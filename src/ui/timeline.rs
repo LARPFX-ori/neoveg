@@ -1,0 +1,1987 @@
+//! Timeline: régua, barra de marcadores/regiões, lista de trilhas (track
+//! headers) e área de eventos com edição por mouse (mover, aparar, fades,
+//! slip, envelopes, seleção de tempo, arrastar e soltar).
+
+use super::{App, DndPayload, FxTarget};
+use crate::model::*;
+use eframe::egui;
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
+use std::collections::HashSet;
+
+const HEADER_W: f32 = 250.0;
+const LOOP_H: f32 = 12.0;
+const MARKER_H: f32 = 18.0;
+const RULER_H: f32 = 22.0;
+const TOP_H: f32 = LOOP_H + MARKER_H + RULER_H;
+const EDGE_PX: f32 = 5.0;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Zone {
+    Body,
+    LeftEdge,
+    RightEdge,
+    FadeIn,
+    FadeOut,
+    FxButton,
+    PanCropButton,
+}
+
+#[derive(Clone, Debug, Default)]
+enum Drag {
+    #[default]
+    None,
+    Scrub,
+    TimeSel {
+        anchor: f64,
+    },
+    LoopEdge {
+        start: bool,
+    },
+    LoopMove {
+        orig: (f64, f64),
+        t0: f64,
+    },
+    Move {
+        anchor_id: Id,
+        anchor_start: f64,
+        origin_t: f64,
+        origin_track: usize,
+        orig: Vec<(Id, f64, usize)>,
+    },
+    Trim {
+        left: bool,
+        slip: bool,
+        origin_t: f64,
+        anchor_id: Id,
+        orig: Vec<(Id, f64, f64, f64)>,
+    },
+    Fade {
+        id: Id,
+        fade_in: bool,
+    },
+    Slip {
+        origin_t: f64,
+        orig: Vec<(Id, f64)>,
+    },
+    EnvPoint {
+        track: usize,
+        kind: EnvKind,
+        idx: usize,
+    },
+    Marker {
+        id: Id,
+    },
+    RegionEdge {
+        id: Id,
+        start: bool,
+    },
+    TrackHeight {
+        track: usize,
+        orig_h: f32,
+        y0: f32,
+    },
+    Pan {
+        last: Pos2,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+enum CtxTarget {
+    #[default]
+    None,
+    Event(Id),
+    EnvPoint(usize, EnvKind, usize),
+    EnvLine(usize, EnvKind, f64),
+    Lane(usize, f64),
+    Marker(Id),
+    Region(Id),
+}
+
+pub struct TimelineState {
+    pub px_per_sec: f32,
+    pub scroll_x: f64,
+    pub scroll_y: f32,
+    pub width: f32,
+    drag: Drag,
+    ctx_target: CtxTarget,
+    rename: Option<(Id, String)>,
+    snap_line: Option<f64>,
+    drop_hint: Option<(usize, f64)>,
+}
+
+impl Default for TimelineState {
+    fn default() -> Self {
+        TimelineState {
+            px_per_sec: 60.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            width: 800.0,
+            drag: Drag::None,
+            ctx_target: CtxTarget::None,
+            rename: None,
+            snap_line: None,
+            drop_hint: None,
+        }
+    }
+}
+
+impl TimelineState {
+    pub fn zoom_by(&mut self, f: f32, anchor: Option<f64>) {
+        let anchor = anchor.unwrap_or(self.scroll_x + (self.width / 2.0 / self.px_per_sec) as f64);
+        let ax = (anchor - self.scroll_x) as f32 * self.px_per_sec;
+        self.px_per_sec = (self.px_per_sec * f).clamp(2.0, 4000.0);
+        self.scroll_x = (anchor - (ax / self.px_per_sec) as f64).max(0.0);
+    }
+    pub fn center_on(&mut self, t: f64) {
+        self.scroll_x = (t - (self.width / 2.0 / self.px_per_sec) as f64).max(0.0);
+    }
+    /// Rolagem automática durante a reprodução (por páginas).
+    pub fn follow(&mut self, t: f64) {
+        let vis = (self.width / self.px_per_sec) as f64;
+        if t > self.scroll_x + vis * 0.97 || t < self.scroll_x {
+            self.scroll_x = (t - vis * 0.03).max(0.0);
+        }
+    }
+    fn t2x(&self, t: f64, left: f32) -> f32 {
+        left + ((t - self.scroll_x) * self.px_per_sec as f64) as f32
+    }
+    fn x2t(&self, x: f32, left: f32) -> f64 {
+        self.scroll_x + ((x - left) / self.px_per_sec) as f64
+    }
+}
+
+fn shade(c: [u8; 3], k: f32) -> Color32 {
+    Color32::from_rgb(
+        (c[0] as f32 * k).min(255.0) as u8,
+        (c[1] as f32 * k).min(255.0) as u8,
+        (c[2] as f32 * k).min(255.0) as u8,
+    )
+}
+
+fn nice_step(pps: f32, fps: f64) -> (f64, f64) {
+    let steps = [
+        1.0 / fps,
+        2.0 / fps,
+        5.0 / fps,
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        15.0,
+        30.0,
+        60.0,
+        120.0,
+        300.0,
+        600.0,
+        1800.0,
+        3600.0,
+    ];
+    for s in steps {
+        if s * pps as f64 >= 90.0 {
+            let minor = if s < 1.0 { s / 5.0 } else if s <= 2.0 { s / 4.0 } else { s / 5.0 };
+            return (s, minor.max(1.0 / fps));
+        }
+    }
+    (7200.0, 600.0)
+}
+
+impl App {
+    fn track_layout(&self, lanes_top: f32) -> Vec<(f32, f32)> {
+        let mut y = lanes_top - self.tl.scroll_y;
+        self.project
+            .tracks
+            .iter()
+            .map(|t| {
+                let r = (y, t.height);
+                y += t.height;
+                r
+            })
+            .collect()
+    }
+
+    fn track_at(&self, y: f32, layout: &[(f32, f32)]) -> Option<usize> {
+        layout.iter().position(|(y0, h)| y >= *y0 && y < y0 + h)
+    }
+
+    fn env_y(kind: EnvKind, v: f32, y0: f32, h: f32) -> f32 {
+        y0 + h - 4.0 - kind.to_norm(v) * (h - 8.0)
+    }
+
+    fn event_rect(&self, e: &Event, left: f32, y0: f32, h: f32) -> Rect {
+        Rect::from_min_max(pos2(self.tl.t2x(e.start, left), y0 + 1.0), pos2(self.tl.t2x(e.end(), left), y0 + h - 1.0))
+    }
+
+    fn event_buttons(r: &Rect, is_video: bool) -> (Option<Rect>, Option<Rect>) {
+        if r.width() < 70.0 {
+            return (None, None);
+        }
+        let fx = Rect::from_min_size(pos2(r.right() - 20.0, r.top() + 2.0), vec2(16.0, 13.0));
+        let pc = if is_video {
+            Some(Rect::from_min_size(pos2(r.right() - 38.0, r.top() + 2.0), vec2(16.0, 13.0)))
+        } else {
+            None
+        };
+        (Some(fx), pc)
+    }
+
+    fn hit_event(&self, pos: Pos2, left: f32, layout: &[(f32, f32)]) -> Option<(usize, usize, Zone)> {
+        let ti = self.track_at(pos.y, layout)?;
+        let (y0, h) = layout[ti];
+        let track = &self.project.tracks[ti];
+        for (ei, e) in track.events.iter().enumerate().rev() {
+            let r = self.event_rect(e, left, y0, h);
+            if !r.expand2(vec2(EDGE_PX, 0.0)).contains(pos) {
+                continue;
+            }
+            let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
+            if fxb.map(|b| b.contains(pos)).unwrap_or(false) {
+                return Some((ti, ei, Zone::FxButton));
+            }
+            if pcb.map(|b| b.contains(pos)).unwrap_or(false) {
+                return Some((ti, ei, Zone::PanCropButton));
+            }
+            let fi_x = r.left() + (e.fade_in.len as f32 * self.tl.px_per_sec);
+            let fo_x = r.right() - (e.fade_out.len as f32 * self.tl.px_per_sec);
+            if pos.y < r.top() + 10.0 {
+                if (pos.x - fi_x).abs() < 6.0 && pos.x < r.center().x + 6.0 {
+                    return Some((ti, ei, Zone::FadeIn));
+                }
+                if (pos.x - fo_x).abs() < 6.0 && pos.x > r.center().x - 6.0 {
+                    return Some((ti, ei, Zone::FadeOut));
+                }
+            }
+            if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
+                return Some((ti, ei, Zone::LeftEdge));
+            }
+            if (pos.x - r.right()).abs() <= EDGE_PX {
+                return Some((ti, ei, Zone::RightEdge));
+            }
+            if r.contains(pos) {
+                return Some((ti, ei, Zone::Body));
+            }
+        }
+        None
+    }
+
+    fn hit_envelope(&self, pos: Pos2, left: f32, layout: &[(f32, f32)]) -> Option<(usize, EnvKind, Option<usize>, f64)> {
+        if !self.opts.show_envelopes {
+            return None;
+        }
+        let ti = self.track_at(pos.y, layout)?;
+        let (y0, h) = layout[ti];
+        let t = self.tl.x2t(pos.x, left);
+        for env in self.project.tracks[ti].envelopes.iter().filter(|e| e.visible) {
+            for (i, p) in env.points.iter().enumerate() {
+                let px = self.tl.t2x(p.t, left);
+                let py = Self::env_y(env.kind, p.v, y0, h);
+                if (px - pos.x).abs() < 6.0 && (py - pos.y).abs() < 6.0 {
+                    return Some((ti, env.kind, Some(i), t));
+                }
+            }
+            let ly = Self::env_y(env.kind, env.eval(t), y0, h);
+            if (ly - pos.y).abs() < 4.0 {
+                return Some((ti, env.kind, None, t));
+            }
+        }
+        None
+    }
+
+    /// Encaixe (snapping) em cursor, marcadores, regiões e bordas de eventos.
+    fn snap(&mut self, t: f64, exclude: &HashSet<Id>, shift: bool) -> f64 {
+        let mut t = t.max(0.0);
+        self.tl.snap_line = None;
+        let enabled = self.opts.snapping != shift;
+        if enabled {
+            let tol = 8.0 / self.tl.px_per_sec as f64;
+            let mut best: Option<(f64, f64)> = None;
+            let mut consider = |c: f64| {
+                let d = (c - t).abs();
+                if d <= tol && best.map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, c));
+                }
+            };
+            consider(0.0);
+            consider(self.cursor);
+            for m in &self.project.markers {
+                consider(m.t);
+            }
+            for r in &self.project.regions {
+                consider(r.start);
+                consider(r.end);
+            }
+            if let Some((a, b)) = self.project.loop_region {
+                consider(a);
+                consider(b);
+            }
+            for tr in &self.project.tracks {
+                for e in &tr.events {
+                    if !exclude.contains(&e.id) {
+                        consider(e.start);
+                        consider(e.end());
+                    }
+                }
+            }
+            if let Some((_, c)) = best {
+                self.tl.snap_line = Some(c);
+                return c;
+            }
+        }
+        if self.opts.quantize {
+            t = self.project.settings.quantize(t);
+        }
+        t
+    }
+
+    pub fn timeline_ui(&mut self, ui: &mut egui::Ui) {
+        let full = ui.available_rect_before_wrap();
+        ui.allocate_rect(full, Sense::hover());
+        let left = full.left() + HEADER_W;
+        let corner = Rect::from_min_max(full.min, pos2(left, full.top() + TOP_H));
+        let top = Rect::from_min_max(pos2(left, full.top()), pos2(full.right(), full.top() + TOP_H));
+        let headers = Rect::from_min_max(pos2(full.left(), full.top() + TOP_H), pos2(left, full.bottom()));
+        let lanes = Rect::from_min_max(pos2(left, full.top() + TOP_H), full.max);
+        self.tl.width = lanes.width().max(10.0);
+
+        // limite de rolagem vertical
+        let total_h: f32 = self.project.tracks.iter().map(|t| t.height).sum();
+        self.tl.scroll_y = self.tl.scroll_y.clamp(0.0, (total_h - lanes.height() + 40.0).max(0.0));
+
+        self.corner_ui(ui, corner);
+        self.top_strip(ui, top);
+        let layout = self.track_layout(lanes.top());
+        self.lanes_interact(ui, lanes, &layout);
+        let layout = self.track_layout(lanes.top());
+        self.draw_lanes(ui, lanes, &layout);
+        self.headers_ui(ui, headers, &layout);
+        self.draw_cursors(ui, top.union(lanes));
+        self.rename_popup(ui);
+    }
+
+    fn corner_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        ui.painter().rect_filled(r, 0.0, Color32::from_rgb(30, 30, 33));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(4.0)));
+        child.horizontal(|ui| {
+            if ui.small_button("+ Vídeo").on_hover_text("Inserir trilha de vídeo (Ctrl+Shift+Q)").clicked() {
+                self.checkpoint();
+                self.insert_track(TrackKind::Video);
+            }
+            if ui.small_button("+ Áudio").on_hover_text("Inserir trilha de áudio (Ctrl+Q)").clicked() {
+                self.checkpoint();
+                self.insert_track(TrackKind::Audio);
+            }
+        });
+        child.label(egui::RichText::new(format!("{} trilhas  •  duração {}", self.project.tracks.len(), self.fmt_time(self.project.duration()))).small());
+    }
+
+    // -----------------------------------------------------------------
+    // Régua, marcadores e região de loop
+    // -----------------------------------------------------------------
+
+    fn top_strip(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let painter = ui.painter_at(r);
+        let loop_r = Rect::from_min_max(r.min, pos2(r.right(), r.top() + LOOP_H));
+        let marker_r = Rect::from_min_max(pos2(r.left(), loop_r.bottom()), pos2(r.right(), loop_r.bottom() + MARKER_H));
+        let ruler_r = Rect::from_min_max(pos2(r.left(), marker_r.bottom()), r.max);
+        painter.rect_filled(loop_r, 0.0, Color32::from_rgb(28, 28, 30));
+        painter.rect_filled(marker_r, 0.0, Color32::from_rgb(34, 34, 38));
+        painter.rect_filled(ruler_r, 0.0, Color32::from_rgb(46, 46, 52));
+        let left = r.left();
+        let fps = self.project.settings.fps;
+
+        // região de loop
+        if let Some((a, b)) = self.project.loop_region {
+            let lr = Rect::from_min_max(pos2(self.tl.t2x(a, left), loop_r.top() + 2.0), pos2(self.tl.t2x(b, left), loop_r.bottom() - 2.0));
+            let col = if self.opts.loop_playback { Color32::from_rgb(90, 140, 220) } else { Color32::from_rgb(80, 80, 95) };
+            painter.rect_filled(lr, 2.0, col);
+        }
+        // régua
+        let (major, minor) = nice_step(self.tl.px_per_sec, fps);
+        let t_start = self.tl.scroll_x;
+        let t_end = self.tl.x2t(r.right(), left);
+        let mut t = (t_start / minor).floor() * minor;
+        while t <= t_end {
+            let x = self.tl.t2x(t, left);
+            let is_major = ((t / major).round() * major - t).abs() < minor * 0.25;
+            let h = if is_major { 10.0 } else { 4.0 };
+            painter.line_segment([pos2(x, ruler_r.bottom() - h), pos2(x, ruler_r.bottom())], Stroke::new(1.0_f32, Color32::from_gray(150)));
+            if is_major {
+                painter.text(pos2(x + 3.0, ruler_r.top() + 1.0), Align2::LEFT_TOP, self.fmt_time(t), FontId::monospace(10.0), Color32::from_gray(200));
+            }
+            t += minor;
+        }
+        // regiões e marcadores
+        for reg in &self.project.regions {
+            let xa = self.tl.t2x(reg.start, left);
+            let xb = self.tl.t2x(reg.end, left);
+            let col = Color32::from_rgb(70, 170, 90);
+            painter.rect_filled(Rect::from_min_max(pos2(xa, marker_r.top() + 1.0), pos2(xb, marker_r.top() + 4.0)), 0.0, col.gamma_multiply(0.5));
+            painter.rect_filled(Rect::from_min_size(pos2(xa, marker_r.top()), vec2(10.0, MARKER_H)), 0.0, col);
+            painter.rect_filled(Rect::from_min_size(pos2(xb - 10.0, marker_r.top()), vec2(10.0, MARKER_H)), 0.0, col);
+            painter.text(pos2(xa + 12.0, marker_r.top() + 3.0), Align2::LEFT_TOP, &reg.label, FontId::proportional(11.0), Color32::WHITE);
+        }
+        let mut sorted: Vec<&Marker> = self.project.markers.iter().collect();
+        sorted.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        for (i, m) in sorted.iter().enumerate() {
+            let x = self.tl.t2x(m.t, left);
+            let col = Color32::from_rgb(230, 150, 40);
+            painter.rect_filled(Rect::from_min_size(pos2(x, marker_r.top()), vec2(14.0, MARKER_H - 2.0)), 1.0, col);
+            painter.text(pos2(x + 3.0, marker_r.top() + 2.0), Align2::LEFT_TOP, format!("{}", (i + 1) % 10), FontId::proportional(11.0), Color32::BLACK);
+            painter.text(pos2(x + 17.0, marker_r.top() + 2.0), Align2::LEFT_TOP, &m.label, FontId::proportional(11.0), Color32::from_rgb(255, 210, 150));
+        }
+
+        // interação
+        let resp = ui.interact(r, ui.id().with("topstrip"), Sense::click_and_drag());
+        let shift = ui.input(|i| i.modifiers.shift);
+        if let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()) {
+            let t = self.tl.x2t(pos.x, left);
+            let hit_marker = self
+                .project
+                .markers
+                .iter()
+                .find(|m| {
+                    let x = self.tl.t2x(m.t, left);
+                    pos.x >= x - 2.0 && pos.x <= x + 14.0
+                })
+                .map(|m| m.id);
+            let hit_region = self.project.regions.iter().find_map(|reg| {
+                let xa = self.tl.t2x(reg.start, left);
+                let xb = self.tl.t2x(reg.end, left);
+                if pos.x >= xa && pos.x <= xa + 10.0 {
+                    Some((reg.id, true))
+                } else if pos.x >= xb - 10.0 && pos.x <= xb {
+                    Some((reg.id, false))
+                } else {
+                    None
+                }
+            });
+            let in_loop = loop_r.contains(pos);
+            let in_marker = marker_r.contains(pos);
+            if resp.drag_started() {
+                let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+                let ot = self.tl.x2t(origin.x, left);
+                let in_loop0 = loop_r.contains(origin);
+                let in_marker0 = marker_r.contains(origin);
+                if in_marker0 && hit_marker.is_some() {
+                    self.checkpoint();
+                    self.tl.drag = Drag::Marker { id: hit_marker.unwrap() };
+                } else if in_marker0 && hit_region.is_some() {
+                    self.checkpoint();
+                    let (id, start) = hit_region.unwrap();
+                    self.tl.drag = Drag::RegionEdge { id, start };
+                } else if in_loop0 {
+                    let tol = 6.0 / self.tl.px_per_sec as f64;
+                    match self.project.loop_region {
+                        Some((a, _)) if (ot - a).abs() < tol => self.tl.drag = Drag::LoopEdge { start: true },
+                        Some((_, b)) if (ot - b).abs() < tol => self.tl.drag = Drag::LoopEdge { start: false },
+                        Some((a, b)) if ot > a && ot < b => self.tl.drag = Drag::LoopMove { orig: (a, b), t0: ot },
+                        _ => {
+                            let s = self.snap(ot, &HashSet::new(), shift);
+                            self.tl.drag = Drag::TimeSel { anchor: s };
+                        }
+                    }
+                } else {
+                    self.tl.drag = Drag::Scrub;
+                }
+            }
+            if resp.dragged() {
+                match self.tl.drag.clone() {
+                    Drag::Scrub => {
+                        let s = self.snap(t, &HashSet::new(), shift);
+                        self.set_cursor(s)
+                    }
+                    Drag::Marker { id } => {
+                        let s = self.snap(t, &HashSet::new(), shift);
+                        if let Some(m) = self.project.markers.iter_mut().find(|m| m.id == id) {
+                            m.t = s;
+                        }
+                        self.changed();
+                    }
+                    Drag::RegionEdge { id, start } => {
+                        let s = self.snap(t, &HashSet::new(), shift);
+                        if let Some(r) = self.project.regions.iter_mut().find(|r| r.id == id) {
+                            if start {
+                                r.start = s.min(r.end - 0.01);
+                            } else {
+                                r.end = s.max(r.start + 0.01);
+                            }
+                        }
+                        self.changed();
+                    }
+                    Drag::LoopEdge { start } => {
+                        let s = self.snap(t, &HashSet::new(), shift);
+                        if let Some((a, b)) = self.project.loop_region {
+                            let nr = if start { (s.min(b - 0.01), b) } else { (a, s.max(a + 0.01)) };
+                            self.project.loop_region = Some(nr);
+                            self.time_sel = Some(nr);
+                        }
+                    }
+                    Drag::LoopMove { orig, t0 } => {
+                        let d = (t - t0).max(-orig.0);
+                        let a = self.snap(orig.0 + d, &HashSet::new(), shift);
+                        let nr = (a, a + (orig.1 - orig.0));
+                        self.project.loop_region = Some(nr);
+                        self.time_sel = Some(nr);
+                    }
+                    Drag::TimeSel { anchor } => {
+                        let s = self.snap(t, &HashSet::new(), shift);
+                        let sel = (anchor.min(s), anchor.max(s));
+                        self.time_sel = Some(sel);
+                        self.project.loop_region = Some(sel);
+                    }
+                    _ => {}
+                }
+            }
+            if resp.drag_stopped() {
+                self.tl.drag = Drag::None;
+                self.tl.snap_line = None;
+            }
+            if resp.clicked() && !in_loop && !in_marker {
+                let s = self.snap(t, &HashSet::new(), shift);
+                self.set_cursor(s);
+            }
+            if resp.clicked() && in_marker {
+                if let Some(id) = hit_marker {
+                    if let Some(m) = self.project.markers.iter().find(|m| m.id == id) {
+                        let mt = m.t;
+                        self.set_cursor(mt);
+                    }
+                } else if let Some((id, _)) = hit_region {
+                    if let Some(r) = self.project.regions.iter().find(|r| r.id == id) {
+                        let sel = (r.start, r.end);
+                        self.time_sel = Some(sel);
+                        self.project.loop_region = Some(sel);
+                        self.set_cursor(sel.0);
+                    }
+                }
+            }
+            if resp.double_clicked() && in_marker {
+                if let Some(id) = hit_marker {
+                    let label = self.project.markers.iter().find(|m| m.id == id).map(|m| m.label.clone()).unwrap_or_default();
+                    self.tl.rename = Some((id, label));
+                } else if let Some((id, _)) = hit_region {
+                    let label = self.project.regions.iter().find(|r| r.id == id).map(|r| r.label.clone()).unwrap_or_default();
+                    self.tl.rename = Some((id, label));
+                } else {
+                    self.cursor = t;
+                    self.insert_marker();
+                }
+            }
+            if resp.double_clicked() && in_loop {
+                self.project.loop_region = None;
+                self.time_sel = None;
+            }
+            if resp.secondary_clicked() {
+                self.tl.ctx_target = if let Some(id) = hit_marker {
+                    CtxTarget::Marker(id)
+                } else if let Some((id, _)) = hit_region {
+                    CtxTarget::Region(id)
+                } else {
+                    CtxTarget::None
+                };
+            }
+        }
+        resp.context_menu(|ui| match self.tl.ctx_target.clone() {
+            CtxTarget::Marker(id) => {
+                if ui.button("Renomear marcador").clicked() {
+                    let label = self.project.markers.iter().find(|m| m.id == id).map(|m| m.label.clone()).unwrap_or_default();
+                    self.tl.rename = Some((id, label));
+                    ui.close_menu();
+                }
+                if ui.button("Excluir marcador").clicked() {
+                    self.checkpoint();
+                    self.project.markers.retain(|m| m.id != id);
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+            CtxTarget::Region(id) => {
+                if ui.button("Renomear região").clicked() {
+                    let label = self.project.regions.iter().find(|m| m.id == id).map(|m| m.label.clone()).unwrap_or_default();
+                    self.tl.rename = Some((id, label));
+                    ui.close_menu();
+                }
+                if ui.button("Selecionar região").clicked() {
+                    if let Some(r) = self.project.regions.iter().find(|r| r.id == id) {
+                        self.time_sel = Some((r.start, r.end));
+                        self.project.loop_region = Some((r.start, r.end));
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Renderizar região...").clicked() {
+                    if let Some(r) = self.project.regions.iter().find(|r| r.id == id) {
+                        self.project.loop_region = Some((r.start, r.end));
+                    }
+                    self.dlg.open_render(&self.project, self.path.as_deref());
+                    self.dlg.render_use_loop = true;
+                    ui.close_menu();
+                }
+                if ui.button("Excluir região").clicked() {
+                    self.checkpoint();
+                    self.project.regions.retain(|m| m.id != id);
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+            _ => {
+                if ui.button("Inserir marcador no cursor (M)").clicked() {
+                    self.insert_marker();
+                    ui.close_menu();
+                }
+                if ui.button("Inserir região da seleção (R)").clicked() {
+                    self.insert_region();
+                    ui.close_menu();
+                }
+                if ui.button("Limpar região de loop").clicked() {
+                    self.project.loop_region = None;
+                    self.time_sel = None;
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    fn rename_popup(&mut self, ui: &mut egui::Ui) {
+        let Some((id, mut label)) = self.tl.rename.clone() else { return };
+        let mut open = true;
+        let mut done = false;
+        egui::Window::new("Renomear")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                let r = ui.text_edit_singleline(&mut label);
+                r.request_focus();
+                if ui.button("OK").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                    done = true;
+                }
+            });
+        if done {
+            self.checkpoint();
+            if let Some(m) = self.project.markers.iter_mut().find(|m| m.id == id) {
+                m.label = label.clone();
+            }
+            if let Some(r) = self.project.regions.iter_mut().find(|r| r.id == id) {
+                r.label = label.clone();
+            }
+            if let Some(e) = self.project.event_mut(id) {
+                e.name = label.clone();
+            }
+            self.changed();
+            self.tl.rename = None;
+        } else if !open {
+            self.tl.rename = None;
+        } else {
+            self.tl.rename = Some((id, label));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Cabeçalhos de trilha
+    // -----------------------------------------------------------------
+
+    fn headers_ui(&mut self, ui: &mut egui::Ui, area: Rect, layout: &[(f32, f32)]) {
+        let painter = ui.painter_at(area);
+        painter.rect_filled(area, 0.0, Color32::from_rgb(36, 36, 40));
+        // rolagem vertical com a roda sobre os cabeçalhos
+        if ui.rect_contains_pointer(area) {
+            let d = ui.input(|i| i.raw_scroll_delta.y);
+            if d != 0.0 {
+                self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
+            }
+        }
+        let n = self.project.tracks.len();
+        for ti in 0..n {
+            let (y0, h) = layout[ti];
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
+            if r.bottom() < area.top() || r.top() > area.bottom() {
+                continue;
+            }
+            let selected = self.sel_track == Some(ti);
+            let track = &self.project.tracks[ti];
+            let bg = if selected { Color32::from_rgb(58, 62, 74) } else { Color32::from_rgb(44, 44, 50) };
+            painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, bg);
+            painter.rect_filled(Rect::from_min_size(r.min, vec2(6.0, h)), 0.0, shade(track.color, 1.0));
+            painter.line_segment([pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())], Stroke::new(1.0_f32, Color32::from_gray(25)));
+
+            // clique no fundo seleciona a trilha
+            let bresp = ui.interact(r, ui.id().with(("thdr", track.id)), Sense::click());
+            if bresp.clicked() {
+                self.sel_track = Some(ti);
+            }
+            let tid = track.id;
+            bresp.context_menu(|ui| self.track_menu(ui, ti));
+
+            let inner = Rect::from_min_max(pos2(r.left() + 10.0, r.top() + 3.0), pos2(r.right() - 14.0, r.bottom() - 3.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("th", tid)));
+            child.set_clip_rect(inner.intersect(area));
+            let kind = self.project.tracks[ti].kind;
+            let mut changed_track = false;
+            let mut want_checkpoint = false;
+            child.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{}", ti + 1)).strong());
+                ui.label(if kind == TrackKind::Video { "🎞" } else { "🔊" });
+                let t = &mut self.project.tracks[ti];
+                let r = ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(78.0).font(egui::TextStyle::Small));
+                if r.changed() {
+                    changed_track = true;
+                }
+                let m = ui.selectable_label(t.mute, "M").on_hover_text("Mudo (Z)");
+                if m.clicked() {
+                    want_checkpoint = true;
+                    t.mute = !t.mute;
+                    changed_track = true;
+                }
+                let s = ui.selectable_label(t.solo, "S").on_hover_text("Solo (X)");
+                if s.clicked() {
+                    want_checkpoint = true;
+                    t.solo = !t.solo;
+                    changed_track = true;
+                }
+                let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
+                if ui.small_button(fxlabel).on_hover_text("Efeitos da trilha").clicked() {
+                    self.dlg.fx_target = Some(FxTarget::Track(tid));
+                }
+                if kind == TrackKind::Video && ui.small_button("✥").on_hover_text("Movimento da trilha (Track Motion)").clicked() {
+                    self.dlg.track_motion = Some(tid);
+                }
+            });
+            if h >= 50.0 {
+                child.horizontal(|ui| {
+                    let t = &mut self.project.tracks[ti];
+                    if kind == TrackKind::Audio {
+                        ui.label(egui::RichText::new("Vol").small());
+                        let r = ui.add(
+                            egui::Slider::new(&mut t.volume_db, -60.0..=12.0)
+                                .show_value(true)
+                                .suffix(" dB")
+                                .fixed_decimals(1)
+                                .trailing_fill(true),
+                        );
+                        if r.drag_started() {
+                            want_checkpoint = true;
+                        }
+                        if r.double_clicked() {
+                            t.volume_db = 0.0;
+                        }
+                        changed_track |= r.changed() || r.double_clicked();
+                    } else {
+                        ui.label(egui::RichText::new("Nível").small());
+                        let mut pct = t.opacity * 100.0;
+                        let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").fixed_decimals(0).trailing_fill(true));
+                        if r.drag_started() {
+                            want_checkpoint = true;
+                        }
+                        if r.changed() {
+                            t.opacity = pct / 100.0;
+                            changed_track = true;
+                        }
+                    }
+                });
+            }
+            if h >= 72.0 {
+                child.horizontal(|ui| {
+                    let t = &mut self.project.tracks[ti];
+                    if kind == TrackKind::Audio {
+                        ui.label(egui::RichText::new("Pan").small());
+                        let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
+                        if r.drag_started() {
+                            want_checkpoint = true;
+                        }
+                        if r.double_clicked() {
+                            t.pan = 0.0;
+                        }
+                        changed_track |= r.changed() || r.double_clicked();
+                        ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
+                    } else {
+                        ui.label(egui::RichText::new("Modo").small());
+                        let before = t.blend;
+                        egui::ComboBox::from_id_salt(("blend", tid))
+                            .width(120.0)
+                            .selected_text(t.blend.name())
+                            .show_ui(ui, |ui| {
+                                for b in BlendMode::ALL {
+                                    ui.selectable_value(&mut t.blend, b, b.name());
+                                }
+                            });
+                        if t.blend != before {
+                            changed_track = true;
+                        }
+                    }
+                });
+            }
+            if want_checkpoint {
+                // checkpoint com o estado anterior aproximado (antes da mudança atual)
+                let mut snap = self.project.clone();
+                let t = &mut snap.tracks[ti];
+                let old = &self.snapshot.tracks.iter().find(|x| x.id == tid);
+                if let Some(old) = old {
+                    t.mute = old.mute;
+                    t.solo = old.solo;
+                    t.volume_db = old.volume_db;
+                    t.opacity = old.opacity;
+                    t.pan = old.pan;
+                }
+                self.undo.push(snap);
+                self.redo.clear();
+            }
+            if changed_track {
+                self.changed();
+            }
+            // medidor de nível (áudio)
+            if kind == TrackKind::Audio {
+                let lv = self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]);
+                let mr = Rect::from_min_max(pos2(r.right() - 11.0, r.top() + 4.0), pos2(r.right() - 3.0, r.bottom() - 4.0));
+                draw_meter(&painter, mr, lv);
+            }
+            // alça de altura da trilha
+            let hr = Rect::from_min_max(pos2(r.left(), r.bottom() - 3.0), pos2(r.right(), r.bottom() + 2.0));
+            let hresp = ui.interact(hr, ui.id().with(("theight", tid)), Sense::drag());
+            if hresp.hovered() || hresp.dragged() {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+            }
+            if hresp.drag_started() {
+                self.tl.drag = Drag::TrackHeight {
+                    track: ti,
+                    orig_h: h,
+                    y0: hresp.interact_pointer_pos().map(|p| p.y).unwrap_or(0.0),
+                };
+            }
+            if hresp.dragged() {
+                if let (Drag::TrackHeight { track, orig_h, y0 }, Some(p)) = (self.tl.drag.clone(), hresp.interact_pointer_pos()) {
+                    if track == ti {
+                        self.project.tracks[ti].height = (orig_h + p.y - y0).clamp(28.0, 400.0);
+                    }
+                }
+            }
+            if hresp.drag_stopped() {
+                self.tl.drag = Drag::None;
+            }
+        }
+    }
+
+    pub fn track_menu(&mut self, ui: &mut egui::Ui, ti: usize) {
+        let kind = self.project.tracks[ti].kind;
+        let tid = self.project.tracks[ti].id;
+        if ui.button("Efeitos da trilha...").clicked() {
+            self.dlg.fx_target = Some(FxTarget::Track(tid));
+            ui.close_menu();
+        }
+        if kind == TrackKind::Video && ui.button("Movimento da trilha...").clicked() {
+            self.dlg.track_motion = Some(tid);
+            ui.close_menu();
+        }
+        ui.separator();
+        let envs: &[EnvKind] = if kind == TrackKind::Audio { &[EnvKind::Volume, EnvKind::Pan] } else { &[EnvKind::Opacity, EnvKind::FadeToColor] };
+        for &k in envs {
+            let has = self.project.tracks[ti].envelope(k).is_some();
+            let label = if has { format!("Remover envelope: {}", k.name()) } else { format!("Inserir envelope: {}", k.name()) };
+            if ui.button(label).clicked() {
+                self.checkpoint();
+                let t = &mut self.project.tracks[ti];
+                if has {
+                    t.envelopes.retain(|e| e.kind != k);
+                } else {
+                    t.envelopes.push(Envelope::new(k));
+                    self.opts.show_envelopes = true;
+                }
+                self.changed();
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button("Duplicar trilha").clicked() {
+            self.duplicate_track(ti);
+            ui.close_menu();
+        }
+        if ui.button("Mover para cima").clicked() {
+            self.move_track(ti, true);
+            ui.close_menu();
+        }
+        if ui.button("Mover para baixo").clicked() {
+            self.move_track(ti, false);
+            ui.close_menu();
+        }
+        ui.menu_button("Cor da trilha", |ui| {
+            let mut c = self.project.tracks[ti].color;
+            if ui.color_edit_button_srgb(&mut c).changed() {
+                self.project.tracks[ti].color = c;
+            }
+        });
+        ui.separator();
+        if ui.button("Excluir trilha").clicked() {
+            self.delete_track(ti);
+            ui.close_menu();
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Interação com eventos
+    // -----------------------------------------------------------------
+
+    fn lanes_interact(&mut self, ui: &mut egui::Ui, lanes: Rect, layout: &[(f32, f32)]) {
+        let left = lanes.left();
+        let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
+        let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
+            (i.modifiers, i.raw_scroll_delta, i.zoom_delta(), i.pointer.middle_down(), i.pointer.hover_pos())
+        });
+
+        // roda do mouse: zoom; Shift = rolar horizontal; Ctrl = rolar vertical
+        if let Some(p) = pointer.filter(|p| lanes.contains(*p)) {
+            if zoom_delta != 1.0 {
+                self.tl.scroll_y = (self.tl.scroll_y - (zoom_delta - 1.0) * 400.0).max(0.0);
+            } else if scroll != egui::Vec2::ZERO {
+                let d = if scroll.y != 0.0 { scroll.y } else { scroll.x };
+                if mods.shift || scroll.x != 0.0 && scroll.y == 0.0 {
+                    self.tl.scroll_x = (self.tl.scroll_x - (d / self.tl.px_per_sec) as f64).max(0.0);
+                } else if mods.command {
+                    self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
+                } else {
+                    let t = self.tl.x2t(p.x, left);
+                    self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                }
+            }
+            // botão do meio: pan
+            if middle_down {
+                if let Drag::Pan { last } = self.tl.drag {
+                    let d = p - last;
+                    self.tl.scroll_x = (self.tl.scroll_x - (d.x / self.tl.px_per_sec) as f64).max(0.0);
+                    self.tl.scroll_y = (self.tl.scroll_y - d.y).max(0.0);
+                }
+                self.tl.drag = Drag::Pan { last: p };
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            } else if matches!(self.tl.drag, Drag::Pan { .. }) {
+                self.tl.drag = Drag::None;
+            }
+        }
+
+        // arrastar e soltar (mídia, efeitos, transições, geradores)
+        self.tl.drop_hint = None;
+        if let Some(p) = pointer.filter(|p| lanes.contains(*p)) {
+            if egui::DragAndDrop::has_any_payload(ui.ctx()) {
+                let ti = self.track_at(p.y, layout).unwrap_or(self.project.tracks.len());
+                let t = self.snap(self.tl.x2t(p.x, left), &HashSet::new(), mods.shift);
+                self.tl.drop_hint = Some((ti, t));
+                if ui.input(|i| i.pointer.any_released()) {
+                    if let Some(payload) = egui::DragAndDrop::take_payload::<DndPayload>(ui.ctx()) {
+                        let hit = self.hit_event(p, left, layout);
+                        self.handle_drop((*payload).clone(), self.track_at(p.y, layout), t, hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id));
+                    }
+                }
+            }
+        }
+
+        let hover = pointer.filter(|p| lanes.contains(*p));
+        // cursor do mouse conforme a zona
+        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
+            if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, layout) {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
+                match z {
+                    Zone::LeftEdge | Zone::RightEdge => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+                    Zone::FadeIn | Zone::FadeOut => ui.ctx().set_cursor_icon(CursorIcon::ResizeNeSw),
+                    Zone::FxButton | Zone::PanCropButton => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
+                    Zone::Body => {
+                        if mods.alt {
+                            ui.ctx().set_cursor_icon(CursorIcon::AllScroll)
+                        } else {
+                            ui.ctx().set_cursor_icon(CursorIcon::Grab)
+                        }
+                    }
+                }
+            } else if self.hit_envelope(p, left, layout).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+        }
+
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(lanes.center());
+            self.start_lane_drag(origin, left, layout, mods);
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.update_lane_drag(p, left, layout, mods);
+                // rolagem automática perto das bordas
+                if p.x > lanes.right() - 20.0 {
+                    self.tl.scroll_x += (8.0 / self.tl.px_per_sec) as f64;
+                } else if p.x < lanes.left() + 10.0 && self.tl.scroll_x > 0.0 {
+                    self.tl.scroll_x = (self.tl.scroll_x - (8.0 / self.tl.px_per_sec) as f64).max(0.0);
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            if matches!(self.tl.drag, Drag::Move { .. } | Drag::Trim { .. }) {
+                self.project.sort_events();
+            }
+            if !matches!(self.tl.drag, Drag::Pan { .. }) {
+                self.tl.drag = Drag::None;
+            }
+            self.tl.snap_line = None;
+        }
+
+        if resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.lane_click(p, left, layout, mods);
+            }
+        }
+        if resp.double_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                if let Some((ti, kind, None, t)) = self.hit_envelope(p, left, layout) {
+                    self.checkpoint();
+                    let (y0, h) = layout[ti];
+                    let v = kind.from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
+                    let env = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind).unwrap();
+                    let v = if (Self::env_y(kind, env.eval(t), y0, h) - p.y).abs() < 4.0 { env.eval(t) } else { v };
+                    env.points.push(EnvPoint { t, v, curve: Curve::Linear });
+                    env.sort();
+                    self.changed();
+                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
+                    let e = &self.project.tracks[ti].events[ei];
+                    let sel = (e.start, e.end());
+                    self.time_sel = Some(sel);
+                    self.project.loop_region = Some(sel);
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let t = self.tl.x2t(p.x, left);
+                self.tl.ctx_target = if let Some((ti, k, idx, t)) = self.hit_envelope(p, left, layout) {
+                    match idx {
+                        Some(i) => CtxTarget::EnvPoint(ti, k, i),
+                        None => CtxTarget::EnvLine(ti, k, t),
+                    }
+                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
+                    let id = self.project.tracks[ti].events[ei].id;
+                    if !self.sel_events.contains(&id) {
+                        self.sel_events.clear();
+                        self.sel_events.insert(id);
+                    }
+                    self.sel_track = Some(ti);
+                    CtxTarget::Event(id)
+                } else if let Some(ti) = self.track_at(p.y, layout) {
+                    self.sel_track = Some(ti);
+                    CtxTarget::Lane(ti, t)
+                } else {
+                    CtxTarget::None
+                };
+            }
+        }
+        resp.context_menu(|ui| self.lane_context_menu(ui));
+    }
+
+    fn start_lane_drag(&mut self, origin: Pos2, left: f32, layout: &[(f32, f32)], mods: egui::Modifiers) {
+        let ot = self.tl.x2t(origin.x, left);
+        if let Some((ti, kind, Some(idx), _)) = self.hit_envelope(origin, left, layout) {
+            self.checkpoint();
+            self.tl.drag = Drag::EnvPoint { track: ti, kind, idx };
+            return;
+        }
+        if let Some((ti, ei, zone)) = self.hit_event(origin, left, layout) {
+            let id = self.project.tracks[ti].events[ei].id;
+            if self.project.tracks[ti].events[ei].locked || self.project.tracks[ti].locked {
+                return;
+            }
+            self.sel_track = Some(ti);
+            match zone {
+                Zone::FadeIn | Zone::FadeOut => {
+                    self.checkpoint();
+                    self.tl.drag = Drag::Fade { id, fade_in: zone == Zone::FadeIn };
+                }
+                Zone::LeftEdge | Zone::RightEdge => {
+                    self.checkpoint();
+                    if !self.sel_events.contains(&id) {
+                        self.sel_events.clear();
+                        self.sel_events.insert(id);
+                    }
+                    let e = &self.project.tracks[ti].events[ei];
+                    let left_edge = zone == Zone::LeftEdge;
+                    let edge_t = if left_edge { e.start } else { e.end() };
+                    let mut ids: HashSet<Id> = HashSet::new();
+                    ids.insert(id);
+                    let group_ids = self.expand_groups(&ids);
+                    let mut orig = vec![];
+                    for gid in group_ids {
+                        if let Some(ge) = self.project.event(gid) {
+                            let ge_edge = if left_edge { ge.start } else { ge.end() };
+                            if (ge_edge - edge_t).abs() < 1e-6 {
+                                orig.push((gid, ge.start, ge.length, ge.offset));
+                            }
+                        }
+                    }
+                    self.tl.drag = Drag::Trim {
+                        left: left_edge,
+                        slip: mods.alt,
+                        origin_t: ot,
+                        anchor_id: id,
+                        orig,
+                    };
+                }
+                Zone::FxButton | Zone::PanCropButton => {}
+                Zone::Body => {
+                    self.checkpoint();
+                    if !self.sel_events.contains(&id) {
+                        if !mods.command && !mods.shift {
+                            self.sel_events.clear();
+                        }
+                        self.sel_events.insert(id);
+                    }
+                    let ids = self.expand_groups(&self.sel_events.clone());
+                    if mods.alt {
+                        let orig = ids.iter().filter_map(|i| self.project.event(*i).map(|e| (*i, e.offset))).collect();
+                        self.tl.drag = Drag::Slip { origin_t: ot, orig };
+                        return;
+                    }
+                    let mut anchor = id;
+                    if mods.command {
+                        // Ctrl+arrastar: copia os eventos
+                        let mut gm = std::collections::HashMap::new();
+                        let mut new_sel = HashSet::new();
+                        for i in &ids {
+                            let (t, e) = self.project.find_event(*i).unwrap();
+                            let mut c = self.project.tracks[t].events[e].clone();
+                            c.id = new_id();
+                            c.group = c.group.map(|g| *gm.entry(g).or_insert_with(new_id));
+                            c.fx = c.fx.iter().map(|f| f.duplicate()).collect();
+                            if *i == id {
+                                anchor = c.id;
+                            }
+                            new_sel.insert(c.id);
+                            self.project.tracks[t].events.push(c);
+                        }
+                        self.sel_events = new_sel.clone();
+                        self.changed();
+                        let orig = new_sel
+                            .iter()
+                            .filter_map(|i| self.project.find_event(*i).map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t)))
+                            .collect();
+                        let anchor_start = self.project.event(anchor).map(|e| e.start).unwrap_or(0.0);
+                        self.tl.drag = Drag::Move { anchor_id: anchor, anchor_start, origin_t: ot, origin_track: ti, orig };
+                        return;
+                    }
+                    let orig = ids
+                        .iter()
+                        .filter_map(|i| self.project.find_event(*i).map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t)))
+                        .collect();
+                    let anchor_start = self.project.tracks[ti].events[ei].start;
+                    self.tl.drag = Drag::Move { anchor_id: anchor, anchor_start, origin_t: ot, origin_track: ti, orig };
+                }
+            }
+            return;
+        }
+        // área vazia: seleção de tempo
+        let s = self.snap(ot, &HashSet::new(), mods.shift);
+        if let Some(ti) = self.track_at(origin.y, layout) {
+            self.sel_track = Some(ti);
+        }
+        self.tl.drag = Drag::TimeSel { anchor: s };
+    }
+
+    fn update_lane_drag(&mut self, p: Pos2, left: f32, layout: &[(f32, f32)], mods: egui::Modifiers) {
+        let t = self.tl.x2t(p.x, left);
+        match self.tl.drag.clone() {
+            Drag::TimeSel { anchor } => {
+                let s = self.snap(t, &HashSet::new(), mods.shift);
+                let sel = (anchor.min(s), anchor.max(s));
+                if sel.1 - sel.0 > 1e-6 {
+                    self.time_sel = Some(sel);
+                    self.project.loop_region = Some(sel);
+                }
+                self.cursor = sel.0;
+            }
+            Drag::EnvPoint { track, kind, idx } => {
+                let (y0, h) = layout[track];
+                let v = kind.from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
+                let snapped = self.snap(t, &HashSet::new(), mods.shift);
+                let env = self.project.tracks[track].envelopes.iter_mut().find(|e| e.kind == kind);
+                if let Some(env) = env {
+                    let lo = if idx > 0 { env.points[idx - 1].t + 1e-4 } else { 0.0 };
+                    let hi = env.points.get(idx + 1).map(|p| p.t - 1e-4).unwrap_or(f64::MAX);
+                    if let Some(pt) = env.points.get_mut(idx) {
+                        if !mods.command {
+                            pt.t = if idx == 0 && env_first_locked() { 0.0 } else { snapped.clamp(lo, hi.max(lo)) };
+                        }
+                        if !mods.alt {
+                            pt.v = v;
+                        }
+                    }
+                }
+                self.changed();
+            }
+            Drag::Fade { id, fade_in } => {
+                if let Some(e) = self.project.event_mut(id) {
+                    if fade_in {
+                        e.fade_in.len = (t - e.start).clamp(0.0, e.length - e.fade_out.len);
+                    } else {
+                        e.fade_out.len = (e.end() - t).clamp(0.0, e.length - e.fade_in.len);
+                    }
+                }
+                self.changed();
+            }
+            Drag::Slip { origin_t, orig } => {
+                let dt = t - origin_t;
+                for (id, off) in orig {
+                    let dur = self.project.event(id).and_then(|e| self.project.media(e.media_id)).and_then(|m| m.duration);
+                    if let Some(e) = self.project.event_mut(id) {
+                        let mut o = off - dt * e.rate;
+                        if let (Some(d), false) = (dur, e.looped) {
+                            o = o.clamp(0.0, (d - e.length * e.rate).max(0.0));
+                        }
+                        e.offset = o.max(if e.looped { f64::MIN } else { 0.0 });
+                        if e.looped {
+                            if let Some(d) = dur {
+                                e.offset = e.offset.rem_euclid(d);
+                            }
+                        }
+                    }
+                }
+                self.changed();
+            }
+            Drag::Trim { left: is_left, slip, origin_t, anchor_id, orig } => {
+                let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
+                let Some(&(_, a_start, a_len, _)) = orig.iter().find(|o| o.0 == anchor_id) else { return };
+                let fd = self.project.settings.frame_dur();
+                let raw_edge = if is_left { a_start } else { a_start + a_len } + (t - origin_t);
+                let edge = self.snap(raw_edge, &exclude, mods.shift);
+                let mut dt = edge - if is_left { a_start } else { a_start + a_len };
+                // limites para todos os eventos do grupo
+                for &(id, st, len, off) in &orig {
+                    let Some(e) = self.project.event(id) else { continue };
+                    let dur = self.project.media(e.media_id).and_then(|m| m.duration);
+                    let rate = e.rate;
+                    if is_left {
+                        dt = dt.min(len - fd);
+                        dt = dt.max(-st);
+                        if let (false, false, false) = (e.looped, slip, e.reverse) {
+                            if rate > 0.0 {
+                                dt = dt.max(-off / rate);
+                            }
+                        }
+                    } else {
+                        dt = dt.max(-(len - fd));
+                        if let (Some(d), false, false) = (dur, e.looped, slip) {
+                            if rate > 0.0 && !e.reverse {
+                                dt = dt.min((d - off) / rate - len);
+                            }
+                        }
+                    }
+                }
+                for &(id, st, len, off) in &orig {
+                    if let Some(e) = self.project.event_mut(id) {
+                        if is_left {
+                            e.start = st + dt;
+                            e.length = len - dt;
+                            if !slip && !e.reverse {
+                                e.offset = off + dt * e.rate;
+                            }
+                        } else {
+                            e.length = len + dt;
+                            if slip {
+                                e.offset = (off - dt * e.rate).max(0.0);
+                            }
+                        }
+                        e.fade_in.len = e.fade_in.len.min(e.length);
+                        e.fade_out.len = e.fade_out.len.min(e.length - e.fade_in.len);
+                    }
+                }
+                self.changed();
+            }
+            Drag::Move { anchor_id, anchor_start, origin_t, origin_track, orig } => {
+                let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
+                let raw = anchor_start + (t - origin_t);
+                // encaixa o início ou o fim do evento âncora
+                let anchor_len = self.project.event(anchor_id).map(|e| e.length).unwrap_or(0.0);
+                let s1 = self.snap(raw, &exclude, mods.shift);
+                let line1 = self.tl.snap_line;
+                let s2 = self.snap(raw + anchor_len, &exclude, mods.shift) - anchor_len;
+                let line2 = self.tl.snap_line;
+                let ns = if line1.is_some() && (line2.is_none() || (s1 - raw).abs() <= (s2 - raw).abs()) {
+                    self.tl.snap_line = line1;
+                    s1
+                } else if line2.is_some() {
+                    self.tl.snap_line = line2;
+                    s2
+                } else {
+                    s1
+                };
+                let min_start = orig.iter().map(|o| o.1).fold(f64::MAX, f64::min);
+                let dt = (ns - anchor_start).max(-min_start);
+                // deslocamento vertical entre trilhas do mesmo tipo
+                let target = self.track_at(p.y, layout).unwrap_or(origin_track);
+                let dtrack = target as isize - origin_track as isize;
+                let n = self.project.tracks.len() as isize;
+                let valid = orig.iter().all(|&(id, _, ti)| {
+                    let nt = ti as isize + dtrack;
+                    let kind = self.project.find_event(id).map(|(t, _)| self.project.tracks[t].kind);
+                    nt >= 0 && nt < n && Some(self.project.tracks[nt as usize].kind) == kind
+                });
+                let dtrack = if valid && !mods.alt { dtrack } else { 0 };
+                for &(id, st, ti) in &orig {
+                    let Some((cur_t, cur_e)) = self.project.find_event(id) else { continue };
+                    let new_t = (ti as isize + dtrack) as usize;
+                    // grupos áudio/vídeo: só move de trilha os eventos do tipo da âncora
+                    let new_t = if self.project.tracks[new_t].kind == self.project.tracks[cur_t].kind { new_t } else { cur_t };
+                    if new_t != cur_t {
+                        let ev = self.project.tracks[cur_t].events.remove(cur_e);
+                        self.project.tracks[new_t].events.push(ev);
+                    }
+                    if let Some(e) = self.project.event_mut(id) {
+                        e.start = st + dt;
+                    }
+                }
+                self.changed();
+            }
+            _ => {}
+        }
+    }
+
+    fn lane_click(&mut self, p: Pos2, left: f32, layout: &[(f32, f32)], mods: egui::Modifiers) {
+        let t = self.tl.x2t(p.x, left);
+        if let Some(ti) = self.track_at(p.y, layout) {
+            self.sel_track = Some(ti);
+        }
+        if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
+            let id = self.project.tracks[ti].events[ei].id;
+            match zone {
+                Zone::FxButton => {
+                    self.dlg.fx_target = Some(FxTarget::Event(id));
+                    return;
+                }
+                Zone::PanCropButton => {
+                    self.dlg.pan_crop = Some(id);
+                    return;
+                }
+                _ => {}
+            }
+            if mods.command {
+                if !self.sel_events.remove(&id) {
+                    self.sel_events.insert(id);
+                }
+            } else if mods.shift {
+                self.sel_events.insert(id);
+            } else {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+                let ids = self.expand_groups(&self.sel_events.clone());
+                self.sel_events = ids;
+            }
+            let s = self.snap(t, &HashSet::new(), false);
+            self.set_cursor(s);
+            return;
+        }
+        if self.hit_envelope(p, left, layout).is_some() {
+            return;
+        }
+        if !mods.command && !mods.shift {
+            self.sel_events.clear();
+        }
+        self.time_sel = None;
+        let s = self.snap(t, &HashSet::new(), mods.shift);
+        self.set_cursor(s);
+    }
+
+    fn handle_drop(&mut self, payload: DndPayload, track: Option<usize>, t: f64, event: Option<Id>) {
+        match payload {
+            DndPayload::Media(mid) => {
+                self.checkpoint();
+                self.add_media_to_timeline(mid, t, track);
+            }
+            DndPayload::Generator(spec) => {
+                let imp = crate::media::import_generated(spec);
+                let id = imp.item.id;
+                self.media.insert(id, imp.entry);
+                self.checkpoint();
+                self.project.media.push(imp.item);
+                self.add_media_to_timeline(id, t, track);
+            }
+            DndPayload::Fx(kind) => {
+                let want_audio = kind.is_audio();
+                if let Some(eid) = event {
+                    let Some((ti, _)) = self.project.find_event(eid) else { return };
+                    if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
+                        self.checkpoint();
+                        self.project.event_mut(eid).unwrap().fx.push(FxInstance::new(kind));
+                        self.dlg.fx_target = Some(FxTarget::Event(eid));
+                        self.changed();
+                        return;
+                    }
+                }
+                if let Some(ti) = track {
+                    if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
+                        self.checkpoint();
+                        self.project.tracks[ti].fx.push(FxInstance::new(kind));
+                        self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[ti].id));
+                        self.changed();
+                        return;
+                    }
+                }
+                self.set_status("Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio");
+            }
+            DndPayload::Transition(kind) => {
+                if let Some(eid) = event {
+                    self.apply_transition(eid, kind);
+                }
+            }
+        }
+    }
+
+    pub fn apply_transition(&mut self, eid: Id, kind: TransitionKind) {
+        let Some((ti, _)) = self.project.find_event(eid) else { return };
+        if self.project.tracks[ti].kind != TrackKind::Video {
+            self.set_status("Transições se aplicam a eventos de vídeo");
+            return;
+        }
+        self.checkpoint();
+        let e = self.project.event_mut(eid).unwrap();
+        let soft = e.transition.as_ref().map(|t| t.softness).unwrap_or(0.05);
+        e.transition = Some(TransitionSpec { kind, softness: soft });
+        if e.fade_in.len <= 0.0 {
+            e.fade_in.len = 1.0f64.min(e.length / 2.0);
+        }
+        self.set_status(format!("Transição \"{}\" aplicada", kind.name()));
+        self.changed();
+    }
+
+    fn lane_context_menu(&mut self, ui: &mut egui::Ui) {
+        match self.tl.ctx_target.clone() {
+            CtxTarget::Event(id) => self.event_context_menu(ui, id),
+            CtxTarget::EnvPoint(ti, kind, idx) => {
+                ui.label(egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong());
+                if let Some(env) = self.project.tracks.get(ti).and_then(|t| t.envelope(kind)) {
+                    if let Some(p) = env.points.get(idx) {
+                        ui.label(format!("{}  @ {}", kind.format(p.v), self.fmt_time(p.t)));
+                    }
+                }
+                ui.separator();
+                for c in Curve::ALL {
+                    if ui.button(format!("Curva: {}", c.name())).clicked() {
+                        self.checkpoint();
+                        if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                            if let Some(p) = env.points.get_mut(idx) {
+                                p.curve = c;
+                            }
+                        }
+                        self.changed();
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if ui.button("Redefinir valor").clicked() {
+                    self.checkpoint();
+                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                        if let Some(p) = env.points.get_mut(idx) {
+                            p.v = kind.default_value();
+                        }
+                    }
+                    self.changed();
+                    ui.close_menu();
+                }
+                if ui.button("Excluir ponto").clicked() {
+                    self.checkpoint();
+                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                        if env.points.len() > 1 {
+                            env.points.remove(idx);
+                        }
+                    }
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+            CtxTarget::EnvLine(ti, kind, t) => {
+                if ui.button("Adicionar ponto aqui").clicked() {
+                    self.checkpoint();
+                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                        let v = env.eval(t);
+                        env.points.push(EnvPoint { t, v, curve: Curve::Linear });
+                        env.sort();
+                    }
+                    self.changed();
+                    ui.close_menu();
+                }
+                if ui.button("Redefinir todos os pontos").clicked() {
+                    self.checkpoint();
+                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                        *env = Envelope::new(kind);
+                    }
+                    self.changed();
+                    ui.close_menu();
+                }
+                if ui.button("Ocultar envelope").clicked() {
+                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                        env.visible = false;
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Remover envelope").clicked() {
+                    self.checkpoint();
+                    self.project.tracks[ti].envelopes.retain(|e| e.kind != kind);
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+            CtxTarget::Lane(ti, t) => {
+                if ui.add_enabled(!self.clipboard.is_empty(), egui::Button::new("Colar aqui")).clicked() {
+                    self.cursor = t;
+                    self.sel_track = Some(ti);
+                    self.paste(false);
+                    ui.close_menu();
+                }
+                if ui.button("Inserir marcador aqui").clicked() {
+                    self.cursor = t;
+                    self.insert_marker();
+                    ui.close_menu();
+                }
+                if ui.button("Inserir texto aqui").clicked() {
+                    self.cursor = t;
+                    self.sel_track = Some(ti);
+                    self.insert_generated(GenSpec::Text(TextSpec::default()));
+                    ui.close_menu();
+                }
+                ui.separator();
+                self.track_menu(ui, ti);
+            }
+            _ => {
+                ui.label("—");
+            }
+        }
+    }
+
+    fn event_context_menu(&mut self, ui: &mut egui::Ui, id: Id) {
+        let Some((ti, ei)) = self.project.find_event(id) else {
+            ui.close_menu();
+            return;
+        };
+        let is_video = self.project.tracks[ti].kind == TrackKind::Video;
+        let e = self.project.tracks[ti].events[ei].clone();
+        let media_generated = self
+            .project
+            .media(e.media_id)
+            .map(|m| matches!(m.source, MediaSource::Generated(_)))
+            .unwrap_or(false);
+        ui.label(egui::RichText::new(&e.name).strong());
+        ui.separator();
+        if ui.button("Propriedades...").clicked() {
+            self.dlg.event_props = Some(id);
+            ui.close_menu();
+        }
+        if is_video && ui.button("Pan/Crop do evento...").clicked() {
+            self.dlg.pan_crop = Some(id);
+            ui.close_menu();
+        }
+        if ui.button("Efeitos do evento...").clicked() {
+            self.dlg.fx_target = Some(FxTarget::Event(id));
+            ui.close_menu();
+        }
+        if media_generated && ui.button("Editar mídia gerada...").clicked() {
+            self.dlg.gen_editor = Some(e.media_id);
+            ui.close_menu();
+        }
+        if ui.button("Renomear (F2)").clicked() {
+            self.tl.rename = Some((id, e.name.clone()));
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("Dividir no cursor (S)").clicked() {
+            self.split_at_cursor();
+            ui.close_menu();
+        }
+        if ui.button("Copiar").clicked() {
+            self.copy_selection();
+            ui.close_menu();
+        }
+        if ui.button("Recortar").clicked() {
+            self.cut_selection();
+            ui.close_menu();
+        }
+        if ui.button("Excluir").clicked() {
+            self.delete_selection();
+            ui.close_menu();
+        }
+        ui.separator();
+        let mut flags = (e.mute, e.locked, e.looped, e.reverse, e.maintain_aspect);
+        let before = flags;
+        ui.checkbox(&mut flags.0, "Mudo");
+        ui.checkbox(&mut flags.1, "Travado");
+        ui.checkbox(&mut flags.2, "Loop");
+        ui.checkbox(&mut flags.3, "Inverter (reverse)");
+        if is_video {
+            ui.checkbox(&mut flags.4, "Manter proporção");
+        }
+        if flags != before {
+            self.checkpoint();
+            for sid in self.sel_events.clone() {
+                if let Some(ev) = self.project.event_mut(sid) {
+                    if flags.0 != before.0 {
+                        ev.mute = flags.0;
+                    }
+                    if flags.1 != before.1 {
+                        ev.locked = flags.1;
+                    }
+                    if flags.2 != before.2 {
+                        ev.looped = flags.2;
+                    }
+                    if flags.3 != before.3 {
+                        ev.reverse = flags.3;
+                    }
+                    if flags.4 != before.4 {
+                        ev.maintain_aspect = flags.4;
+                    }
+                }
+            }
+            self.changed();
+        }
+        ui.separator();
+        ui.menu_button("Curva do fade de entrada", |ui| {
+            for c in Curve::ALL.iter().take(5) {
+                if ui.selectable_label(e.fade_in.curve == *c, c.name()).clicked() {
+                    self.checkpoint();
+                    self.project.event_mut(id).unwrap().fade_in.curve = *c;
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Curva do fade de saída", |ui| {
+            for c in Curve::ALL.iter().take(5) {
+                if ui.selectable_label(e.fade_out.curve == *c, c.name()).clicked() {
+                    self.checkpoint();
+                    self.project.event_mut(id).unwrap().fade_out.curve = *c;
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+        });
+        if is_video {
+            ui.menu_button("Transição de entrada", |ui| {
+                if ui.selectable_label(e.transition.is_none(), "Nenhuma (crossfade)").clicked() {
+                    self.checkpoint();
+                    self.project.event_mut(id).unwrap().transition = None;
+                    self.changed();
+                    ui.close_menu();
+                }
+                for k in TransitionKind::ALL {
+                    let sel = e.transition.as_ref().map(|t| t.kind == k).unwrap_or(false);
+                    if ui.selectable_label(sel, k.name()).clicked() {
+                        self.apply_transition(id, k);
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        ui.menu_button("Velocidade", |ui| {
+            for r in [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0] {
+                if ui.selectable_label((e.rate - r).abs() < 1e-6, format!("{:.0}%", r * 100.0)).clicked() {
+                    self.checkpoint();
+                    let ev = self.project.event_mut(id).unwrap();
+                    // mantém o mesmo conteúdo: ajusta a duração
+                    let content = ev.length * ev.rate;
+                    ev.rate = r;
+                    ev.length = content / r;
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.separator();
+        if ui.button("Agrupar seleção (G)").clicked() {
+            self.group_selected();
+            ui.close_menu();
+        }
+        if e.group.is_some() && ui.button("Desagrupar (U)").clicked() {
+            self.ungroup_selected();
+            ui.close_menu();
+        }
+        if e.group.is_some() && ui.button("Selecionar grupo (Shift+G)").clicked() {
+            self.select_group();
+            ui.close_menu();
+        }
+        if is_video && ui.button("Congelar quadro no cursor").clicked() {
+            self.freeze_frame();
+            ui.close_menu();
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Desenho
+    // -----------------------------------------------------------------
+
+    fn draw_lanes(&mut self, ui: &mut egui::Ui, lanes: Rect, layout: &[(f32, f32)]) {
+        let painter = ui.painter_at(lanes);
+        painter.rect_filled(lanes, 0.0, Color32::from_rgb(30, 30, 33));
+        let left = lanes.left();
+        let pps = self.tl.px_per_sec;
+        let ctx = ui.ctx().clone();
+        // grade
+        let (major, _) = nice_step(pps, self.project.settings.fps);
+        let mut gt = (self.tl.scroll_x / major).floor() * major;
+        let t_end = self.tl.x2t(lanes.right(), left);
+        while gt <= t_end {
+            let x = self.tl.t2x(gt, left);
+            painter.line_segment([pos2(x, lanes.top()), pos2(x, lanes.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 44)));
+            gt += major;
+        }
+        // seleção de tempo
+        if let Some((a, b)) = self.time_sel {
+            let r = Rect::from_min_max(pos2(self.tl.t2x(a, left), lanes.top()), pos2(self.tl.t2x(b, left), lanes.bottom()));
+            painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(90, 130, 200, 40));
+        }
+        let audio_map = self.media.audio_map();
+        for ti in 0..self.project.tracks.len() {
+            let (y0, h) = layout[ti];
+            if y0 + h < lanes.top() || y0 > lanes.bottom() {
+                continue;
+            }
+            let lane = Rect::from_min_max(pos2(lanes.left(), y0), pos2(lanes.right(), y0 + h));
+            let selected = self.sel_track == Some(ti);
+            painter.rect_filled(lane, 0.0, if selected { Color32::from_rgb(40, 42, 50) } else { Color32::from_rgb(33, 33, 37) });
+            painter.line_segment([pos2(lane.left(), lane.bottom()), pos2(lane.right(), lane.bottom())], Stroke::new(1.0_f32, Color32::from_gray(22)));
+            let track = self.project.tracks[ti].clone();
+            let muted = track.mute;
+            // sobreposições (crossfades)
+            for (i, a) in track.events.iter().enumerate() {
+                for b in track.events.iter().skip(i + 1) {
+                    let (s, e) = (a.start.max(b.start), a.end().min(b.end()));
+                    if e > s {
+                        let r = Rect::from_min_max(pos2(self.tl.t2x(s, left), y0 + 1.0), pos2(self.tl.t2x(e, left), y0 + h - 1.0));
+                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18));
+                        painter.line_segment([r.left_top(), r.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(140)));
+                        painter.line_segment([r.left_bottom(), r.right_top()], Stroke::new(1.0_f32, Color32::from_gray(140)));
+                    }
+                }
+            }
+            for e in &track.events {
+                let r = self.event_rect(e, left, y0, h);
+                if r.right() < lanes.left() || r.left() > lanes.right() {
+                    continue;
+                }
+                let sel = self.sel_events.contains(&e.id);
+                let k = if sel { 1.0 } else { 0.62 };
+                let body = if e.mute || muted { shade([90, 90, 90], 0.7) } else { shade(track.color, k * 0.55) };
+                let hdr_h = 14.0f32.min(r.height() * 0.3);
+                painter.rect_filled(r, 2.0, body);
+                let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
+                painter.rect_filled(hdr, 2.0, if e.mute || muted { Color32::from_gray(80) } else { shade(track.color, k * 0.9) });
+                let content = Rect::from_min_max(pos2(r.left(), hdr.bottom()), r.max);
+                let vis = content.intersect(lanes);
+                // conteúdo: miniaturas ou forma de onda
+                if track.kind == TrackKind::Video && self.opts.show_thumbs && content.height() > 16.0 {
+                    if let Some(tex) = self.thumb(&ctx, e.media_id) {
+                        let ts = tex.size_vec2();
+                        let th = content.height() - 2.0;
+                        let tw = th * ts.x / ts.y.max(1.0);
+                        let mut x = content.left() + 1.0;
+                        let p2 = painter.with_clip_rect(vis);
+                        let mut count = 0;
+                        while x < content.right() && count < 64 {
+                            if x + tw >= lanes.left() && x <= lanes.right() {
+                                p2.image(
+                                    tex.id(),
+                                    Rect::from_min_size(pos2(x, content.top() + 1.0), vec2(tw, th)),
+                                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                    Color32::from_white_alpha(if e.mute { 80 } else { 230 }),
+                                );
+                            }
+                            x += tw.max(8.0) + if content.width() > tw * 3.0 { tw * 2.0 } else { tw };
+                            count += 1;
+                        }
+                    }
+                }
+                if track.kind == TrackKind::Audio && self.opts.show_waveforms && vis.width() > 0.0 {
+                    if let Some(a) = audio_map.get(&e.media_id) {
+                        let dur = self.project.media(e.media_id).and_then(|m| m.duration).or(Some(a.duration()));
+                        let mid = content.center().y;
+                        let amp = content.height() * 0.48 * db_to_lin(e.gain_db).min(4.0);
+                        let col = Color32::from_rgba_unmultiplied(220, 230, 240, if e.mute { 60 } else { 170 });
+                        let mut x = vis.left().floor();
+                        let mut segs = Vec::with_capacity(vis.width() as usize * 2);
+                        while x < vis.right() {
+                            let t0 = self.tl.x2t(x, left);
+                            let t1 = self.tl.x2t(x + 1.0, left);
+                            if let (Some(m0), Some(m1)) = (e.media_time(t0, dur), e.media_time(t1.min(e.end() - 1e-6), dur)) {
+                                let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
+                                let (lo, hi) = a.peak_range(m0, m1.max(m0 + 1e-4));
+                                let fg = e.fade_gain(t0);
+                                segs.push(Shape::line_segment(
+                                    [pos2(x, mid - hi * amp * fg), pos2(x, mid - lo * amp * fg + 0.5)],
+                                    Stroke::new(1.0_f32, col),
+                                ));
+                            }
+                            x += 1.0;
+                        }
+                        painter.with_clip_rect(vis).extend(segs);
+                    }
+                }
+                // nome e indicadores
+                let mut label = e.name.clone();
+                if (e.rate - 1.0).abs() > 1e-6 {
+                    label.push_str(&format!("  [{:.0}%]", e.rate * 100.0));
+                }
+                if e.reverse {
+                    label.push_str("  ⇄");
+                }
+                if e.looped && self.project.media(e.media_id).and_then(|m| m.duration).map(|d| e.length * e.rate > d + 1e-3).unwrap_or(false) {
+                    label.push_str("  ⟲");
+                }
+                if e.group.is_some() {
+                    label.push_str("  ⛓");
+                }
+                if let Some(tr) = &e.transition {
+                    label = format!("◪ {} | {}", tr.kind.name(), label);
+                }
+                painter.with_clip_rect(hdr.intersect(lanes)).text(
+                    pos2(r.left().max(lanes.left()) + 4.0, hdr.top() + 1.0),
+                    Align2::LEFT_TOP,
+                    label,
+                    FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
+                // botões do evento
+                let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
+                if let Some(b) = fxb {
+                    let col = if e.fx.is_empty() { Color32::from_gray(150) } else { Color32::from_rgb(120, 230, 120) };
+                    painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
+                    painter.text(b.center(), Align2::CENTER_CENTER, "fx", FontId::proportional(9.0), col);
+                }
+                if let Some(b) = pcb {
+                    let active = !e.pan_crop.is_identity() || e.pan_crop.keys.len() > 1;
+                    let col = if active { Color32::from_rgb(120, 200, 255) } else { Color32::from_gray(150) };
+                    painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
+                    painter.text(b.center(), Align2::CENTER_CENTER, "⛶", FontId::proportional(9.0), col);
+                }
+                // fades
+                let fade_col = Stroke::new(1.5_f32, Color32::from_rgb(250, 250, 160));
+                let draw_fade = |len: f64, curve: Curve, fade_in: bool| {
+                    if len <= 0.0 {
+                        return;
+                    }
+                    let w = len as f32 * pps;
+                    let n = (w / 3.0).clamp(2.0, 60.0) as usize;
+                    let mut pts = vec![];
+                    for i in 0..=n {
+                        let x = i as f32 / n as f32;
+                        let g = curve.shape(x);
+                        let (px, py) = if fade_in {
+                            (r.left() + x * w, r.bottom() - g * (r.height() - 2.0))
+                        } else {
+                            (r.right() - x * w, r.bottom() - g * (r.height() - 2.0))
+                        };
+                        pts.push(pos2(px, py));
+                    }
+                    painter.add(Shape::line(pts, fade_col));
+                };
+                draw_fade(e.fade_in.len, e.fade_in.curve, true);
+                draw_fade(e.fade_out.len, e.fade_out.curve, false);
+                // alças de fade
+                let fi_x = r.left() + e.fade_in.len as f32 * pps;
+                let fo_x = r.right() - e.fade_out.len as f32 * pps;
+                for x in [fi_x, fo_x] {
+                    painter.rect_filled(Rect::from_center_size(pos2(x, r.top() + 3.0), vec2(6.0, 6.0)), 1.0, Color32::from_rgb(250, 250, 160));
+                }
+                let border = if sel { Stroke::new(2.0_f32, Color32::WHITE) } else { Stroke::new(1.0_f32, Color32::from_gray(15)) };
+                painter.rect_stroke(r, 2.0, border, StrokeKind::Inside);
+                if e.locked {
+                    painter.text(pos2(r.right() - 4.0, r.bottom() - 2.0), Align2::RIGHT_BOTTOM, "🔒", FontId::proportional(10.0), Color32::WHITE);
+                }
+            }
+            // envelopes
+            if self.opts.show_envelopes {
+                for env in track.envelopes.iter().filter(|e| e.visible) {
+                    let col = match env.kind {
+                        EnvKind::Volume | EnvKind::Opacity => Color32::from_rgb(90, 160, 255),
+                        EnvKind::Pan | EnvKind::FadeToColor => Color32::from_rgb(255, 110, 110),
+                    };
+                    let mut pts = vec![];
+                    let mut x = lanes.left();
+                    while x <= lanes.right() + 3.0 {
+                        let t = self.tl.x2t(x, left);
+                        pts.push(pos2(x, Self::env_y(env.kind, env.eval(t), y0, h)));
+                        x += 3.0;
+                    }
+                    painter.add(Shape::line(pts, Stroke::new(1.5_f32, col)));
+                    for p in &env.points {
+                        let px = self.tl.t2x(p.t, left);
+                        if px < lanes.left() - 5.0 || px > lanes.right() + 5.0 {
+                            continue;
+                        }
+                        let py = Self::env_y(env.kind, p.v, y0, h);
+                        painter.rect_filled(Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)), 1.0, col);
+                        painter.rect_stroke(Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)), 1.0, Stroke::new(1.0_f32, Color32::WHITE), StrokeKind::Inside);
+                    }
+                    painter.text(pos2(lanes.left() + 4.0, y0 + h - 14.0), Align2::LEFT_TOP, env.kind.name(), FontId::proportional(10.0), col);
+                }
+            }
+        }
+        // valor do ponto de envelope durante o arrasto
+        if let Drag::EnvPoint { track, kind, idx } = self.tl.drag {
+            if let Some(p) = self.project.tracks.get(track).and_then(|t| t.envelope(kind)).and_then(|e| e.points.get(idx)) {
+                let (y0, h) = layout[track];
+                let pos = pos2(self.tl.t2x(p.t, left) + 8.0, Self::env_y(kind, p.v, y0, h) - 16.0);
+                painter.text(pos, Align2::LEFT_TOP, format!("{}  {}", kind.format(p.v), self.fmt_time(p.t)), FontId::proportional(11.0), Color32::WHITE);
+            }
+        }
+        // indicador de soltura
+        if let Some((ti, t)) = self.tl.drop_hint {
+            let x = self.tl.t2x(t, left);
+            let (y0, h) = layout.get(ti).cloned().unwrap_or((lanes.bottom() - 30.0, 30.0));
+            painter.rect_stroke(
+                Rect::from_min_size(pos2(x, y0 + 1.0), vec2(80.0, h - 2.0)),
+                2.0,
+                Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 90)),
+                StrokeKind::Inside,
+            );
+        }
+        if let Some(t) = self.tl.snap_line {
+            let x = self.tl.t2x(t, left);
+            painter.line_segment([pos2(x, lanes.top()), pos2(x, lanes.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(255, 220, 90)));
+        }
+    }
+
+    fn draw_cursors(&mut self, ui: &mut egui::Ui, area: Rect) {
+        let painter = ui.painter_at(area);
+        let left = area.left();
+        // marcadores (linhas pontilhadas)
+        for m in &self.project.markers {
+            let x = self.tl.t2x(m.t, left);
+            let mut y = area.top() + TOP_H;
+            while y < area.bottom() {
+                painter.line_segment([pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))], Stroke::new(1.0_f32, Color32::from_rgb(230, 150, 40)));
+                y += 8.0;
+            }
+        }
+        let x = self.tl.t2x(self.cursor, left);
+        painter.line_segment([pos2(x, area.top() + LOOP_H), pos2(x, area.bottom())], Stroke::new(1.0_f32, Color32::WHITE));
+        painter.add(Shape::convex_polygon(
+            vec![pos2(x - 5.0, area.top() + LOOP_H + MARKER_H), pos2(x + 5.0, area.top() + LOOP_H + MARKER_H), pos2(x, area.top() + LOOP_H + MARKER_H + 7.0)],
+            Color32::WHITE,
+            Stroke::NONE,
+        ));
+        if self.is_playing() {
+            let px = self.tl.t2x(self.play_pos(), left);
+            painter.line_segment([pos2(px, area.top() + LOOP_H), pos2(px, area.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(255, 120, 60)));
+        }
+    }
+}
+
+fn env_first_locked() -> bool {
+    false
+}
+
+pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
+    painter.rect_filled(r, 1.0, Color32::from_gray(20));
+    let w = (r.width() - 1.0) / 2.0;
+    for (i, v) in lv.iter().enumerate() {
+        let db = lin_to_db(*v).clamp(-60.0, 6.0);
+        let n = ((db + 60.0) / 66.0).clamp(0.0, 1.0);
+        let col = if db > -0.1 {
+            Color32::from_rgb(240, 60, 50)
+        } else if db > -9.0 {
+            Color32::from_rgb(230, 210, 60)
+        } else {
+            Color32::from_rgb(70, 200, 90)
+        };
+        let x0 = r.left() + i as f32 * (w + 1.0);
+        let bar = Rect::from_min_max(pos2(x0, r.bottom() - n * r.height()), pos2(x0 + w, r.bottom()));
+        painter.rect_filled(bar, 0.0, col);
+    }
+}
