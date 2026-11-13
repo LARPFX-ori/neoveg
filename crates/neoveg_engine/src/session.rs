@@ -110,6 +110,8 @@ pub struct EditorSession {
     pub edit_mode: EditMode,
     pub status: String,
     pub removed_media_ids: Vec<Id>,
+    /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
+    pub prerendered_ranges: Vec<(Ticks, Ticks)>,
 }
 
 impl EditorSession {
@@ -141,7 +143,36 @@ impl EditorSession {
             edit_mode: EditMode::Normal,
             status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
             removed_media_ids: Vec::new(),
+            prerendered_ranges: Vec::new(),
         }
+    }
+
+    /// Registra um trecho pré-renderizado e mescla intervalos adjacentes/sobrepostos.
+    pub fn record_prerendered_range(&mut self, start: Ticks, end: Ticks) {
+        let a = start.max(Ticks::ZERO);
+        if end <= a {
+            return;
+        }
+        self.prerendered_ranges.push((a, end));
+        self.prerendered_ranges.sort_by_key(|(s, _)| *s);
+        let mut merged: Vec<(Ticks, Ticks)> = Vec::with_capacity(self.prerendered_ranges.len());
+        for (s, e) in self.prerendered_ranges.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        if merged.len() > 256 {
+            merged.drain(..merged.len() - 256);
+        }
+        self.prerendered_ranges = merged;
+    }
+
+    pub fn clear_prerendered(&mut self) {
+        self.prerendered_ranges.clear();
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -161,6 +192,7 @@ impl EditorSession {
     pub fn changed(&mut self) {
         self.generation += 1;
         self.dirty = true;
+        self.prerendered_ranges.clear();
     }
 
     /// Atualiza o snapshot imutável quando `generation != sent_generation`.
@@ -217,6 +249,7 @@ impl EditorSession {
         }
         self.generation += 1;
         self.dirty = true;
+        self.prerendered_ranges.clear();
     }
 
     pub fn reset_project(&mut self, project: Project, path: Option<PathBuf>) {
@@ -229,6 +262,7 @@ impl EditorSession {
         self.play_start = Ticks::ZERO;
         self.sel_events.clear();
         self.time_sel = None;
+        self.prerendered_ranges.clear();
         self.sel_track = if self.project.tracks.is_empty() {
             None
         } else {
@@ -1558,5 +1592,25 @@ mod tests {
         assert_eq!(sess_manual.project.settings.height, 1080);
         assert_eq!(sess_manual.project.settings.fps, FrameRate::FPS_60);
         assert_eq!(sess_manual.project.settings.sample_rate, 48000);
+    }
+
+    #[test]
+    fn trechos_prerenderizados_mesclam_e_invalidam_ao_editar() {
+        let mut sess = EditorSession::new(Project::new_default());
+        sess.record_prerendered_range(Ticks::from_secs_i64(5), Ticks::from_secs_i64(3));
+        assert!(sess.prerendered_ranges.is_empty());
+
+        sess.record_prerendered_range(Ticks::from_secs_i64(2), Ticks::from_secs_i64(6));
+        sess.record_prerendered_range(Ticks::from_secs_i64(5), Ticks::from_secs_i64(9));
+        sess.record_prerendered_range(Ticks::from_secs_i64(12), Ticks::from_secs_i64(14));
+        assert_eq!(
+            sess.prerendered_ranges,
+            vec![
+                (Ticks::from_secs_i64(2), Ticks::from_secs_i64(9)),
+                (Ticks::from_secs_i64(12), Ticks::from_secs_i64(14)),
+            ]
+        );
+        sess.changed();
+        assert!(sess.prerendered_ranges.is_empty());
     }
 }

@@ -24,38 +24,74 @@ fn dock_tab_icon(tab: DockTab) -> Icon {
 }
 
 impl App {
-    fn dock_tab_strip(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
-        let mut detach_req: Option<DockTab> = None;
-        ui.horizontal_wrapped(|ui| {
-            for &tab in docked {
-                if icons::small_icon_button(
-                    ui,
-                    dock_tab_icon(tab),
-                    Some(tab.name()),
-                    self.dock_tab == tab,
-                    &self.theme,
-                )
-                .clicked()
-                {
-                    self.dock_tab = tab;
-                }
-            }
-            if docked.contains(&self.dock_tab)
-                && icons::small_icon_button(ui, Icon::PopOut, Some("Destacar"), false, &self.theme)
-                    .on_hover_text("Abrir a aba ativa em janela flutuante")
-                    .clicked()
-            {
-                detach_req = Some(self.dock_tab);
-            }
-        });
-        if let Some(tab) = detach_req {
-            self.detached_tabs.insert(tab);
+    pub fn detach_dock_tab(&mut self, tab: DockTab) {
+        self.detached_tabs.insert(tab);
+        if self.dock_tab == tab {
             if let Some(next) = DockTab::ALL
                 .into_iter()
                 .find(|t| !self.detached_tabs.contains(t))
             {
                 self.dock_tab = next;
             }
+        }
+    }
+
+    fn dock_tab_strip(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
+        let mut detach_req: Option<DockTab> = None;
+        let mut detach_all = false;
+        let mut toggle_preview = false;
+        ui.horizontal_wrapped(|ui| {
+            for &tab in docked {
+                let resp = icons::small_icon_button(
+                    ui,
+                    dock_tab_icon(tab),
+                    Some(tab.name()),
+                    self.dock_tab == tab,
+                    &self.theme,
+                );
+                if resp.clicked() {
+                    self.dock_tab = tab;
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Destacar em janela do Windows").clicked() {
+                        detach_req = Some(tab);
+                        ui.close_menu();
+                    }
+                    if ui.button("Destacar todas as abas").clicked() {
+                        detach_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let pv_label = if self.preview_detached {
+                        "Acoplar Prévia de Vídeo"
+                    } else {
+                        "Destacar Prévia de Vídeo em janela do Windows"
+                    };
+                    if ui.button(pv_label).clicked() {
+                        toggle_preview = true;
+                        ui.close_menu();
+                    }
+                });
+            }
+            if docked.contains(&self.dock_tab)
+                && icons::small_icon_button(ui, Icon::PopOut, Some("Destacar"), false, &self.theme)
+                    .on_hover_text(
+                        "Abrir a aba ativa em janela normal do Windows (clique direito em qualquer aba para mais opções)",
+                    )
+                    .clicked()
+            {
+                detach_req = Some(self.dock_tab);
+            }
+        });
+        if detach_all {
+            for tab in DockTab::ALL {
+                self.detached_tabs.insert(tab);
+            }
+        } else if let Some(tab) = detach_req {
+            self.detach_dock_tab(tab);
+        }
+        if toggle_preview {
+            self.preview_detached = !self.preview_detached;
         }
     }
 
@@ -78,20 +114,35 @@ impl App {
 
     pub fn dock_area(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_rect_before_wrap();
-        let preview_w = (avail.width() * self.preview_ratio).clamp(260.0, 900.0);
-        let (tabs_rect, preview_rect) = if self.prefs.edit_layout.preview_on_left {
-            (
-                Rect::from_min_max(pos2(avail.left() + preview_w + 6.0, avail.top()), avail.max),
-                Rect::from_min_max(avail.min, pos2(avail.left() + preview_w, avail.bottom())),
-            )
+        let (tabs_rect, preview_rect_opt) = if self.preview_detached {
+            (avail, None)
         } else {
-            (
-                Rect::from_min_max(
-                    avail.min,
-                    pos2(avail.right() - preview_w - 6.0, avail.bottom()),
-                ),
-                Rect::from_min_max(pos2(avail.right() - preview_w, avail.top()), avail.max),
-            )
+            let min_pv = 220.0_f32.min((avail.width() * 0.45).max(120.0));
+            let max_pv = (avail.width() * 0.68).max(min_pv);
+            let preview_w = (avail.width() * self.preview_ratio).clamp(min_pv, max_pv);
+            if self.prefs.edit_layout.preview_on_left {
+                (
+                    Rect::from_min_max(
+                        pos2(avail.left() + preview_w + 6.0, avail.top()),
+                        avail.max,
+                    ),
+                    Some(Rect::from_min_max(
+                        avail.min,
+                        pos2(avail.left() + preview_w, avail.bottom()),
+                    )),
+                )
+            } else {
+                (
+                    Rect::from_min_max(
+                        avail.min,
+                        pos2(avail.right() - preview_w - 6.0, avail.bottom()),
+                    ),
+                    Some(Rect::from_min_max(
+                        pos2(avail.right() - preview_w, avail.top()),
+                        avail.max,
+                    )),
+                )
+            }
         };
         ui.allocate_rect(avail, Sense::hover());
 
@@ -170,16 +221,91 @@ impl App {
             self.dock_tab_strip(&mut strip_ui, &docked);
         }
 
-        let mut right = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(preview_rect)
-                .id_salt("dock_right"),
-        );
-        right.set_clip_rect(preview_rect);
-        self.preview_panel(&mut right);
+        if let Some(preview_rect) = preview_rect_opt {
+            let mut right = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(preview_rect)
+                    .id_salt("dock_right"),
+            );
+            right.set_clip_rect(preview_rect);
+            self.preview_panel(&mut right, false);
+        }
     }
 
     pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
+        if self.preview_detached {
+            let mut open = true;
+            let mut reattach = false;
+            let vid = egui::ViewportId::from_hash_of("neoveg_floating_preview_viewport");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Prévia de Vídeo - Neoveg")
+                .with_inner_size([560.0, 380.0])
+                .with_min_inner_size([280.0, 200.0])
+                .with_resizable(true)
+                .with_decorations(true)
+                .with_icon(self.window_icon.clone());
+            ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
+                if class == egui::ViewportClass::Embedded {
+                    egui::Window::new("Prévia de Vídeo")
+                        .id(egui::Id::new("floating_preview_window"))
+                        .open(&mut open)
+                        .default_size([520.0, 340.0])
+                        .min_size([260.0, 180.0])
+                        .show(v_ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                if icons::small_icon_button(
+                                    ui,
+                                    Icon::DockIn,
+                                    Some("Acoplar na área de janelas"),
+                                    false,
+                                    &self.theme,
+                                )
+                                .clicked()
+                                {
+                                    reattach = true;
+                                }
+                            });
+                            ui.separator();
+                            self.preview_panel(ui, true);
+                        });
+                } else {
+                    if v_ctx.input(|i| i.viewport().close_requested()) {
+                        open = false;
+                    }
+                    egui::CentralPanel::default().show(v_ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if icons::small_icon_button(
+                                ui,
+                                Icon::DockIn,
+                                Some("Acoplar na área de janelas"),
+                                false,
+                                &self.theme,
+                            )
+                            .clicked()
+                            {
+                                reattach = true;
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Janela independente (arraste pela barra de título para mover entre monitores)",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        });
+                        ui.separator();
+                        self.preview_panel(ui, true);
+                    });
+                }
+            });
+            if !open || reattach {
+                self.preview_detached = false;
+                if reattach {
+                    self.dock_visible = true;
+                }
+            }
+        }
+
         let detached: Vec<DockTab> = DockTab::ALL
             .into_iter()
             .filter(|t| self.detached_tabs.contains(t))
@@ -187,30 +313,75 @@ impl App {
         for tab in detached {
             let mut open = true;
             let mut reattach = false;
-            egui::Window::new(tab.name())
-                .id(egui::Id::new(("floating_dock", tab.command_id())))
-                .open(&mut open)
-                .default_size([460.0, 320.0])
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if icons::small_icon_button(
-                            ui,
-                            Icon::DockIn,
-                            Some("Acoplar na área inferior"),
-                            false,
-                            &self.theme,
-                        )
-                        .clicked()
-                        {
-                            reattach = true;
-                        }
+            let key = crate::layout::panel_key(tab);
+            let vid = egui::ViewportId::from_hash_of(("neoveg_floating_dock_viewport", key));
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("{} - Neoveg", tab.name()))
+                .with_inner_size([520.0, 360.0])
+                .with_min_inner_size([260.0, 180.0])
+                .with_resizable(true)
+                .with_decorations(true)
+                .with_icon(self.window_icon.clone());
+            ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
+                if class == egui::ViewportClass::Embedded {
+                    egui::Window::new(tab.name())
+                        .id(egui::Id::new(("floating_dock", tab.command_id())))
+                        .open(&mut open)
+                        .default_size([460.0, 320.0])
+                        .min_size([240.0, 160.0])
+                        .show(v_ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                if icons::small_icon_button(
+                                    ui,
+                                    Icon::DockIn,
+                                    Some("Acoplar na área de janelas"),
+                                    false,
+                                    &self.theme,
+                                )
+                                .clicked()
+                                {
+                                    reattach = true;
+                                }
+                            });
+                            ui.separator();
+                            egui::ScrollArea::both()
+                                .id_salt(("floating_scroll", tab.command_id()))
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
+                        });
+                } else {
+                    if v_ctx.input(|i| i.viewport().close_requested()) {
+                        open = false;
+                    }
+                    egui::CentralPanel::default().show(v_ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if icons::small_icon_button(
+                                ui,
+                                Icon::DockIn,
+                                Some("Acoplar na área de janelas"),
+                                false,
+                                &self.theme,
+                            )
+                            .clicked()
+                            {
+                                reattach = true;
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Janela independente (arraste pela barra de título para mover entre monitores)",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        });
+                        ui.separator();
+                        egui::ScrollArea::both()
+                            .id_salt(("floating_os_scroll", tab.command_id()))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
                     });
-                    ui.separator();
-                    egui::ScrollArea::both()
-                        .id_salt(("floating_scroll", tab.command_id()))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
-                });
+                }
+            });
             if !open || reattach {
                 self.detached_tabs.remove(&tab);
                 if reattach {
@@ -248,8 +419,8 @@ impl App {
         }
     }
 
-    fn preview_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+    fn preview_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Prévia de Vídeo").strong());
             egui::ComboBox::from_id_salt("pq")
                 .selected_text(self.opts.preview_quality.name())
@@ -295,6 +466,13 @@ impl App {
             .clicked()
             {
                 self.exec_cmd(Some(ui.ctx()), "view.tab.color_grading");
+            }
+            if !is_floating
+                && icons::small_icon_button(ui, Icon::PopOut, None, false, &self.theme)
+                    .on_hover_text("Destacar Prévia de Vídeo em janela normal do Windows")
+                    .clicked()
+            {
+                self.preview_detached = true;
             }
         });
         let avail = ui.available_rect_before_wrap();
@@ -422,6 +600,7 @@ impl App {
                                     );
                                 }
                                 ui.vertical(|ui| {
+                                    ui.set_min_width(140.0);
                                     ui.add(
                                         egui::Label::new(egui::RichText::new(&m.name).strong())
                                             .extend(),

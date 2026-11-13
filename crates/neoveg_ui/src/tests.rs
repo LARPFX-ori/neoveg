@@ -340,9 +340,9 @@ fn ui_smoke() {
 
     app.exec_cmd(Some(&ctx), "edit.properties.layout.magix");
     assert_eq!(app.prefs.edit_layout.layout_type, crate::LayoutType::Magix);
-    assert!(!app.prefs.edit_layout.timeline_at_bottom);
+    assert!(app.prefs.edit_layout.timeline_at_bottom);
     assert!(app.prefs.edit_layout.tabs_at_top);
-    assert!(!app.prefs.edit_layout.transport_at_bottom);
+    assert!(app.prefs.edit_layout.transport_at_bottom);
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasEscuro);
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -350,9 +350,12 @@ fn ui_smoke() {
         app.apply_window_layout(preset);
         frame(&mut app, vec![], Modifiers::NONE);
     }
+    app.preview_detached = true;
     app.detached_tabs.insert(DockTab::Mixer);
+    app.detached_tabs.insert(DockTab::VideoFx);
     frame(&mut app, vec![], Modifiers::NONE);
-    app.detached_tabs.remove(&DockTab::Mixer);
+    app.detached_tabs.clear();
+    app.preview_detached = false;
 
     // Playback rate contínuo durante reprodução + geração de proxy
     app.playback_rate = 1.5;
@@ -389,6 +392,7 @@ fn ui_smoke() {
         .position(|m| m.id == avi_mid)
         .unwrap();
     assert_narrow_layout_fixes(&mut app, avi_idx);
+    assert_vegas21_ui_upgrades(&mut app);
     if let Some(pf) = proxy_file {
         let _ = std::fs::remove_file(pf);
     }
@@ -520,4 +524,102 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     app.dock_tab = prev_tab;
     app.dock_visible = prev_dock_vis;
     app.loading = prev_loading;
+}
+
+/// Garante Visor de Tempo dedicado, Barra de Status de Renderização, janela responsiva
+/// de Layout em monitor pequeno, janelas destacáveis e legibilidade em temas claros.
+fn assert_vegas21_ui_upgrades(app: &mut App) {
+    let prev_theme = app.theme_id;
+    let prev_preview_detached = app.preview_detached;
+    let prev_detached = app.detached_tabs.clone();
+    let prev_prerendered = app.session.prerendered_ranges.clone();
+
+    let ctx = egui::Context::default();
+    let small_raw = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(760.0, 520.0))),
+        time: Some(t),
+        ..Default::default()
+    };
+
+    // 1. Timeline exibe Visor de Tempo dedicado e Barra de Status de Renderização
+    app.session.clear_prerendered();
+    let _ = ctx.run(raw(vec![], Modifiers::NONE, 3.0), |c| app.frame_ui(c));
+    let out = ctx.run(raw(vec![], Modifiers::NONE, 3.05), |c| app.frame_ui(c));
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    assert!(
+        texts.iter().any(|(t, _, _, _)| t == "Visor de tempo"),
+        "Visor de tempo deve ser exibido abaixo das faixas de áudio/vídeo"
+    );
+    assert!(
+        texts.iter().any(
+            |(t, _, _, _)| t == "Status de renderização: Pronto (sem trechos pré-renderizados)"
+        ),
+        "Barra de Status de Renderização deve aparecer na base da timeline"
+    );
+
+    app.session
+        .record_prerendered_range(Ticks::ZERO, Ticks::from_secs_i64(2));
+    let out = ctx.run(raw(vec![], Modifiers::NONE, 3.1), |c| app.frame_ui(c));
+    texts.clear();
+    for clipped in &out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    assert!(
+        texts
+            .iter()
+            .any(|(t, _, _, _)| t == "Status de renderização: 1 trecho(s) pré-renderizado(s)"),
+        "Barra de Status deve indicar trechos pré-renderizados registrados"
+    );
+
+    // 2. Janela "Editar > Propriedades > Layout" deve caber integralmente em 760x520
+    app.exec_cmd(Some(&ctx), "edit.properties.layout");
+    let _ = ctx.run(small_raw(3.15), |c| app.frame_ui(c));
+    let out = ctx.run(small_raw(3.20), |c| app.frame_ui(c));
+    texts.clear();
+    for clipped in &out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    for btn_label in ["OK", "Restaurar padrão do tipo"] {
+        let found = texts.iter().find(|(t, _, _, _)| t == btn_label).unwrap_or_else(|| {
+            let all = texts
+                .iter()
+                .map(|(s, r, rc, _)| format!("{s:?}@{r}:{rc:?}"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            panic!(
+                "botão '{btn_label}' deve aparecer no diálogo de Layout (edit_layout_open={}, shapes={}, all=[{all}])",
+                app.dlg.edit_layout_open,
+                out.shapes.len()
+            );
+        });
+        let (_, _, rect, clip) = found;
+        assert!(
+            rect.right() <= 760.0 + 1.5
+                && rect.bottom() <= 520.0 + 1.5
+                && rect.right() <= clip.right() + 1.5
+                && rect.bottom() <= clip.bottom() + 1.5,
+            "botão '{btn_label}' saiu dos limites em monitor 760x520: rect={rect:?}, clip={clip:?}"
+        );
+    }
+    app.dlg.edit_layout_open = false;
+
+    // 3. Temas claros + Prévia destacada e janelas do dock destacadas sem pânico
+    app.preview_detached = true;
+    app.detached_tabs.insert(DockTab::Mixer);
+    for tid in [
+        crate::theme::ThemeId::VegasClaro,
+        crate::theme::ThemeId::AltoContrasteClaro,
+    ] {
+        app.set_theme(&ctx, tid, false);
+        let _ = ctx.run(raw(vec![], Modifiers::NONE, 3.3), |c| app.frame_ui(c));
+        let _ = ctx.run(raw(vec![], Modifiers::NONE, 3.35), |c| app.frame_ui(c));
+    }
+
+    app.session.prerendered_ranges = prev_prerendered;
+    app.detached_tabs = prev_detached;
+    app.preview_detached = prev_preview_detached;
+    app.set_theme(&ctx, prev_theme, false);
 }

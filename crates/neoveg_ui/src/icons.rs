@@ -944,15 +944,19 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
         active,
         enabled,
     } = opts;
+    let sel_fg = crate::theme::contrast_on(theme.selection_bg);
+    let label_fg = if !enabled {
+        theme.text_muted
+    } else if active {
+        sel_fg
+    } else {
+        theme.text_primary
+    };
     let galley = label.map(|t| {
         ui.painter().layout_no_wrap(
             t.to_string(),
             egui::TextStyle::Button.resolve(ui.style()),
-            if enabled {
-                theme.text_primary
-            } else {
-                theme.text_muted
-            },
+            label_fg,
         )
     });
     let text_w = galley.as_ref().map(|g| g.size().x + 5.0).unwrap_or(0.0);
@@ -996,11 +1000,21 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
             rect.center().x - icon_size * 0.5
         };
         let icon_rect = Rect::from_min_size(pos2(ix, iy), vec2(icon_size, icon_size));
-        paint(p, icon_rect, icon, theme, enabled);
+        if active && crate::theme::relative_luminance(theme.selection_bg) < 0.35 {
+            let mut active_theme = theme.clone();
+            active_theme.dark_mode = true;
+            if active_theme.high_contrast {
+                active_theme.text_primary = sel_fg;
+                active_theme.accent = sel_fg;
+            }
+            paint(p, icon_rect, icon, &active_theme, enabled);
+        } else {
+            paint(p, icon_rect, icon, theme, enabled);
+        }
         if let Some(g) = galley {
             let tx = icon_rect.right() + 5.0;
             let ty = rect.center().y - g.size().y * 0.5;
-            p.galley(pos2(tx, ty), g, theme.text_primary);
+            p.galley(pos2(tx, ty), g, label_fg);
         }
     }
     resp

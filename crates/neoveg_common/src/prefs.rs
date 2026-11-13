@@ -248,8 +248,8 @@ impl LayoutType {
                  barra de transporte no rodapé, abas na base e cinza médio Sony."
             }
             LayoutType::Magix => {
-                "Timeline no topo, barra unificada de transporte e edição, \
-                 área acoplável embaixo com abas no topo e interface escura moderna."
+                "Área acoplável (Prévia e painéis) no topo com abas no topo, \
+                 timeline embaixo, barra de transporte e edição no rodapé e tema escuro."
             }
         }
     }
@@ -327,9 +327,9 @@ impl EditLayoutPrefs {
             },
             LayoutType::Magix => Self {
                 layout_type,
-                timeline_at_bottom: false,
+                timeline_at_bottom: true,
                 tabs_at_top: true,
-                transport_at_bottom: false,
+                transport_at_bottom: true,
                 preview_on_left: false,
                 sync_theme_with_layout: true,
             },
@@ -645,9 +645,9 @@ mod tests {
         assert!(sony.transport_at_bottom);
 
         let magix = EditLayoutPrefs::for_type(LayoutType::Magix);
-        assert!(!magix.timeline_at_bottom);
+        assert!(magix.timeline_at_bottom);
         assert!(magix.tabs_at_top);
-        assert!(!magix.transport_at_bottom);
+        assert!(magix.transport_at_bottom);
 
         let raw = r#"{"edit_layout":{"layout_type":"Sonic Fonudry"}}"#;
         let p: Preferences = serde_json::from_str(raw).unwrap();

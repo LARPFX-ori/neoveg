@@ -253,12 +253,12 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             widget_bg: Color32::from_rgb(212, 215, 222),
             widget_hover_bg: Color32::from_rgb(194, 200, 212),
             selection_bg: Color32::from_rgb(52, 108, 196),
-            text_primary: Color32::from_rgb(24, 26, 32),
-            text_muted: Color32::from_rgb(76, 80, 92),
-            border: Color32::from_rgb(160, 165, 178),
-            accent: Color32::from_rgb(22, 86, 175),
-            timecode_fg: Color32::from_rgb(14, 110, 45),
-            offline_fg: Color32::from_rgb(185, 45, 20),
+            text_primary: Color32::from_rgb(20, 22, 28),
+            text_muted: Color32::from_rgb(64, 68, 80),
+            border: Color32::from_rgb(152, 158, 172),
+            accent: Color32::from_rgb(20, 82, 170),
+            timecode_fg: Color32::from_rgb(12, 105, 42),
+            offline_fg: Color32::from_rgb(180, 40, 18),
             tl_bg: Color32::from_rgb(214, 217, 224),
             tl_header_bg: Color32::from_rgb(224, 226, 232),
             tl_header_sel: Color32::from_rgb(184, 202, 232),
@@ -266,16 +266,16 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_loop_bar: Color32::from_rgb(200, 204, 212),
             tl_marker_bar: Color32::from_rgb(212, 216, 224),
             tl_ruler_bg: Color32::from_rgb(236, 238, 244),
-            tl_grid_line: Color32::from_rgb(192, 196, 206),
+            tl_grid_line: Color32::from_rgb(184, 188, 200),
             tl_lane_even: Color32::from_rgb(222, 225, 232),
             tl_lane_odd: Color32::from_rgb(212, 215, 222),
-            tl_playhead_edit: Color32::from_rgb(190, 95, 0),
-            tl_playhead_live: Color32::from_rgb(210, 45, 25),
-            tl_loop_active: Color32::from_rgb(45, 105, 195),
-            tl_loop_inactive: Color32::from_rgb(140, 145, 160),
-            tl_marker: Color32::from_rgb(26, 130, 52),
-            tl_region: Color32::from_rgb(185, 100, 12),
-            tl_region_band: Color32::from_rgb(210, 130, 40),
+            tl_playhead_edit: Color32::from_rgb(188, 68, 0),
+            tl_playhead_live: Color32::from_rgb(205, 38, 20),
+            tl_loop_active: Color32::from_rgb(40, 98, 188),
+            tl_loop_inactive: Color32::from_rgb(124, 130, 146),
+            tl_marker: Color32::from_rgb(20, 120, 48),
+            tl_region: Color32::from_rgb(180, 92, 10),
+            tl_region_band: Color32::from_rgb(142, 66, 0),
             tl_sel_band: Color32::from_rgba_unmultiplied(45, 105, 200, 42),
             tl_fade: Color32::from_rgb(155, 110, 0),
             tl_gain_line: Color32::from_rgb(18, 125, 58),
@@ -421,15 +421,13 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
     } else {
         egui::Visuals::light()
     };
+    let sel_fg = contrast_on(c.selection_bg);
     v.panel_fill = c.panel_fill;
     v.window_fill = c.window_fill;
     v.extreme_bg_color = c.extreme_bg;
-    v.override_text_color = Some(c.text_primary);
+    v.override_text_color = None;
     v.selection.bg_fill = c.selection_bg;
-    v.selection.stroke = Stroke::new(
-        if c.high_contrast { 1.5_f32 } else { 1.0_f32 },
-        c.text_primary,
-    );
+    v.selection.stroke = Stroke::new(if c.high_contrast { 1.5_f32 } else { 1.0_f32 }, sel_fg);
 
     let border_w = if c.high_contrast { 1.5_f32 } else { 1.0_f32 };
     v.widgets.noninteractive.bg_fill = c.panel_fill;
@@ -448,8 +446,8 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
 
     v.widgets.active.bg_fill = c.selection_bg;
     v.widgets.active.weak_bg_fill = c.selection_bg;
-    v.widgets.active.bg_stroke = Stroke::new(border_w, c.text_primary);
-    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
+    v.widgets.active.bg_stroke = Stroke::new(border_w, sel_fg);
+    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, sel_fg);
 
     v.widgets.open.bg_fill = c.widget_hover_bg;
     v.widgets.open.bg_stroke = Stroke::new(border_w, c.accent);
@@ -461,6 +459,15 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     ctx.set_style(style);
     c
+}
+
+/// Escolhe branco ou preto conforme a maior razão de contraste WCAG 2.1 contra `bg`.
+pub fn contrast_on(bg: Color32) -> Color32 {
+    if contrast_ratio(Color32::WHITE, bg) >= contrast_ratio(Color32::BLACK, bg) {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
 }
 
 /// Luminância relativa sRGB segundo WCAG 2.1.
@@ -512,6 +519,29 @@ mod tests {
             assert!(
                 contrast_ratio(p.timecode_fg, p.panel_fill) >= 7.0,
                 "timecode de {:?} precisa >= 7:1",
+                id
+            );
+        }
+        for id in ThemeId::ALL {
+            let p = palette(id);
+            assert!(
+                contrast_ratio(p.text_primary, p.panel_fill) >= 4.5,
+                "texto principal de {:?} precisa >= 4.5:1",
+                id
+            );
+            assert!(
+                contrast_ratio(p.text_muted, p.window_fill) >= 4.5,
+                "texto secundário de {:?} precisa >= 4.5:1",
+                id
+            );
+            assert!(
+                contrast_ratio(contrast_on(p.selection_bg), p.selection_bg) >= 4.5,
+                "texto selecionado de {:?} precisa >= 4.5:1",
+                id
+            );
+            assert!(
+                contrast_ratio(p.tl_playhead_edit, p.tl_lane_even) >= 3.0,
+                "playhead de {:?} precisa de contraste visível na timeline",
                 id
             );
         }

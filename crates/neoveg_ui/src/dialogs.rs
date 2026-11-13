@@ -2493,107 +2493,147 @@ impl App {
         let mut apply_and_keep = false;
         let mut cancel_close = false;
 
+        let screen = ctx.screen_rect().size();
+        let max_w = if screen.x.is_finite() {
+            (screen.x - 24.0).clamp(260.0, 760.0)
+        } else {
+            580.0
+        };
+        let max_h = if screen.y.is_finite() {
+            (screen.y - 36.0).clamp(220.0, 620.0)
+        } else {
+            460.0
+        };
+        let def_w = 560.0_f32.min(max_w);
+        let def_h = 460.0_f32.min(max_h);
+        let extra_wrap = if def_w < 440.0 { 26.0 } else { 0.0 };
+        let scroll_max_h = (def_h - 96.0 - extra_wrap).max(90.0);
+
         egui::Window::new("Editar > Propriedades > Layout")
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .default_width(600.0)
+            .resizable(true)
+            .constrain_to(ctx.screen_rect())
+            .default_size([def_w, def_h])
+            .max_size([max_w, max_h])
             .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(280.0);
-                        ui.heading("Tipos de layout");
-                        ui.add_space(4.0);
-                        for lt in LayoutType::ALL {
-                            let selected = draft.layout_type == lt;
-                            if ui
-                                .radio(
-                                    selected,
-                                    egui::RichText::new(format!("{}  ({})", lt.label(), lt.era()))
+                egui::ScrollArea::vertical()
+                    .id_salt("edit_layout_scroll")
+                    .max_height(scroll_max_h)
+                    .show(ui, |ui| {
+                        let avail_w = ui.available_width().max(220.0);
+                        let wide = avail_w >= 460.0;
+                        let mut render_types = |ui: &mut egui::Ui| {
+                            ui.heading("Tipos de layout");
+                            ui.add_space(4.0);
+                            for lt in LayoutType::ALL {
+                                let selected = draft.layout_type == lt;
+                                if ui
+                                    .radio(
+                                        selected,
+                                        egui::RichText::new(format!(
+                                            "{}  ({})",
+                                            lt.label(),
+                                            lt.era()
+                                        ))
                                         .strong(),
-                                )
-                                .clicked()
-                                && !selected
-                            {
-                                apply_type_live = Some(lt);
+                                    )
+                                    .clicked()
+                                    && !selected
+                                {
+                                    apply_type_live = Some(lt);
+                                }
                             }
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(draft.layout_type.description()).small().weak(),
+                            );
+                        };
+                        if wide {
+                            let left_w = (avail_w * 0.52).clamp(210.0, 290.0);
+                            let schem_w = (avail_w - left_w - 22.0).clamp(170.0, 270.0);
+                            ui.horizontal_top(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(left_w);
+                                    render_types(ui);
+                                });
+                                ui.separator();
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Pré-visualização da janela").strong(),
+                                    );
+                                    ui.add_space(4.0);
+                                    draw_layout_schematic(ui, &draft, &self.theme, schem_w);
+                                });
+                            });
+                        } else {
+                            render_types(ui);
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Pré-visualização da janela").strong());
+                            ui.add_space(4.0);
+                            draw_layout_schematic(ui, &draft, &self.theme, avail_w);
                         }
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(draft.layout_type.description())
+
+                        ui.separator();
+                        ui.heading("Opções da área de trabalho");
+                        if ui
+                            .checkbox(
+                                &mut draft.timeline_at_bottom,
+                                "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
+                            )
+                            .changed()
+                        {
+                            live_tweak = true;
+                        }
+                        if ui
+                            .checkbox(
+                                &mut draft.tabs_at_top,
+                                "Posicionar abas no topo das janelas acopladas",
+                            )
+                            .changed()
+                        {
+                            live_tweak = true;
+                        }
+                        if ui
+                            .checkbox(
+                                &mut draft.transport_at_bottom,
+                                "Fixar barra de transporte no rodapé da janela",
+                            )
+                            .changed()
+                        {
+                            live_tweak = true;
+                        }
+                        if ui
+                            .checkbox(
+                                &mut draft.preview_on_left,
+                                "Posicionar Prévia de Vídeo à esquerda na área acoplável",
+                            )
+                            .changed()
+                        {
+                            live_tweak = true;
+                        }
+                        if ui
+                            .checkbox(
+                                &mut draft.sync_theme_with_layout,
+                                "Aplicar tema visual da era ao selecionar tipo de layout",
+                            )
+                            .changed()
+                        {
+                            live_tweak = true;
+                        }
+                        if self.theme_id.is_high_contrast() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Tema Alto Contraste AAA ativo: a paleta de acessibilidade é preservada ao alternar tipos de layout.",
+                                )
                                 .small()
-                                .weak(),
-                        );
+                                .color(self.theme.accent),
+                            );
+                        }
                     });
 
-                    ui.separator();
-
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Pré-visualização da janela").strong());
-                        ui.add_space(4.0);
-                        draw_layout_schematic(ui, &draft, &self.theme);
-                    });
-                });
-
                 ui.separator();
-                ui.heading("Opções da área de trabalho");
-                if ui
-                    .checkbox(
-                        &mut draft.timeline_at_bottom,
-                        "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
-                    )
-                    .changed()
-                {
-                    live_tweak = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut draft.tabs_at_top,
-                        "Posicionar abas no topo das janelas acopladas",
-                    )
-                    .changed()
-                {
-                    live_tweak = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut draft.transport_at_bottom,
-                        "Fixar barra de transporte no rodapé da janela",
-                    )
-                    .changed()
-                {
-                    live_tweak = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut draft.preview_on_left,
-                        "Posicionar Prévia de Vídeo à esquerda na área acoplável",
-                    )
-                    .changed()
-                {
-                    live_tweak = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut draft.sync_theme_with_layout,
-                        "Aplicar tema visual da era ao selecionar tipo de layout",
-                    )
-                    .changed()
-                {
-                    live_tweak = true;
-                }
-                if self.theme_id.is_high_contrast() {
-                    ui.label(
-                        egui::RichText::new(
-                            "Tema Alto Contraste AAA ativo: a paleta de acessibilidade é preservada ao alternar tipos de layout.",
-                        )
-                        .small()
-                        .color(self.theme.accent),
-                    );
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("OK").clicked() {
                         save_and_close = true;
                     }
@@ -2786,8 +2826,11 @@ fn draw_layout_schematic(
     ui: &mut egui::Ui,
     cfg: &EditLayoutPrefs,
     theme: &crate::theme::ThemeColors,
+    max_width: f32,
 ) {
-    let size = vec2(270.0, 146.0);
+    let w = max_width.clamp(170.0, 270.0);
+    let h = (w * 0.54).clamp(112.0, 146.0);
+    let size = vec2(w, h);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 4.0, theme.extreme_bg);
@@ -2801,6 +2844,9 @@ fn draw_layout_schematic(
     let inner = rect.shrink(5.0);
     let mut top_y = inner.top();
     let mut bot_y = inner.bottom();
+    let bar_h = (h * 0.10).clamp(11.0, 15.0);
+    let tr_h = (h * 0.11).clamp(12.0, 16.0);
+    let font_sz = (w / 27.0).clamp(8.0, 10.0);
 
     let box_labeled = |r: Rect, fill: Color32, stroke: Color32, text: &str| {
         p.rect_filled(r, 2.0, fill);
@@ -2809,19 +2855,25 @@ fn draw_layout_schematic(
             r.center(),
             egui::Align2::CENTER_CENTER,
             text,
-            egui::FontId::proportional(10.0),
-            theme.text_primary,
+            egui::FontId::proportional(font_sz),
+            crate::theme::contrast_on(fill),
         );
     };
 
     // Menu + Toolbar no topo
-    let menu_r = Rect::from_min_max(pos2(inner.left(), top_y), pos2(inner.right(), top_y + 15.0));
-    top_y += 18.0;
+    let menu_r = Rect::from_min_max(
+        pos2(inner.left(), top_y),
+        pos2(inner.right(), top_y + bar_h),
+    );
+    top_y += bar_h + 2.5;
     box_labeled(menu_r, theme.tl_header_bg, theme.border, "Menu / Toolbar");
 
     // Status no rodapé
-    let status_r = Rect::from_min_max(pos2(inner.left(), bot_y - 13.0), pos2(inner.right(), bot_y));
-    bot_y -= 16.0;
+    let status_r = Rect::from_min_max(
+        pos2(inner.left(), bot_y - (bar_h - 1.5)),
+        pos2(inner.right(), bot_y),
+    );
+    bot_y -= bar_h + 1.0;
     box_labeled(
         status_r,
         theme.tl_header_bg,
@@ -2831,24 +2883,24 @@ fn draw_layout_schematic(
 
     let transport_fill = theme.widget_bg;
     if cfg.transport_at_bottom {
-        let tr_r = Rect::from_min_max(pos2(inner.left(), bot_y - 16.0), pos2(inner.right(), bot_y));
-        bot_y -= 19.0;
+        let tr_r = Rect::from_min_max(pos2(inner.left(), bot_y - tr_h), pos2(inner.right(), bot_y));
+        bot_y -= tr_h + 2.5;
         box_labeled(tr_r, transport_fill, theme.accent, "Barra de transporte");
     }
 
-    let dock_h = ((bot_y - top_y) * 0.44).clamp(32.0, 56.0);
+    let dock_h = ((bot_y - top_y) * 0.44).clamp(24.0, 56.0);
     let (dock_r, tl_r, tr_r_opt) = if cfg.timeline_at_bottom {
         let dr = Rect::from_min_max(
             pos2(inner.left(), top_y),
             pos2(inner.right(), top_y + dock_h),
         );
-        let mut tl_top = dr.bottom() + 3.0;
+        let mut tl_top = dr.bottom() + 2.5;
         let tr_mid = if !cfg.transport_at_bottom {
             let r = Rect::from_min_max(
                 pos2(inner.left(), tl_top),
-                pos2(inner.right(), tl_top + 16.0),
+                pos2(inner.right(), tl_top + tr_h),
             );
-            tl_top += 19.0;
+            tl_top += tr_h + 2.5;
             Some(r)
         } else {
             None
@@ -2860,13 +2912,13 @@ fn draw_layout_schematic(
             pos2(inner.left(), bot_y - dock_h),
             pos2(inner.right(), bot_y),
         );
-        let mut tl_bot = dr.top() - 3.0;
+        let mut tl_bot = dr.top() - 2.5;
         let tr_mid = if !cfg.transport_at_bottom {
             let r = Rect::from_min_max(
-                pos2(inner.left(), tl_bot - 16.0),
+                pos2(inner.left(), tl_bot - tr_h),
                 pos2(inner.right(), tl_bot),
             );
-            tl_bot -= 19.0;
+            tl_bot -= tr_h + 2.5;
             Some(r)
         } else {
             None

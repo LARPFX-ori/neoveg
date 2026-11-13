@@ -43,6 +43,8 @@ pub struct WindowLayout {
     #[serde(default)]
     pub detached_tabs: Vec<String>,
     #[serde(default)]
+    pub preview_detached: bool,
+    #[serde(default)]
     pub px_per_sec: Option<f32>,
     #[serde(default)]
     pub edit_layout: Option<EditLayoutPrefs>,
@@ -73,6 +75,7 @@ impl Default for WindowLayout {
             dock_visible: true,
             active_tab: default_active_tab(),
             detached_tabs: Vec::new(),
+            preview_detached: false,
             px_per_sec: None,
             edit_layout: None,
         }
@@ -140,6 +143,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             dock_visible: true,
             active_tab: panel_key(DockTab::Scopes).into(),
             detached_tabs: vec![panel_key(DockTab::VideoFx).into()],
+            preview_detached: false,
             px_per_sec: None,
             edit_layout: None,
         },
@@ -150,6 +154,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             dock_visible: true,
             active_tab: panel_key(DockTab::Mixer).into(),
             detached_tabs: vec![panel_key(DockTab::AudioFx).into()],
+            preview_detached: false,
             px_per_sec: None,
             edit_layout: None,
         },
@@ -160,6 +165,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             dock_visible: false,
             active_tab: panel_key(DockTab::ProjectMedia).into(),
             detached_tabs: Vec::new(),
+            preview_detached: false,
             px_per_sec: None,
             edit_layout: None,
         },
@@ -257,6 +263,7 @@ mod tests {
                 "bogus".into(),
                 "scopes".into(),
             ],
+            preview_detached: true,
             px_per_sec: Some(-10.0),
             edit_layout: Some(EditLayoutPrefs::for_type(neoveg_common::LayoutType::Sony)),
         };

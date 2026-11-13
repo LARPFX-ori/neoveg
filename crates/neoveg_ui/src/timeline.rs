@@ -16,6 +16,8 @@ const LOOP_H: f32 = 12.0;
 const MARKER_H: f32 = 18.0;
 const RULER_H: f32 = 22.0;
 const TOP_H: f32 = LOOP_H + MARKER_H + RULER_H;
+const TIME_DISP_H: f32 = 46.0;
+const RENDER_BAR_H: f32 = 24.0;
 const EDGE_PX: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -400,11 +402,29 @@ impl App {
             pos2(left, full.top()),
             pos2(full.right(), full.top() + TOP_H),
         );
+        let show_footer = full.height() > TOP_H + TIME_DISP_H + 56.0;
         let headers = Rect::from_min_max(
             pos2(full.left(), full.top() + TOP_H),
-            pos2(left, full.bottom()),
+            pos2(
+                left,
+                if show_footer {
+                    full.bottom() - TIME_DISP_H
+                } else {
+                    full.bottom()
+                },
+            ),
         );
-        let lanes = Rect::from_min_max(pos2(left, full.top() + TOP_H), full.max);
+        let lanes = Rect::from_min_max(
+            pos2(left, full.top() + TOP_H),
+            pos2(
+                full.right(),
+                if show_footer {
+                    full.bottom() - RENDER_BAR_H
+                } else {
+                    full.bottom()
+                },
+            ),
+        );
         self.tl.width = lanes.width().max(10.0);
 
         // limite de rolagem vertical
@@ -421,8 +441,223 @@ impl App {
         let layout = self.track_layout(lanes.top());
         self.draw_lanes(ui, lanes, &layout);
         self.headers_ui(ui, headers, &layout);
+        if show_footer {
+            let time_disp_r = Rect::from_min_max(
+                pos2(full.left(), headers.bottom()),
+                pos2(left, full.bottom()),
+            );
+            let render_bar_r = Rect::from_min_max(pos2(left, lanes.bottom()), full.max);
+            self.time_display_ui(ui, time_disp_r);
+            self.render_status_bar_ui(ui, render_bar_r);
+        }
         self.draw_cursors(ui, top.union(lanes));
         self.rename_popup(ui);
+    }
+
+    /// Visor de Tempo dedicado abaixo da lista de faixas de áudio/vídeo (Manual VEGAS Pro 21, p. 69-70).
+    fn time_display_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let painter = ui.painter_at(r);
+        painter.rect_filled(r, 0.0, self.theme.tl_header_bg);
+        painter.line_segment(
+            [r.left_top(), r.right_top()],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+        painter.line_segment(
+            [r.right_top(), r.right_bottom()],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let box_r = r.shrink2(vec2(6.0, 4.0));
+        painter.rect_filled(box_r, 3.0, self.theme.extreme_bg);
+        painter.rect_stroke(
+            box_r,
+            3.0,
+            Stroke::new(1.0_f32, self.theme.border),
+            StrokeKind::Inside,
+        );
+
+        painter.text(
+            pos2(box_r.left() + 6.0, box_r.top() + 3.0),
+            Align2::LEFT_TOP,
+            "Visor de tempo",
+            FontId::proportional(9.5),
+            self.theme.text_muted,
+        );
+        painter.text(
+            pos2(box_r.right() - 6.0, box_r.top() + 3.0),
+            Align2::RIGHT_TOP,
+            self.opts.time_format.name(),
+            FontId::proportional(9.5),
+            self.theme.text_muted,
+        );
+        painter.text(
+            pos2(box_r.center().x, box_r.bottom() - 4.0),
+            Align2::CENTER_BOTTOM,
+            self.fmt_time(self.view_time()),
+            FontId::monospace(17.0),
+            self.theme.timecode_fg,
+        );
+
+        let resp = ui
+            .interact(box_r, ui.id().with("timeline_time_display"), Sense::click())
+            .on_hover_text(
+                "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)",
+            );
+        if resp.double_clicked() {
+            self.exec_cmd(Some(ui.ctx()), "edit.goto");
+        }
+        resp.context_menu(|ui| {
+            ui.label(
+                egui::RichText::new("Formato do Visor de Tempo")
+                    .small()
+                    .strong(),
+            );
+            ui.separator();
+            for fmt in TimeFormat::ALL {
+                if ui
+                    .selectable_label(self.opts.time_format == fmt, fmt.name())
+                    .clicked()
+                {
+                    self.session.opts.time_format = fmt;
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            if ui.button("Ir para tempo... (Ctrl+G)").clicked() {
+                self.dlg.goto_open = true;
+                ui.close_menu();
+            }
+        });
+    }
+
+    /// Barra de Status de Renderização e Pré-renderização na base da timeline.
+    fn render_status_bar_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let painter = ui.painter_at(r);
+        painter.rect_filled(r, 0.0, self.theme.tl_header_bg);
+        painter.line_segment(
+            [r.left_top(), r.right_top()],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(r.shrink2(vec2(6.0, 2.0)))
+                .id_salt("timeline_render_status_bar"),
+        );
+        child.set_clip_rect(r);
+
+        let mut cancel_render = false;
+        let mut cancel_prerender = false;
+        let mut clear_prerender = false;
+        let mut trigger_prerender = false;
+        let mut trigger_render = false;
+
+        child.horizontal(|ui| {
+            if let Some(job) = &self.render_job {
+                let p = &job.progress;
+                let frac = p.fraction().clamp(0.0, 1.0);
+                let done = p.done.load(std::sync::atomic::Ordering::Relaxed);
+                let total = p.total.load(std::sync::atomic::Ordering::Relaxed);
+                let name = job
+                    .settings
+                    .path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| job.settings.path.display().to_string());
+                crate::splash::spinner_inline(ui, 13.0, ui.ctx().input(|i| i.time), &self.theme);
+                ui.label(
+                    egui::RichText::new(format!("Renderizando {name}: {done}/{total}"))
+                        .small()
+                        .strong(),
+                );
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .desired_width(140.0)
+                        .show_percentage(),
+                );
+                if ui.small_button("Cancelar").clicked() {
+                    cancel_render = true;
+                }
+            } else if let Some((a, b, prog)) = &self.prerender_job {
+                let frac = prog.fraction().clamp(0.0, 1.0);
+                crate::splash::spinner_inline(ui, 13.0, ui.ctx().input(|i| i.time), &self.theme);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Pré-renderizando {} → {}",
+                        self.fmt_time(*a),
+                        self.fmt_time(*b)
+                    ))
+                    .small()
+                    .strong(),
+                );
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .desired_width(130.0)
+                        .show_percentage(),
+                );
+                if ui.small_button("Cancelar").clicked() {
+                    cancel_prerender = true;
+                }
+            } else {
+                let pre_count = self.session.prerendered_ranges.len();
+                let pre_text = if pre_count > 0 {
+                    format!("Status de renderização: {pre_count} trecho(s) pré-renderizado(s)")
+                } else {
+                    "Status de renderização: Pronto (sem trechos pré-renderizados)".to_string()
+                };
+                let pre_col = if pre_count > 0 {
+                    self.theme.tl_marker
+                } else {
+                    self.theme.text_muted
+                };
+                ui.label(egui::RichText::new(pre_text).small().color(pre_col));
+                if ui
+                    .small_button("Pré-render (Shift+M)")
+                    .on_hover_text("Pré-renderizar região selecionada e marcar no topo da timeline")
+                    .clicked()
+                {
+                    trigger_prerender = true;
+                }
+                if ui
+                    .small_button("Renderizar...")
+                    .on_hover_text("Abrir janela Renderizar como (Ctrl+M)")
+                    .clicked()
+                {
+                    trigger_render = true;
+                }
+                if pre_count > 0
+                    && ui
+                        .small_button("Limpar pré-render")
+                        .on_hover_text("Limpar indicações de pré-render da timeline")
+                        .clicked()
+                {
+                    clear_prerender = true;
+                }
+            }
+        });
+
+        if cancel_render {
+            if let Some(job) = &self.render_job {
+                job.progress
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        if cancel_prerender {
+            if let Some((_, _, prog)) = &self.prerender_job {
+                prog.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        if clear_prerender {
+            self.session.clear_prerendered();
+            self.set_status("Indicações de pré-renderização limpas.");
+        }
+        if trigger_prerender {
+            self.exec_cmd(Some(ui.ctx()), "tools.prerender");
+        }
+        if trigger_render {
+            self.exec_cmd(Some(ui.ctx()), "file.render");
+        }
     }
 
     fn corner_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
@@ -485,7 +720,30 @@ impl App {
             };
             painter.rect_filled(lr, 2.0, col);
         }
-        // régua
+        // barra de status de pré-renderização no topo da timeline (VEGAS Pro 21, p. 215)
+        for &(pa, pb) in &self.session.prerendered_ranges {
+            let pr = Rect::from_min_max(
+                pos2(self.tl.t2x(pa, left), loop_r.bottom() - 4.0),
+                pos2(self.tl.t2x(pb, left), loop_r.bottom()),
+            );
+            painter.rect_filled(pr, 0.0, self.theme.tl_marker);
+        }
+        if let Some((pa, pb, prog)) = &self.prerender_job {
+            let frac = prog.fraction().clamp(0.0, 1.0);
+            let xa = self.tl.t2x(*pa, left);
+            let xb = self.tl.t2x(*pb, left);
+            let xm = xa + (xb - xa) * frac;
+            painter.rect_filled(
+                Rect::from_min_max(pos2(xa, loop_r.bottom() - 4.0), pos2(xb, loop_r.bottom())),
+                0.0,
+                self.theme.tl_loop_inactive,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(pos2(xa, loop_r.bottom() - 4.0), pos2(xm, loop_r.bottom())),
+                0.0,
+                self.theme.accent,
+            );
+        }
         let (major, minor) = nice_step(self.tl.px_per_sec, fps);
         let step = minor.0.max(1);
         let maj = major.0.max(step);
@@ -521,14 +779,14 @@ impl App {
         for reg in &self.project.regions {
             let xa = self.tl.t2x(reg.start, left);
             let xb = self.tl.t2x(reg.end, left);
-            let col = Color32::from_rgb(70, 170, 90);
+            let col = self.theme.tl_marker;
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(xa, marker_r.top() + 1.0),
                     pos2(xb, marker_r.top() + 4.0),
                 ),
                 0.0,
-                col.gamma_multiply(0.5),
+                col.gamma_multiply(0.55),
             );
             painter.rect_filled(
                 Rect::from_min_size(pos2(xa, marker_r.top()), vec2(10.0, MARKER_H)),
@@ -545,7 +803,7 @@ impl App {
                 Align2::LEFT_TOP,
                 &reg.label,
                 FontId::proportional(11.0),
-                Color32::WHITE,
+                self.theme.text_primary,
             );
         }
         let mut sorted: Vec<&Marker> = self.project.markers.iter().collect();
@@ -563,14 +821,14 @@ impl App {
                 Align2::LEFT_TOP,
                 format!("{}", (i + 1) % 10),
                 FontId::proportional(11.0),
-                Color32::BLACK,
+                crate::theme::contrast_on(col),
             );
             painter.text(
                 pos2(x + 17.0, marker_r.top() + 2.0),
                 Align2::LEFT_TOP,
                 &m.label,
                 FontId::proportional(11.0),
-                Color32::from_rgb(255, 210, 150),
+                self.theme.tl_region_band,
             );
         }
 
@@ -914,7 +1172,7 @@ impl App {
             );
             painter.line_segment(
                 [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
-                Stroke::new(1.0_f32, Color32::from_gray(25)),
+                Stroke::new(1.0_f32, self.theme.border),
             );
 
             // clique no fundo seleciona a trilha
@@ -941,7 +1199,31 @@ impl App {
             let mut changed_track = false;
             let mut want_checkpoint = false;
             child.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{}", ti + 1)).strong());
+                let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
+                let num_bg = if selected {
+                    self.theme.selection_bg
+                } else {
+                    self.theme.widget_bg
+                };
+                let num_border = if selected {
+                    self.theme.accent
+                } else {
+                    self.theme.border
+                };
+                ui.painter().rect_filled(num_r, 2.0, num_bg);
+                ui.painter().rect_stroke(
+                    num_r,
+                    2.0,
+                    Stroke::new(1.0_f32, num_border),
+                    StrokeKind::Inside,
+                );
+                ui.painter().text(
+                    num_r.center(),
+                    Align2::CENTER_CENTER,
+                    format!("{}", ti + 1),
+                    FontId::proportional(11.0),
+                    crate::theme::contrast_on(num_bg),
+                );
                 icons::paint_inline(
                     ui,
                     if kind == TrackKind::Video {
@@ -2296,18 +2578,14 @@ impl App {
                             pos2(self.tl.t2x(s, left), y0 + 1.0),
                             pos2(self.tl.t2x(e, left), y0 + h - 1.0),
                         );
-                        painter.rect_filled(
-                            r,
-                            0.0,
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
-                        );
+                        painter.rect_filled(r, 0.0, self.theme.text_primary.gamma_multiply(0.08));
                         painter.line_segment(
                             [r.left_top(), r.right_bottom()],
-                            Stroke::new(1.0_f32, Color32::from_gray(140)),
+                            Stroke::new(1.0_f32, self.theme.border),
                         );
                         painter.line_segment(
                             [r.left_bottom(), r.right_top()],
-                            Stroke::new(1.0_f32, Color32::from_gray(140)),
+                            Stroke::new(1.0_f32, self.theme.border),
                         );
                     }
                 }
@@ -2320,22 +2598,33 @@ impl App {
                 let sel = self.sel_events.contains(&e.id);
                 let k = if sel { 1.0 } else { 0.62 };
                 let body = if e.mute || muted {
-                    shade([90, 90, 90], 0.7)
+                    shade([90, 90, 90], if self.theme.dark_mode { 0.7 } else { 1.45 })
                 } else {
                     shade(track.color, k * 0.55)
                 };
                 let hdr_h = 14.0f32.min(r.height() * 0.3);
                 painter.rect_filled(r, 2.0, body);
-                let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
-                painter.rect_filled(
-                    hdr,
-                    2.0,
-                    if e.mute || muted {
+                let hdr_col = if e.mute || muted {
+                    if self.theme.dark_mode {
                         Color32::from_gray(80)
                     } else {
-                        shade(track.color, k * 0.9)
-                    },
-                );
+                        Color32::from_gray(176)
+                    }
+                } else {
+                    shade(track.color, k * 0.9)
+                };
+                let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
+                painter.rect_filled(hdr, 2.0, hdr_col);
+                let body_light = crate::theme::relative_luminance(body) > 0.35;
+                let hdr_fg = crate::theme::contrast_on(hdr_col);
+                let mut ev_icon_theme = self.theme.clone();
+                ev_icon_theme.dark_mode = !body_light;
+                if ev_icon_theme.high_contrast {
+                    let fg = crate::theme::contrast_on(body);
+                    ev_icon_theme.text_primary = fg;
+                    ev_icon_theme.text_muted = fg;
+                    ev_icon_theme.extreme_bg = body;
+                }
                 let content = Rect::from_min_max(pos2(r.left(), hdr.bottom()), r.max);
                 let vis = content.intersect(lanes);
                 // conteúdo: miniaturas ou forma de onda
@@ -2378,12 +2667,12 @@ impl App {
                             .or(Some(a.duration()));
                         let mid = content.center().y;
                         let amp = content.height() * 0.48 * db_to_lin(e.gain_db).min(4.0);
-                        let col = Color32::from_rgba_unmultiplied(
-                            220,
-                            230,
-                            240,
-                            if e.mute { 60 } else { 170 },
-                        );
+                        let alpha = if e.mute { 70 } else { 185 };
+                        let col = if body_light {
+                            Color32::from_rgba_unmultiplied(22, 30, 42, alpha)
+                        } else {
+                            Color32::from_rgba_unmultiplied(220, 230, 240, alpha)
+                        };
                         let mut x = vis.left().floor();
                         let mut segs = Vec::with_capacity(vis.width() as usize * 2);
                         let min_span = Ticks::from_raw(TICKS_PER_MS / 10);
@@ -2439,16 +2728,27 @@ impl App {
                     Align2::LEFT_TOP,
                     label,
                     FontId::proportional(11.0),
-                    Color32::WHITE,
+                    hdr_fg,
                 );
                 // botões do evento
                 let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
+                let btn_bg = if body_light {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 170)
+                } else {
+                    Color32::from_rgba_unmultiplied(18, 22, 28, 175)
+                };
+                let btn_muted = crate::theme::contrast_on(btn_bg).gamma_multiply(0.78);
                 if let Some(b) = fxb {
                     let col = if e.fx.is_empty() {
-                        Color32::from_gray(150)
+                        btn_muted
+                    } else if self.theme.high_contrast {
+                        self.theme.accent
+                    } else if body_light {
+                        Color32::from_rgb(16, 130, 56)
                     } else {
                         Color32::from_rgb(120, 230, 120)
                     };
+                    painter.rect_filled(b, 2.0, btn_bg);
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
                     painter.text(
                         b.center(),
@@ -2460,13 +2760,24 @@ impl App {
                 }
                 if let Some(b) = pcb {
                     let active = !e.pan_crop.is_identity() || e.pan_crop.keys.len() > 1;
-                    let col = if active {
-                        Color32::from_rgb(120, 200, 255)
+                    let col = if !active {
+                        btn_muted
+                    } else if self.theme.high_contrast {
+                        self.theme.accent
+                    } else if body_light {
+                        Color32::from_rgb(16, 102, 198)
                     } else {
-                        Color32::from_gray(150)
+                        Color32::from_rgb(120, 200, 255)
                     };
+                    painter.rect_filled(b, 2.0, btn_bg);
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
-                    icons::paint(&painter, b.shrink(1.5), Icon::PanCrop, &self.theme, active);
+                    icons::paint(
+                        &painter,
+                        b.shrink(1.5),
+                        Icon::PanCrop,
+                        &ev_icon_theme,
+                        active,
+                    );
                 }
                 // fades
                 let fade_col = Stroke::new(1.5_f32, self.theme.tl_fade);
@@ -2519,17 +2830,32 @@ impl App {
                         );
                     }
                     if dragging_gain {
-                        painter.text(
-                            pos2((x0 + x1) * 0.5, (gy - 12.0).max(r.top() + 2.0)),
-                            Align2::CENTER_BOTTOM,
+                        let g = painter.layout_no_wrap(
                             format!("{:+.1} dB", e.gain_db),
                             FontId::monospace(10.0),
-                            self.theme.tl_gain_line,
+                            self.theme.text_primary,
                         );
+                        let bg = Rect::from_center_size(
+                            pos2((x0 + x1) * 0.5, (gy - 12.0).max(r.top() + 8.0)),
+                            g.size() + vec2(8.0, 4.0),
+                        );
+                        painter.rect_filled(bg, 2.0, self.theme.extreme_bg);
+                        painter.rect_stroke(
+                            bg,
+                            2.0,
+                            Stroke::new(1.0_f32, self.theme.border),
+                            StrokeKind::Inside,
+                        );
+                        painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
                     }
                 }
                 let border = if sel {
-                    Stroke::new(2.0_f32, self.theme.tl_event_sel_border)
+                    let sel_col = if self.opts.auto_ripple {
+                        self.theme.offline_fg
+                    } else {
+                        self.theme.tl_event_sel_border
+                    };
+                    Stroke::new(2.0_f32, sel_col)
                 } else {
                     Stroke::new(1.0_f32, self.theme.tl_event_border)
                 };
@@ -2544,7 +2870,7 @@ impl App {
                         &lock_painter,
                         lock_rect,
                         Icon::LockClosed,
-                        &self.theme,
+                        &ev_icon_theme,
                         true,
                     );
                 }
@@ -2578,7 +2904,7 @@ impl App {
                         painter.rect_stroke(
                             Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
                             1.0,
-                            Stroke::new(1.0_f32, Color32::WHITE),
+                            Stroke::new(1.0_f32, crate::theme::contrast_on(col)),
                             StrokeKind::Inside,
                         );
                     }
@@ -2602,17 +2928,24 @@ impl App {
                 .and_then(|e| e.points.get(idx))
             {
                 let (y0, h) = layout[track];
-                let pos = pos2(
-                    self.tl.t2x(p.t, left) + 8.0,
-                    Self::env_y(kind, p.v, y0, h) - 16.0,
-                );
-                painter.text(
-                    pos,
-                    Align2::LEFT_TOP,
+                let g = painter.layout_no_wrap(
                     format!("{}  {}", kind.format(p.v), self.fmt_time(p.t)),
                     FontId::proportional(11.0),
-                    Color32::WHITE,
+                    self.theme.text_primary,
                 );
+                let px = (self.tl.t2x(p.t, left) + 8.0)
+                    .min(lanes.right() - g.size().x - 10.0)
+                    .max(lanes.left() + 2.0);
+                let py = (Self::env_y(kind, p.v, y0, h) - 20.0).max(lanes.top() + 2.0);
+                let bg = Rect::from_min_size(pos2(px, py), g.size() + vec2(8.0, 4.0));
+                painter.rect_filled(bg, 2.0, self.theme.extreme_bg);
+                painter.rect_stroke(
+                    bg,
+                    2.0,
+                    Stroke::new(1.0_f32, self.theme.border),
+                    StrokeKind::Inside,
+                );
+                painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
             }
         }
         // indicador de soltura
@@ -2654,24 +2987,33 @@ impl App {
             }
         }
         let x = self.tl.t2x(self.cursor, left);
+        let ph_col = if self.opts.auto_ripple {
+            self.theme.offline_fg
+        } else {
+            self.theme.tl_playhead_edit
+        };
+        let ph_rim = crate::theme::contrast_on(ph_col);
         painter.line_segment(
             [pos2(x, area.top() + LOOP_H), pos2(x, area.bottom())],
-            Stroke::new(1.0_f32, Color32::WHITE),
+            Stroke::new(1.5_f32, ph_col),
         );
+        let head_y = area.top() + LOOP_H + MARKER_H;
         painter.add(Shape::convex_polygon(
             vec![
-                pos2(x - 5.0, area.top() + LOOP_H + MARKER_H),
-                pos2(x + 5.0, area.top() + LOOP_H + MARKER_H),
-                pos2(x, area.top() + LOOP_H + MARKER_H + 7.0),
+                pos2(x - 5.5, head_y - 4.0),
+                pos2(x + 5.5, head_y - 4.0),
+                pos2(x + 5.5, head_y),
+                pos2(x, head_y + 7.0),
+                pos2(x - 5.5, head_y),
             ],
-            Color32::WHITE,
-            Stroke::NONE,
+            ph_col,
+            Stroke::new(1.0_f32, ph_rim),
         ));
         if self.is_playing() {
             let px = self.tl.t2x(self.play_pos(), left);
             painter.line_segment(
                 [pos2(px, area.top() + LOOP_H), pos2(px, area.bottom())],
-                Stroke::new(1.0_f32, self.theme.tl_playhead_live),
+                Stroke::new(1.5_f32, self.theme.tl_playhead_live),
             );
         }
     }

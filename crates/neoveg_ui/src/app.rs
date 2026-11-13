@@ -56,7 +56,11 @@ pub enum LoadMsg {
     Imported(media::Imported, Option<PlaceTarget>),
     Reloaded(Id, Result<media::Imported, String>),
     ProxyBuilt(Id, Result<PathBuf, String>),
-    PrerenderDone(Result<PathBuf, String>),
+    PrerenderDone {
+        start: Ticks,
+        end: Ticks,
+        result: Result<PathBuf, String>,
+    },
     Error(String),
 }
 
@@ -80,6 +84,7 @@ pub struct App {
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
+    pub preview_detached: bool,
     pub dock_visible: bool,
     pub dock_height: f32,
     pub preview_ratio: f32,
@@ -96,6 +101,8 @@ pub struct App {
     pub explorer_dir: PathBuf,
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
+    pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
+    pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
     pub(crate) meters_hold: HashMap<Id, [f32; 2]>,
     pub(crate) master_hold: [f32; 2],
@@ -175,6 +182,7 @@ impl App {
             preview_inflight_since: Instant::now(),
             last_req: (Ticks::from_raw(-1), 0, 0, 0, false, false),
             detached_tabs: initial_layout.detached_panels(),
+            preview_detached: initial_layout.preview_detached,
             dock_visible: initial_layout.dock_visible,
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
@@ -195,6 +203,8 @@ impl App {
             explorer_dir,
             explorer_filter: String::new(),
             render_job: None,
+            prerender_job: None,
+            window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
             meters_hold: HashMap::new(),
             master_hold: [0.0; 2],
@@ -752,12 +762,16 @@ impl App {
                     }
                     Err(e) => self.set_status(format!("Erro ao gerar proxy: {e}")),
                 },
-                LoadMsg::PrerenderDone(res) => match res {
-                    Ok(p) => {
-                        self.set_status(format!("Pré-renderização concluída: {}", p.display()))
+                LoadMsg::PrerenderDone { start, end, result } => {
+                    self.prerender_job = None;
+                    match result {
+                        Ok(p) => {
+                            self.session.record_prerendered_range(start, end);
+                            self.set_status(format!("Pré-renderização concluída: {}", p.display()));
+                        }
+                        Err(e) => self.set_status(format!("Erro na pré-renderização: {e}")),
                     }
-                    Err(e) => self.set_status(format!("Erro na pré-renderização: {e}")),
-                },
+                }
                 LoadMsg::Error(e) => self.set_status(format!("Erro de importação: {e}")),
             }
         }
@@ -1251,16 +1265,44 @@ impl App {
             ui.menu_button("Exibir", |ui| {
                 for tab in DockPanel::ALL {
                     let open = self.is_panel_open(tab);
-                    if ui.selectable_label(open, tab.name()).clicked() {
+                    let suffix = if self.detached_tabs.contains(&tab) {
+                        format!("{} (flutuante)", tab.name())
+                    } else {
+                        tab.name().to_string()
+                    };
+                    if ui.selectable_label(open, suffix).clicked() {
                         self.exec_cmd(Some(ui.ctx()), tab.command_id());
                         ui.close_menu();
                     }
                 }
+                ui.separator();
                 if ui
-                    .selectable_label(self.dock_visible, "Área inferior acoplável")
+                    .selectable_label(self.preview_detached, "Prévia de Vídeo em janela separada")
+                    .clicked()
+                {
+                    self.preview_detached = !self.preview_detached;
+                    ui.close_menu();
+                }
+                if ui
+                    .selectable_label(self.dock_visible, "Área de janelas acopláveis")
                     .clicked()
                 {
                     self.dock_visible = !self.dock_visible;
+                    ui.close_menu();
+                }
+                if self.dock_visible
+                    && !self.detached_tabs.contains(&self.dock_tab)
+                    && ui.button("Destacar janela da aba atual").clicked()
+                {
+                    self.detach_dock_tab(self.dock_tab);
+                    ui.close_menu();
+                }
+                if (!self.detached_tabs.is_empty() || self.preview_detached)
+                    && ui.button("Acoplar todas as janelas flutuantes").clicked()
+                {
+                    self.detached_tabs.clear();
+                    self.preview_detached = false;
+                    self.dock_visible = true;
                     ui.close_menu();
                 }
                 ui.menu_button("Layouts de janela", |ui| {
@@ -1653,6 +1695,19 @@ impl App {
                             .show_percentage(),
                     );
                     ui.label("Renderizando:");
+                } else if let Some((_, _, prog)) = &self.prerender_job {
+                    crate::splash::spinner_inline(
+                        ui,
+                        14.0,
+                        ui.ctx().input(|i| i.time),
+                        &self.theme,
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(prog.fraction())
+                            .desired_width(130.0)
+                            .show_percentage(),
+                    );
+                    ui.label("Pré-renderizando:");
                 } else if self.loading > 0 {
                     crate::splash::spinner_inline(
                         ui,
@@ -1663,6 +1718,15 @@ impl App {
                     ui.label(format!("Carregando ({})...", self.loading));
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(40));
+                } else if !self.session.prerendered_ranges.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Pré-render: {} trecho(s)",
+                            self.session.prerendered_ranges.len()
+                        ))
+                        .small()
+                        .color(self.theme.tl_marker),
+                    );
                 }
             });
         });
@@ -1821,7 +1885,7 @@ impl App {
             }
             ctx.request_repaint();
         }
-        if self.render_job.is_some() || self.loading > 0 {
+        if self.render_job.is_some() || self.prerender_job.is_some() || self.loading > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
@@ -2033,6 +2097,7 @@ impl App {
             dock_visible: self.dock_visible,
             active_tab: layout::panel_key(self.dock_tab).to_string(),
             detached_tabs: detached,
+            preview_detached: self.preview_detached,
             px_per_sec: Some(self.tl.px_per_sec),
             edit_layout: Some(self.prefs.edit_layout.clone()),
         };
@@ -2047,6 +2112,7 @@ impl App {
         self.dock_visible = l.dock_visible;
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
+        self.preview_detached = l.preview_detached;
         if self.detached_tabs.contains(&self.dock_tab) {
             if let Some(next) = DockTab::ALL
                 .into_iter()
@@ -2174,16 +2240,19 @@ impl App {
             wav_bits: crate::render::WavBits::Pcm16,
         };
         let tx = self.loader_tx.clone();
+        let prog = Arc::new(RenderProgress::default());
+        let prog_bg = prog.clone();
         self.loading += 1;
+        self.prerender_job = Some((start, end, prog));
         self.set_status("Pré-renderizando região selecionada...");
         if let Err(e) = util::spawn("prerender-regiao", move || {
-            let prog = RenderProgress::default();
-            let res = crate::render::run(&proj, &media, &settings, &prog)
+            let result = crate::render::run(&proj, &media, &settings, &prog_bg)
                 .map(|()| out)
                 .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(LoadMsg::PrerenderDone(res));
+            let _ = tx.send(LoadMsg::PrerenderDone { start, end, result });
         }) {
             self.loading = self.loading.saturating_sub(1);
+            self.prerender_job = None;
             self.set_status(e);
         }
     }
