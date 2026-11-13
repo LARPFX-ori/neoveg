@@ -694,8 +694,7 @@ impl App {
                 "Mídia suportada",
                 &[
                     "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "wav",
-                    "mp3", "flac", "ogg", "m4a", "aac", "aif", "aiff", "caf", "mp4", "mov", "mkv",
-                    "webm",
+                    "aif", "aiff", "aifc", "flac", "ogg", "mp3",
                 ],
             )
             .add_filter("Todos os arquivos", &["*"])

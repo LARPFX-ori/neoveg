@@ -1,16 +1,11 @@
-//! Decodificação de áudio com Symphonia (WAV, MP3, FLAC, OGG/Vorbis, AAC/M4A,
-//! ALAC, AIFF, CAF, MKV/WebM-áudio) — tudo em Rust puro.
+//! Decodificação de áudio em Rust puro com licenças permissivas (lista SPDX
+//! do AGENTS.md): WAVE/AIFF (leitor próprio), FLAC (`claxon`, Apache-2.0),
+//! Ogg Vorbis (`lewton`, MIT OR Apache-2.0) e MP3 (`puremp3`, MIT OR CC0-1.0).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::errors::Error as SymError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 /// Áudio decodificado em memória: estéreo intercalado f32.
 pub struct AudioData {
@@ -107,86 +102,87 @@ impl AudioData {
 }
 
 pub fn decode_file(path: &Path) -> Result<AudioData> {
-    let file = File::open(path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    )?;
-    let mut format = probed.format;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some())
-        .ok_or_else(|| anyhow!("nenhuma faixa de áudio suportada"))?;
-    let track_id = track.id;
-    let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
-    let mut decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-    let mut out: Vec<f32> = Vec::new();
-    let mut channels = 0usize;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymError::IoError(_)) => break,
-            Err(SymError::ResetRequired) => break,
-            Err(e) => {
-                if out.is_empty() {
-                    return Err(e.into());
-                }
-                break;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (sr, ch, samples) = match ext.as_str() {
+        "wav" | "wave" | "aif" | "aiff" | "aifc" => {
+            let len = std::fs::metadata(path)?.len();
+            if len > MAX_FILE_BYTES {
+                bail!("arquivo de áudio grande demais ({len} bytes)");
             }
-        };
-        if packet.track_id() != track_id {
-            continue;
+            let bytes = std::fs::read(path)?;
+            let pcm = super::wav::decode(&bytes, MAX_SAMPLES)?;
+            (pcm.sample_rate, pcm.channels as usize, pcm.samples)
         }
-        match decoder.decode(&packet) {
-            Ok(buf) => {
-                let spec = *buf.spec();
-                sr = spec.rate;
-                let ch = spec.channels.count().max(1);
-                if out.len() >= MAX_SAMPLES {
-                    crate::util::log_warn(
-                        "áudio truncado: arquivo excede o limite de duração em memória",
-                    );
-                    break;
-                }
-                let mut sb = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
-                sb.copy_interleaved_ref(buf);
-                let s = sb.samples();
-                if channels == 0 {
-                    channels = ch;
-                }
-                // normaliza para estéreo já aqui (canais podem variar raramente)
-                let frames = s.len() / ch;
-                for f in 0..frames {
-                    let l = s[f * ch];
-                    let r = if ch >= 2 { s[f * ch + 1] } else { l };
-                    out.push(l);
-                    out.push(r);
-                }
-            }
-            Err(SymError::DecodeError(_)) => continue,
-            Err(SymError::IoError(_)) => break,
-            Err(e) => {
-                if out.is_empty() {
-                    return Err(e.into());
-                }
-                break;
-            }
-        }
-    }
-    if out.is_empty() {
+        "flac" => decode_flac(path)?,
+        "ogg" | "oga" => decode_vorbis(path)?,
+        "mp3" => decode_mp3(path)?,
+        _ => bail!("formato de áudio não suportado: .{ext}"),
+    };
+    if samples.is_empty() {
         return Err(anyhow!("nenhuma amostra de áudio decodificada"));
     }
-    if sr == 0 {
+    if sr == 0 || sr > 1_000_000 {
         return Err(anyhow!("taxa de amostragem inválida"));
     }
-    Ok(AudioData::from_interleaved(sr, 2, &out))
+    if samples.len() >= MAX_SAMPLES {
+        crate::util::log_warn("áudio truncado: arquivo excede o limite de duração em memória");
+    }
+    Ok(AudioData::from_interleaved(sr, ch, &samples))
+}
+
+/// Maior arquivo WAVE/AIFF lido inteiro para a memória.
+const MAX_FILE_BYTES: u64 = 4 << 30;
+
+fn decode_flac(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
+    let mut r = claxon::FlacReader::open(path).map_err(|e| anyhow!("FLAC inválido: {e}"))?;
+    let info = r.streaminfo();
+    if info.bits_per_sample == 0 || info.bits_per_sample > 32 || info.channels == 0 {
+        bail!("FLAC com formato inválido");
+    }
+    let scale = 1.0 / (1u64 << (info.bits_per_sample - 1)) as f32;
+    let mut out = Vec::new();
+    for s in r.samples() {
+        let Ok(s) = s else { break };
+        out.push(s as f32 * scale);
+        if out.len() >= MAX_SAMPLES {
+            break;
+        }
+    }
+    Ok((info.sample_rate, info.channels as usize, out))
+}
+
+fn decode_vorbis(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
+    let f = BufReader::new(File::open(path)?);
+    let mut r = lewton::inside_ogg::OggStreamReader::new(f)
+        .map_err(|e| anyhow!("Ogg Vorbis inválido: {e}"))?;
+    let sr = r.ident_hdr.audio_sample_rate;
+    let ch = r.ident_hdr.audio_channels as usize;
+    let mut out = Vec::new();
+    while let Ok(Some(pkt)) = r.read_dec_packet_itl() {
+        out.extend(pkt.iter().map(|&v| v as f32 / 32768.0));
+        if out.len() >= MAX_SAMPLES {
+            break;
+        }
+    }
+    Ok((sr, ch.max(1), out))
+}
+
+fn decode_mp3(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
+    let f = BufReader::new(File::open(path)?);
+    let (header, samples) = puremp3::read_mp3(f).map_err(|e| anyhow!("MP3 inválido: {e:?}"))?;
+    let sr = header.sample_rate.hz();
+    // o decodificador sempre entrega pares (esquerdo, direito)
+    let mut out = Vec::new();
+    for (l, r) in samples {
+        out.push(if l.is_finite() { l } else { 0.0 });
+        out.push(if r.is_finite() { r } else { 0.0 });
+        if out.len() >= MAX_SAMPLES {
+            break;
+        }
+    }
+    Ok((sr, 2, out))
 }

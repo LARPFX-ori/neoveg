@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod avi;
 pub mod generate;
+pub mod wav;
 pub mod y4m;
 
 use crate::model::{new_id, GenSpec, Id, MediaItem, MediaSource};
@@ -14,13 +15,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"];
-pub const AUDIO_EXTS: [&str; 12] = [
-    "wav", "mp3", "flac", "ogg", "oga", "m4a", "aac", "aif", "aiff", "caf", "mka", "wv",
-];
+pub const AUDIO_EXTS: [&str; 8] = ["wav", "wave", "aif", "aiff", "aifc", "flac", "ogg", "mp3"];
 pub const VIDEO_EXTS: [&str; 2] = ["avi", "y4m"];
-/// Contêineres cujo vídeo (H.264/H.265/VP9...) não possui decodificador maduro
-/// em Rust puro: importamos apenas o áudio.
-pub const AUDIO_ONLY_CONTAINERS: [&str; 5] = ["mp4", "mov", "mkv", "webm", "m4v"];
+/// Contêineres ainda não suportados: H.264/H.265/AAC não têm decodificador
+/// em Rust puro com licença permissiva; o suporte virá pela API de mídia do
+/// sistema operacional (Media Foundation). A importação explica o motivo.
+pub const UNSUPPORTED_CONTAINERS: [&str; 7] = ["mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac"];
 
 /// Memória máxima para os quadros de um GIF animado.
 const MAX_GIF_BYTES: u64 = 1 << 30;
@@ -30,7 +30,7 @@ pub fn is_supported(path: &Path) -> bool {
     IMAGE_EXTS.contains(&ext.as_str())
         || AUDIO_EXTS.contains(&ext.as_str())
         || VIDEO_EXTS.contains(&ext.as_str())
-        || AUDIO_ONLY_CONTAINERS.contains(&ext.as_str())
+        || UNSUPPORTED_CONTAINERS.contains(&ext.as_str())
 }
 
 fn ext_of(path: &Path) -> String {
@@ -467,15 +467,16 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                     audio: None,
                 }
             } else {
-                // áudio (ou contêiner do qual só extraímos o áudio)
-                let a = audio::decode_file(&p)?;
-                if AUDIO_ONLY_CONTAINERS.contains(&ext.as_str()) {
-                    warning = Some(format!(
-                        "{}: apenas o áudio foi importado. Não há decodificador H.264/H.265 em Rust puro; \
-                         converta o vídeo para AVI MJPEG (ex.: ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi)",
+                if UNSUPPORTED_CONTAINERS.contains(&ext.as_str()) {
+                    bail!(
+                        "{}: MP4/MOV/MKV/AAC ainda não são suportados (não há decodificador em Rust \
+                         puro com licença permissiva; o suporte virá pela API de mídia do sistema). \
+                         Converta para AVI MJPEG + PCM, por exemplo: \
+                         ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi",
                         item.name
-                    ));
+                    );
                 }
+                let a = audio::decode_file(&p)?;
                 item.has_audio = true;
                 item.duration = Some(a.duration());
                 item.info = format!("Áudio {} Hz, {:.2} s", a.sample_rate, a.duration());

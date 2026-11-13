@@ -170,7 +170,7 @@ fn valid_wav() -> Vec<u8> {
 }
 
 #[test]
-fn fuzz_wav_symphonia() {
+fn fuzz_wav() {
     let base = valid_wav();
     let path = tmp("m.wav");
     for (i, m) in mutations(&base, 150, 0xC3).iter().enumerate() {
@@ -181,6 +181,48 @@ fn fuzz_wav_symphonia() {
         });
     }
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn fuzz_aiff_e_audio_corrompido() {
+    // AIFF mínimo válido (FORM/AIFF/COMM/SSND) mutado em memória
+    let mut aiff = Vec::new();
+    aiff.extend_from_slice(b"FORM");
+    aiff.extend_from_slice(&46u32.to_be_bytes());
+    aiff.extend_from_slice(b"AIFF");
+    aiff.extend_from_slice(b"COMM");
+    aiff.extend_from_slice(&18u32.to_be_bytes());
+    aiff.extend_from_slice(&1u16.to_be_bytes()); // canais
+    aiff.extend_from_slice(&4u32.to_be_bytes()); // quadros
+    aiff.extend_from_slice(&16u16.to_be_bytes()); // bits
+    aiff.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100 Hz
+    aiff.extend_from_slice(b"SSND");
+    aiff.extend_from_slice(&16u32.to_be_bytes());
+    aiff.extend_from_slice(&0u32.to_be_bytes());
+    aiff.extend_from_slice(&0u32.to_be_bytes());
+    aiff.extend_from_slice(&[0, 0, 0x40, 0, 0x7F, 0xFF, 0x80, 0]);
+
+    for (i, m) in mutations(&aiff, 150, 0xE5).iter().enumerate() {
+        assert_no_panic("AIFF", i, || {
+            let _ = media::wav::decode(m, 1024);
+        });
+    }
+
+    // Bytes hostis nos decodificadores MP3, FLAC e OGG via load_entry (com guard)
+    let mut rng = Rng(0xF6);
+    for ext in ["mp3", "flac", "ogg"] {
+        let p = tmp(&format!("corrompido.{ext}"));
+        for i in 0..40usize {
+            let len = (i * 17).min(512);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            assert_no_panic(ext, i, || {
+                std::fs::write(&p, &bytes).unwrap();
+                let mut item = media_item(&p);
+                let _ = media::load_entry(&mut item);
+            });
+        }
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 #[test]
