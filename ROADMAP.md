@@ -13,7 +13,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Workspace de 5 crates (§3.2):** `neoveg_common`, `neoveg_engine`, `neoveg_scripting`, `neoveg_ui` e binário `neoveg`.
 - **Renderização UI (`eframe` + `wgpu` com fallback `glow`):** inicialização com `wgpu` e recuo automático para backend `glow`/software caso não exista adaptador compatível.
 - **Tabela Única de Comandos (§3.3):** registro unificado de comandos (`neoveg_engine::commands::COMMANDS`) compartilhado entre menus, barra de ferramentas, atalhos regraváveis e CLI (`--list-commands`, `--command`).
-- **Interface CLI completa:** modos `--open`, `--render` (AVI MJPEG/PNG/Y4M/WAV), `--command`, `--list-commands` e ponto de entrada `--run-script`.
+- **Interface CLI completa:** modos `--open`, `--render` (AVI MJPEG/PNG/Y4M/WAV), `--command`, `--list-commands` e `--run-script` (`.NET Host`).
 
 ## Fase 3 — Paridade Operacional VEGAS Pro, Decodificação Nativa do SO e Hardware Limitado *(Atual)*
 
@@ -35,11 +35,14 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Painel **Color Grading** (`crates/neoveg_ui/src/color_grading.rs`) acoplável/flutuante com rodas tonais vetoriais (*Lift*, *Gamma*, *Gain*), pad *Temp × Tinta*, sliders e predefinições ligados ao `FxKind::ColorCorrector`;
   - Janela **Renderizar como... em 2 colunas** com pesquisa, favoritos ★ persistidos, modelos de formato e progresso com spinner vetorial original;
   - Janela dinâmica de **Atalhos de teclado** (regravação, remoção e filtro ligados à Tabela Única) e diálogo **Preferências...** em 2 painéis (barra lateral com 8 categorias: *Geral*, *Aparência e Layout*, *Edição e Timeline*, *Vídeo e Prévia*, *Áudio*, *Memória e Desempenho*, *Salvamento Automático* e *Atalhos e Controles*, com rolagem contínua/por página, comportamento da roda do mouse, guias de Área Segura configuráveis e parâmetros persistidos com sanitização).
+- **Dock `egui_tiles` e testes de UI `egui_kittest`:** árvore de painéis 3 colunas com destaque em janelas nativas e suíte automatizada de interação (`kittest_tests.rs`).
+- **Áudio avançado (`fundsp` + `rubato`):** até 26 barramentos auxiliares (`Bus A`..`Bus Z`) com envios *pre/post-fader* e roteamento acíclico para o *Master Bus*, DSP nativo via `fundsp` e reamostragem *Sinc* para *Playback Rate* (`0.25x`–`4.00x`) com `rubato`.
+- **Intercâmbio OpenTimelineIO (`.otio`):** parser e exportador *Clean Room* (esquema OTIO 0.17) em `neoveg_engine/src/otio.rs`, comandos `file.import_otio`/`file.export_otio` e importação via arrastar-e-soltar.
+- **Scripting `.NET` sob demanda (`netcorehost`):** carregamento isolado do host `.NET`/CLR (`Hostfxr`) em `neoveg_scripting` com ponte *Clean Room* `ScriptPortal.Vegas` (`NeovegBridge`), hospedagem de assemblies `.dll` externos em `AssemblyLoadContext` coletável (sem bloqueio de arquivo no Windows) com mutação atômica em passo único de Desfazer, execução via *Ferramentas → Executar script (.cs/.dll)...* e CLI `--run-script`.
 - **Empacotamento portátil (`build_portable.py`):** build `--release` portátil sem `target-cpu=native` e auditoria contra assets/fontes/ferramentas não redistribuíveis.
 
 ## Fase 4 — Próximos Marcos *(Planejado)*
 
-- **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API/GStreamer (Linux) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
-- **Scripting `.NET` (`neoveg_scripting`):** carregamento sob demanda do host .NET Core/CLR para execução de scripts `.cs` compatíveis com `ScriptPortal.Vegas`.
-- **Intercâmbio aberto:** importação e exportação de EDL CMX 3600, FCP7 XML, FCPXML, OpenTimelineIO (OTIO) e legendas SRT/WebVTT a partir de especificações públicas.
-- **Áudio avançado e plug-ins:** roteamento completo de até 26 barramentos auxiliares + Master e hospedagem isolada de plug-ins VST3 e OpenFX (OFX).
+- **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
+- **Intercâmbio aberto restante:** importação e exportação de EDL CMX 3600, FCP7 XML, FCPXML, AAF e legendas SRT/WebVTT a partir de especificações públicas.
+- **Áudio espacial, medição e plug-ins:** *Surround Panner* 5.1, *Loudness Meters* e hospedagem isolada de plug-ins VST3 e OpenFX (OFX).
