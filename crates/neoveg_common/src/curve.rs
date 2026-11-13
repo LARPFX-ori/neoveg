@@ -18,6 +18,11 @@ pub fn bump_ids(max: Id) {
     NEXT_ID.fetch_max(max + 1, Ordering::Relaxed);
 }
 
+/// Consulta o próximo id sem alocá-lo (útil para invariantes atômicas, §3.1).
+pub fn peek_next_id() -> Id {
+    NEXT_ID.load(Ordering::Relaxed)
+}
+
 /// Tipos de curva de fade / segmento de envelope (Linear, Fast, Slow, Smooth,
 /// Sharp e Hold, como no VEGAS Pro).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

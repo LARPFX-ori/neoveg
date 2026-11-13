@@ -263,6 +263,7 @@ fn media_item(path: &std::path::Path) -> crate::model::MediaItem {
         height: 0,
         fps: None,
         info: String::new(),
+        proxy_path: None,
     }
 }
 
@@ -443,4 +444,54 @@ fn fuzz_tempo_exato_e_parse_hostis() {
     assert_no_panic("project_json_extremo", 0, || {
         exercise_project(&json_extremo);
     });
+}
+
+#[test]
+fn fuzz_mp4_e_media_foundation_hostil() {
+    // Bytes MP4/ISO-BMFF mínimos sintéticos + mutações hostis (§0.8).
+    let mut base = Vec::new();
+    base.extend_from_slice(&20u32.to_be_bytes());
+    base.extend_from_slice(b"ftypisom");
+    base.extend_from_slice(&0u32.to_be_bytes());
+    base.extend_from_slice(b"isom");
+    base.extend_from_slice(&16u32.to_be_bytes());
+    base.extend_from_slice(b"moov");
+    base.extend_from_slice(&[0u8; 8]);
+    base.extend_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+    base.extend_from_slice(b"mdat");
+    base.extend_from_slice(&[0x41u8; 64]);
+
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+        .join("fixtures")
+        .join("mf_smoke.mp4");
+
+    let mp4_bytes = if fixture.exists() {
+        let mut item = media_item(&fixture);
+        let imp = media::load_entry(&mut item).expect("fixture mf_smoke.mp4 deveria carregar");
+        assert!(imp.item.has_video);
+        assert!(imp.item.width > 0 && imp.item.height > 0);
+        let cache = media::MediaCache::default();
+        cache.insert(imp.item.id, imp.entry);
+        let img = cache.video_frame(&imp.item, crate::time::Ticks::from_millis_i64(500), 160, 90);
+        assert!(
+            img.is_some(),
+            "quadro decodificado via Media Foundation esperado"
+        );
+        std::fs::read(&fixture).unwrap()
+    } else {
+        base
+    };
+
+    let mut_path = tmp("hostil.mp4");
+    for (i, m) in mutations(&mp4_bytes, 40, 0x4D46).iter().enumerate() {
+        assert_no_panic("MP4/MF", i, || {
+            let _ = std::fs::write(&mut_path, m);
+            let mut item = media_item(&mut_path);
+            let _ = media::load_entry(&mut item);
+        });
+    }
+    let _ = std::fs::remove_file(mut_path);
 }

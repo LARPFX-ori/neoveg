@@ -1,86 +1,54 @@
-# NVOV — editor de vídeo não-linear em Rust puro
+# Neoveg
 
-Um NLE no estilo do **VEGAS Pro**, construído a partir dos conceitos, da terminologia e dos atalhos descritos nos manuais em [`manuais/`](manuais/).
-Só usa crates Rust, sem bindings para bibliotecas C (nada de ffmpeg-sys, GTK ou Qt).
+Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa em português (`eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
 
-| Camada | Crates |
-|---|---|
-| Interface | `eframe`/`egui` (OpenGL via `glow`), `rfd` (diálogos de arquivo) |
-| Áudio | `symphonia` (decodificação), `cpal` (saída WASAPI) |
-| Imagem/vídeo | `image` (PNG/JPEG/GIF/BMP/TIFF/WebP), leitor/gravador AVI e Y4M próprios |
-| Texto | `ab_glyph` |
-| Paralelismo | `rayon` |
+## Arquitetura do Workspace (5 Crates)
 
-## Compilar e executar
+- **`neoveg_common`** (`crates/neoveg_common`): tipos fundamentais, representação exata de tempo (`Ticks`, `FrameRate`, `Rate`, *SMPTE Drop-Frame*), curvas, preferências e utilitários base.
+- **`neoveg_engine`** (`crates/neoveg_engine`): estado da timeline, invariantes de edição atômica, mixer de áudio multifaixa, compositor de vídeo, efeitos/transições, escopos, persistência `.neoveg`/`.nvp`, decodificação streaming via Windows Media Foundation (`media/mf.rs`) e **Tabela Única de Comandos**.
+- **`neoveg_scripting`** (`crates/neoveg_scripting`): camada de automação headless e ponte prevista para scripts `.NET`/`C#` (`ScriptPortal.Vegas`).
+- **`neoveg_ui`** (`crates/neoveg_ui`): interface desktop nativa em `eframe` + `wgpu`, timeline interativa, 7 temas visuais (incluindo 2 temas de Alto Contraste WCAG AAA), gerenciador de layouts `.neoveglayout` com painéis destacáveis e editores de atalhos e preferências.
+- **`neoveg`** (`crates/neoveg`): binário principal e interface CLI com inicialização do pool `rayon` proporcional ao hardware.
 
-```powershell
-cargo run --release                       # interface gráfica
-cargo run --release -- projeto.nvp        # abre um projeto
-cargo run --release -- --render projeto.nvp saida.avi   # renderiza sem interface (.avi/.png/.y4m/.wav)
-cargo test                                # testes (inclui teste de fumaça da interface)
+## Recursos Implementados
+
+- **Timeline e Edição VEGAS Pro:** múltiplas trilhas A/V, auto-crossfade ao sobrepor eventos, alças de fade nos cantos superiores, alça de ganho em dB no topo de eventos de áudio, playhead físico de `1 px`, controle contínuo de taxa (*Playback Rate*), divisão (`S`), marcações (`M`), regiões (`R`), *Auto Ripple* (`Ctrl+L`), encaixe (`F8`) e *scrub* (`J`/`K`/`L`).
+- **Tabela Única de Comandos e Atalhos Regraváveis:** menus, barra de ferramentas, atalhos e comandos CLI despacham pelo mesmo `id`; atalhos personalizados podem ser gravados/limpos em *Ajuda → Atalhos de teclado*.
+- **Personalização e Acessibilidade:** 7 temas selecionáveis em *Exibir → Tema* ou *Opções → Preferências...* (incluindo *Alto Contraste AAA Escuro* e *Claro* com contraste >= 7:1), abas inferiores acopláveis/destacáveis em janelas flutuantes e 4 presets + arquivos `.neoveglayout` salvos pelo usuário.
+- **Formatos Suportados:**
+  - **Rust puro (multiplataforma):** projetos `.neoveg` (e legado `.nvp`), `AVI (MJPEG/PCM)`, `Y4M`, `GIF`, sequências de imagens (`PNG`, `JPEG`, `BMP`, `TIFF`, `WebP`), áudio `WAV`, `AIFF`, `FLAC`, `OGG` e `MP3`.
+  - **Windows nativo (Media Foundation):** importação e decodificação em streaming de `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `M4A`, `AAC`, `WMV` e `ASF`.
+- **Hardware Limitado:** matriz de prévia 4×3 (*Rascunho / Prévia / Boa / Melhor* × *1/4 / 1/2 / Completa*), geração de proxies `.avi`, pré-renderização seletiva de região, limite configurável de RAM/quadros em cache e compilação portátil sem `-C target-cpu=native`.
+
+## Como Executar
+
+```bash
+# Abrir interface gráfica (opcionalmente passando um projeto ou mídia)
+cargo run -p neoveg
+cargo run -p neoveg -- meu_projeto.neoveg
+
+# Interface de linha de comando (CLI)
+cargo run -p neoveg -- --list-commands
+cargo run -p neoveg -- --command insert.marker meu_projeto.neoveg atualizado.neoveg
+cargo run -p neoveg -- --render meu_projeto.neoveg saida.avi
 ```
 
-> Os artefatos de build vão para `C:/Users/paulomatos/.cargo-targets/nvov` (veja `.cargo/config.toml`),
-> para não sincronizar gigabytes de arquivos temporários no Google Drive.
+Logs, autosave, preferências (`preferencias.json`), layouts (`.neoveglayout`), proxies e pré-renderizações são gravados ao lado do executável em builds portáteis (ou na pasta temporária do sistema quando executado em diretório somente leitura).
 
-## Recursos (mapeados aos capítulos do manual)
+## Empacotamento Portátil e Verificações de Qualidade
 
-**Janela principal / timeline**
-- Lista de trilhas de vídeo e áudio com nome, mudo, solo, nível de composição ou volume, pan, modo de composição, FX e Track Motion; altura ajustável; reordenar, duplicar e excluir.
-- Régua com timecode SMPTE, tempo ou quadros; barra de marcadores e regiões; região de loop; cursor de edição e cursor de reprodução.
-- Eventos: mover (inclusive entre trilhas), copiar com Ctrl+arrastar, aparar bordas, slip (Alt), slip-trim, fades com 5 curvas, crossfade automático ao sobrepor, agrupamento A/V, travar, loop, reverso, velocidade, congelar quadro.
-- Encaixe (snapping) em cursor, marcadores, regiões e bordas; quantizar para quadros; ripple automático.
-- Edição: dividir (S), recortar, copiar, colar, colar inserindo, excluir, aparar para a seleção, excluir ou inserir intervalo, fechar lacunas, desfazer e refazer (200 níveis).
-- Envelopes de trilha: volume, pan, nível de composição e fade para cor, com pontos e curvas.
-
-**Janelas acopláveis**
-- Mídia do Projeto (miniaturas, arrastar para a timeline), Explorer, Transições, Efeitos de Vídeo, Efeitos de Áudio, Geradores de Mídia, Mixer com medidores de pico, Escopos (histograma, forma de onda, vectorscope, RGB parade) e Notas.
-- Prévia de vídeo em três qualidades (1/4, 1/2 e completa), áreas de segurança e snapshot para PNG.
-
-**Animação e composição**
-- Pan/Crop por evento com keyframes (posição, zoom, rotação) e predefinições Ken Burns.
-- Track Motion com keyframes (posição, escala, rotação) e predefinição de picture-in-picture.
-- 10 modos de composição: alfa, adicionar, subtrair, multiplicar, screen, overlay, luz forte, clarear, escurecer e diferença.
-
-**Efeitos** (todos os parâmetros aceitam keyframes)
-- Vídeo (18): brilho e contraste, HSL, corretor de cor, níveis, P&B, sépia, inverter, desfoque gaussiano, nitidez, vinheta, chroma key, pixelizar, espelhar, glow, granulação, relevo, posterizar, colorir.
-- Áudio (10): ganho, EQ paramétrico de 3 bandas, passa-altas, passa-baixas, compressor, noise gate, delay, reverb (Freeverb), chorus, distorção.
-- Os efeitos podem ser aplicados no evento, na trilha, no master bus (áudio) e na saída de vídeo.
-- Transições (16): dissolver, fade pelo preto, wipes, push, slide, íris, relógio, porta de celeiro, zoom, persianas e tabuleiro, com borda suave.
-
-**Geradores de mídia**
-- Texto e títulos com fonte, contorno, sombra, fundo e alinhamento, e animações de créditos rolando, letreiro, máquina de escrever e fade.
-- Cor sólida, gradiente linear ou radial, xadrez, barras de cor e ruído.
-
-**Renderizar como**
-- AVI Motion-JPEG com áudio PCM 16 bits, sequência PNG (+WAV), Y4M (+WAV) e WAV de 16 bits, 24 bits ou 32 bits float.
-- Projeto inteiro ou região de loop, resolução personalizada, barra de progresso com cancelamento.
-
-## Formatos de entrada
-
-| Tipo | Formatos |
-|---|---|
-| Vídeo | AVI (MJPEG ou RGB não comprimido, com áudio PCM), Y4M, GIF animado, sequências numeradas de imagens |
-| Imagem | PNG, JPEG, BMP, TIFF, WebP |
-| Áudio | WAV, MP3, FLAC, OGG/Vorbis, AAC/M4A, ALAC, AIFF, CAF |
-| MP4/MOV/MKV/WebM | **somente o áudio** |
-
-> [!IMPORTANT]
-> Não existe decodificador H.264/H.265/VP9 maduro em Rust puro. Converta antes de importar:
-> `ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi`
-
-## Estrutura do código
-
-```
-src/
-  main.rs            ponto de entrada (GUI ou --render)
-  model.rs           projeto, trilhas, eventos, envelopes, keyframes, efeitos (serde -> .nvp JSON)
-  media/             importação e cache: AVI, Y4M, GIF, sequências, áudio (symphonia), geradores e texto
-  engine/            compositor de vídeo, pan/crop, track motion, modos de mistura, efeitos, transições, mixer de áudio
-  render.rs          renderização final (AVI/PNG/Y4M/WAV)
-  playback.rs        saída de áudio em tempo real (relógio mestre) e worker da prévia
-  scopes.rs          escopos de vídeo
-  ui/                interface: timeline, painéis, diálogos, operações de edição, atalhos
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+python tools/check_licenses.py
+python build_portable.py
 ```
 
-Os atalhos de teclado seguem a tabela padrão do VEGAS Pro 18 (veja **Ajuda > Atalhos de teclado**).
+O script `build_portable.py` gera o pacote portátil em `target/portable/neoveg-portable/` sem dependência de instalador, fontes proprietárias ou binários externos.
+
+## Acompanhamento de Paridade
+
+- [Roadmap](ROADMAP.md)
+- [Matriz de Paridade VEGAS Pro](docs_obsidian/ui_references/matriz_de_paridade.md)
+- [Atribuição e Licenças de Assets](ATTRIBUTION.md)

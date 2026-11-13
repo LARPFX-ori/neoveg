@@ -5,6 +5,7 @@
 use crate::media::MediaCache;
 use crate::model::*;
 use crate::prefs::PreviewQuality;
+use neoveg_common::{NeovegError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,7 +75,7 @@ impl Default for EditorOptions {
             show_waveforms: true,
             show_thumbs: true,
             time_format: TimeFormat::SmpteDrop,
-            preview_quality: PreviewQuality::Preview,
+            preview_quality: PreviewQuality::PreviewHalf,
             safe_areas: false,
             loop_playback: false,
         }
@@ -1082,5 +1083,480 @@ impl EditorSession {
         ));
         self.changed();
         removed
+    }
+
+    /// Configura manualmente as propriedades do projeto, impedindo que a
+    /// primeira mídia importada sobrescreva o formato escolhido (§3.1).
+    pub fn configure_project_settings(&mut self, mut settings: ProjectSettings) {
+        self.checkpoint();
+        settings.width = (settings.width / 2).max(8) * 2;
+        settings.height = (settings.height / 2).max(8) * 2;
+        settings.manually_configured = true;
+        self.project.settings = settings;
+        self.project.sanitize();
+        self.changed();
+    }
+
+    /// Registra uma mídia importada aplicando a invariante §3.1:
+    /// a primeira mídia importada só define o formato do projeto se o usuário
+    /// ainda não tiver configurado as propriedades manualmente.
+    pub fn register_imported_media(
+        &mut self,
+        item: MediaItem,
+        entry_sample_rate: Option<u32>,
+    ) -> Id {
+        let id = item.id;
+        let is_first = self.project.media.is_empty();
+        if is_first && !self.project.settings.manually_configured {
+            if item.has_video && item.width >= 16 && item.height >= 16 {
+                self.project.settings.width = (item.width / 2).max(8) * 2;
+                self.project.settings.height = (item.height / 2).max(8) * 2;
+                if let Some(fps) = item.fps {
+                    if (1.0..=240.0).contains(&fps.as_f64()) {
+                        self.project.settings.fps = fps;
+                        self.project.settings.drop_frame = fps.is_ntsc_drop_eligible();
+                    }
+                }
+            }
+            if let Some(sr) = entry_sample_rate {
+                if (8000..=192_000).contains(&sr) {
+                    self.project.settings.sample_rate = sr;
+                }
+            }
+            self.project.sanitize();
+        }
+        self.project.media.push(item);
+        id
+    }
+
+    /// Aplica atomicamente um plano de movimentação ou cópia de eventos (§3.1):
+    /// - Em movimentações (`copy == false`), solicitações com IDs duplicados são
+    ///   rejeitadas atomicamente antes de mutar a timeline, alocar novos IDs ou
+    ///   tocar o histórico (`undo`/`redo`).
+    /// - Em cópias (`copy == true`), cada entrada recebe um novo `Id` após a
+    ///   validação completa e mantém o destino exato solicitado.
+    /// - Criação de novas faixas de destino e edição são confirmadas juntas.
+    pub fn apply_move_plan(&mut self, plan: &[MoveEntry], copy: bool) -> Result<Vec<Id>> {
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fase 1: validação integral e pura (nenhuma mutação, novo ID ou undo).
+        let mut seen_ids = HashSet::new();
+        let mut planned_tracks: HashMap<u64, TrackKind> = HashMap::new();
+        let mut resolved_origins = Vec::with_capacity(plan.len());
+
+        for entry in plan {
+            if !copy && !seen_ids.insert(entry.id) {
+                return Err(NeovegError::InvalidInput(format!(
+                    "plano de movimentação inválido: identificador {} duplicado",
+                    entry.id
+                )));
+            }
+            if entry.new_start < Ticks::ZERO {
+                return Err(NeovegError::InvalidInput(format!(
+                    "posição inicial negativa para evento {}",
+                    entry.id
+                )));
+            }
+            let Some((ti, ei)) = self.project.find_event(entry.id) else {
+                return Err(NeovegError::InvalidInput(format!(
+                    "evento {} não encontrado na timeline",
+                    entry.id
+                )));
+            };
+            let orig_track = &self.project.tracks[ti];
+            let orig_ev = &orig_track.events[ei];
+            if !copy && orig_ev.locked {
+                return Err(NeovegError::InvalidInput(format!(
+                    "evento {} está travado para movimentação",
+                    entry.id
+                )));
+            }
+            match &entry.target_track {
+                MoveTrackTarget::Existing(dst) => {
+                    let Some(dst_track) = self.project.tracks.get(*dst) else {
+                        return Err(NeovegError::InvalidInput(format!(
+                            "faixa de destino {dst} inexistente"
+                        )));
+                    };
+                    if dst_track.kind != orig_track.kind {
+                        return Err(NeovegError::InvalidInput(format!(
+                            "tipo incompatível ao colocar evento {} na faixa {dst}",
+                            entry.id
+                        )));
+                    }
+                }
+                MoveTrackTarget::CreateNew { key, kind, name } => {
+                    if *kind != orig_track.kind {
+                        return Err(NeovegError::InvalidInput(format!(
+                            "tipo incompatível para nova faixa '{name}' do evento {}",
+                            entry.id
+                        )));
+                    }
+                    if name.trim().is_empty() {
+                        return Err(NeovegError::InvalidInput(
+                            "nome da nova faixa de destino vazio".into(),
+                        ));
+                    }
+                    if let Some(prev_kind) = planned_tracks.insert(*key, *kind) {
+                        if prev_kind != *kind {
+                            return Err(NeovegError::InvalidInput(format!(
+                                "chave de criação de faixa {key} usada com tipos conflitantes"
+                            )));
+                        }
+                    }
+                }
+            }
+            resolved_origins.push((ti, ei));
+        }
+
+        // Fase 2: snapshot dos eventos originais antes de mutar ou alocar IDs.
+        let source_clones: Vec<Event> = resolved_origins
+            .iter()
+            .map(|&(ti, ei)| self.project.tracks[ti].events[ei].clone())
+            .collect();
+
+        // Fase 3: efetivação atômica em 1 passo de histórico.
+        self.checkpoint();
+
+        let mut created_map: HashMap<u64, usize> = HashMap::new();
+        let mut target_indices = Vec::with_capacity(plan.len());
+        for entry in plan {
+            let dst = match &entry.target_track {
+                MoveTrackTarget::Existing(ti) => *ti,
+                MoveTrackTarget::CreateNew { key, kind, name } => {
+                    if let Some(&idx) = created_map.get(key) {
+                        idx
+                    } else {
+                        let idx = self.project.tracks.len();
+                        self.project.tracks.push(Track::new(*kind, name));
+                        created_map.insert(*key, idx);
+                        idx
+                    }
+                }
+            };
+            target_indices.push(dst);
+        }
+
+        let mut result_ids = Vec::with_capacity(plan.len());
+        if !copy {
+            for (idx, entry) in plan.iter().enumerate() {
+                let dst = target_indices[idx];
+                if let Some((cur_t, cur_e)) = self.project.find_event(entry.id) {
+                    if cur_t != dst {
+                        let mut ev = self.project.tracks[cur_t].events.remove(cur_e);
+                        ev.start = entry.new_start;
+                        self.project.tracks[dst].events.push(ev);
+                    } else {
+                        self.project.tracks[cur_t].events[cur_e].start = entry.new_start;
+                    }
+                    result_ids.push(entry.id);
+                }
+            }
+            self.sel_events = result_ids.iter().copied().collect();
+        } else {
+            let mut occurrence_count: HashMap<Id, usize> = HashMap::new();
+            let mut group_remap: HashMap<(Id, usize), Id> = HashMap::new();
+            for (idx, entry) in plan.iter().enumerate() {
+                let dst = target_indices[idx];
+                let occ = occurrence_count.entry(entry.id).or_insert(0);
+                let occ_idx = *occ;
+                *occ += 1;
+
+                let mut ev = source_clones[idx].clone();
+                ev.id = new_id();
+                ev.start = entry.new_start;
+                ev.group = ev
+                    .group
+                    .map(|g| *group_remap.entry((g, occ_idx)).or_insert_with(new_id));
+                ev.fx = ev.fx.iter().map(|f| f.duplicate()).collect();
+                result_ids.push(ev.id);
+                self.project.tracks[dst].events.push(ev);
+            }
+            self.sel_events = result_ids.iter().copied().collect();
+        }
+
+        self.project.sort_events();
+        self.changed();
+        Ok(result_ids)
+    }
+}
+
+/// Destino de faixa para cada item em um plano de movimentação/cópia (§3.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MoveTrackTarget {
+    Existing(usize),
+    CreateNew {
+        key: u64,
+        kind: TrackKind,
+        name: String,
+    },
+}
+
+/// Entrada individual de um plano de movimentação/cópia (§3.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveEntry {
+    pub id: Id,
+    pub target_track: MoveTrackTarget,
+    pub new_start: Ticks,
+}
+
+/// Constrói um plano de movimentação a partir de uma lista ordenada de seleção
+/// (preservando a ordem da primeira ocorrência e mantendo cada identidade uma
+/// única vez antes de expandir eventos agrupados — §3.1).
+pub fn build_move_plan_from_selection(
+    project: &Project,
+    seed_ids: &[Id],
+    expand_groups: bool,
+    dt: Ticks,
+    dtrack: isize,
+) -> Vec<MoveEntry> {
+    let mut ordered_ids: Vec<Id> = Vec::new();
+    let mut seen: HashSet<Id> = HashSet::new();
+
+    for &id in seed_ids {
+        if project.find_event(id).is_some() && seen.insert(id) {
+            ordered_ids.push(id);
+        }
+    }
+
+    if expand_groups {
+        let mut groups: Vec<Id> = Vec::new();
+        let mut seen_groups: HashSet<Id> = HashSet::new();
+        for &id in &ordered_ids {
+            if let Some(g) = project.event(id).and_then(|e| e.group) {
+                if seen_groups.insert(g) {
+                    groups.push(g);
+                }
+            }
+        }
+        if !seen_groups.is_empty() {
+            for t in &project.tracks {
+                for e in &t.events {
+                    if let Some(g) = e.group {
+                        if seen_groups.contains(&g) && seen.insert(e.id) {
+                            ordered_ids.push(e.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let n = project.tracks.len() as isize;
+    let valid_track_shift = dtrack != 0
+        && ordered_ids.iter().all(|&id| {
+            let Some((ti, _)) = project.find_event(id) else {
+                return false;
+            };
+            let nt = ti as isize + dtrack;
+            nt >= 0 && nt < n && project.tracks[nt as usize].kind == project.tracks[ti].kind
+        });
+    let effective_dtrack = if valid_track_shift { dtrack } else { 0 };
+
+    ordered_ids
+        .into_iter()
+        .filter_map(|id| {
+            let (ti, ei) = project.find_event(id)?;
+            let ev = &project.tracks[ti].events[ei];
+            let target_ti = (ti as isize + effective_dtrack) as usize;
+            let new_start = (ev.start + dt).max(Ticks::ZERO);
+            Some(MoveEntry {
+                id,
+                target_track: MoveTrackTarget::Existing(target_ti),
+                new_start,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::peek_next_id;
+
+    fn sample_media(id: Id, w: u32, h: u32, fps: Option<FrameRate>) -> MediaItem {
+        MediaItem {
+            id,
+            name: format!("m_{id}"),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [1.0, 0.0, 0.0, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(5)),
+            has_video: true,
+            has_audio: true,
+            width: w,
+            height: h,
+            fps,
+            info: String::new(),
+            proxy_path: None,
+        }
+    }
+
+    #[test]
+    fn invariante_movimentacao_rejeita_ids_duplicados_atomicamente() {
+        let mut p = Project::new_default();
+        p.tracks.push(Track::new(TrackKind::Video, "Vídeo 2"));
+        let m = sample_media(new_id(), 1920, 1080, Some(FrameRate::FPS_30));
+        let ev1 = Event::new(&m, Ticks::from_secs_i64(1), Ticks::from_secs_i64(2));
+        let ev2 = Event::new(&m, Ticks::from_secs_i64(4), Ticks::from_secs_i64(2));
+        let id1 = ev1.id;
+        let id2 = ev2.id;
+        p.media.push(m);
+        p.tracks[0].events.push(ev1);
+        p.tracks[0].events.push(ev2);
+
+        let mut sess = EditorSession::new(p);
+        let gen_before = sess.generation;
+        let undo_before = sess.undo.len();
+        let redo_before = sess.redo.len();
+        let next_id_before = peek_next_id();
+
+        let bad_plan = vec![
+            MoveEntry {
+                id: id1,
+                target_track: MoveTrackTarget::Existing(0),
+                new_start: Ticks::from_secs_i64(3),
+            },
+            MoveEntry {
+                id: id2,
+                target_track: MoveTrackTarget::CreateNew {
+                    key: 1,
+                    kind: TrackKind::Video,
+                    name: "Nova Vídeo".into(),
+                },
+                new_start: Ticks::from_secs_i64(5),
+            },
+            MoveEntry {
+                id: id1,
+                target_track: MoveTrackTarget::Existing(2),
+                new_start: Ticks::from_secs_i64(7),
+            },
+        ];
+
+        let err = sess.apply_move_plan(&bad_plan, false);
+        assert!(err.is_err());
+        // Nenhuma faixa criada, nenhum evento movido, nenhum novo ID nem histórico tocado.
+        assert_eq!(sess.project.tracks.len(), 3);
+        assert_eq!(sess.project.tracks[0].events.len(), 2);
+        assert_eq!(
+            sess.project.tracks[0].events[0].start,
+            Ticks::from_secs_i64(1)
+        );
+        assert_eq!(sess.project.tracks[2].events.len(), 0);
+        assert_eq!(sess.generation, gen_before);
+        assert_eq!(sess.undo.len(), undo_before);
+        assert_eq!(sess.redo.len(), redo_before);
+        assert_eq!(peek_next_id(), next_id_before);
+    }
+
+    #[test]
+    fn invariante_copia_recebe_novos_ids_e_cria_faixa_destino_junto() {
+        let mut p = Project::new_default();
+        let m = sample_media(new_id(), 1920, 1080, Some(FrameRate::FPS_30));
+        let ev = Event::new(&m, Ticks::from_secs_i64(1), Ticks::from_secs_i64(2));
+        let src_id = ev.id;
+        p.media.push(m);
+        p.tracks[0].events.push(ev);
+
+        let mut sess = EditorSession::new(p);
+        let plan = vec![
+            MoveEntry {
+                id: src_id,
+                target_track: MoveTrackTarget::Existing(0),
+                new_start: Ticks::from_secs_i64(6),
+            },
+            MoveEntry {
+                id: src_id,
+                target_track: MoveTrackTarget::CreateNew {
+                    key: 99,
+                    kind: TrackKind::Video,
+                    name: "Vídeo Cópia".into(),
+                },
+                new_start: Ticks::from_secs_i64(8),
+            },
+        ];
+        let copies = sess.apply_move_plan(&plan, true).unwrap();
+        assert_eq!(copies.len(), 2);
+        assert_ne!(copies[0], src_id);
+        assert_ne!(copies[1], src_id);
+        assert_ne!(copies[0], copies[1]);
+        assert_eq!(sess.project.tracks.len(), 3);
+        assert_eq!(sess.project.tracks[0].events.len(), 2);
+        assert_eq!(sess.project.tracks[2].events.len(), 1);
+        assert_eq!(sess.project.tracks[2].events[0].id, copies[1]);
+        assert_eq!(
+            sess.project.tracks[2].events[0].start,
+            Ticks::from_secs_i64(8)
+        );
+        // Desfazer desfaz faixa criada + ambas as cópias atomicamente.
+        assert!(sess.undo());
+        assert_eq!(sess.project.tracks.len(), 2);
+        assert_eq!(sess.project.tracks[0].events.len(), 1);
+    }
+
+    #[test]
+    fn invariante_plano_selecao_deduplica_antes_de_expandir_grupos() {
+        let mut p = Project::new_default();
+        let m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_24));
+        let gid = new_id();
+        let mut v_ev = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(3));
+        v_ev.group = Some(gid);
+        let mut a_ev = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(3));
+        a_ev.group = Some(gid);
+        let standalone = Event::new(&m, Ticks::from_secs_i64(7), Ticks::from_secs_i64(1));
+        let (vid, aid, sid) = (v_ev.id, a_ev.id, standalone.id);
+        p.media.push(m);
+        p.tracks[0].events.push(v_ev);
+        p.tracks[0].events.push(standalone);
+        p.tracks[1].events.push(a_ev);
+
+        // Seleção contém IDs repetidos antes de expandir o grupo.
+        let plan = build_move_plan_from_selection(
+            &p,
+            &[sid, vid, sid, vid],
+            true,
+            Ticks::from_secs_i64(1),
+            0,
+        );
+        let plan_ids: Vec<Id> = plan.iter().map(|e| e.id).collect();
+        // Ordem da primeira ocorrência das sementes deduplicadas, seguida da expansão de grupo sem duplicar.
+        assert_eq!(plan_ids, vec![sid, vid, aid]);
+    }
+
+    #[test]
+    fn invariante_primeiro_arquivo_define_formato_apenas_se_nao_configurado() {
+        // Caso 1: projeto padrão não configurado manualmente adota a 1ª mídia e ignora a 2ª.
+        let mut sess = EditorSession::new(Project::new_default());
+        assert!(!sess.project.settings.manually_configured);
+        let m1 = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_24));
+        sess.register_imported_media(m1, Some(44100));
+        assert_eq!(sess.project.settings.width, 1280);
+        assert_eq!(sess.project.settings.height, 720);
+        assert_eq!(sess.project.settings.fps, FrameRate::FPS_24);
+        assert_eq!(sess.project.settings.sample_rate, 44100);
+
+        let m2 = sample_media(new_id(), 3840, 2160, Some(FrameRate::FPS_60));
+        sess.register_imported_media(m2, Some(96000));
+        assert_eq!(sess.project.settings.width, 1280);
+        assert_eq!(sess.project.settings.fps, FrameRate::FPS_24);
+
+        // Caso 2: projeto configurado manualmente nunca é sobrescrito nem pela 1ª mídia.
+        let mut sess_manual = EditorSession::new(Project::new_default());
+        let custom = ProjectSettings {
+            width: 1920,
+            height: 1080,
+            fps: FrameRate::FPS_60,
+            ..Default::default()
+        };
+        sess_manual.configure_project_settings(custom);
+        assert!(sess_manual.project.settings.manually_configured);
+        let m_first = sample_media(new_id(), 640, 360, Some(FrameRate::FPS_25));
+        sess_manual.register_imported_media(m_first, Some(44100));
+        assert_eq!(sess_manual.project.settings.width, 1920);
+        assert_eq!(sess_manual.project.settings.height, 1080);
+        assert_eq!(sess_manual.project.settings.fps, FrameRate::FPS_60);
+        assert_eq!(sess_manual.project.settings.sample_rate, 48000);
     }
 }

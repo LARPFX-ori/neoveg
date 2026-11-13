@@ -116,7 +116,14 @@ const HELP: &str = "Uso:
 
 fn main() -> anyhow::Result<()> {
     recovery::install_panic_hook();
-    util::log_info("Neoveg iniciado");
+    let boot_prefs = prefs::Preferences::load_or_default();
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(boot_prefs.effective_worker_threads())
+        .build_global();
+    util::log_info(&format!(
+        "Neoveg iniciado (workers={})",
+        boot_prefs.effective_worker_threads()
+    ));
 
     let args: Vec<String> = std::env::args().collect();
     let open = match parse_args(&args) {

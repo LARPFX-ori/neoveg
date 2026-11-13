@@ -1,9 +1,16 @@
 //! Gerenciamento de mídia: importação, decodificação e cache de quadros.
 
+#[forbid(unsafe_code)]
 pub mod audio;
+#[forbid(unsafe_code)]
 pub mod avi;
+#[forbid(unsafe_code)]
 pub mod generate;
+#[cfg(windows)]
+mod mf;
+#[forbid(unsafe_code)]
 pub mod wav;
+#[forbid(unsafe_code)]
 pub mod y4m;
 
 use crate::model::{new_id, FrameRate, GenSpec, Id, MediaItem, MediaSource, Ticks, TICKS_PER_MS};
@@ -17,20 +24,22 @@ use std::sync::{Arc, Mutex};
 pub const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"];
 pub const AUDIO_EXTS: [&str; 8] = ["wav", "wave", "aif", "aiff", "aifc", "flac", "ogg", "mp3"];
 pub const VIDEO_EXTS: [&str; 2] = ["avi", "y4m"];
-/// Contêineres ainda não suportados: H.264/H.265/AAC não têm decodificador
-/// em Rust puro com licença permissiva; o suporte virá pela API de mídia do
-/// sistema operacional (Media Foundation). A importação explica o motivo.
+/// Contêineres decodificados pela API de mídia do sistema operacional
+/// (Windows Media Foundation via módulo FFI isolado `media::mf`).
+pub const SYSTEM_CONTAINER_EXTS: [&str; 9] = [
+    "mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac", "wmv", "asf",
+];
 pub const UNSUPPORTED_CONTAINERS: [&str; 7] = ["mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac"];
 
 /// Memória máxima para os quadros de um GIF animado.
-const MAX_GIF_BYTES: u64 = 1 << 30;
+const MAX_GIF_BYTES: u64 = 512 << 20;
 
 pub fn is_supported(path: &Path) -> bool {
     let ext = ext_of(path);
     IMAGE_EXTS.contains(&ext.as_str())
         || AUDIO_EXTS.contains(&ext.as_str())
         || VIDEO_EXTS.contains(&ext.as_str())
-        || UNSUPPORTED_CONTAINERS.contains(&ext.as_str())
+        || SYSTEM_CONTAINER_EXTS.contains(&ext.as_str())
 }
 
 fn ext_of(path: &Path) -> String {
@@ -41,29 +50,62 @@ fn ext_of(path: &Path) -> String {
 }
 
 pub struct FrameCache {
-    items: VecDeque<(usize, Arc<RgbaImage>)>,
+    items: VecDeque<(usize, Arc<RgbaImage>, usize)>,
     cap: usize,
+    total_bytes: usize,
+    max_bytes: usize,
 }
 
 impl FrameCache {
     fn new(cap: usize) -> Self {
+        Self::with_budget(cap, 64 << 20)
+    }
+
+    fn with_budget(cap: usize, max_bytes: usize) -> Self {
         FrameCache {
             items: VecDeque::new(),
-            cap,
+            cap: cap.max(1),
+            total_bytes: 0,
+            max_bytes: max_bytes.max(1 << 20),
         }
     }
+
+    fn set_budget(&mut self, cap: usize, max_bytes: usize) {
+        self.cap = cap.max(1);
+        self.max_bytes = max_bytes.max(1 << 20);
+        self.evict();
+    }
+
+    fn clear(&mut self) {
+        self.items.clear();
+        self.total_bytes = 0;
+    }
+
+    fn evict(&mut self) {
+        while self.items.len() > self.cap
+            || (self.items.len() > 1 && self.total_bytes > self.max_bytes)
+        {
+            if let Some((_, _, bytes)) = self.items.pop_back() {
+                self.total_bytes = self.total_bytes.saturating_sub(bytes);
+            } else {
+                break;
+            }
+        }
+    }
+
     fn get(&mut self, k: usize) -> Option<Arc<RgbaImage>> {
-        let pos = self.items.iter().position(|(i, _)| *i == k)?;
+        let pos = self.items.iter().position(|(i, _, _)| *i == k)?;
         let item = self.items.remove(pos)?;
         let img = item.1.clone();
         self.items.push_front(item);
         Some(img)
     }
+
     fn put(&mut self, k: usize, img: Arc<RgbaImage>) {
-        self.items.push_front((k, img));
-        while self.items.len() > self.cap {
-            self.items.pop_back();
-        }
+        let bytes = img.as_raw().len();
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.items.push_front((k, img, bytes));
+        self.evict();
     }
 }
 
@@ -74,8 +116,52 @@ pub enum VideoSource {
     Frames(Vec<Arc<RgbaImage>>, Vec<Ticks>),
     Avi(Mutex<avi::AviReader>, Mutex<FrameCache>),
     Y4m(Mutex<y4m::Y4mReader>, Mutex<FrameCache>),
+    #[cfg(windows)]
+    Mf(Arc<mf::MfVideoReader>, Mutex<FrameCache>),
     Sequence(Vec<String>, FrameRate, Mutex<FrameCache>),
     Generated,
+}
+
+impl VideoSource {
+    fn set_cache_budget(&self, cap: usize, max_bytes: usize) {
+        match self {
+            VideoSource::Avi(_, c) | VideoSource::Y4m(_, c) | VideoSource::Sequence(_, _, c) => {
+                c.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_budget(cap, max_bytes);
+            }
+            #[cfg(windows)]
+            VideoSource::Mf(_, c) => {
+                c.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_budget(cap, max_bytes);
+            }
+            VideoSource::None
+            | VideoSource::Still(_)
+            | VideoSource::Frames(_, _)
+            | VideoSource::Generated => {}
+        }
+    }
+
+    fn clear_cache(&self) {
+        match self {
+            VideoSource::Avi(_, c) | VideoSource::Y4m(_, c) | VideoSource::Sequence(_, _, c) => {
+                c.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+            }
+            #[cfg(windows)]
+            VideoSource::Mf(_, c) => {
+                c.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+            }
+            VideoSource::None
+            | VideoSource::Still(_)
+            | VideoSource::Frames(_, _)
+            | VideoSource::Generated => {}
+        }
+    }
 }
 
 pub struct MediaEntry {
@@ -86,16 +172,41 @@ pub struct MediaEntry {
 /// Chave do cache de mídia gerada: (mídia, largura, altura, tempo em ms).
 type GenKey = (Id, u32, u32, u64);
 
-/// Cache compartilhado entre interface, prévia, reprodução e renderização.
-#[derive(Default)]
+/// Cache compartilhado entre interface, prévia, reprodução e renderização, com
+/// orçamento configurável de RAM e número de quadros (§3.6).
 pub struct MediaCache {
     entries: Mutex<HashMap<Id, Arc<MediaEntry>>>,
+    proxies: Mutex<HashMap<(Id, String), Arc<MediaEntry>>>,
     generated: Mutex<HashMap<GenKey, Arc<RgbaImage>>>,
+    frame_cap: Mutex<usize>,
+    ram_budget_bytes: Mutex<usize>,
     pub fonts: generate::Fonts,
+}
+
+impl Default for MediaCache {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            proxies: Mutex::new(HashMap::new()),
+            generated: Mutex::new(HashMap::new()),
+            frame_cap: Mutex::new(48),
+            ram_budget_bytes: Mutex::new(256 << 20),
+            fonts: generate::Fonts::default(),
+        }
+    }
 }
 
 impl MediaCache {
     pub fn insert(&self, id: Id, e: MediaEntry) {
+        let cap = *self
+            .frame_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let budget = *self
+            .ram_budget_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        e.video.set_cache_budget(cap, (budget / 2).max(8 << 20));
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -107,6 +218,10 @@ impl MediaCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&id);
+        self.proxies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(k, _), _| *k != id);
     }
 
     pub fn contains(&self, id: Id) -> bool {
@@ -114,6 +229,69 @@ impl MediaCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&id)
+    }
+
+    /// Atualiza os limites de cache em execução a partir das Preferências (§3.6).
+    pub fn configure_limits(&self, frame_cap: usize, ram_mb: u32) {
+        let cap = frame_cap.clamp(4, 512);
+        let budget = (ram_mb.clamp(32, 8192) as usize) << 20;
+        *self
+            .frame_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cap;
+        *self
+            .ram_budget_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = budget;
+
+        let per_stream_budget = (budget / 2).max(8 << 20);
+        for entry in self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            entry.video.set_cache_budget(cap, per_stream_budget);
+        }
+        for entry in self
+            .proxies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            entry.video.set_cache_budget(cap, per_stream_budget);
+        }
+        let mut g = self
+            .generated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.len() > cap {
+            g.clear();
+        }
+    }
+
+    /// Libera todos os caches de quadros sob pressão de memória (§3.6).
+    pub fn clear_frame_caches(&self) {
+        for entry in self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            entry.video.clear_cache();
+        }
+        for entry in self
+            .proxies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            entry.video.clear_cache();
+        }
+        self.generated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     fn entry(&self, id: Id) -> Option<Arc<MediaEntry>> {
@@ -150,11 +328,78 @@ impl MediaCache {
         w: u32,
         h: u32,
     ) -> Option<Arc<RgbaImage>> {
+        self.video_frame_for_quality(item, t, w, h, false)
+    }
+
+    /// Quadro da mídia respeitando a preferência por proxy na prévia (§3.6).
+    pub fn video_frame_for_quality(
+        &self,
+        item: &MediaItem,
+        t: Ticks,
+        w: u32,
+        h: u32,
+        prefer_proxy: bool,
+    ) -> Option<Arc<RgbaImage>> {
         if let MediaSource::Generated(spec) = &item.source {
             return Some(self.generated_frame(item.id, spec, t, w, h));
         }
+        if prefer_proxy {
+            if let Some(proxy_path) = &item.proxy_path {
+                if let Some(pe) = self.proxy_entry(item.id, proxy_path) {
+                    if let Some(img) = self.decode_from_source(&pe.video, item, t) {
+                        return Some(img);
+                    }
+                }
+            }
+        }
         let e = self.entry(item.id)?;
-        match &e.video {
+        self.decode_from_source(&e.video, item, t)
+    }
+
+    fn proxy_entry(&self, media_id: Id, path: &str) -> Option<Arc<MediaEntry>> {
+        let key = (media_id, path.to_string());
+        if let Some(existing) = self
+            .proxies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned()
+        {
+            return Some(existing);
+        }
+        let p = Path::new(path);
+        if !p.exists() {
+            return None;
+        }
+        let mut dummy = base_item("proxy".into(), MediaSource::File { path: path.into() });
+        let loaded = load_entry(&mut dummy).ok()?;
+        let cap = *self
+            .frame_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let budget = *self
+            .ram_budget_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loaded
+            .entry
+            .video
+            .set_cache_budget(cap, (budget / 2).max(8 << 20));
+        let arc = Arc::new(loaded.entry);
+        self.proxies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, arc.clone());
+        Some(arc)
+    }
+
+    fn decode_from_source(
+        &self,
+        source: &VideoSource,
+        item: &MediaItem,
+        t: Ticks,
+    ) -> Option<Arc<RgbaImage>> {
+        match source {
             VideoSource::None | VideoSource::Generated => None,
             VideoSource::Still(img) => Some(img.clone()),
             VideoSource::Frames(frames, times) => {
@@ -208,6 +453,35 @@ impl MediaCache {
                     .put(idx, img.clone());
                 Some(img)
             }
+            #[cfg(windows)]
+            VideoSource::Mf(reader, cache) => {
+                let fps = item.fps.unwrap_or(reader.fps);
+                let max_idx = item
+                    .duration
+                    .map(|d| fps.ticks_to_frame_floor(d).max(0))
+                    .unwrap_or(i64::MAX / 2);
+                let idx = fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
+                if let Some(img) = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(idx)
+                {
+                    return Some(img);
+                }
+                let frame_time = fps.frame_to_ticks(idx as i64);
+                let img = Arc::new(
+                    crate::util::guard("decodificação Media Foundation", || {
+                        reader.decode_at(frame_time)
+                    })
+                    .ok()?
+                    .ok()?,
+                );
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .put(idx, img.clone());
+                Some(img)
+            }
             VideoSource::Sequence(paths, fps, cache) => {
                 let max_idx = paths.len().saturating_sub(1) as i64;
                 let idx = fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
@@ -234,6 +508,59 @@ impl MediaCache {
         }
     }
 
+    /// Gera um arquivo proxy AVI MJPEG em 1/4 da resolução (até 480x270)
+    /// em streaming quadro a quadro para edição fluida em hardware fraco (§3.6).
+    pub fn create_proxy_avi(&self, item: &MediaItem, out_path: &Path) -> Result<()> {
+        if !item.has_video {
+            bail!("mídia '{}' não contém vídeo para gerar proxy", item.name);
+        }
+        let dur = item.duration.unwrap_or_else(|| Ticks::from_secs_i64(5));
+        let fps = item.fps.unwrap_or(FrameRate::FPS_30);
+        let src_w = item.width.max(16);
+        let src_h = item.height.max(16);
+        let mut pw = ((src_w / 4).max(64) / 2) * 2;
+        let mut ph = ((src_h / 4).max(64) / 2) * 2;
+        if pw > 480 {
+            let scale = 480.0 / pw as f32;
+            pw = 480;
+            ph = (((ph as f32 * scale).round() as u32).max(64) / 2) * 2;
+        }
+        let n_frames = fps.ticks_to_frame_floor(dur).max(1) as usize;
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut w = avi::AviWriter::create(out_path, pw, ph, fps, None)?;
+        for fi in 0..n_frames {
+            let t = fps.frame_to_ticks(fi as i64);
+            let frame = self
+                .video_frame_for_quality(item, t, pw, ph, false)
+                .map(|img| {
+                    if img.width() == pw && img.height() == ph {
+                        (*img).clone()
+                    } else {
+                        image::imageops::resize(
+                            &*img,
+                            pw,
+                            ph,
+                            image::imageops::FilterType::Triangle,
+                        )
+                    }
+                })
+                .unwrap_or_else(|| RgbaImage::new(pw, ph));
+            let rgb = image::DynamicImage::ImageRgba8(frame).into_rgb8();
+            let mut jpg = Vec::with_capacity((pw * ph / 4) as usize);
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 75).encode(
+                &rgb,
+                pw,
+                ph,
+                image::ExtendedColorType::Rgb8,
+            )?;
+            w.write_video_jpeg(&jpg)?;
+        }
+        w.finish()?;
+        Ok(())
+    }
+
     fn generated_frame(&self, id: Id, spec: &GenSpec, t: Ticks, w: u32, h: u32) -> Arc<RgbaImage> {
         let tk = if spec.is_animated() {
             (t.0 / TICKS_PER_MS).max(0) as u64
@@ -255,11 +582,15 @@ impl MediaCache {
             Ok(i) => Arc::new(i),
             Err(_) => Arc::new(RgbaImage::new(w.max(1), h.max(1))),
         };
+        let cap = *self
+            .frame_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut g = self
             .generated
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if g.len() > 64 {
+        if g.len() > cap {
             g.clear();
         }
         g.insert(key, img.clone());
@@ -314,6 +645,7 @@ fn base_item(name: String, source: MediaSource) -> MediaItem {
         height: 0,
         fps: None,
         info: String::new(),
+        proxy_path: None,
     }
 }
 
@@ -481,16 +813,9 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                     video: VideoSource::Y4m(Mutex::new(rd), Mutex::new(FrameCache::new(12))),
                     audio: None,
                 }
+            } else if SYSTEM_CONTAINER_EXTS.contains(&ext.as_str()) {
+                load_system_container(&p, item)?
             } else {
-                if UNSUPPORTED_CONTAINERS.contains(&ext.as_str()) {
-                    bail!(
-                        "{}: MP4/MOV/MKV/AAC ainda não são suportados (não há decodificador em Rust \
-                         puro com licença permissiva; o suporte virá pela API de mídia do sistema). \
-                         Converta para AVI MJPEG + PCM, por exemplo: \
-                         ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi",
-                        item.name
-                    );
-                }
                 let a = audio::decode_file(&p)?;
                 item.has_audio = true;
                 let dur = a.duration();
@@ -633,4 +958,62 @@ pub fn import_sequence(first: &Path, fps: FrameRate) -> Result<Imported> {
     let mut imp = load_entry(&mut item)?;
     imp.item = item;
     Ok(imp)
+}
+
+#[cfg(windows)]
+fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
+    let loaded = mf::open_media(p)?;
+    let audio = loaded.audio.map(Arc::new);
+    item.has_audio = audio.is_some();
+    if let Some(vr) = loaded.video {
+        let vr = Arc::new(vr);
+        item.has_video = true;
+        item.width = vr.width;
+        item.height = vr.height;
+        item.fps = Some(vr.fps);
+        let dur = loaded
+            .duration
+            .or_else(|| audio.as_ref().map(|a| a.duration()));
+        item.duration = dur;
+        item.info = format!(
+            "Media Foundation {}x{} {}{}",
+            vr.width,
+            vr.height,
+            vr.fps.label(),
+            audio
+                .as_ref()
+                .map(|a| format!(", áudio {} Hz", a.sample_rate))
+                .unwrap_or_default()
+        );
+        Ok(MediaEntry {
+            video: VideoSource::Mf(vr, Mutex::new(FrameCache::new(16))),
+            audio,
+        })
+    } else if let Some(a) = audio {
+        let dur = loaded.duration.unwrap_or_else(|| a.duration());
+        item.duration = Some(dur);
+        item.info = format!(
+            "Áudio (Media Foundation) {} Hz, {:.2} s",
+            a.sample_rate,
+            dur.as_secs_f64()
+        );
+        Ok(MediaEntry {
+            video: VideoSource::None,
+            audio: Some(a),
+        })
+    } else {
+        bail!(
+            "{}: contêiner sem fluxos legíveis via Media Foundation",
+            item.name
+        )
+    }
+}
+
+#[cfg(not(windows))]
+fn load_system_container(_p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
+    bail!(
+        "{}: contêineres MP4/MOV/MKV/AAC usam Media Foundation (disponível no Windows); \
+         converta para AVI MJPEG + PCM (ex.: ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi)",
+        item.name
+    )
 }

@@ -225,12 +225,24 @@ pub fn event_layer(
     w: usize,
     h: usize,
 ) -> Option<Frame> {
+    event_layer_opts(p, media, e, t, w, h, false)
+}
+
+fn event_layer_opts(
+    p: &Project,
+    media: &MediaCache,
+    e: &Event,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    prefer_proxy: bool,
+) -> Option<Frame> {
     let m = p.media(e.media_id)?;
     if !m.has_video {
         return None;
     }
     let mt = e.media_time(t, m.duration)?;
-    let src = media.video_frame(m, mt, w as u32, h as u32)?;
+    let src = media.video_frame_for_quality(m, mt, w as u32, h as u32, prefer_proxy)?;
     let local = t - e.start;
     let key = e.pan_crop.eval(local);
     let mut f = draw_source(&src, w, h, &key, e.maintain_aspect);
@@ -247,6 +259,7 @@ fn render_track(
     t: Ticks,
     w: usize,
     h: usize,
+    prefer_proxy: bool,
 ) -> Option<Frame> {
     let mut active: Vec<&Event> = track
         .events
@@ -261,7 +274,7 @@ fn render_track(
     // camadas mais antigas por baixo (sem transição)
     let mut base: Option<Frame> = None;
     for e in active.iter().take(n.saturating_sub(2)) {
-        if let Some(mut f) = event_layer(p, media, e, t, w, h) {
+        if let Some(mut f) = event_layer_opts(p, media, e, t, w, h, prefer_proxy) {
             f.scale_alpha(event_alpha(e, t, false, false));
             match &mut base {
                 Some(b) => b.over(&f),
@@ -274,11 +287,11 @@ fn render_track(
         let b = active[n - 1];
         let overlap = (a.end() - b.start).max(Ticks::from_raw(1));
         let prog = t.fraction_in(b.start, overlap);
-        let fa = event_layer(p, media, a, t, w, h).map(|mut f| {
+        let fa = event_layer_opts(p, media, a, t, w, h, prefer_proxy).map(|mut f| {
             f.scale_alpha(event_alpha(a, t, false, true));
             f
         });
-        let fb = event_layer(p, media, b, t, w, h).map(|mut f| {
+        let fb = event_layer_opts(p, media, b, t, w, h, prefer_proxy).map(|mut f| {
             f.scale_alpha(event_alpha(b, t, true, false));
             f
         });
@@ -299,15 +312,17 @@ fn render_track(
             e.fade_in.len > Ticks::ZERO && local < e.fade_in.len,
         ) {
             // transição sem evento anterior: entra a partir do transparente
-            (Some(tr), true) => event_layer(p, media, e, t, w, h).map(|mut f| {
-                f.scale_alpha(event_alpha(e, t, true, false));
-                let prog = e
-                    .fade_in
-                    .curve
-                    .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
-                transition::apply(tr.kind, tr.softness, &Frame::new(w, h), &f, prog)
-            }),
-            _ => event_layer(p, media, e, t, w, h).map(|mut f| {
+            (Some(tr), true) => {
+                event_layer_opts(p, media, e, t, w, h, prefer_proxy).map(|mut f| {
+                    f.scale_alpha(event_alpha(e, t, true, false));
+                    let prog = e
+                        .fade_in
+                        .curve
+                        .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
+                    transition::apply(tr.kind, tr.softness, &Frame::new(w, h), &f, prog)
+                })
+            }
+            _ => event_layer_opts(p, media, e, t, w, h, prefer_proxy).map(|mut f| {
                 f.scale_alpha(event_alpha(e, t, false, false));
                 f
             }),
@@ -324,6 +339,18 @@ fn render_track(
 
 /// Renderiza o quadro do projeto no tempo exato `t` (ticks) na resolução w x h.
 pub fn render_frame(p: &Project, media: &MediaCache, t: Ticks, w: usize, h: usize) -> Frame {
+    render_frame_preview(p, media, t, w, h, false)
+}
+
+/// Renderiza o quadro do projeto com preferência opcional por proxies (§3.6).
+pub fn render_frame_preview(
+    p: &Project,
+    media: &MediaCache,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    prefer_proxy: bool,
+) -> Frame {
     let bg = p.settings.background;
     let mut out = Frame::filled(w, h, [bg[0], bg[1], bg[2], 1.0]);
     let any_solo = p.any_solo(TrackKind::Video);
@@ -331,7 +358,7 @@ pub fn render_frame(p: &Project, media: &MediaCache, t: Ticks, w: usize, h: usiz
         if track.kind != TrackKind::Video || !track.is_audible(any_solo) {
             continue;
         }
-        let Some(mut layer) = render_track(p, media, track, t, w, h) else {
+        let Some(mut layer) = render_track(p, media, track, t, w, h, prefer_proxy) else {
             continue;
         };
         for fx in &track.fx {

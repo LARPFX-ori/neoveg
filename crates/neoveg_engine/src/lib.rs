@@ -15,15 +15,24 @@
 
 pub use neoveg_common::{curve, error, prefs, time, util};
 
+#[forbid(unsafe_code)]
 pub mod commands;
+#[forbid(unsafe_code)]
 pub mod engine;
 pub mod media;
+#[forbid(unsafe_code)]
 pub mod model;
+#[forbid(unsafe_code)]
 pub mod playback;
+#[forbid(unsafe_code)]
 pub mod recovery;
+#[forbid(unsafe_code)]
 pub mod render;
+#[forbid(unsafe_code)]
 pub mod scopes;
+#[forbid(unsafe_code)]
 pub mod session;
 
 #[cfg(test)]
+#[forbid(unsafe_code)]
 mod fuzz_tests;

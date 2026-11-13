@@ -1,8 +1,10 @@
 //! Interface gráfica (`eframe` + `wgpu`) no estilo do VEGAS Pro: timeline com
 //! lista de trilhas em cima, área de janelas acopláveis embaixo e prévia.
 
+use crate::layout::{self, WindowLayout};
+use crate::theme::{self, ThemeColors, ThemeId};
 use eframe::egui;
-use egui::{Color32, Key, TextureHandle};
+use egui::{Key, TextureHandle};
 pub use neoveg_common::prefs::{Preferences, PreviewQuality};
 use neoveg_engine::commands::{
     self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
@@ -15,7 +17,7 @@ use neoveg_engine::recovery;
 use neoveg_engine::render::{RenderProgress, RenderSettings};
 pub use neoveg_engine::session::{ClipItem, EditorOptions as Options, EditorSession};
 use neoveg_engine::util;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -52,6 +54,8 @@ pub enum PlaceTarget {
 pub enum LoadMsg {
     Imported(media::Imported, Option<PlaceTarget>),
     Reloaded(Id, Result<media::Imported, String>),
+    ProxyBuilt(Id, Result<PathBuf, String>),
+    PrerenderDone(Result<PathBuf, String>),
     Error(String),
 }
 
@@ -69,11 +73,19 @@ pub struct App {
     pub(crate) preview_tex: Option<TextureHandle>,
     pub(crate) preview_inflight: bool,
     pub(crate) preview_inflight_since: Instant,
-    pub(crate) last_req: (Ticks, u64, usize, usize, bool),
+    pub(crate) last_req: (Ticks, u64, usize, usize, bool, bool),
     pub(crate) preview_ms: f64,
     pub(crate) scopes_tex: Option<[TextureHandle; 4]>,
     pub tl: TimelineState,
     pub dock_tab: DockTab,
+    pub detached_tabs: HashSet<DockTab>,
+    pub dock_visible: bool,
+    pub dock_height: f32,
+    pub preview_ratio: f32,
+    pub saved_layouts: Vec<(String, PathBuf)>,
+    pub theme_id: ThemeId,
+    pub theme: ThemeColors,
+    pub playback_rate: f64,
     pub dlg: Dialogs,
     pub status_at: Instant,
     pub thumbs: HashMap<Id, TextureHandle>,
@@ -116,10 +128,18 @@ impl App {
     }
 
     pub fn with_context(egui_ctx: &egui::Context, open: Option<PathBuf>) -> Self {
-        setup_style(egui_ctx);
         let prefs = Preferences::load_or_default();
+        let theme_id = ThemeId::from_pref(&prefs.theme);
+        let theme = theme::apply_theme(egui_ctx, theme_id);
+        let initial_layout = prefs
+            .window_layout
+            .as_deref()
+            .and_then(|p| layout::load_layout_file(std::path::Path::new(p)).ok())
+            .unwrap_or_default();
+        let saved_layouts = layout::list_saved_layouts();
         let session = EditorSession::new(Project::new_default());
         let media = Arc::new(MediaCache::default());
+        media.configure_limits(prefs.frame_cache_cap, prefs.ram_preview_mb);
         let audio = AudioOut::new(session.snapshot.clone());
         let repaint_ctx = egui_ctx.clone();
         let preview = Preview::new(
@@ -137,11 +157,19 @@ impl App {
             preview_tex: None,
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
-            last_req: (Ticks::from_raw(-1), 0, 0, 0, false),
+            last_req: (Ticks::from_raw(-1), 0, 0, 0, false, false),
+            detached_tabs: initial_layout.detached_panels(),
+            dock_visible: initial_layout.dock_visible,
+            dock_height: initial_layout.dock_height,
+            preview_ratio: initial_layout.preview_ratio,
+            saved_layouts,
+            theme_id,
+            theme,
+            playback_rate: 1.0,
             preview_ms: 0.0,
             scopes_tex: None,
             tl: TimelineState::default(),
-            dock_tab: DockTab::ProjectMedia,
+            dock_tab: initial_layout.active_panel(),
             dlg: Dialogs::default(),
             status_at: Instant::now(),
             thumbs: HashMap::new(),
@@ -343,10 +371,15 @@ impl App {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         s.loop_range = lr.filter(|(a, b)| b > a);
         s.pos = start.to_samples_round(sr);
-        s.speed = 1.0;
+        let rate = if self.playback_rate.is_finite() && self.playback_rate >= 0.25 {
+            self.playback_rate.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        s.speed = rate;
         s.mixer.reset();
         s.playing = true;
-        self.shuttle = 1.0;
+        self.shuttle = rate;
     }
 
     pub fn shuttle_play(&mut self, speed: f64) {
@@ -560,8 +593,9 @@ impl App {
             .add_filter(
                 "Mídia suportada",
                 &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "wav",
-                    "aif", "aiff", "aifc", "flac", "ogg", "mp3",
+                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
+                    "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
+                    "flac", "ogg", "mp3", "m4a", "aac",
                 ],
             )
             .add_filter("Todos os arquivos", &["*"])
@@ -637,9 +671,10 @@ impl App {
                     } else {
                         self.set_status(format!("Importado: {}", imp.item.name));
                     }
+                    let sr = imp.entry.audio.as_ref().map(|a| a.sample_rate);
                     self.media.insert(id, imp.entry);
                     self.checkpoint();
-                    self.project.media.push(imp.item);
+                    self.session.register_imported_media(imp.item, sr);
                     if let Some(place) = place {
                         let t = match place {
                             PlaceTarget::At(t) => t,
@@ -664,6 +699,23 @@ impl App {
                         self.generation += 1;
                     }
                     Err(e) => self.set_status(format!("Mídia offline: {e}")),
+                },
+                LoadMsg::ProxyBuilt(id, res) => match res {
+                    Ok(p) => {
+                        if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
+                            m.proxy_path = Some(p.to_string_lossy().to_string());
+                        }
+                        self.dirty = true;
+                        self.generation += 1;
+                        self.set_status(format!("Proxy pronto: {}", p.display()));
+                    }
+                    Err(e) => self.set_status(format!("Erro ao gerar proxy: {e}")),
+                },
+                LoadMsg::PrerenderDone(res) => match res {
+                    Ok(p) => {
+                        self.set_status(format!("Pré-renderização concluída: {}", p.display()))
+                    }
+                    Err(e) => self.set_status(format!("Erro na pré-renderização: {e}")),
                 },
                 LoadMsg::Error(e) => self.set_status(format!("Erro de importação: {e}")),
             }
@@ -825,8 +877,9 @@ impl App {
         let s = self.opts.preview_quality.scale();
         let w = ((self.project.settings.width as f32 * s) as usize).max(16);
         let h = ((self.project.settings.height as f32 * s) as usize).max(16);
-        let scopes = self.dock_tab == DockTab::Scopes;
-        let key = (t, self.generation, w, h, scopes);
+        let scopes = self.is_panel_open(DockTab::Scopes);
+        let prefer_proxy = self.opts.preview_quality.prefer_proxy();
+        let key = (t, self.generation, w, h, scopes, prefer_proxy);
         if key != self.last_req {
             self.sync_snapshot();
             self.preview.request(PreviewRequest {
@@ -835,6 +888,7 @@ impl App {
                 w,
                 h,
                 scopes,
+                prefer_proxy,
             });
             self.last_req = key;
             self.preview_inflight = true;
@@ -916,13 +970,20 @@ impl App {
             UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
             UiAction::OpenGoto => self.dlg.goto_open = true,
             UiAction::OpenShortcuts => self.dlg.shortcuts = true,
+            UiAction::OpenPrefs => self.dlg.open_prefs(&self.prefs),
             UiAction::OpenAbout => self.dlg.about = true,
+            UiAction::BuildProxySelected => self.build_proxy_selected(),
+            UiAction::PrerenderRegion => self.prerender_region(),
             UiAction::ExitApp => {
                 if let Some(c) = ctx {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
-            UiAction::SelectDock(panel) => self.dock_tab = panel,
+            UiAction::SelectDock(panel) => {
+                self.dock_visible = true;
+                self.detached_tabs.remove(&panel);
+                self.dock_tab = panel;
+            }
             UiAction::TogglePlay => self.toggle_play(),
             UiAction::PlayFromStart => {
                 self.set_cursor(Ticks::ZERO);
@@ -969,6 +1030,9 @@ impl App {
                 ),
                 _ => {}
             }
+        }
+        if self.dlg.capturing_shortcut.is_some() {
+            return;
         }
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
         let ctrl = mods.command;
@@ -1114,14 +1178,80 @@ impl App {
             });
             ui.menu_button("Exibir", |ui| {
                 for tab in DockPanel::ALL {
-                    if ui
-                        .selectable_label(self.dock_tab == tab, tab.name())
-                        .clicked()
-                    {
+                    let open = self.is_panel_open(tab);
+                    if ui.selectable_label(open, tab.name()).clicked() {
                         self.exec_cmd(Some(ui.ctx()), tab.command_id());
                         ui.close_menu();
                     }
                 }
+                if ui
+                    .selectable_label(self.dock_visible, "Área inferior acoplável")
+                    .clicked()
+                {
+                    self.dock_visible = !self.dock_visible;
+                    ui.close_menu();
+                }
+                ui.menu_button("Layouts de janela", |ui| {
+                    for preset in layout::builtin_presets() {
+                        let label = preset.name.clone();
+                        if ui.button(label).clicked() {
+                            self.apply_window_layout(preset);
+                            ui.close_menu();
+                        }
+                    }
+                    if !self.saved_layouts.is_empty() {
+                        ui.separator();
+                        let saved = self.saved_layouts.clone();
+                        for (name, path) in saved {
+                            if ui.button(&name).clicked() {
+                                match layout::load_layout_file(&path) {
+                                    Ok(l) => {
+                                        self.apply_window_layout(l);
+                                        self.prefs.window_layout =
+                                            Some(path.to_string_lossy().to_string());
+                                        let _ = self.prefs.save();
+                                    }
+                                    Err(e) => self.set_status(format!("Erro no layout: {e}")),
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Salvar layout atual (.neoveglayout)...")
+                        .clicked()
+                    {
+                        self.dlg.save_layout_name = "Meu Layout".into();
+                        self.dlg.save_layout_open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Carregar arquivo .neoveglayout...").clicked() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("Layout Neoveg", &["neoveglayout", "json"])
+                            .pick_file()
+                        {
+                            match layout::load_layout_file(&p) {
+                                Ok(l) => {
+                                    self.apply_window_layout(l);
+                                    self.prefs.window_layout =
+                                        Some(p.to_string_lossy().to_string());
+                                    let _ = self.prefs.save();
+                                }
+                                Err(e) => self.set_status(format!("Erro no layout: {e}")),
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Tema", |ui| {
+                    for t in ThemeId::ALL {
+                        if ui.selectable_label(self.theme_id == t, t.label()).clicked() {
+                            self.set_theme(ui.ctx(), t, true);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 self.cmd_menu_chk(ui, self.opts.show_envelopes, "view.envelopes");
                 self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
@@ -1156,6 +1286,9 @@ impl App {
                 self.cmd_menu_btn(ui, "tools.fx_event");
                 self.cmd_menu_btn(ui, "tools.reverse");
                 self.cmd_menu_btn(ui, "tools.freeze_frame");
+                ui.separator();
+                self.cmd_menu_btn(ui, "tools.build_proxy");
+                self.cmd_menu_btn(ui, "tools.prerender");
             });
             ui.menu_button("Opções", |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
@@ -1168,6 +1301,8 @@ impl App {
                     "Dispositivo de áudio: {} ({} Hz)",
                     self.audio.device_name, self.audio.sr
                 ));
+                ui.separator();
+                self.cmd_menu_btn(ui, "options.prefs");
             });
             ui.menu_button("Ajuda", |ui| {
                 self.cmd_menu_btn(ui, "help.shortcuts");
@@ -1309,7 +1444,7 @@ impl App {
                 egui::RichText::new(self.fmt_time(t))
                     .monospace()
                     .size(20.0)
-                    .color(Color32::from_rgb(120, 230, 140)),
+                    .color(self.theme.timecode_fg),
             );
             if let Some((a, b)) = self.time_sel {
                 ui.label(
@@ -1336,8 +1471,36 @@ impl App {
                     self.tl.px_per_sec = z.exp();
                 }
                 ui.label("Zoom");
+                ui.separator();
+                let mut rate_changed = false;
+                if ui
+                    .small_button(format!("{:.2}×", self.playback_rate))
+                    .on_hover_text("Clique para restaurar velocidade normal (1,00×)")
+                    .clicked()
+                {
+                    self.playback_rate = 1.0;
+                    rate_changed = true;
+                }
+                rate_changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.playback_rate, 0.25..=4.0)
+                            .logarithmic(true)
+                            .show_value(false),
+                    )
+                    .on_hover_text("Taxa de reprodução contínua (Playback Rate)")
+                    .changed();
+                ui.label("Taxa:");
+                if rate_changed && playing {
+                    self.shuttle = self.playback_rate;
+                    let mut s = self
+                        .audio
+                        .shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    s.speed = self.playback_rate;
+                }
                 if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
-                    ui.label(format!("Shuttle {:+.0}x", self.shuttle));
+                    ui.label(format!("Shuttle {:+.2}x", self.shuttle));
                 }
             });
         });
@@ -1536,14 +1699,21 @@ impl App {
             self.toolbar(ui);
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
-        egui::TopBottomPanel::bottom("dock")
-            .resizable(true)
-            .default_height(330.0)
-            .min_height(160.0)
-            .show(ctx, |ui| self.dock_area(ui));
+        if self.dock_visible {
+            let resp = egui::TopBottomPanel::bottom("dock")
+                .resizable(true)
+                .default_height(self.dock_height)
+                .min_height(160.0)
+                .show(ctx, |ui| self.dock_area(ui));
+            let h = resp.response.rect.height();
+            if h.is_finite() && h >= 160.0 {
+                self.dock_height = h.clamp(160.0, 720.0);
+            }
+        }
         egui::TopBottomPanel::bottom("transport").show(ctx, |ui| self.transport_bar(ui));
         egui::CentralPanel::default().show(ctx, |ui| self.timeline_ui(ui));
 
+        self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
         self.recovery_window(ctx);
         self.autosave();
@@ -1585,16 +1755,187 @@ impl App {
     }
 }
 
-fn setup_style(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = Color32::from_rgb(38, 38, 42);
-    v.window_fill = Color32::from_rgb(44, 44, 48);
-    v.extreme_bg_color = Color32::from_rgb(24, 24, 26);
-    v.selection.bg_fill = Color32::from_rgb(60, 110, 190);
-    ctx.set_visuals(v);
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    ctx.set_style(style);
+impl App {
+    pub fn set_theme(&mut self, ctx: &egui::Context, id: ThemeId, save_prefs: bool) {
+        self.theme_id = id;
+        self.theme = theme::apply_theme(ctx, id);
+        self.prefs.theme = id.id().to_string();
+        if save_prefs {
+            if let Err(e) = self.prefs.save() {
+                self.set_status(format!("Aviso ao salvar tema: {e}"));
+            }
+        }
+    }
+
+    pub fn is_panel_open(&self, tab: DockTab) -> bool {
+        (self.dock_visible && self.dock_tab == tab && !self.detached_tabs.contains(&tab))
+            || self.detached_tabs.contains(&tab)
+    }
+
+    pub fn current_window_layout(&self, name: &str) -> WindowLayout {
+        let mut detached: Vec<String> = self
+            .detached_tabs
+            .iter()
+            .map(|t| layout::panel_key(*t).to_string())
+            .collect();
+        detached.sort();
+        let mut l = WindowLayout {
+            name: name.to_string(),
+            dock_height: self.dock_height,
+            preview_ratio: self.preview_ratio,
+            dock_visible: self.dock_visible,
+            active_tab: layout::panel_key(self.dock_tab).to_string(),
+            detached_tabs: detached,
+            px_per_sec: Some(self.tl.px_per_sec),
+        };
+        l.sanitize();
+        l
+    }
+
+    pub fn apply_window_layout(&mut self, mut l: WindowLayout) {
+        l.sanitize();
+        self.dock_height = l.dock_height;
+        self.preview_ratio = l.preview_ratio;
+        self.dock_visible = l.dock_visible;
+        self.dock_tab = l.active_panel();
+        self.detached_tabs = l.detached_panels();
+        if self.detached_tabs.contains(&self.dock_tab) {
+            if let Some(next) = DockTab::ALL
+                .into_iter()
+                .find(|t| !self.detached_tabs.contains(t))
+            {
+                self.dock_tab = next;
+            }
+        }
+        if let Some(pps) = l.px_per_sec {
+            self.tl.px_per_sec = pps;
+        }
+        self.set_status(format!("Layout aplicado: {}", l.name));
+    }
+
+    pub fn save_named_layout(&mut self, name: &str) {
+        let layout = self.current_window_layout(name);
+        let fname = format!("{}.neoveglayout", layout::sanitize_layout_filename(name));
+        let path = Preferences::layouts_dir().join(fname);
+        match layout::save_layout_file(&layout, &path) {
+            Ok(()) => {
+                self.prefs.window_layout = Some(path.to_string_lossy().to_string());
+                let _ = self.prefs.save();
+                self.saved_layouts = layout::list_saved_layouts();
+                self.set_status(format!("Layout salvo em {}", path.display()));
+            }
+            Err(e) => self.set_status(format!("Erro ao salvar layout: {e}")),
+        }
+    }
+
+    pub fn build_proxy_for_media(&mut self, media_id: Id) {
+        let Some(item) = self.project.media(media_id).cloned() else {
+            self.set_status("Mídia não encontrada no projeto.");
+            return;
+        };
+        if !item.has_video {
+            self.set_status("Proxies aplicam-se apenas a clipes de vídeo.");
+            return;
+        }
+        if !self.media.contains(media_id) {
+            self.set_status("Mídia offline: não foi possível gerar proxy.");
+            return;
+        }
+        let dir = neoveg_common::util::base_dir().join("proxies");
+        let out = dir.join(format!("proxy_{media_id}.avi"));
+        let media = self.media.clone();
+        let tx = self.loader_tx.clone();
+        self.loading += 1;
+        self.set_status(format!("Gerando proxy de '{}'...", item.name));
+        if let Err(e) = util::spawn("gerar-proxy", move || {
+            let res = media
+                .create_proxy_avi(&item, &out)
+                .map(|()| out)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(LoadMsg::ProxyBuilt(media_id, res));
+        }) {
+            self.loading = self.loading.saturating_sub(1);
+            self.set_status(e);
+        }
+    }
+
+    pub fn build_proxy_selected(&mut self) {
+        let mut media_ids: Vec<Id> = Vec::new();
+        for eid in &self.sel_events {
+            if let Some(ev) = self.project.event(*eid) {
+                if self
+                    .project
+                    .media(ev.media_id)
+                    .map(|m| m.has_video)
+                    .unwrap_or(false)
+                    && !media_ids.contains(&ev.media_id)
+                {
+                    media_ids.push(ev.media_id);
+                }
+            }
+        }
+        if media_ids.is_empty() {
+            self.set_status("Selecione pelo menos um evento de vídeo para gerar proxy.");
+            return;
+        }
+        for mid in media_ids {
+            self.build_proxy_for_media(mid);
+        }
+    }
+
+    pub fn prerender_region(&mut self) {
+        let (start, end) = if let Some((a, b)) = self.time_sel.filter(|(a, b)| b > a) {
+            (a, b)
+        } else if let Some((a, b)) = self.project.loop_region.filter(|(a, b)| b > a) {
+            (a, b)
+        } else {
+            let a = self.cursor;
+            let dur = self.project.duration();
+            let b = if dur > a {
+                (a + Ticks::from_secs_i64(5)).min(dur)
+            } else {
+                a + Ticks::from_secs_i64(5)
+            };
+            (a, b)
+        };
+        if end <= start {
+            self.set_status("Região vazia para pré-renderizar.");
+            return;
+        }
+        self.sync_snapshot();
+        let proj = Arc::new((*self.session.snapshot).clone());
+        let media = self.media.clone();
+        let scale = self.opts.preview_quality.resolution().scale();
+        let w = (((proj.settings.width as f32 * scale) as u32 / 2).max(32)) * 2;
+        let h = (((proj.settings.height as f32 * scale) as u32 / 2).max(18)) * 2;
+        let dir = neoveg_common::util::base_dir().join("prerender");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join(format!("prerender_{}_{}.avi", start.0, end.0));
+        let settings = RenderSettings {
+            format: crate::render::RenderFormat::AviMjpeg,
+            path: out.clone(),
+            width: w,
+            height: h,
+            start,
+            end,
+            jpeg_quality: 80,
+            include_audio: true,
+            wav_bits: crate::render::WavBits::Pcm16,
+        };
+        let tx = self.loader_tx.clone();
+        self.loading += 1;
+        self.set_status("Pré-renderizando região selecionada...");
+        if let Err(e) = util::spawn("prerender-regiao", move || {
+            let prog = RenderProgress::default();
+            let res = crate::render::run(&proj, &media, &settings, &prog)
+                .map(|()| out)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(LoadMsg::PrerenderDone(res));
+        }) {
+            self.loading = self.loading.saturating_sub(1);
+            self.set_status(e);
+        }
+    }
 }
 
 pub(crate) fn rgba_to_color_image(img: &image::RgbaImage) -> egui::ColorImage {

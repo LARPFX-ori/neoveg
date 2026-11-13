@@ -24,6 +24,9 @@ pub struct ProjectSettings {
     pub sample_rate: u32,
     #[serde(default = "default_bg")]
     pub background: [f32; 3],
+    /// Indica se o formato do projeto foi escolhido explicitamente pelo usuário (§3.1).
+    #[serde(default)]
+    pub manually_configured: bool,
 }
 
 fn default_bg() -> [f32; 3] {
@@ -39,6 +42,7 @@ impl Default for ProjectSettings {
             drop_frame: true,
             sample_rate: 48000,
             background: default_bg(),
+            manually_configured: false,
         }
     }
 }
@@ -540,6 +544,9 @@ pub struct MediaItem {
     pub fps: Option<FrameRate>,
     #[serde(default)]
     pub info: String,
+    /// Arquivo auxiliar leve de proxy para edição em hardware modesto (§3.6).
+    #[serde(default)]
+    pub proxy_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1757,6 +1764,7 @@ mod tests {
             height: 0,
             fps: Some(FrameRate::FPS_30),
             info: String::new(),
+            proxy_path: None,
         };
         let dur = Some(Ticks::from_secs_i64(4));
         let mut e = Event::new(&m, Ticks::from_secs_i64(10), Ticks::from_secs_i64(6));

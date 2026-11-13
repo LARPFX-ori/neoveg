@@ -244,4 +244,56 @@ fn ui_smoke() {
     assert_eq!(app.project.tracks.len(), n_tracks_before + 1);
     app.exec_cmd(None, "edit.undo");
     assert_eq!(app.project.tracks.len(), n_tracks_before);
+
+    // 7 temas (incluindo Alto Contraste AAA), preferências, layouts e aba destacada
+    for tid in crate::theme::ThemeId::ALL {
+        app.set_theme(&ctx, tid, false);
+        frame(&mut app, vec![], Modifiers::NONE);
+    }
+    app.set_theme(&ctx, crate::theme::ThemeId::VegasEscuro, false);
+
+    app.exec_cmd(Some(&ctx), "options.prefs");
+    assert!(app.dlg.prefs_open);
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dlg.prefs_open = false;
+
+    for preset in crate::layout::builtin_presets() {
+        app.apply_window_layout(preset);
+        frame(&mut app, vec![], Modifiers::NONE);
+    }
+    app.detached_tabs.insert(DockTab::Mixer);
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.detached_tabs.remove(&DockTab::Mixer);
+
+    // Playback rate contínuo durante reprodução + geração de proxy
+    app.playback_rate = 1.5;
+    app.play();
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert!(app.is_playing());
+    app.stop(false);
+    app.playback_rate = 1.0;
+
+    let avi_mid = app
+        .project
+        .media
+        .iter()
+        .find(|m| m.has_video && !matches!(m.source, MediaSource::Generated(_)))
+        .map(|m| m.id)
+        .unwrap();
+    app.build_proxy_for_media(avi_mid);
+    for _ in 0..150 {
+        if app.loading == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        frame(&mut app, vec![], Modifiers::NONE);
+    }
+    let proxy_file = app
+        .project
+        .media(avi_mid)
+        .and_then(|m| m.proxy_path.clone());
+    assert!(proxy_file.is_some(), "proxy deveria ter sido criado");
+    if let Some(pf) = proxy_file {
+        let _ = std::fs::remove_file(pf);
+    }
 }

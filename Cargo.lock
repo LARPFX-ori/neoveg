@@ -2402,6 +2402,7 @@ dependencies = [
  "neoveg_engine",
  "neoveg_scripting",
  "neoveg_ui",
+ "rayon",
 ]
 
 [[package]]
@@ -2428,6 +2429,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "windows 0.58.0",
 ]
 
 [[package]]
@@ -2449,6 +2451,8 @@ dependencies = [
  "neoveg_engine",
  "neoveg_scripting",
  "rfd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

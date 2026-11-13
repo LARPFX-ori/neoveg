@@ -12,6 +12,8 @@ neoveg_scripting.workspace = true
 eframe.workspace = true
 rfd.workspace = true
 image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 
 [lints]

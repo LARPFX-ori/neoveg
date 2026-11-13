@@ -24,6 +24,7 @@ enum Zone {
     RightEdge,
     FadeIn,
     FadeOut,
+    GainHandle,
     FxButton,
     PanCropButton,
 }
@@ -60,6 +61,11 @@ enum Drag {
     Fade {
         id: Id,
         fade_in: bool,
+    },
+    Gain {
+        id: Id,
+        orig_db: f32,
+        origin_y: f32,
     },
     Slip {
         origin_t: Ticks,
@@ -232,6 +238,14 @@ impl App {
         )
     }
 
+    fn gain_handle_y(r: Rect, gain_db: f32) -> f32 {
+        // Na semântica do VEGAS Pro, 0 dB fica no topo do evento de áudio e
+        // arrastar para baixo atenua até -36 dB.
+        let t = (-gain_db / 36.0).clamp(0.0, 1.0);
+        let span = (r.height() - 8.0).max(0.0);
+        (r.top() + 3.0 + t * span).clamp(r.top() + 2.0, (r.bottom() - 3.0).max(r.top() + 2.0))
+    }
+
     fn event_buttons(r: &Rect, is_video: bool) -> (Option<Rect>, Option<Rect>) {
         if r.width() < 70.0 {
             return (None, None);
@@ -277,6 +291,12 @@ impl App {
                 }
                 if (pos.x - fo_x).abs() < 6.0 && pos.x > r.center().x - 6.0 {
                     return Some((ti, ei, Zone::FadeOut));
+                }
+            }
+            if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
+                let gy = Self::gain_handle_y(r, e.gain_db);
+                if (pos.y - gy).abs() <= 4.5 && pos.x > fi_x + 5.0 && pos.x < fo_x - 5.0 {
+                    return Some((ti, ei, Zone::GainHandle));
                 }
             }
             if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
@@ -405,8 +425,7 @@ impl App {
     }
 
     fn corner_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
-        ui.painter()
-            .rect_filled(r, 0.0, Color32::from_rgb(30, 30, 33));
+        ui.painter().rect_filled(r, 0.0, self.theme.tl_bg);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(4.0)));
         child.horizontal(|ui| {
             if ui
@@ -448,9 +467,9 @@ impl App {
             pos2(r.right(), loop_r.bottom() + MARKER_H),
         );
         let ruler_r = Rect::from_min_max(pos2(r.left(), marker_r.bottom()), r.max);
-        painter.rect_filled(loop_r, 0.0, Color32::from_rgb(28, 28, 30));
-        painter.rect_filled(marker_r, 0.0, Color32::from_rgb(34, 34, 38));
-        painter.rect_filled(ruler_r, 0.0, Color32::from_rgb(46, 46, 52));
+        painter.rect_filled(loop_r, 0.0, self.theme.tl_loop_bar);
+        painter.rect_filled(marker_r, 0.0, self.theme.tl_marker_bar);
+        painter.rect_filled(ruler_r, 0.0, self.theme.tl_ruler_bg);
         let left = r.left();
         let fps = self.project.settings.fps;
 
@@ -461,9 +480,9 @@ impl App {
                 pos2(self.tl.t2x(b, left), loop_r.bottom() - 2.0),
             );
             let col = if self.opts.loop_playback {
-                Color32::from_rgb(90, 140, 220)
+                self.theme.tl_loop_active
             } else {
-                Color32::from_rgb(80, 80, 95)
+                self.theme.tl_loop_inactive
             };
             painter.rect_filled(lr, 2.0, col);
         }
@@ -486,7 +505,7 @@ impl App {
             let h = if is_major { 10.0 } else { 4.0 };
             painter.line_segment(
                 [pos2(x, ruler_r.bottom() - h), pos2(x, ruler_r.bottom())],
-                Stroke::new(1.0_f32, Color32::from_gray(150)),
+                Stroke::new(1.0_f32, self.theme.text_muted),
             );
             if is_major {
                 painter.text(
@@ -494,7 +513,7 @@ impl App {
                     Align2::LEFT_TOP,
                     self.fmt_time(t),
                     FontId::monospace(10.0),
-                    Color32::from_gray(200),
+                    self.theme.text_primary,
                 );
             }
             idx = idx.saturating_add(1);
@@ -534,7 +553,7 @@ impl App {
         sorted.sort_by_key(|a| a.t);
         for (i, m) in sorted.iter().enumerate() {
             let x = self.tl.t2x(m.t, left);
-            let col = Color32::from_rgb(230, 150, 40);
+            let col = self.theme.tl_region;
             painter.rect_filled(
                 Rect::from_min_size(pos2(x, marker_r.top()), vec2(14.0, MARKER_H - 2.0)),
                 1.0,
@@ -866,7 +885,7 @@ impl App {
     #[allow(clippy::needless_range_loop)]
     fn headers_ui(&mut self, ui: &mut egui::Ui, area: Rect, layout: &[(f32, f32)]) {
         let painter = ui.painter_at(area);
-        painter.rect_filled(area, 0.0, Color32::from_rgb(36, 36, 40));
+        painter.rect_filled(area, 0.0, self.theme.tl_header_bg);
         // rolagem vertical com a roda sobre os cabeçalhos
         if ui.rect_contains_pointer(area) {
             let d = ui.input(|i| i.raw_scroll_delta.y);
@@ -884,9 +903,9 @@ impl App {
             let selected = self.sel_track == Some(ti);
             let track = &self.project.tracks[ti];
             let bg = if selected {
-                Color32::from_rgb(58, 62, 74)
+                self.theme.tl_header_sel
             } else {
-                Color32::from_rgb(44, 44, 50)
+                self.theme.tl_header_idle
             };
             painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, bg);
             painter.rect_filled(
@@ -1240,6 +1259,7 @@ impl App {
                     Zone::FadeIn | Zone::FadeOut => {
                         ui.ctx().set_cursor_icon(CursorIcon::ResizeNeSw)
                     }
+                    Zone::GainHandle => ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical),
                     Zone::FxButton | Zone::PanCropButton => {
                         ui.ctx().set_cursor_icon(CursorIcon::PointingHand)
                     }
@@ -1380,6 +1400,15 @@ impl App {
                     self.tl.drag = Drag::Fade {
                         id,
                         fade_in: zone == Zone::FadeIn,
+                    };
+                }
+                Zone::GainHandle => {
+                    let orig_db = self.project.tracks[ti].events[ei].gain_db;
+                    self.checkpoint();
+                    self.tl.drag = Drag::Gain {
+                        id,
+                        orig_db,
+                        origin_y: origin.y,
                     };
                 }
                 Zone::LeftEdge | Zone::RightEdge => {
@@ -1562,6 +1591,23 @@ impl App {
                         e.fade_out.len =
                             (e.end() - t).clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
                     }
+                }
+                self.changed();
+            }
+            Drag::Gain {
+                id,
+                orig_db,
+                origin_y,
+            } => {
+                let dy = p.y - origin_y;
+                let raw = (orig_db - dy * 0.35).clamp(-36.0, 12.0);
+                let snapped = if raw.abs() < 0.4 {
+                    0.0
+                } else {
+                    (raw * 10.0).round() / 10.0
+                };
+                if let Some(e) = self.project.event_mut(id) {
+                    e.gain_db = snapped;
                 }
                 self.changed();
             }
@@ -2183,7 +2229,7 @@ impl App {
     #[allow(clippy::needless_range_loop)]
     fn draw_lanes(&mut self, ui: &mut egui::Ui, lanes: Rect, layout: &[(f32, f32)]) {
         let painter = ui.painter_at(lanes);
-        painter.rect_filled(lanes, 0.0, Color32::from_rgb(30, 30, 33));
+        painter.rect_filled(lanes, 0.0, self.theme.tl_bg);
         let left = lanes.left();
         let pps = self.tl.px_per_sec;
         let ctx = ui.ctx().clone();
@@ -2200,7 +2246,7 @@ impl App {
             let x = self.tl.t2x(gt, left);
             painter.line_segment(
                 [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
-                Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 44)),
+                Stroke::new(1.0_f32, self.theme.tl_grid_line),
             );
             idx = idx.saturating_add(1);
         }
@@ -2210,7 +2256,7 @@ impl App {
                 pos2(self.tl.t2x(a, left), lanes.top()),
                 pos2(self.tl.t2x(b, left), lanes.bottom()),
             );
-            painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(90, 130, 200, 40));
+            painter.rect_filled(r, 0.0, self.theme.tl_sel_band);
         }
         let audio_map = self.media.audio_map();
         for ti in 0..self.project.tracks.len() {
@@ -2224,9 +2270,9 @@ impl App {
                 lane,
                 0.0,
                 if selected {
-                    Color32::from_rgb(40, 42, 50)
+                    self.theme.tl_lane_even
                 } else {
-                    Color32::from_rgb(33, 33, 37)
+                    self.theme.tl_lane_odd
                 },
             );
             painter.line_segment(
@@ -2234,7 +2280,7 @@ impl App {
                     pos2(lane.left(), lane.bottom()),
                     pos2(lane.right(), lane.bottom()),
                 ],
-                Stroke::new(1.0_f32, Color32::from_gray(22)),
+                Stroke::new(1.0_f32, self.theme.border),
             );
             let track = self.project.tracks[ti].clone();
             let muted = track.mute;
@@ -2426,7 +2472,7 @@ impl App {
                     );
                 }
                 // fades
-                let fade_col = Stroke::new(1.5_f32, Color32::from_rgb(250, 250, 160));
+                let fade_col = Stroke::new(1.5_f32, self.theme.tl_fade);
                 let draw_fade = |len: Ticks, curve: Curve, fade_in: bool| {
                     if len <= Ticks::ZERO {
                         return;
@@ -2455,13 +2501,40 @@ impl App {
                     painter.rect_filled(
                         Rect::from_center_size(pos2(x, r.top() + 3.0), vec2(6.0, 6.0)),
                         1.0,
-                        Color32::from_rgb(250, 250, 160),
+                        self.theme.tl_fade,
                     );
                 }
+                // alça de ganho no topo do evento de áudio
+                if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
+                    let gy = Self::gain_handle_y(r, e.gain_db);
+                    let x0 = (fi_x + 4.0).min(r.right() - 4.0);
+                    let x1 = (fo_x - 4.0).max(x0);
+                    painter.line_segment(
+                        [pos2(x0, gy), pos2(x1, gy)],
+                        Stroke::new(1.0_f32, self.theme.tl_gain_line),
+                    );
+                    let dragging_gain = matches!(self.tl.drag, Drag::Gain { id, .. } if id == e.id);
+                    if dragging_gain || e.gain_db.abs() > 0.05 {
+                        painter.rect_filled(
+                            Rect::from_center_size(pos2((x0 + x1) * 0.5, gy), vec2(5.0, 5.0)),
+                            1.0,
+                            self.theme.tl_gain_line,
+                        );
+                    }
+                    if dragging_gain {
+                        painter.text(
+                            pos2((x0 + x1) * 0.5, (gy - 12.0).max(r.top() + 2.0)),
+                            Align2::CENTER_BOTTOM,
+                            format!("{:+.1} dB", e.gain_db),
+                            FontId::monospace(10.0),
+                            self.theme.tl_gain_line,
+                        );
+                    }
+                }
                 let border = if sel {
-                    Stroke::new(2.0_f32, Color32::WHITE)
+                    Stroke::new(2.0_f32, self.theme.tl_event_sel_border)
                 } else {
-                    Stroke::new(1.0_f32, Color32::from_gray(15))
+                    Stroke::new(1.0_f32, self.theme.tl_event_border)
                 };
                 painter.rect_stroke(r, 2.0, border, StrokeKind::Inside);
                 if e.locked {
@@ -2478,8 +2551,8 @@ impl App {
             if self.opts.show_envelopes {
                 for env in track.envelopes.iter().filter(|e| e.visible) {
                     let col = match env.kind {
-                        EnvKind::Volume | EnvKind::Opacity => Color32::from_rgb(90, 160, 255),
-                        EnvKind::Pan | EnvKind::FadeToColor => Color32::from_rgb(255, 110, 110),
+                        EnvKind::Volume | EnvKind::Opacity => self.theme.tl_env_primary,
+                        EnvKind::Pan | EnvKind::FadeToColor => self.theme.tl_env_secondary,
                     };
                     let mut pts = vec![];
                     let mut x = lanes.left();
@@ -2550,7 +2623,7 @@ impl App {
             painter.rect_stroke(
                 Rect::from_min_size(pos2(x, y0 + 1.0), vec2(80.0, h - 2.0)),
                 2.0,
-                Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 90)),
+                Stroke::new(2.0_f32, self.theme.tl_playhead_edit),
                 StrokeKind::Inside,
             );
         }
@@ -2558,7 +2631,7 @@ impl App {
             let x = self.tl.t2x(t, left);
             painter.line_segment(
                 [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
-                Stroke::new(1.0_f32, Color32::from_rgb(255, 220, 90)),
+                Stroke::new(1.0_f32, self.theme.tl_playhead_edit),
             );
         }
     }
@@ -2573,7 +2646,7 @@ impl App {
             while y < area.bottom() {
                 painter.line_segment(
                     [pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))],
-                    Stroke::new(1.0_f32, Color32::from_rgb(230, 150, 40)),
+                    Stroke::new(1.0_f32, self.theme.tl_region),
                 );
                 y += 8.0;
             }
@@ -2596,7 +2669,7 @@ impl App {
             let px = self.tl.t2x(self.play_pos(), left);
             painter.line_segment(
                 [pos2(px, area.top() + LOOP_H), pos2(px, area.bottom())],
-                Stroke::new(1.5_f32, Color32::from_rgb(255, 120, 60)),
+                Stroke::new(1.0_f32, self.theme.tl_playhead_live),
             );
         }
     }

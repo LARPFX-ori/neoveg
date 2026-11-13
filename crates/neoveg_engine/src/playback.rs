@@ -2,7 +2,7 @@
 //! relógio mestre, e um worker de prévia de vídeo em segundo plano.
 
 use crate::engine::audio::{Meters, Mixer};
-use crate::engine::video::render_frame;
+use crate::engine::video::render_frame_preview;
 use crate::media::{AudioData, MediaCache};
 use crate::model::{Id, Project, Ticks};
 use crate::scopes;
@@ -244,6 +244,7 @@ pub struct PreviewRequest {
     pub w: usize,
     pub h: usize,
     pub scopes: bool,
+    pub prefer_proxy: bool,
 }
 
 pub struct PreviewResult {
@@ -282,7 +283,14 @@ impl Preview {
                     // §0.6: uma falha ao renderizar um quadro vira um quadro de erro,
                     // e o worker continua vivo para os próximos pedidos.
                     let rendered = crate::util::guard("prévia de vídeo", || {
-                        let f = render_frame(&req.project, &media, req.t, req.w, req.h);
+                        let f = render_frame_preview(
+                            &req.project,
+                            &media,
+                            req.t,
+                            req.w,
+                            req.h,
+                            req.prefer_proxy,
+                        );
                         let sc = if req.scopes {
                             Some(scopes::compute(&f))
                         } else {

@@ -14,14 +14,18 @@
 pub mod app;
 mod dialogs;
 mod edit;
+pub mod layout;
 mod panels;
+pub mod theme;
 mod timeline;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use app::rgba_to_color_image;
-pub use app::{App, DndPayload, DockTab, FxTarget, PreviewQuality, RenderJob, TimelineState};
+pub use app::{
+    App, DndPayload, DockTab, FxTarget, Preferences, PreviewQuality, RenderJob, TimelineState,
+};
 pub use neoveg_engine::{media, model, playback, recovery, render, session, util};
 
 use eframe::egui;

@@ -2,11 +2,14 @@
 //! Motion, cadeias de efeitos, editor de mídia gerada, Renderizar Como,
 //! atalhos e "sobre".
 
-use super::{App, FxTarget, RenderJob};
+use super::{App, FxTarget, Preferences, RenderJob};
 use crate::model::*;
 use crate::render::{RenderFormat, RenderSettings, WavBits};
+use crate::theme::ThemeId;
 use eframe::egui;
-use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
+use egui::{pos2, vec2, Color32, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
+use neoveg_common::recommended_worker_threads;
+use neoveg_engine::commands::{resolved_shortcut, Shortcut, ShortcutKey, COMMANDS};
 use std::path::{Path, PathBuf};
 
 pub struct RenderDialogState {
@@ -28,6 +31,13 @@ pub struct Dialogs {
     pub fx_target: Option<FxTarget>,
     pub gen_editor: Option<Id>,
     pub shortcuts: bool,
+    pub prefs_open: bool,
+    prefs_draft: Option<Preferences>,
+    prefs_orig_theme: Option<String>,
+    shortcut_filter: String,
+    pub capturing_shortcut: Option<&'static str>,
+    pub save_layout_open: bool,
+    pub save_layout_name: String,
     pub about: bool,
     pub goto_open: bool,
     goto_text: String,
@@ -57,6 +67,12 @@ const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
 ];
 
 impl Dialogs {
+    pub fn open_prefs(&mut self, current: &Preferences) {
+        self.prefs_draft = Some(current.clone());
+        self.prefs_orig_theme = Some(current.theme.clone());
+        self.prefs_open = true;
+    }
+
     pub fn open_render(&mut self, p: &Project, proj_path: Option<&Path>) {
         let base = proj_path
             .map(|pp| pp.with_extension("avi"))
@@ -265,6 +281,7 @@ impl App {
                 );
             });
         if changed {
+            self.session.project.settings.manually_configured = true;
             self.dialog_change();
         }
         self.dlg.project_props = open;
@@ -1670,88 +1687,387 @@ impl App {
             self.dlg.goto_open = open;
         }
         if self.dlg.shortcuts {
-            let mut open = true;
-            egui::Window::new("Atalhos de teclado")
-                .open(&mut open)
-                .default_width(460.0)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(480.0)
-                        .show(ui, |ui| {
-                            egui::Grid::new("sc")
-                                .striped(true)
-                                .num_columns(2)
-                                .show(ui, |ui| {
-                                    for (k, d) in SHORTCUTS {
-                                        ui.label(egui::RichText::new(*k).monospace());
-                                        ui.label(*d);
-                                        ui.end_row();
-                                    }
-                                });
-                        });
-                });
-            self.dlg.shortcuts = open;
+            self.shortcuts_window(ctx);
+        }
+        if self.dlg.prefs_open {
+            self.prefs_window(ctx);
+        }
+        if self.dlg.save_layout_open {
+            self.save_layout_window(ctx);
         }
         if self.dlg.about {
             let mut open = true;
-            egui::Window::new("Sobre o Neoveg").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.heading("Neoveg");
-                ui.label(format!("Versão {}", env!("CARGO_PKG_VERSION")));
-                ui.label("Editor de vídeo não-linear escrito em Rust puro (eframe + wgpu, cpal, claxon, lewton, puremp3, image).");
-                ui.label("Fluxo de trabalho e atalhos baseados na semântica do VEGAS Pro.");
-                ui.separator();
-                ui.label(egui::RichText::new(
-                    "Formatos de vídeo: AVI (MJPEG/RGB), Y4M, GIF, sequências de imagens. \
-                     Áudio: WAV, AIFF, FLAC, OGG, MP3.",
-                ).small());
-            });
+            egui::Window::new("Sobre o Neoveg")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.heading("Neoveg");
+                    ui.label(format!("Versão {}", env!("CARGO_PKG_VERSION")));
+                    ui.label("Editor de vídeo não-linear escrito em Rust puro (eframe + wgpu, cpal, claxon, lewton, puremp3, image).");
+                    ui.label("Fluxo de trabalho e atalhos baseados na semântica do VEGAS Pro.");
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(
+                            "Formatos de vídeo: AVI (MJPEG/RGB), Y4M, GIF, sequências de imagens e MP4/MOV/MKV no Windows via Media Foundation. \
+                             Áudio: WAV, AIFF, FLAC, OGG, MP3, M4A/AAC.",
+                        )
+                        .small(),
+                    );
+                });
             self.dlg.about = open;
         }
     }
+
+    fn shortcuts_window(&mut self, ctx: &egui::Context) {
+        if let Some(cmd_id) = self.dlg.capturing_shortcut {
+            if let Some(captured) = capture_shortcut(ctx) {
+                self.dlg.capturing_shortcut = None;
+                if let Some(sc) = captured {
+                    let formatted = sc.format();
+                    self.prefs
+                        .shortcuts
+                        .insert(cmd_id.to_string(), Some(formatted.clone()));
+                    if let Err(e) = self.prefs.save() {
+                        self.set_status(format!("Aviso ao salvar atalho: {e}"));
+                    } else {
+                        self.set_status(format!("Atalho '{cmd_id}' definido para {formatted}"));
+                    }
+                }
+            }
+        }
+        let mut open = true;
+        egui::Window::new("Atalhos de teclado")
+            .open(&mut open)
+            .default_width(640.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Filtrar:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.shortcut_filter)
+                            .hint_text("comando, menu ou tecla...")
+                            .desired_width(240.0),
+                    );
+                    if ui.button("Restaurar padrões").clicked() {
+                        self.prefs.shortcuts.clear();
+                        self.dlg.capturing_shortcut = None;
+                        let _ = self.prefs.save();
+                        self.set_status("Atalhos restaurados para os padrões.");
+                    }
+                });
+                if let Some(cap) = self.dlg.capturing_shortcut {
+                    ui.colored_label(
+                        self.theme.accent,
+                        format!("Pressione a nova combinação para '{cap}' (Esc para cancelar)..."),
+                    );
+                }
+                ui.separator();
+                let filter = self.dlg.shortcut_filter.trim().to_ascii_lowercase();
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("sc_dyn")
+                            .striped(true)
+                            .num_columns(4)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("Menu / Comando").strong());
+                                ui.label(egui::RichText::new("Atalho ativo").strong());
+                                ui.label("");
+                                ui.label("");
+                                ui.end_row();
+                                for cmd in COMMANDS {
+                                    let sc_text = resolved_shortcut(cmd, &self.prefs.shortcuts)
+                                        .map(Shortcut::format)
+                                        .unwrap_or_else(|| "-".into());
+                                    if !filter.is_empty() {
+                                        let m = cmd.menu_path.to_ascii_lowercase();
+                                        let l = cmd.label.to_ascii_lowercase();
+                                        let id_l = cmd.id.to_ascii_lowercase();
+                                        let s = sc_text.to_ascii_lowercase();
+                                        if !m.contains(&filter)
+                                            && !l.contains(&filter)
+                                            && !id_l.contains(&filter)
+                                            && !s.contains(&filter)
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                    ui.label(cmd.menu_path)
+                                        .on_hover_text(format!("{} ({})", cmd.label, cmd.id));
+                                    ui.label(egui::RichText::new(sc_text).monospace());
+                                    let waiting = self.dlg.capturing_shortcut == Some(cmd.id);
+                                    if ui
+                                        .small_button(if waiting {
+                                            "Aguardando..."
+                                        } else {
+                                            "Gravar"
+                                        })
+                                        .clicked()
+                                    {
+                                        self.dlg.capturing_shortcut = Some(cmd.id);
+                                    }
+                                    if ui.small_button("Limpar").clicked() {
+                                        self.dlg.capturing_shortcut = None;
+                                        self.prefs.shortcuts.insert(cmd.id.to_string(), None);
+                                        let _ = self.prefs.save();
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                        ui.separator();
+                        ui.label(egui::RichText::new("Gestos de mouse na timeline:").strong());
+                        egui::Grid::new("sc_mouse")
+                            .striped(true)
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                for (k, d) in MOUSE_HINTS {
+                                    ui.label(egui::RichText::new(*k).monospace());
+                                    ui.label(*d);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        if !open {
+            self.dlg.capturing_shortcut = None;
+        }
+        self.dlg.shortcuts = open;
+    }
+
+    fn prefs_window(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.dlg.prefs_draft.take() else {
+            self.dlg.prefs_open = false;
+            return;
+        };
+        let mut open = true;
+        let mut apply_and_keep = false;
+        let mut save_and_close = false;
+        let mut cancel_close = false;
+        let mut clear_cache_now = false;
+        let rec_workers = recommended_worker_threads();
+
+        egui::Window::new("Preferências...")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                ui.heading("Aparência e Acessibilidade");
+                let mut cur_theme = ThemeId::from_pref(&draft.theme);
+                egui::ComboBox::from_label("Tema visual (inclui Alto Contraste AAA)")
+                    .selected_text(cur_theme.label())
+                    .show_ui(ui, |ui| {
+                        for t in ThemeId::ALL {
+                            if ui.selectable_value(&mut cur_theme, t, t.label()).clicked() {
+                                draft.theme = t.id().to_string();
+                                self.set_theme(ctx, t, false);
+                            }
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    ui.label("Idioma da interface:");
+                    ui.label(egui::RichText::new(&draft.language).strong());
+                });
+
+                ui.separator();
+                ui.heading("Desempenho e Hardware Limitado (§3.6)");
+                egui::Grid::new("prefs_hw").num_columns(2).show(ui, |ui| {
+                    ui.label("Orçamento de RAM para prévia (MB):");
+                    let mut ram = draft.ram_preview_mb;
+                    if ui
+                        .add(egui::DragValue::new(&mut ram).range(32..=4096).speed(16))
+                        .changed()
+                    {
+                        draft.ram_preview_mb = ram;
+                    }
+                    ui.end_row();
+
+                    ui.label("Máximo de quadros por mídia em cache:");
+                    let mut cap = draft.frame_cache_cap;
+                    if ui
+                        .add(egui::DragValue::new(&mut cap).range(8..=256))
+                        .changed()
+                    {
+                        draft.frame_cache_cap = cap;
+                    }
+                    ui.end_row();
+
+                    ui.label("Threads de processamento (0 = automático):");
+                    let mut wt = draft.worker_threads;
+                    if ui.add(egui::DragValue::new(&mut wt).range(0..=32)).changed() {
+                        draft.worker_threads = wt;
+                    }
+                    ui.end_row();
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Recomendado para esta CPU: {rec_workers} worker(s). Alteração do pool de threads passa a valer totalmente ao reiniciar."
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if ui.button("Limpar cache de quadros em memória agora").clicked() {
+                    clear_cache_now = true;
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        save_and_close = true;
+                    }
+                    if ui.button("Aplicar").clicked() {
+                        apply_and_keep = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel_close = true;
+                    }
+                });
+            });
+
+        if clear_cache_now {
+            self.media.clear_frame_caches();
+            self.thumbs.clear();
+            self.set_status("Cache de quadros liberado.");
+        }
+
+        if cancel_close || (!open && !save_and_close) {
+            if let Some(orig) = self.dlg.prefs_orig_theme.take() {
+                let tid = ThemeId::from_pref(&orig);
+                self.set_theme(ctx, tid, false);
+            }
+            self.dlg.prefs_open = false;
+            self.dlg.prefs_draft = None;
+            return;
+        }
+
+        if apply_and_keep || save_and_close {
+            draft.sanitize();
+            let tid = ThemeId::from_pref(&draft.theme);
+            self.media
+                .configure_limits(draft.frame_cache_cap, draft.ram_preview_mb);
+            self.prefs.theme = draft.theme.clone();
+            self.prefs.ram_preview_mb = draft.ram_preview_mb;
+            self.prefs.frame_cache_cap = draft.frame_cache_cap;
+            self.prefs.worker_threads = draft.worker_threads;
+            self.prefs.language = draft.language.clone();
+            self.set_theme(ctx, tid, true);
+            if save_and_close {
+                self.dlg.prefs_orig_theme = None;
+                self.dlg.prefs_open = false;
+                self.dlg.prefs_draft = None;
+                self.set_status("Preferências salvas.");
+            } else {
+                self.dlg.prefs_orig_theme = Some(draft.theme.clone());
+                self.dlg.prefs_draft = Some(draft);
+                self.set_status("Preferências aplicadas.");
+            }
+        } else {
+            self.dlg.prefs_draft = Some(draft);
+        }
+    }
+
+    fn save_layout_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut commit = false;
+        egui::Window::new("Salvar layout de janela (.neoveglayout)")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Nome do layout:");
+                ui.text_edit_singleline(&mut self.dlg.save_layout_name);
+                ui.horizontal(|ui| {
+                    if ui.button("Salvar").clicked() {
+                        commit = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        self.dlg.save_layout_open = false;
+                    }
+                });
+            });
+        if commit {
+            let name = self.dlg.save_layout_name.clone();
+            self.save_named_layout(&name);
+            open = false;
+        }
+        self.dlg.save_layout_open = open;
+    }
 }
 
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+N / Ctrl+O / Ctrl+S", "Novo / abrir / salvar projeto"),
-    ("Ctrl+Shift+S / Ctrl+Alt+S", "Salvar como / salvar versão"),
-    ("Ctrl+I", "Importar mídia"),
-    ("Ctrl+M", "Renderizar como"),
-    ("Alt+Enter", "Propriedades do projeto"),
-    ("Espaço", "Reproduzir / parar (volta ao início)"),
-    ("Enter", "Reproduzir / pausar"),
-    ("Shift+Espaço", "Reproduzir do início"),
-    ("J / K / L", "Shuttle para trás / pausa / para frente"),
-    ("Q", "Alternar reprodução em loop"),
-    ("Shift+Q", "Selecionar região de loop"),
-    ("Home / End", "Início / fim da seleção"),
-    ("Ctrl+Home / Ctrl+End / W", "Início / fim do projeto"),
-    ("Alt+← / Alt+→", "Quadro anterior / próximo"),
-    ("Ctrl+← / Ctrl+→", "Marcador anterior / próximo"),
-    ("0-9", "Ir para o marcador"),
-    ("↑ / ↓ , Ctrl+↑ / Ctrl+↓", "Zoom horizontal"),
+fn capture_shortcut(ctx: &egui::Context) -> Option<Option<Shortcut>> {
+    let mods = ctx.input(|i| i.modifiers);
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        return Some(None);
+    }
+    const KEYS: &[(Key, ShortcutKey)] = &[
+        (Key::A, ShortcutKey::A),
+        (Key::B, ShortcutKey::B),
+        (Key::C, ShortcutKey::C),
+        (Key::D, ShortcutKey::D),
+        (Key::E, ShortcutKey::E),
+        (Key::F, ShortcutKey::F),
+        (Key::G, ShortcutKey::G),
+        (Key::H, ShortcutKey::H),
+        (Key::I, ShortcutKey::I),
+        (Key::J, ShortcutKey::J),
+        (Key::K, ShortcutKey::K),
+        (Key::L, ShortcutKey::L),
+        (Key::M, ShortcutKey::M),
+        (Key::N, ShortcutKey::N),
+        (Key::O, ShortcutKey::O),
+        (Key::P, ShortcutKey::P),
+        (Key::Q, ShortcutKey::Q),
+        (Key::R, ShortcutKey::R),
+        (Key::S, ShortcutKey::S),
+        (Key::T, ShortcutKey::T),
+        (Key::U, ShortcutKey::U),
+        (Key::V, ShortcutKey::V),
+        (Key::W, ShortcutKey::W),
+        (Key::X, ShortcutKey::X),
+        (Key::Y, ShortcutKey::Y),
+        (Key::Z, ShortcutKey::Z),
+        (Key::Num0, ShortcutKey::Num0),
+        (Key::Num1, ShortcutKey::Num1),
+        (Key::Num2, ShortcutKey::Num2),
+        (Key::Num3, ShortcutKey::Num3),
+        (Key::Num4, ShortcutKey::Num4),
+        (Key::Num5, ShortcutKey::Num5),
+        (Key::Num6, ShortcutKey::Num6),
+        (Key::Num7, ShortcutKey::Num7),
+        (Key::Num8, ShortcutKey::Num8),
+        (Key::Num9, ShortcutKey::Num9),
+        (Key::Space, ShortcutKey::Space),
+        (Key::Enter, ShortcutKey::Enter),
+        (Key::Delete, ShortcutKey::Delete),
+        (Key::F2, ShortcutKey::F2),
+        (Key::F8, ShortcutKey::F8),
+        (Key::ArrowLeft, ShortcutKey::ArrowLeft),
+        (Key::ArrowRight, ShortcutKey::ArrowRight),
+        (Key::ArrowUp, ShortcutKey::ArrowUp),
+        (Key::ArrowDown, ShortcutKey::ArrowDown),
+        (Key::Home, ShortcutKey::Home),
+        (Key::End, ShortcutKey::End),
+        (Key::OpenBracket, ShortcutKey::OpenBracket),
+        (Key::CloseBracket, ShortcutKey::CloseBracket),
+        (Key::Backslash, ShortcutKey::Backslash),
+    ];
+    for &(ek, sk) in KEYS {
+        if ctx.input(|i| i.key_pressed(ek)) {
+            return Some(Some(Shortcut {
+                ctrl: mods.command,
+                shift: mods.shift,
+                alt: mods.alt,
+                key: sk,
+            }));
+        }
+    }
+    None
+}
+
+const MOUSE_HINTS: &[(&str, &str)] = &[
     (
         "Roda / Shift+roda / Ctrl+roda",
         "Zoom / rolar horizontal / rolar vertical",
     ),
-    ("\\", "Centralizar no cursor"),
-    ("Ctrl+G", "Ir para..."),
-    ("I / O", "Definir entrada / saída (seleção)"),
-    ("S", "Dividir eventos no cursor"),
-    ("Delete", "Excluir seleção"),
-    ("Ctrl+X / Ctrl+C / Ctrl+V", "Recortar / copiar / colar"),
-    ("Ctrl+Shift+V", "Colar inserindo"),
-    ("Ctrl+Z / Ctrl+Y", "Desfazer / refazer"),
-    ("Ctrl+A / Ctrl+Shift+A", "Selecionar todos / nenhum"),
-    ("Ctrl+T", "Aparar eventos para a seleção"),
-    ("Alt+[ / Alt+]", "Aparar início / fim do evento no cursor"),
-    ("G / U / Shift+G", "Agrupar / desagrupar / selecionar grupo"),
-    ("F2", "Propriedades do evento"),
-    ("Ctrl+Q / Ctrl+Shift+Q", "Inserir trilha de áudio / vídeo"),
-    ("Z / X", "Mudo / solo da trilha selecionada"),
-    ("V / Shift+V", "Envelope de volume (nível) / remover"),
-    ("P / Shift+P", "Envelope de pan (fade p/ cor) / remover"),
-    ("M / R", "Inserir marcador / região"),
-    ("F8", "Ativar encaixe (snapping)"),
-    ("Ctrl+L", "Ripple automático"),
     ("Shift+arrastar", "Ignorar encaixe temporariamente"),
     ("Ctrl+arrastar evento", "Copiar evento"),
     (
@@ -1759,6 +2075,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Slip (mover a mídia dentro do evento)",
     ),
     ("Alt+arrastar borda", "Slip-trim"),
+    (
+        "Arrastar linha superior (áudio)",
+        "Ajustar ganho do evento em dB",
+    ),
     ("Duplo clique no envelope", "Adicionar ponto"),
     ("Botão do meio", "Mover a vista (pan)"),
 ];

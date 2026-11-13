@@ -271,7 +271,7 @@ impl Shortcut {
 }
 
 /// Abas acopláveis da área inferior (espelhadas na UI).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum DockPanel {
     ProjectMedia,
     Explorer,
@@ -345,7 +345,10 @@ pub enum UiAction {
     OpenFxMasterVideo,
     OpenGoto,
     OpenShortcuts,
+    OpenPrefs,
     OpenAbout,
+    BuildProxySelected,
+    PrerenderRegion,
     ExitApp,
     SelectDock(DockPanel),
     TogglePlay,
@@ -1244,6 +1247,24 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "tools.build_proxy",
+        label: "Criar proxy de vídeo para selecionados",
+        menu_path: "Ferramentas/Criar proxy de vídeo para selecionados",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_events_ui,
+        run: |_s, h| ui_action(UiAction::BuildProxySelected, h),
+    },
+    CommandDef {
+        id: "tools.prerender",
+        label: "Pré-renderizar seletivamente região...",
+        menu_path: "Ferramentas/Pré-renderizar seletivamente região...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
+    },
+    CommandDef {
         id: "tools.remove_unused_media",
         label: "Remover mídias não utilizadas",
         menu_path: "Ferramentas/Remover mídias não utilizadas",
@@ -1317,6 +1338,15 @@ pub static COMMANDS: &[CommandDef] = &[
             s.opts.loop_playback = !s.opts.loop_playback;
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "options.prefs",
+        label: "Preferências...",
+        menu_path: "Opções/Preferências...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenPrefs, h),
     },
     // --- Transporte e Navegação ---
     CommandDef {

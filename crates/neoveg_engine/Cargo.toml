@@ -18,5 +18,14 @@ claxon.workspace = true
 lewton.workspace = true
 puremp3.workspace = true
 
-[lints]
-workspace = true
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+] }
+
+[lints.rust]
+# AGENTS.md §0.3: unsafe proibido em todo o crate, exceto no módulo de
+# fronteira FFI isolado `media::mf`.
+unsafe_code = "deny"

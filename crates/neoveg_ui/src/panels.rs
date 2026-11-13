@@ -10,7 +10,7 @@ use std::path::PathBuf;
 impl App {
     pub fn dock_area(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_rect_before_wrap();
-        let preview_w = (avail.width() * 0.42).clamp(260.0, 900.0);
+        let preview_w = (avail.width() * self.preview_ratio).clamp(260.0, 900.0);
         let left_rect = Rect::from_min_max(
             avail.min,
             pos2(avail.right() - preview_w - 6.0, avail.bottom()),
@@ -25,8 +25,18 @@ impl App {
                 .id_salt("dock_left"),
         );
         left.set_clip_rect(left_rect);
+        let docked: Vec<DockTab> = DockTab::ALL
+            .into_iter()
+            .filter(|t| !self.detached_tabs.contains(t))
+            .collect();
+        if !docked.contains(&self.dock_tab) {
+            if let Some(&first) = docked.first() {
+                self.dock_tab = first;
+            }
+        }
+        let mut detach_req: Option<DockTab> = None;
         left.horizontal_wrapped(|ui| {
-            for tab in DockTab::ALL {
+            for &tab in &docked {
                 if ui
                     .selectable_label(self.dock_tab == tab, tab.name())
                     .clicked()
@@ -34,34 +44,39 @@ impl App {
                     self.dock_tab = tab;
                 }
             }
+            if docked.contains(&self.dock_tab)
+                && ui
+                    .small_button("↗ Destacar")
+                    .on_hover_text("Abrir a aba ativa em janela flutuante")
+                    .clicked()
+            {
+                detach_req = Some(self.dock_tab);
+            }
         });
+        if let Some(tab) = detach_req {
+            self.detached_tabs.insert(tab);
+            if let Some(next) = DockTab::ALL
+                .into_iter()
+                .find(|t| !self.detached_tabs.contains(t))
+            {
+                self.dock_tab = next;
+            }
+        }
         left.separator();
-        egui::ScrollArea::both()
-            .id_salt("dock_scroll")
-            .auto_shrink([false, false])
-            .show(&mut left, |ui| match self.dock_tab {
-                DockTab::ProjectMedia => self.media_tab(ui),
-                DockTab::Explorer => self.explorer_tab(ui),
-                DockTab::Transitions => self.transitions_tab(ui),
-                DockTab::VideoFx => self.fx_tab(ui, false),
-                DockTab::AudioFx => self.fx_tab(ui, true),
-                DockTab::Generators => self.generators_tab(ui),
-                DockTab::Mixer => self.mixer_tab(ui),
-                DockTab::Scopes => self.scopes_tab(ui),
-                DockTab::Notes => {
-                    ui.label("Notas do projeto:");
-                    if ui
-                        .add(
-                            egui::TextEdit::multiline(&mut self.project.notes)
-                                .desired_rows(12)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed()
-                    {
-                        self.dirty = true;
-                    }
-                }
-            });
+        if docked.is_empty() {
+            left.label(
+                egui::RichText::new(
+                    "Todas as abas estão destacadas em janelas flutuantes (clique em Acoplar ou use Exibir/Layouts).",
+                )
+                .weak(),
+            );
+        } else {
+            let tab = self.dock_tab;
+            egui::ScrollArea::both()
+                .id_salt("dock_scroll")
+                .auto_shrink([false, false])
+                .show(&mut left, |ui| self.show_dock_tab_contents(ui, tab));
+        }
 
         let mut right = ui.new_child(
             egui::UiBuilder::new()
@@ -72,17 +87,73 @@ impl App {
         self.preview_panel(&mut right);
     }
 
+    pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
+        let detached: Vec<DockTab> = DockTab::ALL
+            .into_iter()
+            .filter(|t| self.detached_tabs.contains(t))
+            .collect();
+        for tab in detached {
+            let mut open = true;
+            let mut reattach = false;
+            egui::Window::new(tab.name())
+                .id(egui::Id::new(("floating_dock", tab.command_id())))
+                .open(&mut open)
+                .default_size([460.0, 320.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("↙ Acoplar na área inferior").clicked() {
+                            reattach = true;
+                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::both()
+                        .id_salt(("floating_scroll", tab.command_id()))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
+                });
+            if !open || reattach {
+                self.detached_tabs.remove(&tab);
+                if reattach {
+                    self.dock_visible = true;
+                    self.dock_tab = tab;
+                }
+            }
+        }
+    }
+
+    fn show_dock_tab_contents(&mut self, ui: &mut egui::Ui, tab: DockTab) {
+        match tab {
+            DockTab::ProjectMedia => self.media_tab(ui),
+            DockTab::Explorer => self.explorer_tab(ui),
+            DockTab::Transitions => self.transitions_tab(ui),
+            DockTab::VideoFx => self.fx_tab(ui, false),
+            DockTab::AudioFx => self.fx_tab(ui, true),
+            DockTab::Generators => self.generators_tab(ui),
+            DockTab::Mixer => self.mixer_tab(ui),
+            DockTab::Scopes => self.scopes_tab(ui),
+            DockTab::Notes => {
+                ui.label("Notas do projeto:");
+                if ui
+                    .add(
+                        egui::TextEdit::multiline(&mut self.project.notes)
+                            .desired_rows(12)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed()
+                {
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Prévia de Vídeo").strong());
             egui::ComboBox::from_id_salt("pq")
                 .selected_text(self.opts.preview_quality.name())
                 .show_ui(ui, |ui| {
-                    for q in [
-                        PreviewQuality::Draft,
-                        PreviewQuality::Preview,
-                        PreviewQuality::Good,
-                    ] {
+                    for q in PreviewQuality::ALL {
                         ui.selectable_value(&mut self.opts.preview_quality, q, q.name());
                     }
                 });
@@ -106,7 +177,7 @@ impl App {
         let avail = ui.available_rect_before_wrap();
         let (rect, _resp) = ui.allocate_exact_size(avail.size(), Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(16, 16, 18));
+        painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
         let s = &self.project.settings;
         let aspect = s.width as f32 / s.height.max(1) as f32;
         let info_h = 18.0;
@@ -186,6 +257,7 @@ impl App {
         let mut remove = None;
         let mut add = None;
         let mut edit_gen = None;
+        let mut build_proxy = None;
         egui::Grid::new("media_grid")
             .striped(true)
             .num_columns(3)
@@ -226,6 +298,13 @@ impl App {
                             add = Some(m.id);
                             ui.close_menu();
                         }
+                        if m.has_video
+                            && !matches!(m.source, MediaSource::Generated(_))
+                            && ui.button("Gerar proxy de vídeo").clicked()
+                        {
+                            build_proxy = Some(m.id);
+                            ui.close_menu();
+                        }
                         if matches!(m.source, MediaSource::Generated(_))
                             && ui.button("Editar mídia gerada...").clicked()
                         {
@@ -246,7 +325,9 @@ impl App {
                     });
                     if !self.media.contains(m.id) && !matches!(m.source, MediaSource::Generated(_))
                     {
-                        ui.colored_label(Color32::from_rgb(240, 120, 80), "offline");
+                        ui.colored_label(self.theme.offline_fg, "offline");
+                    } else if m.proxy_path.is_some() {
+                        ui.label(egui::RichText::new("[proxy]").small().weak());
                     } else {
                         ui.label("");
                     }
@@ -257,6 +338,9 @@ impl App {
             self.checkpoint();
             let hint = self.sel_track;
             self.add_media_to_timeline(id, self.cursor, hint);
+        }
+        if let Some(id) = build_proxy {
+            self.build_proxy_for_media(id);
         }
         if let Some(id) = edit_gen {
             self.dlg.gen_editor = Some(id);
