@@ -922,7 +922,7 @@ pub fn icon_label(
 ) {
     ui.horizontal(|ui| {
         paint_inline(ui, icon, size, theme);
-        ui.label(text);
+        ui.add(egui::Label::new(text).extend());
     });
 }
 

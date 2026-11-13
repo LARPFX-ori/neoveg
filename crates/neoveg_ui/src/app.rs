@@ -1424,7 +1424,7 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             self.cmd_tool_btn(ui, Icon::NewFile, None, "file.new");
             self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
             self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
@@ -1475,7 +1475,7 @@ impl App {
             self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
             if self.loading > 0 {
                 ui.separator();
-                ui.spinner();
+                crate::splash::spinner_inline(ui, 15.0, ui.ctx().input(|i| i.time), &self.theme);
                 ui.label(format!("carregando {}...", self.loading));
             }
         });

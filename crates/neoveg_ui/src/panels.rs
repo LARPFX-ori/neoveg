@@ -117,12 +117,27 @@ impl App {
             self.dock_tab_contents(&mut left, &docked);
         } else {
             // Nas gerações Sonic Foundry e Sony, as abas ficam na borda inferior do dock.
-            let base_h: f32 = if tabs_rect.width() < 560.0 {
-                48.0
-            } else {
-                28.0
-            };
-            let strip_h = base_h.min((tabs_rect.height() * 0.4).max(24.0));
+            // Calcula quantas linhas serão usadas em `dock_tab_strip` para não cortar abas
+            // como `Color Grading`, `Notas` ou `Destacar` em janelas médias/estreitas.
+            let max_w = (tabs_rect.width() - 8.0).max(120.0);
+            let mut rows = 1usize;
+            let mut cur_x = 0.0_f32;
+            for item_w in docked
+                .iter()
+                .map(|t| 30.0 + t.name().chars().count() as f32 * 6.8)
+                .chain(std::iter::once(
+                    30.0 + "Destacar".chars().count() as f32 * 6.8,
+                ))
+            {
+                if cur_x > 0.0 && cur_x + item_w + 4.0 > max_w {
+                    rows += 1;
+                    cur_x = item_w;
+                } else {
+                    cur_x += item_w + 4.0;
+                }
+            }
+            let base_h: f32 = (rows.min(4) as f32) * 24.0 + 4.0;
+            let strip_h = base_h.min((tabs_rect.height() * 0.45).max(24.0));
             let content_rect = Rect::from_min_max(
                 tabs_rect.min,
                 pos2(
@@ -378,17 +393,22 @@ impl App {
         egui::Grid::new("media_grid")
             .striped(true)
             .num_columns(3)
+            .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 for m in &items {
                     let thumb = self.thumb(&ctx, m.id);
                     let id = egui::Id::new(("media_drag", m.id));
                     let resp = ui
                         .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                            ui.set_min_width(220.0);
                             ui.horizontal(|ui| {
+                                ui.set_min_height(36.0);
                                 if let Some(t) = &thumb {
                                     let s = t.size_vec2();
                                     let h = 36.0;
-                                    ui.image((t.id(), vec2(h * s.x / s.y.max(1.0), h)));
+                                    let w = (h * s.x / s.y.max(1.0)).clamp(24.0, 84.0);
+                                    ui.image((t.id(), vec2(w, h)));
                                 } else {
                                     icons::paint_inline(
                                         ui,
@@ -402,14 +422,20 @@ impl App {
                                     );
                                 }
                                 ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new(&m.name).strong());
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&m.name).strong())
+                                            .extend(),
+                                    );
                                     let dur = m
                                         .duration
                                         .map(|d| self.fmt_time(d))
                                         .unwrap_or_else(|| "estática".into());
-                                    ui.label(
-                                        egui::RichText::new(format!("{}  •  {}", dur, m.info))
-                                            .small(),
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{}  •  {}", dur, m.info))
+                                                .small(),
+                                        )
+                                        .extend(),
                                     );
                                 });
                             });

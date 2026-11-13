@@ -42,7 +42,8 @@ fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1480.0, 900.0])
             .with_min_inner_size([900.0, 600.0])
-            .with_title("Neoveg"),
+            .with_title("Neoveg")
+            .with_icon(std::sync::Arc::new(crate::splash::window_icon_data())),
         ..Default::default()
     }
 }

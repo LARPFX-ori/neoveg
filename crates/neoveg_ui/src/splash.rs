@@ -284,6 +284,97 @@ pub fn spinner_inline(ui: &mut egui::Ui, diameter: f32, phase_secs: f64, theme: 
     }
 }
 
+fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq <= 1e-6 {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+    let t = (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+fn sd_rounded_square(px: f32, py: f32, half: f32, radius: f32) -> f32 {
+    let qx = (px - 15.5).abs() - (half - radius);
+    let qy = (py - 15.5).abs() - (half - radius);
+    let out = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    let inside = qx.max(qy).min(0.0);
+    out + inside - radius
+}
+
+fn blend_channel(dst: f32, src: f32, cov: f32) -> f32 {
+    dst + (src - dst) * cov
+}
+
+fn f32_to_u8(v: f32) -> u8 {
+    if v.is_finite() {
+        v.round().clamp(0.0, 255.0) as u8
+    } else {
+        0
+    }
+}
+
+/// Gera em código Rust puro o ícone original 32x32 da janela do Neoveg.
+pub(crate) fn window_icon_data() -> egui::IconData {
+    const SIDE: u32 = 32;
+    let mut rgba = Vec::with_capacity((SIDE as usize) * (SIDE as usize) * 4);
+    for y in 0..SIDE {
+        let py = y as f32;
+        for x in 0..SIDE {
+            let px = x as f32;
+            let sd_box = sd_rounded_square(px, py, 14.2, 5.2);
+            let outer_cov = (0.75 - sd_box).clamp(0.0, 1.0);
+            if outer_cov <= 0.0 {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+
+            let grad = ((px + py) / 62.0).clamp(0.0, 1.0);
+            let mut r = blend_channel(24.0, 14.0, grad);
+            let mut g = blend_channel(34.0, 20.0, grad);
+            let mut b = blend_channel(52.0, 32.0, grad);
+
+            // Borda sutil azul no perímetro do emblema arredondado
+            let border_cov = (1.0 - (sd_box + 0.85).abs()).clamp(0.0, 1.0);
+            r = blend_channel(r, 72.0, border_cov * 0.90);
+            g = blend_channel(g, 162.0, border_cov * 0.90);
+            b = blend_channel(b, 245.0, border_cov * 0.90);
+
+            // Hastes verticais do "N" em branco frio
+            let d_left = dist_to_segment(px, py, 8.8, 22.2, 8.8, 9.8) - 1.65;
+            let d_right = dist_to_segment(px, py, 23.2, 22.2, 23.2, 9.8) - 1.65;
+            let pillar_cov = (0.75 - d_left.min(d_right)).clamp(0.0, 1.0);
+            r = blend_channel(r, 238.0, pillar_cov);
+            g = blend_channel(g, 245.0, pillar_cov);
+            b = blend_channel(b, 255.0, pillar_cov);
+
+            // Diagonal do "N" em ciano -> âmbar coral original do Neoveg
+            let d_diag = dist_to_segment(px, py, 9.0, 10.0, 23.0, 22.0) - 1.75;
+            let diag_cov = (0.75 - d_diag).clamp(0.0, 1.0);
+            let diag_t = ((px - 9.0) / 14.0).clamp(0.0, 1.0);
+            let dr = blend_channel(58.0, 255.0, diag_t);
+            let dg = blend_channel(196.0, 124.0, diag_t);
+            let db = blend_channel(255.0, 68.0, diag_t);
+            r = blend_channel(r, dr, diag_cov);
+            g = blend_channel(g, dg, diag_cov);
+            b = blend_channel(b, db, diag_cov);
+
+            rgba.push(f32_to_u8(r));
+            rgba.push(f32_to_u8(g));
+            rgba.push(f32_to_u8(b));
+            rgba.push(f32_to_u8(outer_cov * 255.0));
+        }
+    }
+    egui::IconData {
+        rgba,
+        width: SIDE,
+        height: SIDE,
+    }
+}
+
 fn draw_splash_hero(painter: &egui::Painter, banner: Rect, snap: &SplashSnapshot<'_>) {
     if banner.width() <= 8.0 || banner.height() <= 8.0 {
         return;
@@ -688,5 +779,17 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[test]
+    fn icone_da_janela_gerado_em_rust_e_valido() {
+        let icon = window_icon_data();
+        assert_eq!(icon.width, 32);
+        assert_eq!(icon.height, 32);
+        assert_eq!(icon.rgba.len(), 32 * 32 * 4);
+        // Canto (0, 0) é transparente pela borda arredondada; centro (16, 16) é opaco.
+        assert_eq!(icon.rgba[3], 0);
+        let center_idx = (16 * 32 + 16) * 4;
+        assert_eq!(icon.rgba[center_idx + 3], 255);
     }
 }

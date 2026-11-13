@@ -382,7 +382,142 @@ fn ui_smoke() {
         .media(avi_mid)
         .and_then(|m| m.proxy_path.clone());
     assert!(proxy_file.is_some(), "proxy deveria ter sido criado");
+    let avi_idx = app
+        .project
+        .media
+        .iter()
+        .position(|m| m.id == avi_mid)
+        .unwrap();
+    assert_narrow_layout_fixes(&mut app, avi_idx);
     if let Some(pf) = proxy_file {
         let _ = std::fs::remove_file(pf);
     }
+}
+
+fn collect_galley_shapes(
+    shape: &egui::epaint::Shape,
+    clip: egui::Rect,
+    out: &mut Vec<(String, usize, egui::Rect, egui::Rect)>,
+) {
+    match shape {
+        egui::epaint::Shape::Text(ts) => {
+            let rect = egui::Rect::from_min_size(ts.pos, ts.galley.size());
+            out.push((
+                ts.galley.text().to_owned(),
+                ts.galley.rows.len(),
+                rect,
+                clip,
+            ));
+        }
+        egui::epaint::Shape::Vec(items) => {
+            for item in items {
+                collect_galley_shapes(item, clip, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Garante que o layout clássico estreito não quebre nomes de mídia na vertical,
+/// não corte a barra de ferramentas nem esconda as abas inferiores.
+fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
+    let prev_layout = app.prefs.edit_layout.layout_type;
+    let prev_tab = app.dock_tab;
+    let prev_dock_vis = app.dock_visible;
+    let prev_loading = app.loading;
+    let prev_name = app.project.media.get(media_idx).map(|m| m.name.clone());
+    if let Some(item) = app.project.media.get_mut(media_idx) {
+        item.name = "BigBuckBunny_320x180.mp4".to_owned();
+    }
+    app.prefs.edit_layout.layout_type = LayoutType::Sony;
+    app.dock_tab = DockTab::ProjectMedia;
+    app.dock_visible = true;
+    app.detached_tabs.clear();
+    app.loading = 1;
+
+    let ctx = egui::Context::default();
+    let narrow_raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(840.0, 800.0))),
+        time: Some(2.5),
+        ..Default::default()
+    };
+    let _ = ctx.run(narrow_raw.clone(), |c| app.frame_ui(c));
+    let out = ctx.run(narrow_raw, |c| app.frame_ui(c));
+
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    let sample_texts = || {
+        texts
+            .iter()
+            .skip(45)
+            .take(80)
+            .map(|(s, r, rc, _)| format!("{s:?}@{r}:{rc:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let media_text = texts
+        .iter()
+        .find(|(txt, _, _, _)| txt == "BigBuckBunny_320x180.mp4");
+    assert!(
+        media_text.is_some(),
+        "nome da mídia deve ser desenhado na aba Mídia do Projeto; textos={}",
+        sample_texts()
+    );
+    if let Some((_, rows, rect, _)) = media_text {
+        assert_eq!(
+            *rows, 1,
+            "nome de mídia sem espaços não deve quebrar letra por letra na vertical ({rows} linhas)"
+        );
+        assert!(
+            rect.width() > 60.0,
+            "nome de mídia deve ocupar largura horizontal legível ({})",
+            rect.width()
+        );
+    }
+
+    let ignore_groups = texts.iter().find(|(txt, _, _, _)| txt == "Ignorar grupos");
+    assert!(
+        ignore_groups.is_some(),
+        "botão 'Ignorar grupos' deve aparecer na barra de ferramentas; textos={}",
+        sample_texts()
+    );
+    if let Some((_, rows, rect, clip)) = ignore_groups {
+        assert_eq!(*rows, 1);
+        assert!(
+            rect.right() <= clip.right() + 1.5 && rect.bottom() <= clip.bottom() + 1.5,
+            "'Ignorar grupos' não pode ser cortado na direita em janela estreita: rect={rect:?}, clip={clip:?}"
+        );
+    }
+
+    for tab_label in ["Escopos", "Color Grading", "Notas", "Destacar"] {
+        let tab = texts
+            .iter()
+            .find(|(txt, _, _, _)| txt == tab_label)
+            .unwrap_or_else(|| {
+                panic!(
+                    "aba/botão '{tab_label}' deve estar visível no rodapé; textos={}",
+                    sample_texts()
+                )
+            });
+        let (_, _, rect, clip) = tab;
+        assert!(
+            rect.top() >= clip.top() - 1.5
+                && rect.bottom() <= clip.bottom() + 1.5
+                && rect.bottom() <= 800.0,
+            "aba/botão '{tab_label}' não pode ficar clipado fora do rodapé: rect={rect:?}, clip={clip:?}"
+        );
+    }
+
+    if let Some(name) = prev_name {
+        if let Some(item) = app.project.media.get_mut(media_idx) {
+            item.name = name;
+        }
+    }
+    app.prefs.edit_layout.layout_type = prev_layout;
+    app.dock_tab = prev_tab;
+    app.dock_visible = prev_dock_vis;
+    app.loading = prev_loading;
 }
