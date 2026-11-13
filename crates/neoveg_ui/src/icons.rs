@@ -48,6 +48,7 @@ pub enum Icon {
     MediaItem,
     TransitionSplit,
     FxSparkle,
+    ColorWheels,
     FxAudio,
     GeneratorFrame,
     MixerFaders,
@@ -66,7 +67,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 54] = [
+    pub const ALL: [Icon; 55] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -107,6 +108,7 @@ impl Icon {
         Icon::MediaItem,
         Icon::TransitionSplit,
         Icon::FxSparkle,
+        Icon::ColorWheels,
         Icon::FxAudio,
         Icon::GeneratorFrame,
         Icon::MixerFaders,
@@ -737,6 +739,19 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             );
             c.p.circle_filled(c.pt(0.78, 0.22), c.u(0.10), pal.amber);
             c.p.circle_filled(c.pt(0.76, 0.78), c.u(0.09), pal.cyan);
+        }
+        Icon::ColorWheels => {
+            let r = c.u(0.20);
+            for (cx, cy, col) in [
+                (0.50, 0.30, pal.red),
+                (0.32, 0.66, pal.green),
+                (0.68, 0.66, pal.blue),
+            ] {
+                let p = c.pt(cx, cy);
+                c.p.circle_filled(p, r, col);
+                c.p.circle_stroke(p, r, c.stroke(0.06, pal.ink));
+            }
+            c.p.circle_filled(c.pt(0.50, 0.54), c.u(0.07), pal.paper);
         }
         Icon::FxAudio => {
             for (x, top, col) in [

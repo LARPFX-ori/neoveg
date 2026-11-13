@@ -15,6 +15,7 @@ pub fn panel_key(tab: DockTab) -> &'static str {
         DockTab::Explorer => "explorer",
         DockTab::Transitions => "transitions",
         DockTab::VideoFx => "video_fx",
+        DockTab::ColorGrading => "color_grading",
         DockTab::AudioFx => "audio_fx",
         DockTab::Generators => "generators",
         DockTab::Mixer => "mixer",

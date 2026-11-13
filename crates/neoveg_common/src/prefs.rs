@@ -374,7 +374,19 @@ pub struct Preferences {
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
+    /// Exibe a tela de boas-vindas com ações rápidas e projetos recentes ao iniciar.
+    #[serde(default = "default_show_welcome")]
+    pub show_welcome: bool,
+    /// Caminhos dos projetos recentes (mais recente primeiro, máx. 10).
+    #[serde(default)]
+    pub recent_projects: Vec<String>,
+    /// Identificadores de modelos favoritados na janela `Renderizar como...`.
+    #[serde(default)]
+    pub render_favorites: Vec<String>,
 }
+
+const MAX_RECENT_PROJECTS: usize = 10;
+const MAX_RENDER_FAVORITES: usize = 64;
 
 fn default_lang() -> String {
     "pt-BR".to_string()
@@ -394,6 +406,39 @@ fn default_frame_cache() -> usize {
 
 fn default_show_splash() -> bool {
     true
+}
+
+fn default_show_welcome() -> bool {
+    true
+}
+
+fn sanitize_string_list(
+    list: &mut Vec<String>,
+    max_items: usize,
+    max_len: usize,
+    ignore_case: bool,
+) {
+    let mut cleaned: Vec<String> = Vec::with_capacity(list.len().min(max_items));
+    for raw in list.drain(..) {
+        let s = raw.trim();
+        if s.is_empty() || s.len() > max_len || s.contains('\0') {
+            continue;
+        }
+        let dup = cleaned.iter().any(|existing| {
+            if ignore_case {
+                existing.eq_ignore_ascii_case(s)
+            } else {
+                existing == s
+            }
+        });
+        if !dup {
+            cleaned.push(s.to_string());
+            if cleaned.len() >= max_items {
+                break;
+            }
+        }
+    }
+    *list = cleaned;
 }
 
 /// Número padrão de workers proporcionais aos núcleos disponíveis (§3.6),
@@ -421,6 +466,9 @@ impl Default for Preferences {
             window_layout: None,
             edit_layout: EditLayoutPrefs::default(),
             show_splash: default_show_splash(),
+            show_welcome: default_show_welcome(),
+            recent_projects: Vec::new(),
+            render_favorites: Vec::new(),
         }
     }
 }
@@ -442,6 +490,28 @@ impl Preferences {
         }
     }
 
+    /// Registra um projeto recente no topo da lista (deduplicado, máx. 10).
+    pub fn record_recent_project(&mut self, path: &std::path::Path) {
+        let raw = path.to_string_lossy();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.contains('\0') {
+            return;
+        }
+        self.recent_projects
+            .retain(|p| !p.eq_ignore_ascii_case(trimmed));
+        self.recent_projects.insert(0, trimmed.to_string());
+        self.recent_projects.truncate(MAX_RECENT_PROJECTS);
+    }
+
+    pub fn remove_recent_project(&mut self, raw: &str) {
+        self.recent_projects
+            .retain(|p| !p.eq_ignore_ascii_case(raw));
+    }
+
+    pub fn clear_recent_projects(&mut self) {
+        self.recent_projects.clear();
+    }
+
     pub fn sanitize(&mut self) {
         if self.language.trim().is_empty() || self.language.len() > 16 {
             self.language = default_lang();
@@ -460,6 +530,13 @@ impl Preferences {
         {
             self.window_layout = None;
         }
+        sanitize_string_list(
+            &mut self.recent_projects,
+            MAX_RECENT_PROJECTS,
+            1024,
+            cfg!(windows),
+        );
+        sanitize_string_list(&mut self.render_favorites, MAX_RENDER_FAVORITES, 80, false);
     }
 
     pub fn load_or_default() -> Self {
@@ -502,9 +579,31 @@ mod tests {
         assert_eq!(p.frame_cache_cap, 4);
         assert_eq!(p.worker_threads, 16);
         assert!(p.show_splash);
+        assert!(p.show_welcome);
 
-        let p_no_splash: Preferences = serde_json::from_str(r#"{"show_splash":false}"#).unwrap();
+        let p_no_splash: Preferences =
+            serde_json::from_str(r#"{"show_splash":false,"show_welcome":false}"#).unwrap();
         assert!(!p_no_splash.show_splash);
+        assert!(!p_no_splash.show_welcome);
+
+        let mut p_rec = Preferences {
+            recent_projects: vec![
+                "".to_string(),
+                "a\0b.neoveg".to_string(),
+                "proj1.neoveg".to_string(),
+                "proj1.neoveg".to_string(),
+            ],
+            ..Default::default()
+        };
+        p_rec.sanitize();
+        assert_eq!(p_rec.recent_projects, vec!["proj1.neoveg".to_string()]);
+        for i in 0..15 {
+            p_rec.record_recent_project(std::path::Path::new(&format!("p{i}.neoveg")));
+        }
+        assert_eq!(p_rec.recent_projects.len(), MAX_RECENT_PROJECTS);
+        assert_eq!(p_rec.recent_projects[0], "p14.neoveg");
+        p_rec.remove_recent_project("p14.neoveg");
+        assert_eq!(p_rec.recent_projects[0], "p13.neoveg");
     }
 
     #[test]

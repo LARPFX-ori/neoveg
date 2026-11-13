@@ -26,11 +26,14 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Áudio em Rust puro com `symphonia` (`media/audio.rs`):** integração via `https://github.com/pdeljanov/Symphonia.git` (AAC, ALAC, ADPCM, CAF, FLAC, MP1/MP2/MP3, PCM, Vorbis, ISOMP4, MKV, Ogg, RIFF), mantendo leitor WAVE/AIFF próprio, `claxon`/`lewton`/`puremp3` e Windows Media Foundation como fallbacks/complemento.
 - **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de vídeo/áudio em MP4, MOV, MKV, WEBM, M4V, WMV e ASF (com complemento de áudio via `symphonia`).
 - **Experiência VEGAS Pro em `neoveg_ui`:**
-  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **54 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
+  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **55 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
   - Playhead físico de **1 px**, alça de ganho em dB na borda superior de eventos de áudio, controle contínuo de taxa (*Playback Rate*);
   - Painéis acopláveis/destacáveis em janelas flutuantes + layouts `.neoveglayout` (4 presets + salvamento/carregamento em arquivo);
   - **Editar > Propriedades > Layout** com seção **Tipos de layout** (*Sonic Foundry*, *Sony* e *MAGIX*) e opções de disposição da janela (timeline superior/inferior, abas no topo/base, barra de transporte e prévia à esquerda);
-  - **Tela de abertura (Splash Screen)** nativa com arte vetorial original e indicador de carregamento (`crates/neoveg_ui/src/splash.rs`), acompanhamento da inicialização, atalho *Ajuda → Tela de abertura* (`help.splash`) e opção persistida em *Preferências...* (`show_splash`);
+  - **Tela de abertura (Splash Screen)** nativa com arte vetorial original e spinner compartilhado (`crates/neoveg_ui/src/splash.rs`), acompanhamento da inicialização, atalho *Ajuda → Tela de abertura* (`help.splash`) e opção persistida em *Preferências...* (`show_splash`);
+  - **Tela de boas-vindas (Welcome Screen)** (`crates/neoveg_ui/src/welcome.rs`) com ações iniciais, modelos rápidos de projeto, lista persistida de projetos recentes (`recent_projects`), *Ajuda → Tela de boas-vindas* (`help.welcome`) e opção `show_welcome`;
+  - Painel **Color Grading** (`crates/neoveg_ui/src/color_grading.rs`) acoplável/flutuante com rodas tonais vetoriais (*Lift*, *Gamma*, *Gain*), pad *Temp × Tinta*, sliders e predefinições ligados ao `FxKind::ColorCorrector`;
+  - Janela **Renderizar como... em 2 colunas** com pesquisa, favoritos ★ persistidos, modelos de formato e progresso com spinner vetorial original;
   - Janela dinâmica de **Atalhos de teclado** (regravação, remoção e filtro ligados à Tabela Única) e janela **Preferências...**.
 - **Empacotamento portátil (`build_portable.py`):** build `--release` portátil sem `target-cpu=native` e auditoria contra assets/fontes/ferramentas não redistribuíveis.
 

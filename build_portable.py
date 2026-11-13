@@ -22,8 +22,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-FORBIDDEN_EXTS = {".ttf", ".otf", ".mp4", ".mov", ".mkv", ".avi", ".wav", ".mp3", ".ogg"}
+FORBIDDEN_EXTS = {
+    ".ttf",
+    ".otf",
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".wav",
+    ".mp3",
+    ".ogg",
+    ".vectorcraft",
+}
 FORBIDDEN_NAMES = {"ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe", "AGENTS.md"}
+FORBIDDEN_DIRS = {"manuais", "plan", "test_media", "design de layouts"}
 
 
 def cargo_target_dir(repo_root: Path) -> Path:
@@ -51,10 +63,10 @@ def sanitized_env() -> dict[str, str]:
 def ensure_no_forbidden_files(package_dir: Path) -> None:
     for root, dirs, files in os.walk(package_dir):
         rel_parts = set(Path(root).relative_to(package_dir).parts)
-        if rel_parts & {"manuais", "plan", "test_media"}:
+        if rel_parts & FORBIDDEN_DIRS:
             raise SystemExit(f"ERRO (§1.4): pasta proibida incluída no pacote: {root}")
         for d in dirs:
-            if d in {"manuais", "plan", "test_media"}:
+            if d in FORBIDDEN_DIRS:
                 raise SystemExit(f"ERRO (§1.4): subpasta proibida encontrada: {Path(root) / d}")
         for name in files:
             p = Path(root) / name

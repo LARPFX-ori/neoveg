@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 
 pub struct RenderDialogState {
     pub format: RenderFormat,
+    pub template_id: String,
+    pub filter: String,
+    pub only_favorites: bool,
     pub path: String,
     pub width: u32,
     pub height: u32,
@@ -22,6 +25,155 @@ pub struct RenderDialogState {
     pub include_audio: bool,
     pub wav_bits: WavBits,
 }
+
+#[derive(Clone, Copy)]
+struct RenderTemplate {
+    id: &'static str,
+    format: RenderFormat,
+    title: &'static str,
+    summary: &'static str,
+    /// `None` mantém a resolução do projeto (ou `true` na tupla indica 1/2 do projeto).
+    resolution: Option<(u32, u32)>,
+    half_project: bool,
+    quality: u8,
+    include_audio: bool,
+    wav_bits: WavBits,
+}
+
+const RENDER_TEMPLATES: &[RenderTemplate] = &[
+    RenderTemplate {
+        id: "avi.project",
+        format: RenderFormat::AviMjpeg,
+        title: "Igual ao projeto (Full)",
+        summary: "AVI Motion-JPEG 90% + PCM 16 bits na resolução da timeline",
+        resolution: None,
+        half_project: false,
+        quality: 90,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "avi.1080p",
+        format: RenderFormat::AviMjpeg,
+        title: "Full HD 1080p (1920×1080)",
+        summary: "AVI Motion-JPEG 92% • ideal para entrega Full HD em Rust puro",
+        resolution: Some((1920, 1080)),
+        half_project: false,
+        quality: 92,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "avi.720p",
+        format: RenderFormat::AviMjpeg,
+        title: "HD 720p (1280×720)",
+        summary: "AVI Motion-JPEG 88% • arquivos menores e prévia rápida",
+        resolution: Some((1280, 720)),
+        half_project: false,
+        quality: 88,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "avi.4k",
+        format: RenderFormat::AviMjpeg,
+        title: "4K UHD (3840×2160)",
+        summary: "AVI Motion-JPEG 94% • saída de alta resolução",
+        resolution: Some((3840, 2160)),
+        half_project: false,
+        quality: 94,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "avi.vertical",
+        format: RenderFormat::AviMjpeg,
+        title: "Vertical 9:16 (1080×1920)",
+        summary: "AVI Motion-JPEG 90% para vídeos verticais",
+        resolution: Some((1080, 1920)),
+        half_project: false,
+        quality: 90,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "avi.draft",
+        format: RenderFormat::AviMjpeg,
+        title: "Rascunho leve (1/2 projeto, JPEG 75%)",
+        summary: "Metade da resolução do projeto para revisão rápida",
+        resolution: None,
+        half_project: true,
+        quality: 75,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "png.project",
+        format: RenderFormat::PngSequence,
+        title: "Sequência PNG sem perdas (Full)",
+        summary: "Quadros PNG RGB8 + áudio WAV ao lado na resolução do projeto",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+    },
+    RenderTemplate {
+        id: "png.half",
+        format: RenderFormat::PngSequence,
+        title: "Sequência PNG reduzida (1/2)",
+        summary: "Quadros PNG em metade da resolução do projeto",
+        resolution: None,
+        half_project: true,
+        quality: 100,
+        include_audio: false,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "y4m.master",
+        format: RenderFormat::Y4m,
+        title: "YUV4MPEG2 Master não comprimido",
+        summary: "Fluxo Y4M bruto interoperável com pipelines externos + WAV",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+    },
+    RenderTemplate {
+        id: "wav.16",
+        format: RenderFormat::Wav,
+        title: "WAV PCM 16 bits (Estéreo)",
+        summary: "Mixagem Master sem compressão padrão CD",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+    },
+    RenderTemplate {
+        id: "wav.24",
+        format: RenderFormat::Wav,
+        title: "WAV PCM 24 bits (Estúdio)",
+        summary: "Maior faixa dinâmica para masterização de áudio",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+    },
+    RenderTemplate {
+        id: "wav.32f",
+        format: RenderFormat::Wav,
+        title: "WAV IEEE Float 32 bits",
+        summary: "Precisão de ponto flutuante sem ceifamento acima de 0 dB",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Float32,
+    },
+];
 
 #[derive(Default)]
 pub struct Dialogs {
@@ -101,24 +253,34 @@ impl Dialogs {
                     .unwrap_or_default()
                     .join("render.avi")
             });
-        let (path, format, quality, include_audio, wav_bits) = match &self.render {
-            Some(r) => (
-                r.path.clone(),
-                r.format,
-                r.quality,
-                r.include_audio,
-                r.wav_bits,
-            ),
-            None => (
-                base.to_string_lossy().to_string(),
-                RenderFormat::AviMjpeg,
-                90,
-                true,
-                WavBits::Pcm16,
-            ),
-        };
+        let (path, format, template_id, filter, only_favorites, quality, include_audio, wav_bits) =
+            match &self.render {
+                Some(r) => (
+                    r.path.clone(),
+                    r.format,
+                    r.template_id.clone(),
+                    r.filter.clone(),
+                    r.only_favorites,
+                    r.quality,
+                    r.include_audio,
+                    r.wav_bits,
+                ),
+                None => (
+                    base.to_string_lossy().to_string(),
+                    RenderFormat::AviMjpeg,
+                    "avi.project".to_string(),
+                    String::new(),
+                    false,
+                    90,
+                    true,
+                    WavBits::Pcm16,
+                ),
+            };
         self.render = Some(RenderDialogState {
             format,
+            template_id,
+            filter,
+            only_favorites,
             path,
             width: p.settings.width,
             height: p.settings.height,
@@ -180,7 +342,7 @@ fn curve_combo(ui: &mut egui::Ui, c: &mut Curve, id: impl std::hash::Hash) -> bo
 
 impl App {
     /// Registra desfazer para edições feitas em diálogos (uma vez por gesto).
-    fn dialog_change(&mut self) {
+    pub(crate) fn dialog_change(&mut self) {
         if !self.dlg.edit_in_progress {
             let snap = (*self.session.snapshot).clone();
             self.session.undo.push(snap);
@@ -1110,7 +1272,7 @@ impl App {
     // Cadeia de efeitos
     // -----------------------------------------------------------------
 
-    fn fx_chain_mut(&mut self, target: FxTarget) -> Option<&mut Vec<FxInstance>> {
+    pub(crate) fn fx_chain_mut(&mut self, target: FxTarget) -> Option<&mut Vec<FxInstance>> {
         match target {
             FxTarget::Event(id) => self.project.event_mut(id).map(|e| &mut e.fx),
             FxTarget::Track(id) => self
@@ -1557,108 +1719,334 @@ impl App {
         let has_loop = self.project.loop_region.is_some();
         let pw = self.project.settings.width;
         let ph = self.project.settings.height;
+        let fps = self.project.settings.fps;
+        let sr = self.project.settings.sample_rate;
         let dur = self.project.duration();
         let loop_r = self.project.loop_region;
         let fmt_dur = self.fmt_time(dur);
         let fmt_loop = loop_r.map(|(a, b)| format!("{} → {}", self.fmt_time(a), self.fmt_time(b)));
         let mut use_loop = self.dlg.render_use_loop;
+        let mut toggle_fav: Option<String> = None;
+        let mut apply_tmpl: Option<RenderTemplate> = None;
+        let mut cancel_btn = false;
+        let favs = self.prefs.render_favorites.clone();
+        let (range_a, range_b) = match (use_loop && has_loop, loop_r) {
+            (true, Some(lr)) => lr,
+            _ => (Ticks::ZERO, dur),
+        };
+        let range_ticks = (range_b - range_a).max(Ticks::ZERO);
+        let est_frames = fps.ticks_to_frame_round(range_ticks).max(0);
+        let est_len_fmt = self.fmt_time(range_ticks);
         let Some(r) = self.dlg.render.as_mut() else {
             return;
         };
-        egui::Window::new("Renderizar como").open(&mut open).resizable(false).show(ctx, |ui| {
-            egui::Grid::new("rg").num_columns(2).show(ui, |ui| {
-                ui.label("Formato");
-                let before = r.format;
-                egui::ComboBox::from_id_salt("rfmt").selected_text(r.format.name()).show_ui(ui, |ui| {
-                    for f in RenderFormat::ALL {
-                        ui.selectable_value(&mut r.format, f, f.name());
+
+        egui::Window::new("Renderizar como")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([740.0, 440.0])
+            .min_width(560.0)
+            .show(ctx, |ui| {
+                ui.columns(2, |cols| {
+                    // Coluna esquerda: Formatos, pesquisa, favoritos e modelos (templates)
+                    let left = &mut cols[0];
+                    left.label(egui::RichText::new("Formatos e modelos").strong());
+                    left.add_space(3.0);
+                    left.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut r.filter)
+                                .hint_text("Filtrar formatos ou modelos...")
+                                .desired_width(175.0),
+                        );
+                        ui.checkbox(&mut r.only_favorites, "★ Favoritos");
+                    });
+                    left.separator();
+                    let query = r.filter.trim().to_lowercase();
+                    egui::ScrollArea::vertical()
+                        .id_salt("render_templates_scroll")
+                        .max_height(280.0)
+                        .show(left, |ui| {
+                            let mut any = false;
+                            for fmt in RenderFormat::ALL {
+                                let matching: Vec<&RenderTemplate> = RENDER_TEMPLATES
+                                    .iter()
+                                    .filter(|t| t.format == fmt)
+                                    .filter(|t| {
+                                        if r.only_favorites && !favs.iter().any(|f| f == t.id) {
+                                            return false;
+                                        }
+                                        if query.is_empty() {
+                                            return true;
+                                        }
+                                        t.title.to_lowercase().contains(&query)
+                                            || t.summary.to_lowercase().contains(&query)
+                                            || fmt.name().to_lowercase().contains(&query)
+                                    })
+                                    .collect();
+                                if matching.is_empty() {
+                                    continue;
+                                }
+                                any = true;
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} (.{})",
+                                        fmt.name(),
+                                        fmt.ext()
+                                    ))
+                                    .small()
+                                    .strong()
+                                    .color(self.theme.accent),
+                                );
+                                for t in matching {
+                                    let is_fav = favs.iter().any(|f| f == t.id);
+                                    let selected = r.template_id == t.id && r.format == t.format;
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .small_button(if is_fav { "★" } else { "☆" })
+                                            .on_hover_text("Alternar favorito")
+                                            .clicked()
+                                        {
+                                            toggle_fav = Some(t.id.to_string());
+                                        }
+                                        if ui.selectable_label(selected, t.title).clicked() {
+                                            apply_tmpl = Some(*t);
+                                        }
+                                    });
+                                }
+                                ui.add_space(4.0);
+                            }
+                            if !any {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Nenhum modelo corresponde ao filtro atual.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                            }
+                        });
+                    if let Some(active_t) = RENDER_TEMPLATES.iter().find(|t| t.id == r.template_id)
+                    {
+                        left.separator();
+                        left.group(|ui| {
+                            ui.label(egui::RichText::new(active_t.title).small().strong());
+                            ui.label(egui::RichText::new(active_t.summary).small().weak());
+                        });
                     }
-                });
-                if before != r.format {
-                    r.path = PathBuf::from(&r.path).with_extension(r.format.ext()).to_string_lossy().to_string();
-                }
-                ui.end_row();
-                ui.label("Arquivo");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut r.path).desired_width(300.0));
-                    if ui.button("...").clicked() {
-                        let ext = r.format.ext();
-                        if let Some(p) = rfd::FileDialog::new()
-                            .add_filter(ext.to_uppercase(), &[ext])
-                            .set_file_name(PathBuf::from(&r.path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
-                            .save_file()
-                        {
-                            r.path = p.to_string_lossy().to_string();
-                        }
-                    }
-                });
-                ui.end_row();
-                if r.format != RenderFormat::Wav {
-                    ui.label("Resolução");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut r.width).range(16..=8192));
-                        ui.label("x");
-                        ui.add(egui::DragValue::new(&mut r.height).range(16..=8192));
-                        if ui.small_button("Projeto").clicked() {
+
+                    // Coluna direita: Arquivo de saída, parâmetros de saída, intervalo e resumo
+                    let right = &mut cols[1];
+                    right.label(egui::RichText::new("Destino e configurações").strong());
+                    right.add_space(3.0);
+
+                    if let Some(tmpl) = apply_tmpl {
+                        r.format = tmpl.format;
+                        r.template_id = tmpl.id.to_string();
+                        if tmpl.half_project {
+                            r.width = ((pw / 2) / 2).max(8) * 2;
+                            r.height = ((ph / 2) / 2).max(8) * 2;
+                        } else if let Some((tw, th)) = tmpl.resolution {
+                            r.width = tw;
+                            r.height = th;
+                        } else {
                             r.width = pw;
                             r.height = ph;
                         }
-                        if ui.small_button("1/2").clicked() {
-                            r.width = pw / 2;
-                            r.height = ph / 2;
+                        r.quality = tmpl.quality;
+                        r.include_audio = tmpl.include_audio;
+                        r.wav_bits = tmpl.wav_bits;
+                        r.path = PathBuf::from(&r.path)
+                            .with_extension(r.format.ext())
+                            .to_string_lossy()
+                            .to_string();
+                    }
+
+                    egui::Grid::new("rg_right").num_columns(2).show(right, |ui| {
+                        ui.label("Formato");
+                        let before = r.format;
+                        egui::ComboBox::from_id_salt("rfmt")
+                            .selected_text(r.format.name())
+                            .show_ui(ui, |ui| {
+                                for f in RenderFormat::ALL {
+                                    ui.selectable_value(&mut r.format, f, f.name());
+                                }
+                            });
+                        if before != r.format {
+                            r.path = PathBuf::from(&r.path)
+                                .with_extension(r.format.ext())
+                                .to_string_lossy()
+                                .to_string();
+                            if let Some(first_t) =
+                                RENDER_TEMPLATES.iter().find(|t| t.format == r.format)
+                            {
+                                r.template_id = first_t.id.to_string();
+                            }
+                        }
+                        ui.end_row();
+
+                        ui.label("Arquivo");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut r.path).desired_width(240.0));
+                            if ui.button("...").on_hover_text("Procurar destino").clicked() {
+                                let ext = r.format.ext();
+                                if let Some(p) = rfd::FileDialog::new()
+                                    .add_filter(ext.to_uppercase(), &[ext])
+                                    .set_file_name(
+                                        PathBuf::from(&r.path)
+                                            .file_name()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_default(),
+                                    )
+                                    .save_file()
+                                {
+                                    r.path = p.to_string_lossy().to_string();
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        if r.format != RenderFormat::Wav {
+                            ui.label("Resolução");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut r.width).range(16..=8192));
+                                ui.label("x");
+                                ui.add(egui::DragValue::new(&mut r.height).range(16..=8192));
+                                if ui.small_button("Projeto").clicked() {
+                                    r.width = pw;
+                                    r.height = ph;
+                                }
+                                if ui.small_button("1/2").clicked() {
+                                    r.width = pw / 2;
+                                    r.height = ph / 2;
+                                }
+                            });
+                            r.width = (r.width / 2).max(8) * 2;
+                            r.height = (r.height / 2).max(8) * 2;
+                            ui.end_row();
+                        }
+                        if r.format == RenderFormat::AviMjpeg {
+                            ui.label("Qualidade JPEG");
+                            ui.add(egui::Slider::new(&mut r.quality, 30..=100));
+                            ui.end_row();
+                        }
+                        if r.format != RenderFormat::Wav {
+                            ui.label("Áudio");
+                            ui.checkbox(
+                                &mut r.include_audio,
+                                if r.format == RenderFormat::AviMjpeg {
+                                    "Incluir (PCM 16 bits)"
+                                } else {
+                                    "Gerar WAV ao lado"
+                                },
+                            );
+                            ui.end_row();
+                        }
+                        if r.format != RenderFormat::AviMjpeg {
+                            ui.label("WAV");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut r.wav_bits, WavBits::Pcm16, "16 bits");
+                                ui.selectable_value(&mut r.wav_bits, WavBits::Pcm24, "24 bits");
+                                ui.selectable_value(
+                                    &mut r.wav_bits,
+                                    WavBits::Float32,
+                                    "32 bits float",
+                                );
+                            });
+                            ui.end_row();
+                        }
+                        ui.label("Intervalo");
+                        ui.vertical(|ui| {
+                            ui.radio_value(
+                                &mut use_loop,
+                                false,
+                                format!("Projeto inteiro ({fmt_dur})"),
+                            );
+                            ui.add_enabled_ui(has_loop, |ui| {
+                                ui.radio_value(
+                                    &mut use_loop,
+                                    true,
+                                    format!(
+                                        "Somente a região de loop {}",
+                                        fmt_loop.clone().unwrap_or_default()
+                                    ),
+                                );
+                            });
+                        });
+                        ui.end_row();
+                    });
+
+                    right.add_space(6.0);
+                    right.group(|ui| {
+                        ui.label(egui::RichText::new("Resumo da saída").small().strong());
+                        let video_line = if r.format == RenderFormat::Wav {
+                            format!("Somente áudio • {sr} Hz")
+                        } else {
+                            format!(
+                                "{}×{} • {} qps • {} quadro(s) • {} Hz",
+                                r.width,
+                                r.height,
+                                fps.label(),
+                                est_frames,
+                                sr
+                            )
+                        };
+                        ui.label(egui::RichText::new(video_line).small());
+                        ui.label(
+                            egui::RichText::new(format!("Duração selecionada: {est_len_fmt}"))
+                                .small()
+                                .weak(),
+                        );
+                        if r.format == RenderFormat::AviMjpeg {
+                            ui.label(
+                                egui::RichText::new(
+                                    "AVI Motion-JPEG é compatível com VLC e editores externos (limite de 4 GB).",
+                                )
+                                .small()
+                                .weak(),
+                            );
                         }
                     });
-                    r.width = (r.width / 2).max(8) * 2;
-                    r.height = (r.height / 2).max(8) * 2;
-                    ui.end_row();
-                }
-                if r.format == RenderFormat::AviMjpeg {
-                    ui.label("Qualidade JPEG");
-                    ui.add(egui::Slider::new(&mut r.quality, 30..=100));
-                    ui.end_row();
-                }
-                if r.format != RenderFormat::Wav {
-                    ui.label("Áudio");
-                    ui.checkbox(&mut r.include_audio, if r.format == RenderFormat::AviMjpeg { "Incluir (PCM 16 bits)" } else { "Gerar WAV ao lado" });
-                    ui.end_row();
-                }
-                if r.format != RenderFormat::AviMjpeg {
-                    ui.label("WAV");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut r.wav_bits, WavBits::Pcm16, "16 bits");
-                        ui.selectable_value(&mut r.wav_bits, WavBits::Pcm24, "24 bits");
-                        ui.selectable_value(&mut r.wav_bits, WavBits::Float32, "32 bits float");
-                    });
-                    ui.end_row();
-                }
-                ui.label("Intervalo");
-                ui.vertical(|ui| {
-                    ui.radio_value(&mut use_loop, false, format!("Projeto inteiro ({fmt_dur})"));
-                    ui.add_enabled_ui(has_loop, |ui| {
-                        ui.radio_value(&mut use_loop, true, format!("Somente a região de loop {}", fmt_loop.clone().unwrap_or_default()));
+
+                    right.add_space(6.0);
+                    right.horizontal(|ui| {
+                        if icons::icon_button(
+                            ui,
+                            Icon::RenderClapper,
+                            Some("Renderizar"),
+                            false,
+                            true,
+                            &self.theme,
+                        )
+                        .clicked()
+                        {
+                            start = true;
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            cancel_btn = true;
+                        }
                     });
                 });
-                ui.end_row();
             });
-            ui.separator();
-            if r.format == RenderFormat::AviMjpeg {
-                ui.label(egui::RichText::new("AVI Motion-JPEG é lido por VLC, ffmpeg, editores e pelo próprio Neoveg. Limite de 4 GB por arquivo.").small().weak());
+
+        if cancel_btn {
+            open = false;
+        }
+
+        if let Some(fav_id) = toggle_fav {
+            if let Some(pos) = self
+                .prefs
+                .render_favorites
+                .iter()
+                .position(|x| x == &fav_id)
+            {
+                self.prefs.render_favorites.remove(pos);
+            } else {
+                self.prefs.render_favorites.push(fav_id);
             }
-            ui.horizontal(|ui| {
-                if icons::icon_button(
-                    ui,
-                    Icon::RenderClapper,
-                    Some("Renderizar"),
-                    false,
-                    true,
-                    &self.theme,
-                )
-                .clicked()
-                {
-                    start = true;
-                }
-            });
-        });
+            if let Err(e) = self.prefs.save() {
+                self.set_status(format!("Aviso ao salvar favoritos de renderização: {e}"));
+            }
+        }
         self.dlg.render_use_loop = use_loop && has_loop;
         if start {
             let Some(r) = self.dlg.render.as_ref() else {
@@ -1715,11 +2103,15 @@ impl App {
                 0.0
             };
             let mut cancel = false;
+            let theme = self.theme.clone();
             egui::Window::new("Renderizando...")
                 .collapsible(true)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label(job.settings.path.display().to_string());
+                    ui.horizontal(|ui| {
+                        crate::splash::spinner_inline(ui, 20.0, el, &theme);
+                        ui.label(job.settings.path.display().to_string());
+                    });
                     ui.add(
                         egui::ProgressBar::new(frac)
                             .show_percentage()
@@ -1739,6 +2131,7 @@ impl App {
             if cancel {
                 p.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
             }
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 
@@ -1976,6 +2369,10 @@ impl App {
                     &mut draft.show_splash,
                     "Mostrar tela de abertura (Splash Screen) ao iniciar",
                 );
+                ui.checkbox(
+                    &mut draft.show_welcome,
+                    "Mostrar tela de boas-vindas (Projetos recentes) ao iniciar",
+                );
                 if ui
                     .button("Editar > Propriedades > Layout (Sonic Foundry / Sony / MAGIX)...")
                     .clicked()
@@ -2066,6 +2463,7 @@ impl App {
             self.prefs.worker_threads = draft.worker_threads;
             self.prefs.language = draft.language.clone();
             self.prefs.show_splash = draft.show_splash;
+            self.prefs.show_welcome = draft.show_welcome;
             self.set_theme(ctx, tid, true);
             if save_and_close {
                 self.dlg.prefs_orig_theme = None;

@@ -271,6 +271,19 @@ pub fn draw_original_spinner(
     painter.circle_filled(center, (radius * 0.18).max(1.5), theme.text_primary);
 }
 
+/// Widget inline do indicador de carregamento vetorial original do Neoveg.
+pub fn spinner_inline(ui: &mut egui::Ui, diameter: f32, phase_secs: f64, theme: &ThemeColors) {
+    let d = if diameter.is_finite() {
+        diameter.clamp(10.0, 64.0)
+    } else {
+        16.0
+    };
+    let (rect, _) = ui.allocate_exact_size(vec2(d, d), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        draw_original_spinner(ui.painter(), rect.center(), d * 0.46, phase_secs, theme);
+    }
+}
+
 fn draw_splash_hero(painter: &egui::Painter, banner: Rect, snap: &SplashSnapshot<'_>) {
     if banner.width() <= 8.0 || banner.height() <= 8.0 {
         return;

@@ -14,6 +14,7 @@ fn dock_tab_icon(tab: DockTab) -> Icon {
         DockTab::Explorer => Icon::FolderItem,
         DockTab::Transitions => Icon::TransitionSplit,
         DockTab::VideoFx => Icon::FxSparkle,
+        DockTab::ColorGrading => Icon::ColorWheels,
         DockTab::AudioFx => Icon::FxAudio,
         DockTab::Generators => Icon::GeneratorFrame,
         DockTab::Mixer => Icon::MixerFaders,
@@ -211,6 +212,7 @@ impl App {
             DockTab::Explorer => self.explorer_tab(ui),
             DockTab::Transitions => self.transitions_tab(ui),
             DockTab::VideoFx => self.fx_tab(ui, false),
+            DockTab::ColorGrading => self.color_grading_tab(ui),
             DockTab::AudioFx => self.fx_tab(ui, true),
             DockTab::Generators => self.generators_tab(ui),
             DockTab::Mixer => self.mixer_tab(ui),
@@ -266,6 +268,18 @@ impl App {
                 .clicked()
             {
                 self.dlg.fx_target = Some(FxTarget::MasterVideo);
+            }
+            if icons::small_icon_button(
+                ui,
+                Icon::ColorWheels,
+                Some("Cor"),
+                self.is_panel_open(DockTab::ColorGrading),
+                &self.theme,
+            )
+            .on_hover_text("Abrir painel Color Grading")
+            .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "view.tab.color_grading");
             }
         });
         let avail = ui.available_rect_before_wrap();

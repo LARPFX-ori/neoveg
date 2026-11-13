@@ -106,6 +106,8 @@ pub struct App {
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
     pub(crate) splash: crate::splash::SplashState,
+    pub(crate) welcome_open: bool,
+    pub(crate) pending_welcome_after_splash: bool,
 }
 
 impl Deref for App {
@@ -159,6 +161,9 @@ impl App {
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let recovery_offer = recovery::find_existing_recovery().is_some();
         let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
+        let want_welcome = prefs.show_welcome && open.is_none() && !recovery_offer;
+        let welcome_open = want_welcome && !splash.active;
+        let pending_welcome_after_splash = want_welcome && splash.active;
         let mut app = App {
             session,
             prefs,
@@ -200,6 +205,8 @@ impl App {
             last_autosave: Instant::now(),
             recovery_offer,
             splash,
+            welcome_open,
+            pending_welcome_after_splash,
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -231,6 +238,10 @@ impl App {
 
     pub fn dismiss_splash(&mut self) {
         self.splash.dismiss();
+        if self.pending_welcome_after_splash && !self.recovery_offer {
+            self.pending_welcome_after_splash = false;
+            self.welcome_open = true;
+        }
     }
 
     pub fn set_status(&mut self, s: impl Into<String>) {
@@ -545,6 +556,10 @@ impl App {
                 } else {
                     self.set_status(format!("Projeto aberto com {} correção(ões) de dados inválidos (veja logs/neoveg.log)", fixes.len()));
                 }
+                if path != recovery::recovery_path() && path != recovery::legacy_recovery_path() {
+                    self.prefs.record_recent_project(&path);
+                    let _ = self.prefs.save();
+                }
             }
             Err(e) => self.set_status(format!("Erro ao abrir projeto: {e}")),
         }
@@ -577,6 +592,8 @@ impl App {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
                 recovery::clear_recovery();
+                self.prefs.record_recent_project(path);
+                let _ = self.prefs.save();
                 self.set_status(format!("Projeto salvo: {}", path.display()));
                 true
             }
@@ -901,7 +918,8 @@ impl App {
         let s = self.opts.preview_quality.scale();
         let w = ((self.project.settings.width as f32 * s) as usize).max(16);
         let h = ((self.project.settings.height as f32 * s) as usize).max(16);
-        let scopes = self.is_panel_open(DockTab::Scopes);
+        let scopes =
+            self.is_panel_open(DockTab::Scopes) || self.is_panel_open(DockTab::ColorGrading);
         let prefer_proxy = self.opts.preview_quality.prefer_proxy();
         let key = (t, self.generation, w, h, scopes, prefer_proxy);
         if key != self.last_req {
@@ -1001,6 +1019,7 @@ impl App {
             UiAction::OpenShortcuts => self.dlg.shortcuts = true,
             UiAction::OpenPrefs => self.dlg.open_prefs(&self.prefs),
             UiAction::OpenSplash => self.open_splash(),
+            UiAction::OpenWelcome => self.open_welcome(),
             UiAction::OpenAbout => self.dlg.about = true,
             UiAction::BuildProxySelected => self.build_proxy_selected(),
             UiAction::PrerenderRegion => self.prerender_region(),
@@ -1042,7 +1061,7 @@ impl App {
     // -----------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.splash.active || ctx.wants_keyboard_input() {
+        if self.splash.active || self.welcome_open || ctx.wants_keyboard_input() {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
@@ -1358,6 +1377,7 @@ impl App {
                 self.cmd_menu_btn(ui, "options.prefs");
             });
             ui.menu_button("Ajuda", |ui| {
+                self.cmd_menu_btn(ui, "help.welcome");
                 self.cmd_menu_btn(ui, "help.splash");
                 self.cmd_menu_btn(ui, "help.shortcuts");
                 self.cmd_menu_btn(ui, "help.about");
@@ -1621,12 +1641,28 @@ impl App {
                         .unwrap_or_else(|| "(sem título)".into())
                 ));
                 if let Some(job) = &self.render_job {
+                    crate::splash::spinner_inline(
+                        ui,
+                        14.0,
+                        ui.ctx().input(|i| i.time),
+                        &self.theme,
+                    );
                     ui.add(
                         egui::ProgressBar::new(job.progress.fraction())
                             .desired_width(140.0)
                             .show_percentage(),
                     );
                     ui.label("Renderizando:");
+                } else if self.loading > 0 {
+                    crate::splash::spinner_inline(
+                        ui,
+                        14.0,
+                        ui.ctx().input(|i| i.time),
+                        &self.theme,
+                    );
+                    ui.label(format!("Carregando ({})...", self.loading));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(40));
                 }
             });
         });
@@ -1814,6 +1850,7 @@ impl App {
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
         self.recovery_window(ctx);
+        self.show_welcome_overlay(ctx);
         self.show_splash_overlay(ctx);
         self.autosave();
         let audio_err = crate::util::lock(&self.audio.shared).error.take();
@@ -1856,7 +1893,12 @@ impl App {
 
 impl App {
     fn show_splash_overlay(&mut self, ctx: &egui::Context) {
+        let was_active = self.splash.active;
         if !self.splash.update_tick(self.loading) {
+            if was_active && self.pending_welcome_after_splash && !self.recovery_offer {
+                self.pending_welcome_after_splash = false;
+                self.welcome_open = true;
+            }
             return;
         }
         let workers = self.prefs.effective_worker_threads();
@@ -1890,6 +1932,10 @@ impl App {
                     "Aviso ao salvar preferência da tela de abertura: {e}"
                 ));
             }
+        }
+        if out.dismissed && self.pending_welcome_after_splash && !self.recovery_offer {
+            self.pending_welcome_after_splash = false;
+            self.welcome_open = true;
         }
         if self.splash.active {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));

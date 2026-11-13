@@ -69,6 +69,28 @@ fn make_avi() -> PathBuf {
 
 #[test]
 fn ui_smoke() {
+    struct PrefsGuard {
+        path: std::path::PathBuf,
+        prev: Option<Vec<u8>>,
+    }
+    impl Drop for PrefsGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(bytes) => {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+    let prefs_path = crate::Preferences::file_path();
+    let _prefs_guard = PrefsGuard {
+        prev: std::fs::read(&prefs_path).ok(),
+        path: prefs_path,
+    };
+
     let ctx = egui::Context::default();
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0;
@@ -76,13 +98,15 @@ fn ui_smoke() {
         t += 1.0 / 60.0;
         let _ = ctx.run(raw(ev, mods, t), |c| app.frame_ui(c));
     };
-    assert_eq!(
-        app.is_splash_open(),
-        app.prefs.show_splash && neoveg_engine::recovery::find_existing_recovery().is_none()
-    );
+    let no_recovery = neoveg_engine::recovery::find_existing_recovery().is_none();
+    assert_eq!(app.is_splash_open(), app.prefs.show_splash && no_recovery);
     frame(&mut app, vec![], Modifiers::NONE);
     app.dismiss_splash();
     assert!(!app.is_splash_open());
+    assert_eq!(app.is_welcome_open(), app.prefs.show_welcome && no_recovery);
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dismiss_welcome();
+    assert!(!app.is_welcome_open());
 
     app.import_paths(vec![make_avi()], Some(Ticks::ZERO));
     for _ in 0..200 {
@@ -269,28 +293,20 @@ fn ui_smoke() {
     frame(&mut app, key(Key::Escape, Modifiers::NONE), Modifiers::NONE);
     assert!(!app.is_splash_open());
 
-    // Editar > Propriedades > Layout: diálogo + 3 tipos (Sonic Foundry, Sony, MAGIX)
-    struct PrefsGuard {
-        path: std::path::PathBuf,
-        prev: Option<Vec<u8>>,
-    }
-    impl Drop for PrefsGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(bytes) => {
-                    let _ = std::fs::write(&self.path, bytes);
-                }
-                None => {
-                    let _ = std::fs::remove_file(&self.path);
-                }
-            }
-        }
-    }
-    let prefs_path = crate::Preferences::file_path();
-    let _prefs_guard = PrefsGuard {
-        prev: std::fs::read(&prefs_path).ok(),
-        path: prefs_path,
-    };
+    app.exec_cmd(Some(&ctx), "help.welcome");
+    assert!(app.is_welcome_open());
+    frame(&mut app, vec![], Modifiers::NONE);
+    frame(&mut app, key(Key::Escape, Modifiers::NONE), Modifiers::NONE);
+    assert!(!app.is_welcome_open());
+
+    // Renderizar como em 2 colunas + aba Color Grading
+    app.exec_cmd(Some(&ctx), "view.tab.color_grading");
+    assert_eq!(app.dock_tab, DockTab::ColorGrading);
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.exec_cmd(Some(&ctx), "file.render");
+    assert!(app.dlg.render.is_some());
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dlg.render = None;
 
     app.exec_cmd(Some(&ctx), "edit.properties.layout");
     assert!(app.dlg.edit_layout_open);

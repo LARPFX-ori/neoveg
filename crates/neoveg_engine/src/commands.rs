@@ -278,6 +278,7 @@ pub enum DockPanel {
     Explorer,
     Transitions,
     VideoFx,
+    ColorGrading,
     AudioFx,
     Generators,
     Mixer,
@@ -286,11 +287,12 @@ pub enum DockPanel {
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 9] = [
+    pub const ALL: [DockPanel; 10] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Transitions,
         DockPanel::VideoFx,
+        DockPanel::ColorGrading,
         DockPanel::AudioFx,
         DockPanel::Generators,
         DockPanel::Mixer,
@@ -304,6 +306,7 @@ impl DockPanel {
             DockPanel::Explorer => "Explorer",
             DockPanel::Transitions => "Transições",
             DockPanel::VideoFx => "Efeitos de Vídeo",
+            DockPanel::ColorGrading => "Color Grading",
             DockPanel::AudioFx => "Efeitos de Áudio",
             DockPanel::Generators => "Geradores de Mídia",
             DockPanel::Mixer => "Mixer",
@@ -318,6 +321,7 @@ impl DockPanel {
             DockPanel::Explorer => "view.tab.explorer",
             DockPanel::Transitions => "view.tab.transitions",
             DockPanel::VideoFx => "view.tab.video_fx",
+            DockPanel::ColorGrading => "view.tab.color_grading",
             DockPanel::AudioFx => "view.tab.audio_fx",
             DockPanel::Generators => "view.tab.generators",
             DockPanel::Mixer => "view.tab.mixer",
@@ -350,6 +354,7 @@ pub enum UiAction {
     OpenShortcuts,
     OpenPrefs,
     OpenSplash,
+    OpenWelcome,
     OpenAbout,
     BuildProxySelected,
     PrerenderRegion,
@@ -969,6 +974,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::VideoFx), h),
+    },
+    CommandDef {
+        id: "view.tab.color_grading",
+        label: "Color Grading",
+        menu_path: "Exibir/Color Grading",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::ColorGrading), h),
     },
     CommandDef {
         id: "view.tab.audio_fx",
@@ -1700,6 +1714,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::ZoomBy(0.5), h),
     },
     // --- Ajuda ---
+    CommandDef {
+        id: "help.welcome",
+        label: "Tela de boas-vindas",
+        menu_path: "Ajuda/Tela de boas-vindas",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenWelcome, h),
+    },
     CommandDef {
         id: "help.splash",
         label: "Tela de abertura",
