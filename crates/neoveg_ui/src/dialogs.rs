@@ -2260,13 +2260,13 @@ impl App {
                 .show(ctx, |ui| {
                     ui.heading("Neoveg");
                     ui.label(format!("Versão {}", env!("CARGO_PKG_VERSION")));
-                    ui.label("Editor de vídeo não-linear escrito em Rust puro (eframe + wgpu, cpal, symphonia, claxon, lewton, puremp3, image).");
+                    ui.label("Editor de vídeo não-linear escrito em Rust puro (eframe + wgpu, cpal, claxon, lewton, puremp3, fundsp, rubato, netcorehost, image).");
                     ui.label("Fluxo de trabalho e atalhos baseados na semântica do VEGAS Pro.");
                     ui.separator();
                     ui.label(
                         egui::RichText::new(
-                            "Formatos de vídeo: AVI (MJPEG/RGB), Y4M, GIF, sequências de imagens e MP4/MOV/MKV no Windows via Media Foundation. \
-                             Áudio: WAV/AIFF/ADPCM, FLAC, Ogg Vorbis, MP1/MP2/MP3, AAC/ALAC (M4A/AAC), CAF e MKA.",
+                            "Formatos de vídeo: AVI (MJPEG/RGB), Y4M, GIF, sequências de imagens e MP4/MOV/MKV/WMV no Windows via Media Foundation. \
+                             Áudio: WAV/AIFF, FLAC, Ogg Vorbis, MP3 e M4A/AAC (via Media Foundation no Windows).",
                         )
                         .small(),
                     );
@@ -3801,7 +3801,7 @@ fn prefs_audio(
     prefs_group_box(
         ui,
         cx.theme,
-        "Dispositivo de Saída e Motor (cpal / Symphonia)",
+        "Dispositivo de Saída e Motor (cpal / fundsp / rubato)",
         |ui| {
             prefs_ro_row(
                 ui,

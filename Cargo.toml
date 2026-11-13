@@ -36,7 +36,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 claxon = "0.4.3"
 lewton = "0.10.2"
 puremp3 = "0.1.0"
-symphonia = { git = "https://github.com/pdeljanov/Symphonia.git", rev = "5f879df0bf309246a48d57caae457fd8c0e2a5cb", features = ["all", "opt-simd"] }
 
 [workspace.lints.rust]
 # AGENTS.md §0.3: unsafe proibido fora de módulos de fronteira FFI nomeados.

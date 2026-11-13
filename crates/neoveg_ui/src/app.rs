@@ -765,7 +765,7 @@ impl App {
                 &[
                     "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
                     "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
-                    "flac", "ogg", "oga", "mp1", "mp2", "mp3", "m4a", "aac", "caf", "mka",
+                    "flac", "ogg", "oga", "mp3", "m4a", "aac",
                 ],
             )
             .add_filter("Todos os arquivos", &["*"])

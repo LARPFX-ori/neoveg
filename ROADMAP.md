@@ -6,7 +6,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 
 - **Política Zero Pânico (`AGENTS.md` §0):** proibição de `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!` e `unreachable!` fora de testes; entrada externa tratada como hostil com parsers limitados e testes de fuzzing por mutação.
 - **Tempo Exato (§Regras Rust 5):** ticks inteiros (`Ticks`, `FrameRate`, `Rate`) e contagem SMPTE *Drop-Frame* sem aritmética `f64` para edições de quadros/amostras.
-- **Licenças e Exceções (`docs/licencas-de-dependencias.md`):** dependências na lista SPDX permitida, com exceção autorizada de `MPL-2.0` para o `symphonia`, auditadas por `python tools/check_licenses.py`.
+- **Licenças e Exceções (`docs/licencas-de-dependencias.md`):** dependências em conformidade com a lista SPDX permitida (`AGENTS.md`), auditadas por `python tools/check_licenses.py` (sem dependências `MPL-2.0`/`GPL`/`LGPL`; `ffmpeg`/`ffprobe` restritos a oráculos de teste externos).
 
 ## Fase 2 — Arquitetura de 5 Crates, Tabela Única de Comandos e GPU com Fallback *(Concluída)*
 
@@ -23,8 +23,8 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Limite configurável de RAM para prévia e cache de quadros em bytes;
   - Geração assíncrona de proxies `.avi` em baixa resolução e pré-renderização seletiva de região;
   - Pool global do `rayon` dimensionado pelos núcleos da máquina (`Preferences.effective_worker_threads()`).
-- **Áudio em Rust puro com `symphonia` (`media/audio.rs`):** integração via `https://github.com/pdeljanov/Symphonia.git` (AAC, ALAC, ADPCM, CAF, FLAC, MP1/MP2/MP3, PCM, Vorbis, ISOMP4, MKV, Ogg, RIFF), mantendo leitor WAVE/AIFF próprio, `claxon`/`lewton`/`puremp3` e Windows Media Foundation como fallbacks/complemento.
-- **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de vídeo/áudio em MP4, MOV, MKV, WEBM, M4V, WMV e ASF (com complemento de áudio via `symphonia`).
+- **Áudio em Rust puro com licenças SPDX permitidas (`media/audio.rs`):** leitor WAVE/AIFF próprio, FLAC (`claxon`, `Apache-2.0`), Ogg Vorbis (`lewton`, `MIT OR Apache-2.0`) e MP3 (`puremp3`, `MIT OR CC0-1.0`), com verificação opcional via oráculo externo `ffprobe` em `target/fixtures/` (sem dependências `MPL-2.0`/`GPL`/`LGPL`).
+- **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de vídeo/áudio em MP4, MOV, MKV, WEBM, M4V, M4A, AAC, WMV e ASF.
 - **Experiência VEGAS Pro em `neoveg_ui`:**
   - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **57 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
   - Playhead físico de **1 px** contrastado ao tema e ao Auto Ripple, **Linha do Playhead** com cabeçalho no topo, **retângulos nos números das faixas**, **Visor de Tempo** dedicado acima da lista de faixas (alinhado à régua e marcadores), controle **Taxa (`Playback Rate`)** + botões de trilha abaixo das faixas e **Barra de Status de Renderização** na base da timeline com faixa indicadora de pré-render no topo;

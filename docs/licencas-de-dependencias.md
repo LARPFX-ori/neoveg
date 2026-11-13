@@ -17,13 +17,15 @@ não podem ser removidas por configuração de features.
 | `Unicode-3.0` | `icu_*`, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`, `yoke-derive`, `zerofrom`, `zerofrom-derive`, `zerotrie`, `zerovec`, `zerovec-derive` | `eframe` → `egui-winit` (feature `links`) → `webbrowser` → `url` → `idna` | abertura de links |
 | `Zlib` | `foldhash` | `accesskit` → `hashbrown` | acessibilidade (leitores de tela) |
 | `Zlib` | `const_panic`, `konst`, `typewit` | `neoveg_scripting` → `netcorehost` → `fn-ptr` | ponte `.NET Host` (`Hostfxr`) para scripts C# (autorizada em 2026-11-13) |
-| `MPL-2.0` | `symphonia` e sub-crates (`symphonia-core`, `symphonia-common`, `symphonia-metadata`, `symphonia-bundle-*`, `symphonia-codec-*`, `symphonia-format-*`) | `neoveg_engine` → `symphonia` (`https://github.com/pdeljanov/Symphonia.git`, rev `5f879df0bf309246a48d57caae457fd8c0e2a5cb`) | decodificação ampliada de áudio em Rust puro (AAC, ALAC, ADPCM, CAF, MP1/MP2/MP3, FLAC, Vorbis, PCM, ISOMP4, MKV, Ogg), autorizada pelo responsável em 2026-11-13 |
 
 Qualquer nova licença fora da lista exige nova decisão antes de entrar no
 `Cargo.lock` (Regra da Casa 9).
 
-## Complementos e fallbacks de áudio
+## Substituições feitas
 
-- Leitor WAVE/AIFF próprio permanece ativo como caminho principal para PCM/IEEE float WAVE/AIFF, com fallback para `symphonia` (ex.: WAV ADPCM / tags ID3).
-- `claxon` (`Apache-2.0`), `lewton` (`MIT OR Apache-2.0`) e `puremp3` (`MIT OR CC0-1.0`) permanecem como fallback para FLAC, Ogg Vorbis e MP3.
-- Windows Media Foundation (`media::mf`) permanece para vídeo de contêineres (MP4/MOV/MKV/WEBM/WMV/ASF) e como fallback/complemento de áudio (ex.: perfis AAC/M4A não cobertos pelo `symphonia`).
+| Antes | Licença | Depois |
+|---|---|---|
+| `symphonia` | `MPL-2.0` | leitor WAVE/AIFF próprio, `claxon` (FLAC, `Apache-2.0`), `lewton` (Ogg Vorbis, `MIT OR Apache-2.0`), `puremp3` (MP3, `MIT OR CC0-1.0`) e Windows Media Foundation (`media::mf` para MP4/MOV/MKV/M4A/AAC) |
+
+- `ffmpeg`/`ffprobe` nunca são linkados, empacotados ou distribuídos; servem exclusivamente como oráculos de teste externos e geradores de fixtures em `target/fixtures/` (`AGENTS.md` §2.3 e §3.4).
+- No Windows, `M4A`/`AAC` e contêineres `MP4`/`MOV`/`MKV`/`WEBM`/`M4V`/`WMV`/`ASF` usam a fronteira FFI isolada do Windows Media Foundation (`media::mf`). Em Linux/macOS aguarda-se a integração às APIs nativas de mídia do SO com fallback próprio.

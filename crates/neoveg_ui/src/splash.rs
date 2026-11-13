@@ -620,16 +620,14 @@ pub fn show_splash_screen(
                             ui.end_row();
 
                             ui.label(egui::RichText::new("Codecs Rust puro:").strong());
-                            ui.label(
-                                "Symphonia (AAC/ALAC/ADPCM/CAF/MKA/FLAC/OGG/MP3), WAV/AIFF, AVI, Y4M, GIF",
-                            );
+                            ui.label("WAV/AIFF (próprio), FLAC, OGG, MP3, AVI, Y4M, GIF");
                             ui.end_row();
 
                             ui.label(egui::RichText::new("Contêineres / UI:").strong());
                             let os_codecs = if cfg!(windows) {
-                                "Media Foundation (MP4/MOV/MKV/WEBM/WMV)"
+                                "Media Foundation (MP4/MOV/MKV/M4A/AAC/WMV)"
                             } else {
-                                "Multiplataforma (fallback de áudio via Symphonia)"
+                                "Formatos em Rust puro (APIs Linux/macOS previstas)"
                             };
                             ui.label(format!("{os_codecs} · {} comandos", snap.commands_count));
                             ui.end_row();

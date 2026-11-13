@@ -1621,12 +1621,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "extended"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2489,12 +2483,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazy_static"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
-
-[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2852,7 +2840,6 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
- "symphonia",
  "windows 0.58.0",
 ]
 
@@ -3871,12 +3858,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex-lite"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
-
-[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4309,188 +4290,6 @@ dependencies = [
  "quote",
  "rustversion",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "symphonia"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "lazy_static",
- "symphonia-bundle-flac",
- "symphonia-bundle-mp3",
- "symphonia-codec-aac",
- "symphonia-codec-adpcm",
- "symphonia-codec-alac",
- "symphonia-codec-pcm",
- "symphonia-codec-vorbis",
- "symphonia-core",
- "symphonia-format-caf",
- "symphonia-format-isomp4",
- "symphonia-format-mkv",
- "symphonia-format-ogg",
- "symphonia-format-riff",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-bundle-flac"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-bundle-mp3"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-aac"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-adpcm"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-alac"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-pcm"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-vorbis"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-common"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-core"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "bitflags 2.13.2",
- "bytemuck",
- "lazy_static",
- "log",
- "num-complex",
- "rustfft",
- "smallvec",
-]
-
-[[package]]
-name = "symphonia-format-caf"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-format-isomp4"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-format-mkv"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-format-ogg"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-format-riff"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "extended",
- "log",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-metadata"
-version = "0.6.1"
-source = "git+https://github.com/pdeljanov/Symphonia.git?rev=5f879df0bf309246a48d57caae457fd8c0e2a5cb#5f879df0bf309246a48d57caae457fd8c0e2a5cb"
-dependencies = [
- "lazy_static",
- "log",
- "regex-lite",
- "smallvec",
- "symphonia-core",
 ]
 
 [[package]]
