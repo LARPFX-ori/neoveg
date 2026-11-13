@@ -1651,38 +1651,59 @@ impl App {
                 }
                 icons::icon_label(ui, Icon::ZoomGlass, 14.0, "Zoom", &self.theme);
                 ui.separator();
-                let mut rate_changed = false;
-                if ui
-                    .small_button(format!("{:.2}×", self.playback_rate))
-                    .on_hover_text("Clique para restaurar velocidade normal (1,00×)")
-                    .clicked()
-                {
-                    self.playback_rate = 1.0;
-                    rate_changed = true;
-                }
-                rate_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.playback_rate, 0.25..=4.0)
-                            .logarithmic(true)
-                            .show_value(false),
-                    )
-                    .on_hover_text("Taxa de reprodução contínua (Playback Rate)")
-                    .changed();
-                icons::icon_label(ui, Icon::SpeedGauge, 14.0, "Taxa:", &self.theme);
-                if rate_changed && playing {
-                    self.shuttle = self.playback_rate;
-                    let mut s = self
-                        .audio
-                        .shared
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    s.speed = self.playback_rate;
-                }
-                if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
-                    ui.label(format!("Shuttle {:+.2}x", self.shuttle));
-                }
+                ui.horizontal(|ui| self.playback_rate_control(ui, false));
             });
         });
+    }
+
+    /// Controle compartilhado de velocidade de reprodução (Playback Rate) usado na barra de transporte
+    /// e no rodapé da lista de trilhas.
+    pub(crate) fn playback_rate_control(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let mut rate_changed = false;
+        let playing = self.is_playing();
+        if compact {
+            ui.label(
+                egui::RichText::new("Taxa:")
+                    .small()
+                    .color(self.theme.text_muted),
+            );
+        } else {
+            icons::icon_label(ui, Icon::SpeedGauge, 14.0, "Taxa:", &self.theme);
+        }
+        if ui
+            .small_button(format!("{:.2}×", self.playback_rate))
+            .on_hover_text("Taxa de reprodução contínua — clique para restaurar 1,00×")
+            .clicked()
+        {
+            self.playback_rate = 1.0;
+            rate_changed = true;
+        }
+        let slider_w = if compact {
+            ui.available_width().clamp(40.0, 120.0)
+        } else {
+            92.0
+        };
+        rate_changed |= ui
+            .add_sized(
+                [slider_w, 18.0],
+                egui::Slider::new(&mut self.playback_rate, 0.25..=4.0)
+                    .logarithmic(true)
+                    .show_value(false),
+            )
+            .on_hover_text("Taxa de reprodução contínua (Playback Rate)")
+            .changed();
+        if rate_changed && playing {
+            self.shuttle = self.playback_rate;
+            let mut s = self
+                .audio
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.speed = self.playback_rate;
+        }
+        if !compact && self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
+            ui.label(format!("Shuttle {:+.2}x", self.shuttle));
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {

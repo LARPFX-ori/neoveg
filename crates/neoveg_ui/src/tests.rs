@@ -549,15 +549,34 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     for clipped in &out.shapes {
         collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
     }
+    let visor_rect = texts
+        .iter()
+        .find(|(t, _, _, _)| t == "Visor de tempo")
+        .map(|(_, _, r, _)| *r)
+        .expect("Visor de tempo deve ser exibido no canto superior da lista de faixas");
+    let status_rect = texts
+        .iter()
+        .find(|(t, _, _, _)| t == "Status de renderização: Pronto (sem trechos pré-renderizados)")
+        .map(|(_, _, r, _)| *r)
+        .expect("Barra de Status de Renderização deve aparecer na base da timeline");
+    let track1_rect = texts
+        .iter()
+        .find(|(t, _, r, _)| t == "1" && r.left() < 100.0 && r.top() > visor_rect.top())
+        .map(|(_, _, r, _)| *r)
+        .expect("cabeçalho da trilha 1 deve ser exibido abaixo do Visor de tempo");
     assert!(
-        texts.iter().any(|(t, _, _, _)| t == "Visor de tempo"),
-        "Visor de tempo deve ser exibido abaixo das faixas de áudio/vídeo"
+        visor_rect.left() < 250.0 && visor_rect.bottom() < track1_rect.top(),
+        "Visor de tempo ({visor_rect:?}) deve ficar acima dos cabeçalhos das faixas ({track1_rect:?})"
     );
     assert!(
-        texts.iter().any(
-            |(t, _, _, _)| t == "Status de renderização: Pronto (sem trechos pré-renderizados)"
-        ),
-        "Barra de Status de Renderização deve aparecer na base da timeline"
+        visor_rect.bottom() < status_rect.top(),
+        "Visor de tempo ({visor_rect:?}) deve ficar acima do rodapé ({status_rect:?})"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(t, _, r, _)| t == "Taxa:" && r.left() < 250.0 && r.top() > track1_rect.bottom()),
+        "controle Taxa (Playback Rate) deve aparecer abaixo da lista de faixas"
     );
 
     app.session

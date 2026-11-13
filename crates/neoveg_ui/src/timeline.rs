@@ -16,8 +16,7 @@ const LOOP_H: f32 = 12.0;
 const MARKER_H: f32 = 18.0;
 const RULER_H: f32 = 22.0;
 const TOP_H: f32 = LOOP_H + MARKER_H + RULER_H;
-const TIME_DISP_H: f32 = 46.0;
-const RENDER_BAR_H: f32 = 24.0;
+const FOOTER_H: f32 = 26.0;
 const EDGE_PX: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -412,13 +411,13 @@ impl App {
             pos2(left, full.top()),
             pos2(full.right(), full.top() + TOP_H),
         );
-        let show_footer = full.height() > TOP_H + TIME_DISP_H + 56.0;
+        let show_footer = full.height() > TOP_H + FOOTER_H + 56.0;
         let headers = Rect::from_min_max(
             pos2(full.left(), full.top() + TOP_H),
             pos2(
                 left,
                 if show_footer {
-                    full.bottom() - TIME_DISP_H
+                    full.bottom() - FOOTER_H
                 } else {
                     full.bottom()
                 },
@@ -429,7 +428,7 @@ impl App {
             pos2(
                 full.right(),
                 if show_footer {
-                    full.bottom() - RENDER_BAR_H
+                    full.bottom() - FOOTER_H
                 } else {
                     full.bottom()
                 },
@@ -444,7 +443,7 @@ impl App {
             .scroll_y
             .clamp(0.0, (total_h - lanes.height() + 40.0).max(0.0));
 
-        self.corner_ui(ui, corner);
+        self.time_display_ui(ui, corner);
         self.top_strip(ui, top);
         let layout = self.track_layout(lanes.top());
         self.lanes_interact(ui, lanes, &layout);
@@ -452,24 +451,24 @@ impl App {
         self.draw_lanes(ui, lanes, &layout);
         self.headers_ui(ui, headers, &layout);
         if show_footer {
-            let time_disp_r = Rect::from_min_max(
+            let track_footer_r = Rect::from_min_max(
                 pos2(full.left(), headers.bottom()),
                 pos2(left, full.bottom()),
             );
             let render_bar_r = Rect::from_min_max(pos2(left, lanes.bottom()), full.max);
-            self.time_display_ui(ui, time_disp_r);
+            self.track_list_footer_ui(ui, track_footer_r);
             self.render_status_bar_ui(ui, render_bar_r);
         }
         self.draw_cursors(ui, top.union(lanes));
         self.rename_popup(ui);
     }
 
-    /// Visor de Tempo dedicado abaixo da lista de faixas de áudio/vídeo (Manual VEGAS Pro 21, p. 69-70).
+    /// Visor de Tempo dedicado acima da lista de faixas de áudio/vídeo, alinhado à régua e barra de marcadores.
     fn time_display_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
         let painter = ui.painter_at(r);
         painter.rect_filled(r, 0.0, self.theme.tl_header_bg);
         painter.line_segment(
-            [r.left_top(), r.right_top()],
+            [r.left_bottom(), r.right_bottom()],
             Stroke::new(1.0_f32, self.theme.border),
         );
         painter.line_segment(
@@ -477,11 +476,11 @@ impl App {
             Stroke::new(1.0_f32, self.theme.border),
         );
 
-        let box_r = r.shrink2(vec2(6.0, 4.0));
-        painter.rect_filled(box_r, 3.0, self.theme.extreme_bg);
+        let box_r = r.shrink2(vec2(5.0, 4.0));
+        painter.rect_filled(box_r, 2.0, self.theme.extreme_bg);
         painter.rect_stroke(
             box_r,
-            3.0,
+            2.0,
             Stroke::new(1.0_f32, self.theme.border),
             StrokeKind::Inside,
         );
@@ -501,10 +500,10 @@ impl App {
             self.theme.text_muted,
         );
         painter.text(
-            pos2(box_r.center().x, box_r.bottom() - 4.0),
-            Align2::CENTER_BOTTOM,
+            pos2(box_r.right() - 8.0, box_r.bottom() - 3.0),
+            Align2::RIGHT_BOTTOM,
             self.fmt_time(self.view_time()),
-            FontId::monospace(17.0),
+            FontId::monospace(20.0),
             self.theme.timecode_fg,
         );
 
@@ -670,33 +669,42 @@ impl App {
         }
     }
 
-    fn corner_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
-        ui.painter().rect_filled(r, 0.0, self.theme.tl_bg);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(4.0)));
-        child.horizontal(|ui| {
-            if icons::small_icon_button(ui, Icon::VideoTrack, Some("+ Vídeo"), false, &self.theme)
+    /// Rodapé da lista de trilhas: botões rápidos de faixa e controle de Taxa (`Playback Rate`, Manual VEGAS Pro 21, p. 68).
+    fn track_list_footer_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let painter = ui.painter_at(r);
+        painter.rect_filled(r, 0.0, self.theme.tl_header_bg);
+        painter.line_segment(
+            [r.left_top(), r.right_top()],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+        painter.line_segment(
+            [r.right_top(), r.right_bottom()],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(r.shrink2(vec2(5.0, 2.0)))
+                .id_salt("timeline_track_list_footer"),
+        );
+        child.set_clip_rect(r);
+        child.horizontal_centered(|ui| {
+            if icons::small_icon_button(ui, Icon::VideoTrack, None, false, &self.theme)
                 .on_hover_text("Inserir trilha de vídeo (Ctrl+Shift+Q)")
                 .clicked()
             {
                 self.checkpoint();
                 self.insert_track(TrackKind::Video);
             }
-            if icons::small_icon_button(ui, Icon::AudioTrack, Some("+ Áudio"), false, &self.theme)
+            if icons::small_icon_button(ui, Icon::AudioTrack, None, false, &self.theme)
                 .on_hover_text("Inserir trilha de áudio (Ctrl+Q)")
                 .clicked()
             {
                 self.checkpoint();
                 self.insert_track(TrackKind::Audio);
             }
+            ui.separator();
+            self.playback_rate_control(ui, true);
         });
-        child.label(
-            egui::RichText::new(format!(
-                "{} trilhas  •  duração {}",
-                self.project.tracks.len(),
-                self.fmt_time(self.project.duration())
-            ))
-            .small(),
-        );
     }
 
     // -----------------------------------------------------------------
