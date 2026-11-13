@@ -198,15 +198,21 @@ pub fn blend(dst: &mut Frame, top: &Frame, mode: BlendMode, opacity: f32) {
 
 /// Alfa de um evento considerando fades, com opção de ignorar fade de
 /// entrada/saída (quando substituído por uma transição).
-fn event_alpha(e: &Event, t: f64, ignore_in: bool, ignore_out: bool) -> f32 {
+fn event_alpha(e: &Event, t: Ticks, ignore_in: bool, ignore_out: bool) -> f32 {
     let mut g = 1.0;
     let local = t - e.start;
-    if !ignore_in && e.fade_in.len > 0.0 && local < e.fade_in.len {
-        g *= e.fade_in.curve.shape((local / e.fade_in.len) as f32);
+    if !ignore_in && e.fade_in.len > Ticks::ZERO && local < e.fade_in.len {
+        g *= e
+            .fade_in
+            .curve
+            .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
     }
     let rem = e.end() - t;
-    if !ignore_out && e.fade_out.len > 0.0 && rem < e.fade_out.len {
-        g *= e.fade_out.curve.shape((rem / e.fade_out.len) as f32);
+    if !ignore_out && e.fade_out.len > Ticks::ZERO && rem < e.fade_out.len {
+        g *= e
+            .fade_out
+            .curve
+            .shape(rem.fraction_in(Ticks::ZERO, e.fade_out.len));
     }
     g
 }
@@ -215,7 +221,7 @@ pub fn event_layer(
     p: &Project,
     media: &MediaCache,
     e: &Event,
-    t: f64,
+    t: Ticks,
     w: usize,
     h: usize,
 ) -> Option<Frame> {
@@ -238,7 +244,7 @@ fn render_track(
     p: &Project,
     media: &MediaCache,
     track: &Track,
-    t: f64,
+    t: Ticks,
     w: usize,
     h: usize,
 ) -> Option<Frame> {
@@ -250,7 +256,7 @@ fn render_track(
     if active.is_empty() {
         return None;
     }
-    active.sort_by(|a, b| a.start.total_cmp(&b.start));
+    active.sort_by_key(|e| e.start);
     let n = active.len();
     // camadas mais antigas por baixo (sem transição)
     let mut base: Option<Frame> = None;
@@ -266,8 +272,8 @@ fn render_track(
     let layer = if n >= 2 {
         let a = active[n - 2];
         let b = active[n - 1];
-        let overlap = (a.end() - b.start).max(1e-6);
-        let prog = ((t - b.start) / overlap) as f32;
+        let overlap = (a.end() - b.start).max(Ticks::from_raw(1));
+        let prog = t.fraction_in(b.start, overlap);
         let fa = event_layer(p, media, a, t, w, h).map(|mut f| {
             f.scale_alpha(event_alpha(a, t, false, true));
             f
@@ -288,11 +294,17 @@ fn render_track(
     } else {
         let e = active[0];
         let local = t - e.start;
-        match (&e.transition, e.fade_in.len > 0.0 && local < e.fade_in.len) {
+        match (
+            &e.transition,
+            e.fade_in.len > Ticks::ZERO && local < e.fade_in.len,
+        ) {
             // transição sem evento anterior: entra a partir do transparente
             (Some(tr), true) => event_layer(p, media, e, t, w, h).map(|mut f| {
                 f.scale_alpha(event_alpha(e, t, true, false));
-                let prog = e.fade_in.curve.shape((local / e.fade_in.len) as f32);
+                let prog = e
+                    .fade_in
+                    .curve
+                    .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
                 transition::apply(tr.kind, tr.softness, &Frame::new(w, h), &f, prog)
             }),
             _ => event_layer(p, media, e, t, w, h).map(|mut f| {
@@ -310,8 +322,8 @@ fn render_track(
     }
 }
 
-/// Renderiza o quadro do projeto no tempo `t` na resolução w x h.
-pub fn render_frame(p: &Project, media: &MediaCache, t: f64, w: usize, h: usize) -> Frame {
+/// Renderiza o quadro do projeto no tempo exato `t` (ticks) na resolução w x h.
+pub fn render_frame(p: &Project, media: &MediaCache, t: Ticks, w: usize, h: usize) -> Frame {
     let bg = p.settings.background;
     let mut out = Frame::filled(w, h, [bg[0], bg[1], bg[2], 1.0]);
     let any_solo = p.any_solo(TrackKind::Video);

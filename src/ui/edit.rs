@@ -36,14 +36,19 @@ impl App {
         }
         let mut items = vec![];
         let mut min_track = usize::MAX;
-        let mut min_t = f64::MAX;
+        let mut min_t = Ticks::MAX;
+        let mut any = false;
         for (ti, t) in self.project.tracks.iter().enumerate() {
             for e in &t.events {
                 if self.sel_events.contains(&e.id) {
                     min_track = min_track.min(ti);
                     min_t = min_t.min(e.start);
+                    any = true;
                 }
             }
+        }
+        if !any {
+            return;
         }
         for (ti, t) in self.project.tracks.iter().enumerate() {
             for e in &t.events {
@@ -75,12 +80,12 @@ impl App {
         self.checkpoint();
         let base_track = self.sel_track.unwrap_or(0);
         let t0 = self.cursor;
-        let span = self
+        let max_end = self
             .clipboard
             .iter()
             .map(|c| c.ev.end())
-            .fold(0.0, f64::max)
-            - self.clip_base;
+            .fold(self.clip_base, Ticks::max);
+        let span = max_end - self.clip_base;
         let mut group_map: HashMap<Id, Id> = HashMap::new();
         let mut new_sel = HashSet::new();
         let items = self.clipboard.clone();
@@ -91,7 +96,7 @@ impl App {
                 .collect();
             for ti in tracks {
                 for e in &mut self.project.tracks[ti].events {
-                    if e.start >= t0 - 1e-9 {
+                    if e.start >= t0 {
                         e.start += span;
                     }
                 }
@@ -130,7 +135,7 @@ impl App {
         let ids = self.expand_groups(&self.sel_events.clone());
         let ripple = self.opts.auto_ripple;
         for t in &mut self.project.tracks {
-            let removed: Vec<(f64, f64)> = t
+            let removed: Vec<(Ticks, Ticks)> = t
                 .events
                 .iter()
                 .filter(|e| ids.contains(&e.id))
@@ -140,10 +145,10 @@ impl App {
             if ripple {
                 // processa do último para o primeiro
                 let mut removed = removed;
-                removed.sort_by(|a, b| b.0.total_cmp(&a.0));
+                removed.sort_by_key(|a| std::cmp::Reverse(a.0));
                 for (start, len) in removed {
                     for e in &mut t.events {
-                        if e.start >= start + len - 1e-9 {
+                        if e.start >= start + len {
                             e.start -= len;
                         }
                     }
@@ -174,7 +179,7 @@ impl App {
             .filter(|id| {
                 self.project
                     .event(*id)
-                    .map(|e| e.start + 1e-6 < t && e.end() - 1e-6 > t && !e.locked)
+                    .map(|e| e.start < t && e.end() > t && !e.locked)
                     .unwrap_or(false)
             })
             .collect();
@@ -198,21 +203,16 @@ impl App {
             right.length -= left_len;
             right.fade_in = Fade::default();
             right.transition = None;
-            if right.reverse {
-                // no modo reverso o offset continua apontando para o fim da mídia
-                let total = left_len * right.rate;
-                let _ = total;
-            } else {
-                right.offset += left_len * right.rate;
+            if !right.reverse {
+                right.offset += right.rate.scale_ticks(left_len);
             }
             if e.reverse {
-                e.offset += right.length * e.rate;
+                e.offset += e.rate.scale_ticks(right.length);
             }
             // pan/crop: desloca keyframes para o tempo local do novo evento
             for k in &mut right.pan_crop.keys {
                 k.t -= left_len;
             }
-            right.pan_crop.keys.retain(|k| k.t >= -1e-9 || true);
             right.group = right
                 .group
                 .map(|g| *group_map.entry(g).or_insert_with(new_id));
@@ -254,7 +254,7 @@ impl App {
                 if e.start < a {
                     let d = a - e.start;
                     if !e.reverse {
-                        e.offset += d * e.rate;
+                        e.offset += e.rate.scale_ticks(d);
                     }
                     e.start = a;
                     e.length -= d;
@@ -262,7 +262,7 @@ impl App {
                 if e.end() > b {
                     let d = e.end() - b;
                     if e.reverse {
-                        e.offset += d * e.rate;
+                        e.offset += e.rate.scale_ticks(d);
                     }
                     e.length -= d;
                 }
@@ -281,7 +281,7 @@ impl App {
                 if c > e.start && c < e.end() {
                     let d = c - e.start;
                     if !e.reverse {
-                        e.offset += d * e.rate;
+                        e.offset += e.rate.scale_ticks(d);
                     }
                     e.start = c;
                     e.length -= d;
@@ -300,7 +300,7 @@ impl App {
                 if c > e.start && c < e.end() {
                     let d = e.end() - c;
                     if e.reverse {
-                        e.offset += d * e.rate;
+                        e.offset += e.rate.scale_ticks(d);
                     }
                     e.length = c - e.start;
                 }
@@ -335,7 +335,7 @@ impl App {
                     let cut = b - e.start;
                     right.start = a;
                     right.length = e.end() - b;
-                    right.offset += cut * right.rate;
+                    right.offset += right.rate.scale_ticks(cut);
                     right.fade_in = Fade::default();
                     e.length = a - e.start;
                     e.fade_out = Fade::default();
@@ -346,7 +346,7 @@ impl App {
                     keep.push(e);
                 } else {
                     let d = b - e.start;
-                    e.offset += d * e.rate;
+                    e.offset += e.rate.scale_ticks(d);
                     e.length -= d;
                     e.start = a;
                     keep.push(e);
@@ -387,7 +387,7 @@ impl App {
                     let cut = a - e.start;
                     right.start = b;
                     right.length = e.length - cut;
-                    right.offset += cut * right.rate;
+                    right.offset += right.rate.scale_ticks(cut);
                     right.fade_in = Fade::default();
                     e.length = cut;
                     e.fade_out = Fade::default();
@@ -409,8 +409,8 @@ impl App {
         let Some(ti) = self.sel_track else { return };
         self.checkpoint();
         let t = &mut self.project.tracks[ti];
-        t.events.sort_by(|a, b| a.start.total_cmp(&b.start));
-        let mut pos = t.events.first().map(|e| e.start).unwrap_or(0.0);
+        t.events.sort_by_key(|e| e.start);
+        let mut pos = t.events.first().map(|e| e.start).unwrap_or(Ticks::ZERO);
         for e in &mut t.events {
             if e.start > pos {
                 e.start = pos;
@@ -548,14 +548,17 @@ impl App {
             return;
         }
         let m = self.project.media(e.media_id).cloned();
-        let mt = e.media_time(c, m.and_then(|m| m.duration)).unwrap_or(0.0);
+        let mt = e
+            .media_time(c, m.and_then(|m| m.duration))
+            .unwrap_or(Ticks::ZERO);
         self.checkpoint();
+        let two_s = Ticks::from_secs_i64(2);
         let mut fr = e.clone();
         fr.id = new_id();
         fr.start = c;
-        fr.length = 2.0;
+        fr.length = two_s;
         fr.offset = mt;
-        fr.rate = 0.0;
+        fr.rate = Rate::FROZEN;
         fr.looped = false;
         fr.reverse = false;
         fr.group = None;
@@ -564,8 +567,8 @@ impl App {
         fr.name = format!("{} (congelado)", e.name);
         // empurra o restante da trilha
         for ev in &mut self.project.tracks[ti].events {
-            if ev.start >= c - 1e-9 {
-                ev.start += 2.0;
+            if ev.start >= c {
+                ev.start += two_s;
             } else if ev.end() > c && ev.id == e.id {
                 // divide o evento original no cursor
             }
@@ -575,9 +578,9 @@ impl App {
             let left = c - original.start;
             let mut right = original.clone();
             right.id = new_id();
-            right.start = c + 2.0;
+            right.start = c + two_s;
             right.length = original.length - left;
-            right.offset += left * right.rate;
+            right.offset += right.rate.scale_ticks(left);
             right.fade_in = Fade::default();
             original.length = left;
             original.fade_out = Fade::default();

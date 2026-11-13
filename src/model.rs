@@ -5,6 +5,7 @@
 //! "Project Media", com fades, envelopes, pan/crop, track motion, efeitos
 //! (event FX / track FX / master bus FX), transições, marcadores e regiões.
 
+pub use crate::time::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -93,9 +94,9 @@ impl Lerp for f32 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Keyframe<T> {
-    /// Tempo local (segundos) relativo ao início do evento (ou da timeline,
+    /// Tempo local (em ticks) relativo ao início do evento (ou da timeline,
     /// para track motion).
-    pub t: f64,
+    pub t: Ticks,
     pub value: T,
     #[serde(default)]
     pub curve: Curve,
@@ -110,7 +111,7 @@ impl<T: Lerp + Default> Default for Keyframes<T> {
     fn default() -> Self {
         Keyframes {
             keys: vec![Keyframe {
-                t: 0.0,
+                t: Ticks::ZERO,
                 value: T::default(),
                 curve: Curve::Smooth,
             }],
@@ -119,7 +120,7 @@ impl<T: Lerp + Default> Default for Keyframes<T> {
 }
 
 impl<T: Lerp + Default> Keyframes<T> {
-    pub fn eval(&self, t: f64) -> T {
+    pub fn eval(&self, t: Ticks) -> T {
         if self.keys.is_empty() {
             return T::default();
         }
@@ -129,8 +130,7 @@ impl<T: Lerp + Default> Keyframes<T> {
         for w in self.keys.windows(2) {
             let (a, b) = (&w[0], &w[1]);
             if t >= a.t && t < b.t {
-                let span = (b.t - a.t).max(1e-9);
-                let x = ((t - a.t) / span) as f32;
+                let x = Ticks::lerp_factor(t, a.t, b.t);
                 return a.value.lerp(&b.value, a.curve.shape(x));
             }
         }
@@ -140,15 +140,15 @@ impl<T: Lerp + Default> Keyframes<T> {
             .unwrap_or_default()
     }
 
-    /// Insere ou substitui o keyframe no tempo `t` (tolerância de meio frame).
-    pub fn set(&mut self, t: f64, value: T, tol: f64) {
-        if let Some(k) = self.keys.iter_mut().find(|k| (k.t - t).abs() <= tol) {
+    /// Insere ou substitui o keyframe no tempo `t` (tolerância de meio quadro).
+    pub fn set(&mut self, t: Ticks, value: T, tol: Ticks) {
+        if let Some(k) = self.keys.iter_mut().find(|k| k.t.abs_diff(t) <= tol) {
             k.value = value;
             return;
         }
         let curve = self.keys.first().map(|k| k.curve).unwrap_or(Curve::Smooth);
         self.keys.push(Keyframe { t, value, curve });
-        self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        self.keys.sort_by_key(|k| k.t);
     }
 
     pub fn is_identity(&self) -> bool
@@ -167,7 +167,10 @@ impl<T: Lerp + Default> Keyframes<T> {
 pub struct ProjectSettings {
     pub width: u32,
     pub height: u32,
-    pub fps: f64,
+    pub fps: FrameRate,
+    /// Usa contagem SMPTE Drop-Frame (`HH:MM:SS;FF`) quando a taxa é 29,97 ou 59,94.
+    #[serde(default = "yes")]
+    pub drop_frame: bool,
     pub sample_rate: u32,
     #[serde(default = "default_bg")]
     pub background: [f32; 3],
@@ -182,7 +185,8 @@ impl Default for ProjectSettings {
         ProjectSettings {
             width: 1920,
             height: 1080,
-            fps: 29.97,
+            fps: FrameRate::FPS_29_97,
+            drop_frame: true,
             sample_rate: 48000,
             background: default_bg(),
         }
@@ -190,11 +194,18 @@ impl Default for ProjectSettings {
 }
 
 impl ProjectSettings {
-    pub fn frame_dur(&self) -> f64 {
-        1.0 / self.fps.max(1.0)
+    pub fn frame_dur(&self) -> Ticks {
+        self.fps.ticks_per_frame()
     }
-    pub fn quantize(&self, t: f64) -> f64 {
-        (t * self.fps).round() / self.fps
+    pub fn quantize(&self, t: Ticks) -> Ticks {
+        self.fps.quantize(t)
+    }
+    pub fn effective_time_format(&self, fmt: TimeFormat) -> TimeFormat {
+        if fmt == TimeFormat::SmpteDrop && !self.drop_frame {
+            TimeFormat::SmpteNonDrop
+        } else {
+            fmt
+        }
     }
 }
 
@@ -212,7 +223,7 @@ pub struct Project {
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
-    pub loop_region: Option<(f64, f64)>,
+    pub loop_region: Option<(Ticks, Ticks)>,
 }
 
 impl Project {
@@ -223,12 +234,12 @@ impl Project {
         p
     }
 
-    pub fn duration(&self) -> f64 {
+    pub fn duration(&self) -> Ticks {
         self.tracks
             .iter()
             .flat_map(|t| t.events.iter())
             .map(|e| e.end())
-            .fold(0.0, f64::max)
+            .fold(Ticks::ZERO, Ticks::max)
     }
 
     pub fn media(&self, id: Id) -> Option<&MediaItem> {
@@ -291,7 +302,7 @@ impl Project {
     /// Ordena os eventos das trilhas por tempo de início.
     pub fn sort_events(&mut self) {
         for t in &mut self.tracks {
-            t.events.sort_by(|a, b| a.start.total_cmp(&b.start));
+            t.events.sort_by_key(|e| e.start);
         }
     }
 
@@ -300,12 +311,11 @@ impl Project {
     /// que o evento, tamanhos que causariam alocações gigantes etc.
     /// Retorna a lista de correções aplicadas.
     pub fn sanitize(&mut self) -> Vec<String> {
-        use crate::util::{clampd, clampf};
+        use crate::util::clampf;
         let mut fixes: Vec<String> = vec![];
         // ids novos (renumeração) precisam ficar acima dos já existentes
         bump_ids(self.max_id());
         let fin32 = |v: f32, d: f32| if v.is_finite() { v } else { d };
-        let fin64 = |v: f64, d: f64| if v.is_finite() { v } else { d };
 
         let s = &mut self.settings;
         let (w0, h0) = (s.width, s.height);
@@ -317,12 +327,13 @@ impl Project {
                 s.width, s.height
             ));
         }
-        if !s.fps.is_finite() || !(1.0..=240.0).contains(&s.fps) {
+        let fps_f = s.fps.as_f64();
+        if !(1.0..=240.0).contains(&fps_f) {
             fixes.push(format!(
-                "taxa de quadros inválida ({}) trocada por 29,97",
-                s.fps
+                "taxa de quadros inválida ({:.3}) trocada por 29,97",
+                fps_f
             ));
-            s.fps = 29.97;
+            s.fps = FrameRate::FPS_29_97;
         }
         if !(8000..=384_000).contains(&s.sample_rate) {
             fixes.push(format!(
@@ -345,14 +356,15 @@ impl Project {
             }
             m.duration = m
                 .duration
-                .filter(|d| d.is_finite() && *d > 0.0)
-                .map(|d| d.min(MAX_TIME));
+                .filter(|d| *d > Ticks::ZERO)
+                .map(|d| d.min(Ticks::MAX));
             m.width = m.width.min(MAX_DIM * 4);
             m.height = m.height.min(MAX_DIM * 4);
-            m.fps = clampd(fin64(m.fps, 0.0), 0.0, 1000.0);
             match &mut m.source {
                 MediaSource::ImageSequence { fps, .. } => {
-                    *fps = clampd(fin64(*fps, 30.0), 1.0, 240.0)
+                    if !(1.0..=240.0).contains(&fps.as_f64()) {
+                        *fps = FrameRate::FPS_30;
+                    }
                 }
                 MediaSource::Generated(g) => sanitize_gen(g),
                 MediaSource::File { .. } => {}
@@ -371,9 +383,8 @@ impl Project {
             t.volume_db = clampf(fin32(t.volume_db, 0.0), -120.0, 24.0);
             t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
             t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
-            t.motion.keys.retain(|k| k.t.is_finite());
             for k in &mut t.motion.keys {
-                k.t = clampd(k.t, 0.0, MAX_TIME);
+                k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
                 let v = &mut k.value;
                 v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
                 v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
@@ -381,7 +392,7 @@ impl Project {
                 v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
                 v.rot = fin32(v.rot, 0.0) % 3600.0;
             }
-            t.motion.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+            t.motion.keys.sort_by_key(|k| k.t);
             if t.motion.keys.is_empty() {
                 t.motion = Keyframes::default();
             }
@@ -389,9 +400,9 @@ impl Project {
             t.envelopes.retain(|e| kinds.insert(e.kind));
             for env in &mut t.envelopes {
                 let (lo, hi) = env.kind.range();
-                env.points.retain(|p| p.t.is_finite() && p.v.is_finite());
+                env.points.retain(|p| p.v.is_finite());
                 for p in &mut env.points {
-                    p.t = clampd(p.t, 0.0, MAX_TIME);
+                    p.t = p.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
                     p.v = clampf(p.v, lo, hi);
                 }
                 env.sort();
@@ -407,27 +418,30 @@ impl Project {
                     e.id = new_id();
                     fixes.push("id de evento duplicado renumerado".into());
                 }
-                e.start = clampd(fin64(e.start, 0.0), 0.0, MAX_TIME);
-                let len = fin64(e.length, 1.0);
-                if len <= 0.0 {
+                e.start = e.start.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                if e.length <= Ticks::ZERO {
                     fixes.push(format!("evento \"{}\" com duração inválida", e.name));
                 }
-                e.length = clampd(len, 0.001, MAX_TIME);
-                e.offset = clampd(fin64(e.offset, 0.0), 0.0, MAX_TIME);
-                e.rate = clampd(fin64(e.rate, 1.0), 0.0, 100.0);
+                e.length = e.length.clamp_safe(Ticks::from_millis_i64(1), Ticks::MAX);
+                e.offset = e.offset.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                if e.rate.as_f64() > 100.0 {
+                    e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
+                }
                 e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
-                e.fade_in.len = clampd(fin64(e.fade_in.len, 0.0), 0.0, e.length);
-                e.fade_out.len = clampd(fin64(e.fade_out.len, 0.0), 0.0, e.length - e.fade_in.len);
-                e.pan_crop.keys.retain(|k| k.t.is_finite());
+                e.fade_in.len = e.fade_in.len.clamp_safe(Ticks::ZERO, e.length);
+                e.fade_out.len = e
+                    .fade_out
+                    .len
+                    .clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
                 for k in &mut e.pan_crop.keys {
-                    k.t = clampd(k.t, -MAX_TIME, MAX_TIME);
+                    k.t = k.t.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
                     let v = &mut k.value;
                     v.cx = clampf(fin32(v.cx, 0.5), -100.0, 100.0);
                     v.cy = clampf(fin32(v.cy, 0.5), -100.0, 100.0);
                     v.size = clampf(fin32(v.size, 1.0), 0.001, 100.0);
                     v.rot = fin32(v.rot, 0.0) % 3600.0;
                 }
-                e.pan_crop.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+                e.pan_crop.keys.sort_by_key(|k| k.t);
                 if e.pan_crop.keys.is_empty() {
                     e.pan_crop = Keyframes::default();
                 }
@@ -448,22 +462,20 @@ impl Project {
             sanitize_fx(f);
         }
         self.master.volume_db = clampf(fin32(self.master.volume_db, 0.0), -120.0, 24.0);
-        self.markers.retain(|m| m.t.is_finite());
         for m in &mut self.markers {
-            m.t = clampd(m.t, 0.0, MAX_TIME);
+            m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
         }
-        self.regions
-            .retain(|r| r.start.is_finite() && r.end.is_finite());
         for r in &mut self.regions {
             if r.end < r.start {
                 std::mem::swap(&mut r.start, &mut r.end);
             }
-            r.start = clampd(r.start, 0.0, MAX_TIME);
-            r.end = clampd(r.end, r.start, MAX_TIME);
+            r.start = r.start.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            r.end = r.end.clamp_safe(r.start, Ticks::MAX);
         }
         self.loop_region = self
             .loop_region
-            .filter(|(a, b)| a.is_finite() && b.is_finite() && b > a && *a >= 0.0);
+            .filter(|(a, b)| b > a && *a >= Ticks::ZERO)
+            .map(|(a, b)| (a.min(Ticks::MAX), b.min(Ticks::MAX)));
         self.sort_events();
         fixes
     }
@@ -471,8 +483,6 @@ impl Project {
 
 /// Maior dimensão de quadro aceita (evita alocações gigantes).
 pub const MAX_DIM: u32 = 8192;
-/// Maior tempo aceito na timeline (48 horas).
-pub const MAX_TIME: f64 = 48.0 * 3600.0;
 
 fn sanitize_fx(f: &mut FxInstance) {
     let specs = f.kind.params();
@@ -488,8 +498,11 @@ fn sanitize_fx(f: &mut FxInstance) {
         if !p.value.is_finite() {
             p.value = spec.default;
         }
-        p.keys.retain(|k| k.0.is_finite() && k.1.is_finite());
-        p.keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+        p.keys.retain(|k| k.1.is_finite());
+        for k in &mut p.keys {
+            k.0 = k.0.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
+        }
+        p.keys.sort_by_key(|k| k.0);
     }
 }
 
@@ -562,21 +575,83 @@ impl Project {
 // Mídia
 // ---------------------------------------------------------------------------
 
+fn de_opt_fps<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<FrameRate>, D::Error> {
+    use serde::de::{self, MapAccess, Visitor};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<FrameRate>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("taxa de quadros opcional ou null")
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: serde::Deserializer<'de>>(
+            self,
+            des: D2,
+        ) -> Result<Self::Value, D2::Error> {
+            des.deserialize_any(V)
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(if v <= 0 {
+                None
+            } else {
+                FrameRate::from_f64(v as f64)
+            })
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(if v == 0 {
+                None
+            } else {
+                FrameRate::from_f64(v as f64)
+            })
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(if !v.is_finite() || v <= 0.0 {
+                None
+            } else {
+                FrameRate::from_f64(v)
+            })
+        }
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut num: Option<u32> = None;
+            let mut den: Option<u32> = None;
+            while let Some(k) = map.next_key::<String>()? {
+                match k.as_str() {
+                    "num" => num = Some(map.next_value()?),
+                    "den" => den = Some(map.next_value()?),
+                    _ => {
+                        let _: de::IgnoredAny = map.next_value()?;
+                    }
+                }
+            }
+            match (num, den) {
+                (Some(n), Some(d)) => Ok(FrameRate::new(n, d)),
+                _ => Ok(None),
+            }
+        }
+    }
+    d.deserialize_option(V)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MediaItem {
     pub id: Id,
     pub name: String,
     pub source: MediaSource,
-    /// Duração em segundos (None = ilimitada: imagens estáticas e mídia gerada).
-    pub duration: Option<f64>,
+    /// Duração exata em ticks (`None` = ilimitada: imagens estáticas e mídia gerada).
+    pub duration: Option<Ticks>,
     pub has_video: bool,
     pub has_audio: bool,
     #[serde(default)]
     pub width: u32,
     #[serde(default)]
     pub height: u32,
-    #[serde(default)]
-    pub fps: f64,
+    #[serde(default, deserialize_with = "de_opt_fps")]
+    pub fps: Option<FrameRate>,
     #[serde(default)]
     pub info: String,
 }
@@ -584,7 +659,7 @@ pub struct MediaItem {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MediaSource {
     File { path: String },
-    ImageSequence { paths: Vec<String>, fps: f64 },
+    ImageSequence { paths: Vec<String>, fps: FrameRate },
     Generated(GenSpec),
 }
 
@@ -888,8 +963,8 @@ impl EnvKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnvPoint {
-    /// Tempo absoluto na timeline (segundos).
-    pub t: f64,
+    /// Tempo absoluto na timeline (em ticks).
+    pub t: Ticks,
     pub v: f32,
     #[serde(default)]
     pub curve: Curve,
@@ -912,14 +987,14 @@ impl Envelope {
         Envelope {
             kind,
             points: vec![EnvPoint {
-                t: 0.0,
+                t: Ticks::ZERO,
                 v: kind.default_value(),
                 curve: Curve::Linear,
             }],
             visible: true,
         }
     }
-    pub fn eval(&self, t: f64) -> f32 {
+    pub fn eval(&self, t: Ticks) -> f32 {
         let p = &self.points;
         if p.is_empty() {
             return self.kind.default_value();
@@ -929,7 +1004,7 @@ impl Envelope {
         }
         for w in p.windows(2) {
             if t >= w[0].t && t < w[1].t {
-                let x = ((t - w[0].t) / (w[1].t - w[0].t).max(1e-9)) as f32;
+                let x = Ticks::lerp_factor(t, w[0].t, w[1].t);
                 let y = w[0].curve.shape(x);
                 return w[0].v + (w[1].v - w[0].v) * y;
             }
@@ -937,7 +1012,7 @@ impl Envelope {
         p.last().map(|x| x.v).unwrap_or(self.kind.default_value())
     }
     pub fn sort(&mut self) {
-        self.points.sort_by(|a, b| a.t.total_cmp(&b.t));
+        self.points.sort_by_key(|p| p.t);
     }
 }
 
@@ -1057,7 +1132,7 @@ impl Track {
         self.envelopes.iter().find(|e| e.kind == kind)
     }
 
-    pub fn env_value(&self, kind: EnvKind, t: f64) -> f32 {
+    pub fn env_value(&self, kind: EnvKind, t: Ticks) -> f32 {
         self.envelope(kind)
             .map(|e| e.eval(t))
             .unwrap_or(kind.default_value())
@@ -1074,7 +1149,7 @@ impl Track {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Fade {
-    pub len: f64,
+    pub len: Ticks,
     #[serde(default)]
     pub curve: Curve,
 }
@@ -1189,16 +1264,16 @@ pub struct Event {
     pub id: Id,
     pub name: String,
     pub media_id: Id,
-    /// Início na timeline (s).
-    pub start: f64,
-    /// Duração na timeline (s).
-    pub length: f64,
-    /// Deslocamento dentro da mídia (take start offset), em segundos de mídia.
+    /// Início na timeline (em ticks).
+    pub start: Ticks,
+    /// Duração na timeline (em ticks).
+    pub length: Ticks,
+    /// Deslocamento dentro da mídia (take start offset), em ticks de mídia.
     #[serde(default)]
-    pub offset: f64,
-    /// Velocidade de reprodução (playback rate).
-    #[serde(default = "one64")]
-    pub rate: f64,
+    pub offset: Ticks,
+    /// Velocidade de reprodução racional (playback rate).
+    #[serde(default)]
+    pub rate: Rate,
     #[serde(default)]
     pub fade_in: Fade,
     #[serde(default)]
@@ -1229,20 +1304,16 @@ pub struct Event {
     pub transition: Option<TransitionSpec>,
 }
 
-fn one64() -> f64 {
-    1.0
-}
-
 impl Event {
-    pub fn new(media: &MediaItem, start: f64, length: f64) -> Self {
+    pub fn new(media: &MediaItem, start: Ticks, length: Ticks) -> Self {
         Event {
             id: new_id(),
             name: media.name.clone(),
             media_id: media.id,
             start,
             length,
-            offset: 0.0,
-            rate: 1.0,
+            offset: Ticks::ZERO,
+            rate: Rate::NORMAL,
             fade_in: Fade::default(),
             fade_out: Fade::default(),
             mute: false,
@@ -1258,50 +1329,57 @@ impl Event {
         }
     }
 
-    pub fn end(&self) -> f64 {
+    pub fn end(&self) -> Ticks {
         self.start + self.length
     }
 
-    pub fn contains(&self, t: f64) -> bool {
+    pub fn contains(&self, t: Ticks) -> bool {
         t >= self.start && t < self.end()
     }
 
-    /// Converte tempo da timeline em tempo da mídia (considerando offset,
-    /// velocidade, loop e reversão). Retorna None se fora da mídia.
-    pub fn media_time(&self, t: f64, media_dur: Option<f64>) -> Option<f64> {
-        let local = (t - self.start) * self.rate;
+    /// Converte tempo da timeline em tempo da mídia (em ticks exatos),
+    /// considerando offset, velocidade racional, loop e reversão.
+    pub fn media_time(&self, t: Ticks, media_dur: Option<Ticks>) -> Option<Ticks> {
+        let local = self.rate.scale_ticks(t - self.start);
         let mut mt = if self.reverse {
-            let total = self.length * self.rate;
+            let total = self.rate.scale_ticks(self.length);
             self.offset + (total - local)
         } else {
             self.offset + local
         };
         if let Some(d) = media_dur {
-            if d <= 0.0 {
+            if d <= Ticks::ZERO {
                 return None;
             }
-            if mt >= d && mt < d + 1e-4 {
-                mt = (d - 1e-6).max(0.0);
+            let eps = Ticks::from_raw(TICKS_PER_SEC / 10_000);
+            if mt >= d && mt < d + eps {
+                mt = (d - Ticks::from_raw(1)).max(Ticks::ZERO);
             }
             if self.looped {
                 mt = mt.rem_euclid(d);
-            } else if mt < 0.0 || mt >= d {
+            } else if mt < Ticks::ZERO || mt >= d {
                 return None;
             }
         }
-        Some(mt.max(0.0))
+        Some(mt.max(Ticks::ZERO))
     }
 
-    /// Ganho dos fades de entrada/saída (0..1) no tempo local.
-    pub fn fade_gain(&self, t: f64) -> f32 {
+    /// Ganho dos fades de entrada/saída (0..1) no tempo `t`.
+    pub fn fade_gain(&self, t: Ticks) -> f32 {
         let local = t - self.start;
         let mut g = 1.0f32;
-        if self.fade_in.len > 0.0 && local < self.fade_in.len {
-            g *= self.fade_in.curve.shape((local / self.fade_in.len) as f32);
+        if self.fade_in.len > Ticks::ZERO && local < self.fade_in.len {
+            g *= self
+                .fade_in
+                .curve
+                .shape(local.fraction_in(Ticks::ZERO, self.fade_in.len));
         }
         let rem = self.end() - t;
-        if self.fade_out.len > 0.0 && rem < self.fade_out.len {
-            g *= self.fade_out.curve.shape((rem / self.fade_out.len) as f32);
+        if self.fade_out.len > Ticks::ZERO && rem < self.fade_out.len {
+            g *= self
+                .fade_out
+                .curve
+                .shape(rem.fraction_in(Ticks::ZERO, self.fade_out.len));
         }
         g
     }
@@ -1628,13 +1706,13 @@ impl FxKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnimParam {
     pub value: f32,
-    /// (tempo local, valor). Vazio = valor constante.
+    /// (tempo local em ticks, valor). Vazio = valor constante.
     #[serde(default)]
-    pub keys: Vec<(f64, f32)>,
+    pub keys: Vec<(Ticks, f32)>,
 }
 
 impl AnimParam {
-    pub fn eval(&self, t: f64) -> f32 {
+    pub fn eval(&self, t: Ticks) -> f32 {
         if self.keys.is_empty() {
             return self.value;
         }
@@ -1644,18 +1722,18 @@ impl AnimParam {
         }
         for w in k.windows(2) {
             if t >= w[0].0 && t < w[1].0 {
-                let x = ((t - w[0].0) / (w[1].0 - w[0].0).max(1e-9)) as f32;
+                let x = Ticks::lerp_factor(t, w[0].0, w[1].0);
                 return w[0].1 + (w[1].1 - w[0].1) * x;
             }
         }
         k.last().map(|x| x.1).unwrap_or(self.value)
     }
-    pub fn set_key(&mut self, t: f64, v: f32, tol: f64) {
-        if let Some(k) = self.keys.iter_mut().find(|k| (k.0 - t).abs() <= tol) {
+    pub fn set_key(&mut self, t: Ticks, v: f32, tol: Ticks) {
+        if let Some(k) = self.keys.iter_mut().find(|k| k.0.abs_diff(t) <= tol) {
             k.1 = v;
         } else {
             self.keys.push((t, v));
-            self.keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+            self.keys.sort_by_key(|a| a.0);
         }
     }
 }
@@ -1687,7 +1765,7 @@ impl FxInstance {
     }
     /// Valores de todos os parâmetros no tempo local `t`, sempre dentro da
     /// faixa declarada (valores vindos de arquivo são hostis: §0.4).
-    pub fn values(&self, t: f64) -> Vec<f32> {
+    pub fn values(&self, t: Ticks) -> Vec<f32> {
         self.kind
             .params()
             .iter()
@@ -1728,15 +1806,15 @@ pub struct MasterBus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Marker {
     pub id: Id,
-    pub t: f64,
+    pub t: Ticks,
     pub label: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Region {
     pub id: Id,
-    pub start: f64,
-    pub end: f64,
+    pub start: Ticks,
+    pub end: Ticks,
     pub label: String,
 }
 
@@ -1756,98 +1834,35 @@ pub fn lin_to_db(v: f32) -> f32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum TimeFormat {
-    #[default]
-    Timecode,
-    Seconds,
-    Frames,
-}
-
-/// Formata um tempo segundo o formato escolhido (Time Display).
-pub fn format_time(t: f64, fps: f64, fmt: TimeFormat) -> String {
-    let neg = t < 0.0;
-    let t = t.abs();
-    let s = match fmt {
-        TimeFormat::Timecode => {
-            let fr = fps.round().max(1.0) as u64;
-            let total_frames = (t * fps).round() as u64;
-            let f = total_frames % fr;
-            let secs = total_frames / fr;
-            format!(
-                "{:02}:{:02}:{:02};{:02}",
-                secs / 3600,
-                (secs / 60) % 60,
-                secs % 60,
-                f
-            )
-        }
-        TimeFormat::Seconds => {
-            let ms = (t * 1000.0).round() as u64;
-            format!(
-                "{:02}:{:02}:{:02}.{:03}",
-                ms / 3_600_000,
-                (ms / 60_000) % 60,
-                (ms / 1000) % 60,
-                ms % 1000
-            )
-        }
-        TimeFormat::Frames => format!("{}", (t * fps).round() as u64),
-    };
-    if neg {
-        format!("-{s}")
-    } else {
-        s
-    }
-}
-
-/// Interpreta um tempo digitado (HH:MM:SS;FF, HH:MM:SS.mmm, segundos ou
-/// "Nf" para quadros).
-pub fn parse_time(s: &str, fps: f64) -> Option<f64> {
-    let s = s.trim();
-    if let Some(f) = s.strip_suffix('f') {
-        return f.trim().parse::<f64>().ok().map(|f| f / fps);
-    }
-    if !s.contains(':') {
-        return s.replace(',', ".").parse::<f64>().ok();
-    }
-    let (main, frames) = match s.split_once(';') {
-        Some((a, b)) => (a, b.parse::<f64>().ok()),
-        None => (s, None),
-    };
-    let mut total = 0.0;
-    for part in main.split(':') {
-        total = total * 60.0 + part.replace(',', ".").parse::<f64>().ok()?;
-    }
-    if let Some(f) = frames {
-        total += f / fps;
-    }
-    Some(total)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn time_roundtrip() {
-        let t = 3723.5;
-        let s = format_time(t, 30.0, TimeFormat::Timecode);
-        assert_eq!(s, "01:02:03;15");
-        assert!((parse_time(&s, 30.0).unwrap() - t).abs() < 1e-6);
-        assert!((parse_time("90f", 30.0).unwrap() - 3.0).abs() < 1e-9);
+        let t = Ticks::from_millis_i64(3_723_500);
+        let s = format_ticks(t, FrameRate::FPS_30, 48000, TimeFormat::SmpteNonDrop);
+        assert_eq!(s, "01:02:03:15");
+        assert_eq!(
+            parse_time(&s, FrameRate::FPS_30, 48000, TimeFormat::SmpteNonDrop).unwrap(),
+            t
+        );
+        assert_eq!(
+            parse_time("90f", FrameRate::FPS_30, 48000, TimeFormat::SmpteNonDrop).unwrap(),
+            Ticks::from_secs_i64(3)
+        );
     }
 
     #[test]
     fn envelope_eval() {
         let mut e = Envelope::new(EnvKind::Opacity);
         e.points.push(EnvPoint {
-            t: 2.0,
+            t: Ticks::from_secs_i64(2),
             v: 0.0,
             curve: Curve::Linear,
         });
-        assert!((e.eval(1.0) - 0.5).abs() < 1e-6);
-        assert_eq!(e.eval(5.0), 0.0);
+        assert!((e.eval(Ticks::from_secs_i64(1)) - 0.5).abs() < 1e-6);
+        assert_eq!(e.eval(Ticks::from_secs_i64(5)), 0.0);
     }
 
     #[test]
@@ -1856,20 +1871,27 @@ mod tests {
             id: 1,
             name: "x".into(),
             source: MediaSource::File { path: "x".into() },
-            duration: Some(4.0),
+            duration: Some(Ticks::from_secs_i64(4)),
             has_video: true,
             has_audio: false,
             width: 0,
             height: 0,
-            fps: 30.0,
+            fps: Some(FrameRate::FPS_30),
             info: String::new(),
         };
-        let mut e = Event::new(&m, 10.0, 6.0);
-        assert!((e.media_time(15.0, Some(4.0)).unwrap() - 1.0).abs() < 1e-9);
+        let dur = Some(Ticks::from_secs_i64(4));
+        let mut e = Event::new(&m, Ticks::from_secs_i64(10), Ticks::from_secs_i64(6));
+        assert_eq!(
+            e.media_time(Ticks::from_secs_i64(15), dur),
+            Some(Ticks::from_secs_i64(1))
+        );
         e.looped = false;
-        assert!(e.media_time(15.0, Some(4.0)).is_none());
+        assert!(e.media_time(Ticks::from_secs_i64(15), dur).is_none());
         e.reverse = true;
-        e.length = 4.0;
-        assert!((e.media_time(11.0, Some(4.0)).unwrap() - 3.0).abs() < 1e-9);
+        e.length = Ticks::from_secs_i64(4);
+        assert_eq!(
+            e.media_time(Ticks::from_secs_i64(11), dur),
+            Some(Ticks::from_secs_i64(3))
+        );
     }
 }

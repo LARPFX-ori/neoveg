@@ -1,5 +1,6 @@
 //! YUV4MPEG2 (.y4m): vídeo não comprimido, simples de ler e escrever.
 
+use crate::time::{FrameRate, Ticks};
 use anyhow::{bail, Context, Result};
 use image::RgbaImage;
 use std::fs::File;
@@ -21,7 +22,7 @@ pub struct Y4mReader {
     file: File,
     pub width: u32,
     pub height: u32,
-    pub fps: f64,
+    pub fps: FrameRate,
     chroma: Chroma,
     data_start: u64,
     frame_header_len: u64,
@@ -43,7 +44,7 @@ impl Y4mReader {
         if !header.starts_with("YUV4MPEG2") {
             bail!("não é um arquivo YUV4MPEG2");
         }
-        let (mut w, mut h, mut fps, mut chroma) = (0u32, 0u32, 25.0f64, Chroma::C420);
+        let (mut w, mut h, mut fps, mut chroma) = (0u32, 0u32, FrameRate::FPS_25, Chroma::C420);
         for tok in header.split_whitespace().skip(1) {
             let mut chars = tok.chars();
             let Some(k) = chars.next() else { continue };
@@ -53,9 +54,9 @@ impl Y4mReader {
                 'H' => h = v.parse()?,
                 'F' => {
                     if let Some((a, b)) = v.split_once(':') {
-                        let (a, b): (f64, f64) = (a.parse()?, b.parse()?);
-                        if b > 0.0 && (0.1..=1000.0).contains(&(a / b)) {
-                            fps = a / b;
+                        let (a, b): (u32, u32) = (a.parse()?, b.parse()?);
+                        if let Some(r) = FrameRate::new(a, b) {
+                            fps = r;
                         }
                     }
                 }
@@ -106,8 +107,8 @@ impl Y4mReader {
         })
     }
 
-    pub fn duration(&self) -> f64 {
-        self.frames as f64 / self.fps
+    pub fn duration(&self) -> Ticks {
+        self.fps.frame_to_ticks(self.frames as i64)
     }
 
     pub fn decode_frame(&mut self, idx: usize) -> Result<RgbaImage> {
@@ -194,17 +195,9 @@ pub struct Y4mWriter {
 }
 
 impl Y4mWriter {
-    pub fn create(path: &Path, w: u32, h: u32, fps: f64) -> Result<Self> {
+    pub fn create(path: &Path, w: u32, h: u32, fps: FrameRate) -> Result<Self> {
         let mut out = BufWriter::with_capacity(1 << 22, File::create(path)?);
-        let (num, den) = if (fps - 29.97).abs() < 0.01 {
-            (30000, 1001)
-        } else if (fps - 23.976).abs() < 0.01 {
-            (24000, 1001)
-        } else if (fps - 59.94).abs() < 0.01 {
-            (60000, 1001)
-        } else {
-            ((fps * 1000.0).round() as u32, 1000)
-        };
+        let (num, den) = (fps.num, fps.den);
         // largura/altura pares para 4:2:0
         writeln!(out, "YUV4MPEG2 W{w} H{h} F{num}:{den} Ip A1:1 C420jpeg")?;
         Ok(Y4mWriter { out, w, h })
@@ -255,7 +248,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let p = std::env::temp_dir().join("nvov_test.y4m");
-        let mut w = Y4mWriter::create(&p, 8, 6, 25.0).unwrap();
+        let mut w = Y4mWriter::create(&p, 8, 6, FrameRate::FPS_25).unwrap();
         let px: Vec<u8> = (0..8 * 6).flat_map(|_| [250u8, 20, 20, 255]).collect();
         w.write_frame(&px).unwrap();
         w.write_frame(&px).unwrap();

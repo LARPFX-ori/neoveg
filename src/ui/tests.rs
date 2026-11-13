@@ -44,7 +44,9 @@ fn press(p: Pos2, down: bool) -> Event {
 
 fn make_avi() -> PathBuf {
     let path = std::env::temp_dir().join("nvov_ui_smoke.avi");
-    let mut w = crate::media::avi::AviWriter::create(&path, 160, 90, 25.0, Some(48000)).unwrap();
+    let mut w =
+        crate::media::avi::AviWriter::create(&path, 160, 90, FrameRate::FPS_25, Some(48000))
+            .unwrap();
     for i in 0..50u32 {
         let img = image::RgbImage::from_fn(160, 90, |x, y| {
             image::Rgb([(x * 2) as u8, (y * 3) as u8, (i * 5) as u8])
@@ -74,7 +76,7 @@ fn ui_smoke() {
     };
     frame(&mut app, vec![], Modifiers::NONE);
 
-    app.import_paths(vec![make_avi()], Some(0.0));
+    app.import_paths(vec![make_avi()], Some(Ticks::ZERO));
     for _ in 0..200 {
         if app.loading == 0 {
             break;
@@ -87,7 +89,7 @@ fn ui_smoke() {
     let n_events: usize = app.project.tracks.iter().map(|t| t.events.len()).sum();
     assert_eq!(n_events, 2, "evento de vídeo + áudio agrupados");
 
-    app.cursor = 3.0;
+    app.cursor = Ticks::from_secs_i64(3);
     app.insert_generated(GenSpec::Text(TextSpec::default()));
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -151,7 +153,7 @@ fn ui_smoke() {
         .iter()
         .flat_map(|t| t.events.iter().map(|e| e.id))
         .collect();
-    app.cursor = 0.8;
+    app.cursor = Ticks::from_millis_i64(800);
     frame(&mut app, key(Key::S, Modifiers::NONE), Modifiers::NONE);
     let after_split: usize = app.project.tracks.iter().map(|t| t.events.len()).sum();
     assert!(
@@ -171,7 +173,7 @@ fn ui_smoke() {
     frame(&mut app, key(Key::M, Modifiers::NONE), Modifiers::NONE);
     frame(&mut app, key(Key::V, Modifiers::NONE), Modifiers::NONE);
     frame(&mut app, vec![Event::Copy], Modifiers::COMMAND);
-    app.cursor = 10.0;
+    app.cursor = Ticks::from_secs_i64(10);
     frame(
         &mut app,
         vec![Event::Paste(String::new())],

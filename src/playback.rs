@@ -4,7 +4,7 @@
 use crate::engine::audio::{Meters, Mixer};
 use crate::engine::video::render_frame;
 use crate::media::{AudioData, MediaCache};
-use crate::model::{Id, Project};
+use crate::model::{Id, Project, Ticks};
 use crate::scopes;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
@@ -241,7 +241,7 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
 
 pub struct PreviewRequest {
     pub project: Arc<Project>,
-    pub t: f64,
+    pub t: Ticks,
     pub w: usize,
     pub h: usize,
     pub scopes: bool,

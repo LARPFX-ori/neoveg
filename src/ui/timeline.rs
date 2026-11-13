@@ -34,36 +34,36 @@ enum Drag {
     None,
     Scrub,
     TimeSel {
-        anchor: f64,
+        anchor: Ticks,
     },
     LoopEdge {
         start: bool,
     },
     LoopMove {
-        orig: (f64, f64),
-        t0: f64,
+        orig: (Ticks, Ticks),
+        t0: Ticks,
     },
     Move {
         anchor_id: Id,
-        anchor_start: f64,
-        origin_t: f64,
+        anchor_start: Ticks,
+        origin_t: Ticks,
         origin_track: usize,
-        orig: Vec<(Id, f64, usize)>,
+        orig: Vec<(Id, Ticks, usize)>,
     },
     Trim {
         left: bool,
         slip: bool,
-        origin_t: f64,
+        origin_t: Ticks,
         anchor_id: Id,
-        orig: Vec<(Id, f64, f64, f64)>,
+        orig: Vec<(Id, Ticks, Ticks, Ticks)>,
     },
     Fade {
         id: Id,
         fade_in: bool,
     },
     Slip {
-        origin_t: f64,
-        orig: Vec<(Id, f64)>,
+        origin_t: Ticks,
+        orig: Vec<(Id, Ticks)>,
     },
     EnvPoint {
         track: usize,
@@ -93,29 +93,29 @@ enum CtxTarget {
     None,
     Event(Id),
     EnvPoint(usize, EnvKind, usize),
-    EnvLine(usize, EnvKind, f64),
-    Lane(usize, f64),
+    EnvLine(usize, EnvKind, Ticks),
+    Lane(usize, Ticks),
     Marker(Id),
     Region(Id),
 }
 
 pub struct TimelineState {
     pub px_per_sec: f32,
-    pub scroll_x: f64,
+    pub scroll_x: Ticks,
     pub scroll_y: f32,
     pub width: f32,
     drag: Drag,
     ctx_target: CtxTarget,
     rename: Option<(Id, String)>,
-    snap_line: Option<f64>,
-    drop_hint: Option<(usize, f64)>,
+    snap_line: Option<Ticks>,
+    drop_hint: Option<(usize, Ticks)>,
 }
 
 impl Default for TimelineState {
     fn default() -> Self {
         TimelineState {
             px_per_sec: 60.0,
-            scroll_x: 0.0,
+            scroll_x: Ticks::ZERO,
             scroll_y: 0.0,
             width: 800.0,
             drag: Drag::None,
@@ -128,27 +128,37 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
-    pub fn zoom_by(&mut self, f: f32, anchor: Option<f64>) {
-        let anchor = anchor.unwrap_or(self.scroll_x + (self.width / 2.0 / self.px_per_sec) as f64);
-        let ax = (anchor - self.scroll_x) as f32 * self.px_per_sec;
+    fn dx_to_ticks(&self, dx: f32) -> Ticks {
+        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(1.0)) as f64)
+    }
+
+    pub fn zoom_by(&mut self, f: f32, anchor: Option<Ticks>) {
+        let anchor = anchor.unwrap_or(self.scroll_x + self.dx_to_ticks(self.width / 2.0));
+        let ax = (anchor - self.scroll_x).as_secs_f64() as f32 * self.px_per_sec;
         self.px_per_sec = (self.px_per_sec * f).clamp(2.0, 4000.0);
-        self.scroll_x = (anchor - (ax / self.px_per_sec) as f64).max(0.0);
+        self.scroll_x = (anchor - self.dx_to_ticks(ax)).max(Ticks::ZERO);
     }
-    pub fn center_on(&mut self, t: f64) {
-        self.scroll_x = (t - (self.width / 2.0 / self.px_per_sec) as f64).max(0.0);
+
+    pub fn center_on(&mut self, t: Ticks) {
+        self.scroll_x = (t - self.dx_to_ticks(self.width / 2.0)).max(Ticks::ZERO);
     }
+
     /// Rolagem automática durante a reprodução (por páginas).
-    pub fn follow(&mut self, t: f64) {
-        let vis = (self.width / self.px_per_sec) as f64;
-        if t > self.scroll_x + vis * 0.97 || t < self.scroll_x {
-            self.scroll_x = (t - vis * 0.03).max(0.0);
+    pub fn follow(&mut self, t: Ticks) {
+        let vis = self.dx_to_ticks(self.width);
+        let far = self.scroll_x + Ticks::from_secs_f64_clamped(vis.as_secs_f64() * 0.97);
+        if t > far || t < self.scroll_x {
+            let pad = Ticks::from_secs_f64_clamped(vis.as_secs_f64() * 0.03);
+            self.scroll_x = (t - pad).max(Ticks::ZERO);
         }
     }
-    fn t2x(&self, t: f64, left: f32) -> f32 {
-        left + ((t - self.scroll_x) * self.px_per_sec as f64) as f32
+
+    fn t2x(&self, t: Ticks, left: f32) -> f32 {
+        left + ((t - self.scroll_x).as_secs_f64() * self.px_per_sec as f64) as f32
     }
-    fn x2t(&self, x: f32, left: f32) -> f64 {
-        self.scroll_x + ((x - left) / self.px_per_sec) as f64
+
+    fn x2t(&self, x: f32, left: f32) -> Ticks {
+        self.scroll_x + self.dx_to_ticks(x - left)
     }
 }
 
@@ -160,39 +170,37 @@ fn shade(c: [u8; 3], k: f32) -> Color32 {
     )
 }
 
-fn nice_step(pps: f32, fps: f64) -> (f64, f64) {
-    let steps = [
-        1.0 / fps,
-        2.0 / fps,
-        5.0 / fps,
-        0.25,
-        0.5,
-        1.0,
-        2.0,
-        5.0,
-        10.0,
-        15.0,
-        30.0,
-        60.0,
-        120.0,
-        300.0,
-        600.0,
-        1800.0,
-        3600.0,
+fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
+    let f1 = fps.ticks_per_frame();
+    let steps: [(Ticks, i64); 17] = [
+        (f1, 1),
+        (f1.saturating_mul(2), 2),
+        (f1.saturating_mul(5), 5),
+        (Ticks::from_millis_i64(250), 5),
+        (Ticks::from_millis_i64(500), 5),
+        (Ticks::from_secs_i64(1), 5),
+        (Ticks::from_secs_i64(2), 4),
+        (Ticks::from_secs_i64(5), 5),
+        (Ticks::from_secs_i64(10), 5),
+        (Ticks::from_secs_i64(15), 5),
+        (Ticks::from_secs_i64(30), 6),
+        (Ticks::from_secs_i64(60), 6),
+        (Ticks::from_secs_i64(120), 4),
+        (Ticks::from_secs_i64(300), 5),
+        (Ticks::from_secs_i64(600), 6),
+        (Ticks::from_secs_i64(1800), 6),
+        (Ticks::from_secs_i64(3600), 6),
     ];
-    for s in steps {
-        if s * pps as f64 >= 90.0 {
-            let minor = if s < 1.0 {
-                s / 5.0
-            } else if s <= 2.0 {
-                s / 4.0
-            } else {
-                s / 5.0
-            };
-            return (s, minor.max(1.0 / fps));
+    for (s, divs) in steps {
+        if s >= f1 && s.as_secs_f64() * pps as f64 >= 90.0 {
+            let minor = s.div_i64(divs).max(f1);
+            return (s, minor);
         }
     }
-    (7200.0, 600.0)
+    (
+        Ticks::from_secs_i64(7200),
+        Ticks::from_secs_i64(600).max(f1),
+    )
 }
 
 impl App {
@@ -261,8 +269,8 @@ impl App {
             if pcb.map(|b| b.contains(pos)).unwrap_or(false) {
                 return Some((ti, ei, Zone::PanCropButton));
             }
-            let fi_x = r.left() + (e.fade_in.len as f32 * self.tl.px_per_sec);
-            let fo_x = r.right() - (e.fade_out.len as f32 * self.tl.px_per_sec);
+            let fi_x = r.left() + (e.fade_in.len.as_secs_f64() as f32 * self.tl.px_per_sec);
+            let fo_x = r.right() - (e.fade_out.len.as_secs_f64() as f32 * self.tl.px_per_sec);
             if pos.y < r.top() + 10.0 {
                 if (pos.x - fi_x).abs() < 6.0 && pos.x < r.center().x + 6.0 {
                     return Some((ti, ei, Zone::FadeIn));
@@ -289,7 +297,7 @@ impl App {
         pos: Pos2,
         left: f32,
         layout: &[(f32, f32)],
-    ) -> Option<(usize, EnvKind, Option<usize>, f64)> {
+    ) -> Option<(usize, EnvKind, Option<usize>, Ticks)> {
         if !self.opts.show_envelopes {
             return None;
         }
@@ -317,20 +325,20 @@ impl App {
     }
 
     /// Encaixe (snapping) em cursor, marcadores, regiões e bordas de eventos.
-    fn snap(&mut self, t: f64, exclude: &HashSet<Id>, shift: bool) -> f64 {
-        let mut t = t.max(0.0);
+    fn snap(&mut self, t: Ticks, exclude: &HashSet<Id>, shift: bool) -> Ticks {
+        let mut t = t.max(Ticks::ZERO);
         self.tl.snap_line = None;
         let enabled = self.opts.snapping != shift;
         if enabled {
-            let tol = 8.0 / self.tl.px_per_sec as f64;
-            let mut best: Option<(f64, f64)> = None;
-            let mut consider = |c: f64| {
-                let d = (c - t).abs();
+            let tol = self.tl.dx_to_ticks(8.0).max(Ticks::from_raw(1));
+            let mut best: Option<(Ticks, Ticks)> = None;
+            let mut consider = |c: Ticks| {
+                let d = c.abs_diff(t);
                 if d <= tol && best.map(|b| d < b.0).unwrap_or(true) {
                     best = Some((d, c));
                 }
             };
-            consider(0.0);
+            consider(Ticks::ZERO);
             consider(self.cursor);
             for m in &self.project.markers {
                 consider(m.t);
@@ -461,12 +469,20 @@ impl App {
         }
         // régua
         let (major, minor) = nice_step(self.tl.px_per_sec, fps);
+        let step = minor.0.max(1);
+        let maj = major.0.max(step);
+        let half_minor = step / 4;
         let t_start = self.tl.scroll_x;
         let t_end = self.tl.x2t(r.right(), left);
-        let mut t = (t_start / minor).floor() * minor;
-        while t <= t_end {
+        let mut idx = t_start.0 / step;
+        loop {
+            let t = Ticks::from_raw(idx.saturating_mul(step));
+            if t > t_end {
+                break;
+            }
             let x = self.tl.t2x(t, left);
-            let is_major = ((t / major).round() * major - t).abs() < minor * 0.25;
+            let rem = t.0.rem_euclid(maj);
+            let is_major = rem <= half_minor || (maj - rem) <= half_minor;
             let h = if is_major { 10.0 } else { 4.0 };
             painter.line_segment(
                 [pos2(x, ruler_r.bottom() - h), pos2(x, ruler_r.bottom())],
@@ -481,7 +497,7 @@ impl App {
                     Color32::from_gray(200),
                 );
             }
-            t += minor;
+            idx = idx.saturating_add(1);
         }
         // regiões e marcadores
         for reg in &self.project.regions {
@@ -515,7 +531,7 @@ impl App {
             );
         }
         let mut sorted: Vec<&Marker> = self.project.markers.iter().collect();
-        sorted.sort_by(|a, b| a.t.total_cmp(&b.t));
+        sorted.sort_by_key(|a| a.t);
         for (i, m) in sorted.iter().enumerate() {
             let x = self.tl.t2x(m.t, left);
             let col = Color32::from_rgb(230, 150, 40);
@@ -579,12 +595,12 @@ impl App {
                     self.checkpoint();
                     self.tl.drag = Drag::RegionEdge { id, start };
                 } else if in_loop0 {
-                    let tol = 6.0 / self.tl.px_per_sec as f64;
+                    let tol = self.tl.dx_to_ticks(6.0);
                     match self.project.loop_region {
-                        Some((a, _)) if (ot - a).abs() < tol => {
+                        Some((a, _)) if ot.abs_diff(a) < tol => {
                             self.tl.drag = Drag::LoopEdge { start: true }
                         }
-                        Some((_, b)) if (ot - b).abs() < tol => {
+                        Some((_, b)) if ot.abs_diff(b) < tol => {
                             self.tl.drag = Drag::LoopEdge { start: false }
                         }
                         Some((a, b)) if ot > a && ot < b => {
@@ -603,6 +619,7 @@ impl App {
                 }
             }
             if resp.dragged() {
+                let min_len = Ticks::from_millis_i64(10);
                 match self.tl.drag.clone() {
                     Drag::Scrub => {
                         let s = self.snap(t, &HashSet::new(), shift);
@@ -619,9 +636,9 @@ impl App {
                         let s = self.snap(t, &HashSet::new(), shift);
                         if let Some(r) = self.project.regions.iter_mut().find(|r| r.id == id) {
                             if start {
-                                r.start = s.min(r.end - 0.01);
+                                r.start = s.min(r.end - min_len);
                             } else {
-                                r.end = s.max(r.start + 0.01);
+                                r.end = s.max(r.start + min_len);
                             }
                         }
                         self.changed();
@@ -630,9 +647,9 @@ impl App {
                         let s = self.snap(t, &HashSet::new(), shift);
                         if let Some((a, b)) = self.project.loop_region {
                             let nr = if start {
-                                (s.min(b - 0.01), b)
+                                (s.min(b - min_len), b)
                             } else {
-                                (a, s.max(a + 0.01))
+                                (a, s.max(a + min_len))
                             };
                             self.project.loop_region = Some(nr);
                             self.time_sel = Some(nr);
@@ -1149,8 +1166,7 @@ impl App {
             } else if scroll != egui::Vec2::ZERO {
                 let d = if scroll.y != 0.0 { scroll.y } else { scroll.x };
                 if mods.shift || scroll.x != 0.0 && scroll.y == 0.0 {
-                    self.tl.scroll_x =
-                        (self.tl.scroll_x - (d / self.tl.px_per_sec) as f64).max(0.0);
+                    self.tl.scroll_x = (self.tl.scroll_x - self.tl.dx_to_ticks(d)).max(Ticks::ZERO);
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                 } else {
@@ -1163,7 +1179,7 @@ impl App {
                 if let Drag::Pan { last } = self.tl.drag {
                     let d = p - last;
                     self.tl.scroll_x =
-                        (self.tl.scroll_x - (d.x / self.tl.px_per_sec) as f64).max(0.0);
+                        (self.tl.scroll_x - self.tl.dx_to_ticks(d.x)).max(Ticks::ZERO);
                     self.tl.scroll_y = (self.tl.scroll_y - d.y).max(0.0);
                 }
                 self.tl.drag = Drag::Pan { last: p };
@@ -1236,10 +1252,10 @@ impl App {
                 self.update_lane_drag(p, left, layout, mods);
                 // rolagem automática perto das bordas
                 if p.x > lanes.right() - 20.0 {
-                    self.tl.scroll_x += (8.0 / self.tl.px_per_sec) as f64;
-                } else if p.x < lanes.left() + 10.0 && self.tl.scroll_x > 0.0 {
+                    self.tl.scroll_x += self.tl.dx_to_ticks(8.0);
+                } else if p.x < lanes.left() + 10.0 && self.tl.scroll_x > Ticks::ZERO {
                     self.tl.scroll_x =
-                        (self.tl.scroll_x - (8.0 / self.tl.px_per_sec) as f64).max(0.0);
+                        (self.tl.scroll_x - self.tl.dx_to_ticks(8.0)).max(Ticks::ZERO);
                 }
             }
         }
@@ -1367,7 +1383,7 @@ impl App {
                     for gid in group_ids {
                         if let Some(ge) = self.project.event(gid) {
                             let ge_edge = if left_edge { ge.start } else { ge.end() };
-                            if (ge_edge - edge_t).abs() < 1e-6 {
+                            if ge_edge.abs_diff(edge_t) < Ticks::from_millis_i64(1) {
                                 orig.push((gid, ge.start, ge.length, ge.offset));
                             }
                         }
@@ -1427,8 +1443,11 @@ impl App {
                                     .map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t))
                             })
                             .collect();
-                        let anchor_start =
-                            self.project.event(anchor).map(|e| e.start).unwrap_or(0.0);
+                        let anchor_start = self
+                            .project
+                            .event(anchor)
+                            .map(|e| e.start)
+                            .unwrap_or(Ticks::ZERO);
                         self.tl.drag = Drag::Move {
                             anchor_id: anchor,
                             anchor_start,
@@ -1478,7 +1497,7 @@ impl App {
             Drag::TimeSel { anchor } => {
                 let s = self.snap(t, &HashSet::new(), mods.shift);
                 let sel = (anchor.min(s), anchor.max(s));
-                if sel.1 - sel.0 > 1e-6 {
+                if sel.1 - sel.0 > Ticks::ZERO {
                     self.time_sel = Some(sel);
                     self.project.loop_region = Some(sel);
                 }
@@ -1493,22 +1512,23 @@ impl App {
                     .iter_mut()
                     .find(|e| e.kind == kind);
                 if let Some(env) = env {
+                    let gap = Ticks::from_raw(TICKS_PER_MS / 10);
                     let lo = if idx > 0 {
-                        env.points[idx - 1].t + 1e-4
+                        env.points[idx - 1].t + gap
                     } else {
-                        0.0
+                        Ticks::ZERO
                     };
                     let hi = env
                         .points
                         .get(idx + 1)
-                        .map(|p| p.t - 1e-4)
-                        .unwrap_or(f64::MAX);
+                        .map(|p| p.t - gap)
+                        .unwrap_or(Ticks::MAX);
                     if let Some(pt) = env.points.get_mut(idx) {
                         if !mods.command {
                             pt.t = if idx == 0 && env_first_locked() {
-                                0.0
+                                Ticks::ZERO
                             } else {
-                                snapped.clamp(lo, hi.max(lo))
+                                snapped.clamp_safe(lo, hi)
                             };
                         }
                         if !mods.alt {
@@ -1522,10 +1542,10 @@ impl App {
                 if let Some(e) = self.project.event_mut(id) {
                     if fade_in {
                         e.fade_in.len =
-                            crate::util::clampd(t - e.start, 0.0, e.length - e.fade_out.len);
+                            (t - e.start).clamp_safe(Ticks::ZERO, e.length - e.fade_out.len);
                     } else {
                         e.fade_out.len =
-                            crate::util::clampd(e.end() - t, 0.0, e.length - e.fade_in.len);
+                            (e.end() - t).clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
                     }
                 }
                 self.changed();
@@ -1539,14 +1559,17 @@ impl App {
                         .and_then(|e| self.project.media(e.media_id))
                         .and_then(|m| m.duration);
                     if let Some(e) = self.project.event_mut(id) {
-                        let mut o = off - dt * e.rate;
+                        let mut o = off - e.rate.scale_ticks(dt);
                         if let (Some(d), false) = (dur, e.looped) {
-                            o = o.clamp(0.0, (d - e.length * e.rate).max(0.0));
+                            let max_o = (d - e.rate.scale_ticks(e.length)).max(Ticks::ZERO);
+                            o = o.clamp_safe(Ticks::ZERO, max_o);
                         }
-                        e.offset = o.max(if e.looped { f64::MIN } else { 0.0 });
+                        e.offset = if e.looped { o } else { o.max(Ticks::ZERO) };
                         if e.looped {
                             if let Some(d) = dur {
-                                e.offset = e.offset.rem_euclid(d);
+                                if d > Ticks::ZERO {
+                                    e.offset = e.offset.rem_euclid(d);
+                                }
                             }
                         }
                     }
@@ -1578,16 +1601,19 @@ impl App {
                     if is_left {
                         dt = dt.min(len - fd);
                         dt = dt.max(-st);
-                        if let (false, false, false) = (e.looped, slip, e.reverse) {
-                            if rate > 0.0 {
-                                dt = dt.max(-off / rate);
+                        if !e.looped && !slip && !e.reverse {
+                            if let Some(max_back) = rate.unscale_ticks(off) {
+                                dt = dt.max(-max_back);
                             }
                         }
                     } else {
                         dt = dt.max(-(len - fd));
                         if let (Some(d), false, false) = (dur, e.looped, slip) {
-                            if rate > 0.0 && !e.reverse {
-                                dt = dt.min((d - off) / rate - len);
+                            if !e.reverse {
+                                if let Some(avail) = rate.unscale_ticks((d - off).max(Ticks::ZERO))
+                                {
+                                    dt = dt.min((avail - len).max(-(len - fd)));
+                                }
                             }
                         }
                     }
@@ -1596,14 +1622,14 @@ impl App {
                     if let Some(e) = self.project.event_mut(id) {
                         if is_left {
                             e.start = st + dt;
-                            e.length = len - dt;
+                            e.length = (len - dt).max(fd);
                             if !slip && !e.reverse {
-                                e.offset = off + dt * e.rate;
+                                e.offset = off + e.rate.scale_ticks(dt);
                             }
                         } else {
-                            e.length = len + dt;
+                            e.length = (len + dt).max(fd);
                             if slip {
-                                e.offset = (off - dt * e.rate).max(0.0);
+                                e.offset = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
                             }
                         }
                         e.fade_in.len = e.fade_in.len.min(e.length);
@@ -1626,7 +1652,7 @@ impl App {
                     .project
                     .event(anchor_id)
                     .map(|e| e.length)
-                    .unwrap_or(0.0);
+                    .unwrap_or(Ticks::ZERO);
                 let s1 = self.snap(raw, &exclude, mods.shift);
                 let line1 = self.tl.snap_line;
                 let s2 = self.snap(raw + anchor_len, &exclude, mods.shift) - anchor_len;
@@ -1642,8 +1668,8 @@ impl App {
                 } else {
                     s1
                 };
-                let min_start = orig.iter().map(|o| o.1).fold(f64::MAX, f64::min);
-                let dt = (ns - anchor_start).max(-min_start);
+                let min_start = orig.iter().map(|o| o.1).fold(Ticks::MAX, Ticks::min);
+                let dt = (ns - anchor_start).max(Ticks::ZERO - min_start);
                 // deslocamento vertical entre trilhas do mesmo tipo
                 let target = self.track_at(p.y, layout).unwrap_or(origin_track);
                 let dtrack = target as isize - origin_track as isize;
@@ -1732,7 +1758,7 @@ impl App {
         &mut self,
         payload: DndPayload,
         track: Option<usize>,
-        t: f64,
+        t: Ticks,
         event: Option<Id>,
     ) {
         match payload {
@@ -1802,8 +1828,8 @@ impl App {
             kind,
             softness: soft,
         });
-        if e.fade_in.len <= 0.0 {
-            e.fade_in.len = 1.0f64.min(e.length / 2.0);
+        if e.fade_in.len <= Ticks::ZERO {
+            e.fade_in.len = Ticks::from_secs_i64(1).min(e.length.div_i64(2));
         }
         self.set_status(format!("Transição \"{}\" aplicada", kind.name()));
         self.changed();
@@ -2084,19 +2110,33 @@ impl App {
             });
         }
         ui.menu_button("Velocidade", |ui| {
-            for r in [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0] {
+            for (num, den, pct) in [
+                (1, 4, 25),
+                (1, 2, 50),
+                (3, 4, 75),
+                (1, 1, 100),
+                (3, 2, 150),
+                (2, 1, 200),
+                (4, 1, 400),
+            ] {
+                let Some(r) = Rate::from_ratio(num, den) else {
+                    continue;
+                };
                 if ui
-                    .selectable_label((e.rate - r).abs() < 1e-6, format!("{:.0}%", r * 100.0))
+                    .selectable_label(e.rate == r, format!("{pct}%"))
                     .clicked()
                 {
                     self.checkpoint();
+                    let min_len = self.project.settings.frame_dur();
                     let Some(ev) = self.project.event_mut(id) else {
                         return;
                     };
                     // mantém o mesmo conteúdo: ajusta a duração
-                    let content = ev.length * ev.rate;
+                    let content = ev.rate.scale_ticks(ev.length);
                     ev.rate = r;
-                    ev.length = content / r;
+                    if let Some(new_len) = r.unscale_ticks(content) {
+                        ev.length = new_len.max(min_len);
+                    }
                     self.changed();
                     ui.close_menu();
                 }
@@ -2134,15 +2174,20 @@ impl App {
         let ctx = ui.ctx().clone();
         // grade
         let (major, _) = nice_step(pps, self.project.settings.fps);
-        let mut gt = (self.tl.scroll_x / major).floor() * major;
+        let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
-        while gt <= t_end {
+        let mut idx = self.tl.scroll_x.0 / step;
+        loop {
+            let gt = Ticks::from_raw(idx.saturating_mul(step));
+            if gt > t_end {
+                break;
+            }
             let x = self.tl.t2x(gt, left);
             painter.line_segment(
                 [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
                 Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 44)),
             );
-            gt += major;
+            idx = idx.saturating_add(1);
         }
         // seleção de tempo
         if let Some((a, b)) = self.time_sel {
@@ -2277,15 +2322,16 @@ impl App {
                         );
                         let mut x = vis.left().floor();
                         let mut segs = Vec::with_capacity(vis.width() as usize * 2);
+                        let min_span = Ticks::from_raw(TICKS_PER_MS / 10);
+                        let last_t = (e.end() - Ticks::from_raw(1)).max(e.start);
                         while x < vis.right() {
                             let t0 = self.tl.x2t(x, left);
                             let t1 = self.tl.x2t(x + 1.0, left);
-                            if let (Some(m0), Some(m1)) = (
-                                e.media_time(t0, dur),
-                                e.media_time(t1.min(e.end() - 1e-6), dur),
-                            ) {
+                            if let (Some(m0), Some(m1)) =
+                                (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
+                            {
                                 let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
-                                let (lo, hi) = a.peak_range(m0, m1.max(m0 + 1e-4));
+                                let (lo, hi) = a.peak_range(m0, m1.max(m0 + min_span));
                                 let fg = e.fade_gain(t0);
                                 segs.push(Shape::line_segment(
                                     [
@@ -2302,8 +2348,8 @@ impl App {
                 }
                 // nome e indicadores
                 let mut label = e.name.clone();
-                if (e.rate - 1.0).abs() > 1e-6 {
-                    label.push_str(&format!("  [{:.0}%]", e.rate * 100.0));
+                if !e.rate.is_normal() {
+                    label.push_str(&format!("  [{:.0}%]", e.rate.percent_f64()));
                 }
                 if e.reverse {
                     label.push_str("  ⇄");
@@ -2313,7 +2359,7 @@ impl App {
                         .project
                         .media(e.media_id)
                         .and_then(|m| m.duration)
-                        .map(|d| e.length * e.rate > d + 1e-3)
+                        .map(|d| e.rate.scale_ticks(e.length) > d + Ticks::from_millis_i64(1))
                         .unwrap_or(false)
                 {
                     label.push_str("  ⟲");
@@ -2366,11 +2412,11 @@ impl App {
                 }
                 // fades
                 let fade_col = Stroke::new(1.5_f32, Color32::from_rgb(250, 250, 160));
-                let draw_fade = |len: f64, curve: Curve, fade_in: bool| {
-                    if len <= 0.0 {
+                let draw_fade = |len: Ticks, curve: Curve, fade_in: bool| {
+                    if len <= Ticks::ZERO {
                         return;
                     }
-                    let w = len as f32 * pps;
+                    let w = len.as_secs_f64() as f32 * pps;
                     let n = (w / 3.0).clamp(2.0, 60.0) as usize;
                     let mut pts = vec![];
                     for i in 0..=n {
@@ -2388,8 +2434,8 @@ impl App {
                 draw_fade(e.fade_in.len, e.fade_in.curve, true);
                 draw_fade(e.fade_out.len, e.fade_out.curve, false);
                 // alças de fade
-                let fi_x = r.left() + e.fade_in.len as f32 * pps;
-                let fo_x = r.right() - e.fade_out.len as f32 * pps;
+                let fi_x = r.left() + e.fade_in.len.as_secs_f64() as f32 * pps;
+                let fo_x = r.right() - e.fade_out.len.as_secs_f64() as f32 * pps;
                 for x in [fi_x, fo_x] {
                     painter.rect_filled(
                         Rect::from_center_size(pos2(x, r.top() + 3.0), vec2(6.0, 6.0)),

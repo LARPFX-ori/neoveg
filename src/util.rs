@@ -25,14 +25,6 @@ pub fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
     v.max(lo).min(hi)
 }
 
-/// Versão `f64` de [`clampf`].
-pub fn clampd(v: f64, lo: f64, hi: f64) -> f64 {
-    if v.is_nan() || hi < lo {
-        return lo;
-    }
-    v.max(lo).min(hi)
-}
-
 /// Extrai a mensagem de um payload de pânico.
 pub fn panic_message(p: &(dyn Any + Send)) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
@@ -216,7 +208,6 @@ mod tests {
     #[test]
     fn clamp_cruzado_nao_entra_em_panico() {
         assert_eq!(clampf(5.0, 1.0, 0.0), 1.0);
-        assert_eq!(clampd(f64::NAN, 0.0, 1.0), 0.0);
         assert_eq!(clampf(0.5, 0.0, 1.0), 0.5);
     }
 

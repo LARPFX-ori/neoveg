@@ -4,7 +4,7 @@
 // iteradores encadeados deixariam o DSP menos legível.
 #![allow(clippy::needless_range_loop)]
 
-use crate::model::{db_to_lin, FxInstance, FxKind};
+use crate::model::{db_to_lin, FxInstance, FxKind, Ticks};
 
 #[derive(Clone, Copy, Default)]
 pub struct Biquad {
@@ -221,8 +221,8 @@ impl FxState {
     }
 }
 
-/// Processa um bloco estéreo intercalado. `t` = tempo local do início do bloco.
-pub fn process(fx: &FxInstance, st: &mut FxState, sr: u32, buf: &mut [f32], t: f64) {
+/// Processa um bloco estéreo intercalado. `t` = tempo local do início do bloco (em ticks).
+pub fn process(fx: &FxInstance, st: &mut FxState, sr: u32, buf: &mut [f32], t: Ticks) {
     if !fx.enabled || !fx.kind.is_audio() {
         return;
     }

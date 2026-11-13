@@ -50,15 +50,15 @@ fn effective_fades(track: &Track, idx: usize) -> (Fade, Fade) {
 }
 
 #[inline]
-fn fade_gain(e: &Event, fi: &Fade, fo: &Fade, t: f64) -> f32 {
+fn fade_gain(e: &Event, fi: &Fade, fo: &Fade, t: Ticks) -> f32 {
     let local = t - e.start;
     let mut g = 1.0;
-    if fi.len > 0.0 && local < fi.len {
-        g *= fi.curve.shape((local / fi.len) as f32);
+    if fi.len > Ticks::ZERO && local < fi.len {
+        g *= fi.curve.shape(local.fraction_in(Ticks::ZERO, fi.len));
     }
     let rem = e.end() - t;
-    if fo.len > 0.0 && rem < fo.len {
-        g *= fo.curve.shape((rem / fo.len) as f32);
+    if fo.len > Ticks::ZERO && rem < fo.len {
+        g *= fo.curve.shape(rem.fraction_in(Ticks::ZERO, fo.len));
     }
     g
 }
@@ -80,7 +80,7 @@ impl Mixer {
         self.states.clear();
     }
 
-    fn run_fx(&mut self, fx: &FxInstance, buf: &mut [f32], t: f64) {
+    fn run_fx(&mut self, fx: &FxInstance, buf: &mut [f32], t: Ticks) {
         let sr = self.sr;
         let st = self
             .states
@@ -98,9 +98,16 @@ impl Mixer {
         out: &mut [f32],
     ) {
         let n = out.len() / 2;
-        let sr = self.sr as f64;
-        let t0 = start as f64 / sr;
-        let t1 = (start + n as i64) as f64 / sr;
+        let sr = self.sr;
+        let step = Ticks::exact_step_for_sample_rate(sr);
+        let sample_time = |idx: i64| -> Ticks {
+            match step {
+                Some(k) => Ticks(idx.saturating_mul(k)),
+                None => Ticks::from_samples(idx, sr),
+            }
+        };
+        let t0 = sample_time(start);
+        let t1 = sample_time(start.saturating_add(n as i64));
         out.iter_mut().for_each(|s| *s = 0.0);
         self.master_buf.resize(n * 2, 0.0);
         self.master_buf.iter_mut().for_each(|s| *s = 0.0);
@@ -130,12 +137,12 @@ impl Mixer {
                 let Some(a) = audio.get(&e.media_id) else {
                     continue;
                 };
-                let dur = m.duration.or(Some(a.duration()));
+                let dur = m.duration.or_else(|| Some(a.duration()));
                 let (fi, fo) = effective_fades(track, ei);
                 let g = db_to_lin(e.gain_db);
                 ev_buf.iter_mut().for_each(|s| *s = 0.0);
                 for i in 0..n {
-                    let t = (start + i as i64) as f64 / sr;
+                    let t = sample_time(start.saturating_add(i as i64));
                     if !e.contains(t) {
                         continue;
                     }
@@ -165,7 +172,7 @@ impl Mixer {
             let penv = track.envelope(EnvKind::Pan);
             let mut peak = [0f32; 2];
             for i in 0..n {
-                let t = (start + i as i64) as f64 / sr;
+                let t = sample_time(start.saturating_add(i as i64));
                 let ve = venv.map(|e| e.eval(t)).unwrap_or(1.0);
                 let pan = (track.pan + penv.map(|e| e.eval(t)).unwrap_or(0.0)).clamp(-1.0, 1.0);
                 let gl = vol * ve * (1.0 - pan).min(1.0);

@@ -125,8 +125,14 @@ pub struct ClipItem {
     pub ev: Event,
 }
 
+#[derive(Clone, Copy)]
+pub enum PlaceTarget {
+    At(Ticks),
+    EndOfTrack,
+}
+
 pub enum LoadMsg {
-    Imported(media::Imported, Option<f64>),
+    Imported(media::Imported, Option<PlaceTarget>),
     Reloaded(Id, Result<media::Imported, String>),
     Error(String),
 }
@@ -151,18 +157,18 @@ pub struct App {
     preview_tex: Option<TextureHandle>,
     preview_inflight: bool,
     preview_inflight_since: Instant,
-    last_req: (f64, u64, usize, usize, bool),
+    last_req: (Ticks, u64, usize, usize, bool),
     preview_ms: f64,
     scopes_tex: Option<[TextureHandle; 4]>,
-    pub cursor: f64,
-    play_start: f64,
+    pub cursor: Ticks,
+    play_start: Ticks,
     pub sel_events: HashSet<Id>,
     pub sel_track: Option<usize>,
-    pub time_sel: Option<(f64, f64)>,
+    pub time_sel: Option<(Ticks, Ticks)>,
     pub tl: TimelineState,
     pub opts: Options,
     pub clipboard: Vec<ClipItem>,
-    pub clip_base: f64,
+    pub clip_base: Ticks,
     pub dock_tab: DockTab,
     pub dlg: dialogs::Dialogs,
     pub status: String,
@@ -218,11 +224,11 @@ impl App {
             preview_tex: None,
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
-            last_req: (-1.0, 0, 0, 0, false),
+            last_req: (Ticks::from_raw(-1), 0, 0, 0, false),
             preview_ms: 0.0,
             scopes_tex: None,
-            cursor: 0.0,
-            play_start: 0.0,
+            cursor: Ticks::ZERO,
+            play_start: Ticks::ZERO,
             sel_events: HashSet::new(),
             sel_track: Some(0),
             time_sel: None,
@@ -235,13 +241,13 @@ impl App {
                 show_envelopes: true,
                 show_waveforms: true,
                 show_thumbs: true,
-                time_format: TimeFormat::Timecode,
+                time_format: TimeFormat::SmpteDrop,
                 preview_quality: PreviewQuality::Preview,
                 safe_areas: false,
                 loop_playback: false,
             },
             clipboard: vec![],
-            clip_base: 0.0,
+            clip_base: Ticks::ZERO,
             dock_tab: DockTab::ProjectMedia,
             dlg: dialogs::Dialogs::default(),
             status: String::new(),
@@ -276,7 +282,7 @@ impl App {
             {
                 app.open_project_path(p);
             } else {
-                app.import_paths(vec![p], Some(0.0));
+                app.import_paths(vec![p], Some(Ticks::ZERO));
             }
         }
         app
@@ -427,11 +433,11 @@ impl App {
 
     pub fn play(&mut self) {
         self.sync_snapshot();
-        let sr = self.audio.sr as f64;
+        let sr = self.audio.sr;
         let lr = if self.opts.loop_playback {
             self.project
                 .loop_region
-                .map(|(a, b)| ((a * sr) as i64, (b * sr) as i64))
+                .map(|(a, b)| (a.to_samples_round(sr), b.to_samples_round(sr)))
         } else {
             None
         };
@@ -448,7 +454,7 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         s.loop_range = lr.filter(|(a, b)| b > a);
-        s.pos = (start * sr) as i64;
+        s.pos = start.to_samples_round(sr);
         s.speed = 1.0;
         s.mixer.reset();
         s.playing = true;
@@ -457,7 +463,7 @@ impl App {
 
     pub fn shuttle_play(&mut self, speed: f64) {
         self.sync_snapshot();
-        let sr = self.audio.sr as f64;
+        let sr = self.audio.sr;
         let playing = self.is_playing();
         let mut s = self
             .audio
@@ -465,7 +471,7 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !playing {
-            s.pos = (self.cursor * sr) as i64;
+            s.pos = self.cursor.to_samples_round(sr);
         }
         s.loop_range = None;
         s.speed = speed;
@@ -488,7 +494,7 @@ impl App {
         };
         self.shuttle = 0.0;
         if keep {
-            self.cursor = (pos as f64 / self.audio.sr as f64).max(0.0);
+            self.cursor = Ticks::from_samples(pos.max(0), self.audio.sr);
         } else {
             self.cursor = self.play_start;
         }
@@ -502,33 +508,33 @@ impl App {
         }
     }
 
-    pub fn play_pos(&self) -> f64 {
+    pub fn play_pos(&self) -> Ticks {
         let s = self
             .audio
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (s.pos as f64 / self.audio.sr as f64).max(0.0)
+        Ticks::from_samples(s.pos.max(0), self.audio.sr)
     }
 
-    pub fn set_cursor(&mut self, t: f64) {
-        let t = t.max(0.0);
+    pub fn set_cursor(&mut self, t: Ticks) {
+        let t = t.max(Ticks::ZERO);
         self.cursor = t;
         if self.is_playing() {
-            let sr = self.audio.sr as f64;
+            let sr = self.audio.sr;
             let mut s = self
                 .audio
                 .shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            s.pos = (t * sr) as i64;
+            s.pos = t.to_samples_round(sr);
             s.mixer.reset();
             self.play_start = t;
         }
     }
 
     /// Tempo exibido (posição de reprodução durante o play, senão o cursor).
-    pub fn view_time(&self) -> f64 {
+    pub fn view_time(&self) -> Ticks {
         if self.is_playing() {
             self.play_pos()
         } else {
@@ -536,8 +542,10 @@ impl App {
         }
     }
 
-    pub fn fmt_time(&self, t: f64) -> String {
-        format_time(t, self.project.settings.fps, self.opts.time_format)
+    pub fn fmt_time(&self, t: Ticks) -> String {
+        let s = &self.project.settings;
+        let fmt = s.effective_time_format(self.opts.time_format);
+        format_ticks(t, s.fps, s.sample_rate, fmt)
     }
 
     // -----------------------------------------------------------------
@@ -553,7 +561,7 @@ impl App {
         self.redo.clear();
         self.sel_events.clear();
         self.sel_track = Some(0);
-        self.cursor = 0.0;
+        self.cursor = Ticks::ZERO;
         self.time_sel = None;
         self.thumbs.clear();
         self.changed();
@@ -591,7 +599,7 @@ impl App {
                 } else {
                     Some(0)
                 };
-                self.cursor = 0.0;
+                self.cursor = Ticks::ZERO;
                 self.thumbs.clear();
                 // recarrega as mídias em segundo plano
                 let items = self.project.media.clone();
@@ -730,8 +738,8 @@ impl App {
     }
 
     /// Importa arquivos em segundo plano. `place_at` = adiciona à timeline.
-    pub fn import_paths(&mut self, paths: Vec<PathBuf>, place_at: Option<f64>) {
-        let mut t = place_at;
+    pub fn import_paths(&mut self, paths: Vec<PathBuf>, place_at: Option<Ticks>) {
+        let mut t = place_at.map(PlaceTarget::At);
         for p in paths {
             if !media::is_supported(&p) {
                 self.set_status(format!("Formato não suportado: {}", p.display()));
@@ -754,7 +762,7 @@ impl App {
             }
             // arquivos múltiplos são colocados em sequência quando chegarem
             if t.is_some() {
-                t = Some(f64::NAN);
+                t = Some(PlaceTarget::EndOfTrack);
             }
         }
     }
@@ -773,11 +781,10 @@ impl App {
                     self.media.insert(id, imp.entry);
                     self.checkpoint();
                     self.project.media.push(imp.item);
-                    if let Some(t) = place {
-                        let t = if t.is_nan() {
-                            self.end_of_selected_track()
-                        } else {
-                            t
+                    if let Some(place) = place {
+                        let t = match place {
+                            PlaceTarget::At(t) => t,
+                            PlaceTarget::EndOfTrack => self.end_of_selected_track(),
                         };
                         self.add_media_to_timeline(id, t, self.sel_track);
                     }
@@ -804,10 +811,15 @@ impl App {
         }
     }
 
-    fn end_of_selected_track(&self) -> f64 {
+    fn end_of_selected_track(&self) -> Ticks {
         self.sel_track
             .and_then(|i| self.project.tracks.get(i))
-            .map(|t| t.events.iter().map(|e| e.end()).fold(0.0, f64::max))
+            .map(|t| {
+                t.events
+                    .iter()
+                    .map(|e| e.end())
+                    .fold(Ticks::ZERO, Ticks::max)
+            })
             .unwrap_or(self.cursor)
     }
 
@@ -815,7 +827,7 @@ impl App {
     pub fn add_media_to_timeline(
         &mut self,
         media_id: Id,
-        t: f64,
+        t: Ticks,
         track_hint: Option<usize>,
     ) -> Vec<Id> {
         let Some(m) = self.project.media(media_id).cloned() else {
@@ -823,7 +835,7 @@ impl App {
         };
         let len = m
             .duration
-            .unwrap_or(5.0)
+            .unwrap_or(Ticks::from_secs_i64(5))
             .max(self.project.settings.frame_dur());
         let mut created = vec![];
         let group = if m.has_video && m.has_audio {
@@ -1024,7 +1036,7 @@ impl App {
 
         if pressed(Key::Space) {
             if shift {
-                self.set_cursor(0.0);
+                self.set_cursor(Ticks::ZERO);
                 self.play();
             } else {
                 self.toggle_play();
@@ -1108,7 +1120,7 @@ impl App {
         }
         if ctrl {
             if pressed(Key::Home) {
-                self.set_cursor(0.0);
+                self.set_cursor(Ticks::ZERO);
             }
             if pressed(Key::End) {
                 let d = self.project.duration();
@@ -1155,18 +1167,22 @@ impl App {
                 .time_sel
                 .map(|s| s.1)
                 .filter(|e| *e > c)
-                .unwrap_or(c + 5.0);
+                .unwrap_or(c + Ticks::from_secs_i64(5));
             self.time_sel = Some((c, end));
             self.project.loop_region = Some((c, end));
         }
         if pressed(Key::O) {
             let c = self.cursor;
-            let start = self.time_sel.map(|s| s.0).filter(|s| *s < c).unwrap_or(0.0);
+            let start = self
+                .time_sel
+                .map(|s| s.0)
+                .filter(|s| *s < c)
+                .unwrap_or(Ticks::ZERO);
             self.time_sel = Some((start, c));
             self.project.loop_region = Some((start, c));
         }
         if pressed(Key::Home) || pressed(Key::W) {
-            let t = self.time_sel.map(|s| s.0).unwrap_or(0.0);
+            let t = self.time_sel.map(|s| s.0).unwrap_or(Ticks::ZERO);
             self.set_cursor(t);
         }
         if pressed(Key::End) {
@@ -1177,18 +1193,23 @@ impl App {
             self.set_cursor(t);
         }
         if alt && pressed(Key::ArrowLeft) {
-            let t = self.project.settings.quantize(self.cursor - fd);
+            let t = self
+                .project
+                .settings
+                .quantize((self.cursor - fd).max(Ticks::ZERO));
             self.set_cursor(t);
         } else if pressed(Key::ArrowLeft) {
-            let t = self.cursor - 1.0 / self.tl.px_per_sec as f64;
-            self.set_cursor(t);
+            let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
+                .max(Ticks::from_raw(1));
+            self.set_cursor(self.cursor - dt);
         }
         if alt && pressed(Key::ArrowRight) {
             let t = self.project.settings.quantize(self.cursor + fd);
             self.set_cursor(t);
         } else if pressed(Key::ArrowRight) {
-            let t = self.cursor + 1.0 / self.tl.px_per_sec as f64;
-            self.set_cursor(t);
+            let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
+                .max(Ticks::from_raw(1));
+            self.set_cursor(self.cursor + dt);
         }
         if !alt && pressed(Key::ArrowUp) {
             self.tl.zoom_by(1.25, None);
@@ -1288,8 +1309,8 @@ impl App {
         ];
         for (i, k) in nums.iter().enumerate() {
             if pressed(*k) {
-                let mut ms: Vec<f64> = self.project.markers.iter().map(|m| m.t).collect();
-                ms.sort_by(|a, b| a.total_cmp(b));
+                let mut ms: Vec<Ticks> = self.project.markers.iter().map(|m| m.t).collect();
+                ms.sort();
                 let idx = if i == 0 { 9 } else { i - 1 };
                 if let Some(t) = ms.get(idx) {
                     self.set_cursor(*t);
@@ -1299,16 +1320,16 @@ impl App {
     }
 
     fn jump_marker(&mut self, forward: bool) {
-        let mut pts: Vec<f64> = self.project.markers.iter().map(|m| m.t).collect();
+        let mut pts: Vec<Ticks> = self.project.markers.iter().map(|m| m.t).collect();
         pts.extend(self.project.regions.iter().flat_map(|r| [r.start, r.end]));
-        pts.push(0.0);
+        pts.push(Ticks::ZERO);
         pts.push(self.project.duration());
-        pts.sort_by(|a, b| a.total_cmp(b));
+        pts.sort();
         let c = self.cursor;
         let t = if forward {
-            pts.into_iter().find(|t| *t > c + 1e-6)
+            pts.into_iter().find(|t| *t > c)
         } else {
-            pts.into_iter().rev().find(|t| *t < c - 1e-6)
+            pts.into_iter().rev().find(|t| *t < c)
         };
         if let Some(t) = t {
             self.set_cursor(t);
@@ -1481,17 +1502,9 @@ impl App {
                 ui.checkbox(&mut self.opts.safe_areas, "Áreas de segurança na prévia");
                 ui.separator();
                 ui.label("Formato de tempo:");
-                ui.radio_value(
-                    &mut self.opts.time_format,
-                    TimeFormat::Timecode,
-                    "Timecode SMPTE",
-                );
-                ui.radio_value(
-                    &mut self.opts.time_format,
-                    TimeFormat::Seconds,
-                    "Tempo (hh:mm:ss.mmm)",
-                );
-                ui.radio_value(&mut self.opts.time_format, TimeFormat::Frames, "Quadros");
+                for fmt in TimeFormat::ALL {
+                    ui.radio_value(&mut self.opts.time_format, fmt, fmt.name());
+                }
             });
             ui.menu_button("Inserir", |ui| {
                 if ui.button("Trilha de vídeo   Ctrl+Shift+Q").clicked() {
@@ -1696,7 +1709,7 @@ impl App {
                 .on_hover_text("Início do projeto (Ctrl+Home)")
                 .clicked()
             {
-                self.set_cursor(0.0);
+                self.set_cursor(Ticks::ZERO);
             }
             if ui
                 .button("⏪")
@@ -1706,7 +1719,7 @@ impl App {
                 let t = self
                     .project
                     .settings
-                    .quantize(self.cursor - self.project.settings.frame_dur());
+                    .quantize((self.cursor - self.project.settings.frame_dur()).max(Ticks::ZERO));
                 self.set_cursor(t);
             }
             if ui
@@ -1792,10 +1805,10 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let s = &self.project.settings;
                 ui.label(format!(
-                    "{}x{} {:.3} qps | {} Hz | prévia {:.0} ms | {}",
+                    "{}x{} {} qps | {} Hz | prévia {:.0} ms | {}",
                     s.width,
                     s.height,
-                    s.fps,
+                    s.fps.label(),
                     s.sample_rate,
                     self.preview_ms,
                     self.path
@@ -1960,7 +1973,9 @@ impl App {
             let t = self.play_pos();
             self.tl.follow(t);
             // fim do projeto: para
-            if !self.opts.loop_playback && t > self.project.duration() + 0.5 && self.shuttle >= 0.0
+            if !self.opts.loop_playback
+                && t > self.project.duration() + Ticks::from_millis_i64(500)
+                && self.shuttle >= 0.0
             {
                 self.stop(true);
             }

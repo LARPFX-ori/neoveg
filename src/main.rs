@@ -24,6 +24,7 @@ mod model;
 mod playback;
 mod render;
 mod scopes;
+mod time;
 mod ui;
 mod util;
 
@@ -65,7 +66,7 @@ fn headless_render(project: PathBuf, out: PathBuf) -> anyhow::Result<()> {
         path: out.clone(),
         width: p.settings.width,
         height: p.settings.height,
-        start: 0.0,
+        start: time::Ticks::ZERO,
         end: p.duration(),
         jpeg_quality: 90,
         include_audio: true,

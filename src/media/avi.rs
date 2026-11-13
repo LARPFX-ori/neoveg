@@ -6,6 +6,7 @@
 //!
 //! Escrita: AVI com vídeo MJPEG + áudio PCM 16 bits estéreo e índice `idx1`.
 
+use crate::time::{FrameRate, Ticks};
 use anyhow::{anyhow, bail, Context, Result};
 use image::RgbaImage;
 use std::fs::File;
@@ -31,7 +32,7 @@ pub struct AviReader {
     file: File,
     pub width: u32,
     pub height: u32,
-    pub fps: f64,
+    pub fps: FrameRate,
     codec: Option<VideoCodec>,
     /// Quadros: (offset absoluto dos dados, tamanho). Tamanho 0 = repetir o anterior.
     frames: Vec<(u64, u32)>,
@@ -137,7 +138,7 @@ impl AviReader {
             file,
             width: 0,
             height: 0,
-            fps: 30.0,
+            fps: FrameRate::FPS_30,
             codec: None,
             frames: vec![],
             audio: None,
@@ -162,11 +163,8 @@ impl AviReader {
                 if r.width == 0 || r.height == 0 || r.width > MAX_DIM || r.height > MAX_DIM {
                     bail!("dimensões de vídeo inválidas: {}x{}", r.width, r.height);
                 }
-                if s.scale > 0 && s.rate > 0 {
-                    let fps = s.rate as f64 / s.scale as f64;
-                    if (0.1..=1000.0).contains(&fps) {
-                        r.fps = fps;
-                    }
+                if let Some(fps) = FrameRate::new(s.rate, s.scale) {
+                    r.fps = fps;
                 }
                 let handler = String::from_utf8_lossy(&s.handler).to_string();
                 let comps = String::from_utf8_lossy(&comp).to_string();
@@ -247,8 +245,8 @@ impl AviReader {
         self.frames.len()
     }
 
-    pub fn duration(&self) -> f64 {
-        self.frames.len() as f64 / self.fps
+    pub fn duration(&self) -> Ticks {
+        self.fps.frame_to_ticks(self.frames.len() as i64)
     }
 
     fn read_chunk(&mut self, off: u64, size: u32) -> Result<Vec<u8>> {
@@ -470,30 +468,17 @@ pub struct AviWriter {
     off_sugg: u64,
 }
 
-fn fps_rational(fps: f64) -> (u32, u32) {
-    // retorna (rate, scale)
-    let candidates = [(24000, 1001), (30000, 1001), (60000, 1001)];
-    for (r, s) in candidates {
-        if (fps - r as f64 / s as f64).abs() < 0.001 {
-            return (r, s);
-        }
-    }
-    if (fps - fps.round()).abs() < 1e-6 {
-        return (fps.round() as u32, 1);
-    }
-    ((fps * 1000.0).round() as u32, 1000)
-}
-
 impl AviWriter {
     pub fn create(
         path: &Path,
         width: u32,
         height: u32,
-        fps: f64,
+        fps: FrameRate,
         audio_sr: Option<u32>,
     ) -> Result<Self> {
         let file = File::create(path).with_context(|| format!("criando {}", path.display()))?;
-        let (rate, scale) = fps_rational(fps);
+        let (rate, scale) = (fps.num.max(1), fps.den.max(1));
+        let us_per_frame = ((scale as u64 * 1_000_000) / rate as u64).max(1) as u32;
         let has_audio = audio_sr.is_some();
         let mut h: Vec<u8> = Vec::new();
         let w32 = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
@@ -511,7 +496,7 @@ impl AviWriter {
         h.extend_from_slice(b"hdrl");
         h.extend_from_slice(b"avih");
         w32(&mut h, 56);
-        w32(&mut h, (1_000_000.0 / fps).round() as u32);
+        w32(&mut h, us_per_frame);
         w32(&mut h, 0); // max bytes/s
         w32(&mut h, 0); // padding
         w32(&mut h, 0x10 | 0x100); // HASINDEX | ISINTERLEAVED
@@ -711,7 +696,7 @@ mod tests {
     #[test]
     fn write_then_read() {
         let dir = std::env::temp_dir().join("nvov_avi_test.avi");
-        let mut w = AviWriter::create(&dir, 64, 48, 25.0, Some(48000)).unwrap();
+        let mut w = AviWriter::create(&dir, 64, 48, FrameRate::FPS_25, Some(48000)).unwrap();
         let img = image::RgbImage::from_pixel(64, 48, image::Rgb([200, 30, 30]));
         let mut jpg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90)
@@ -725,7 +710,7 @@ mod tests {
         let mut r = AviReader::open(&dir).unwrap();
         assert_eq!(r.frame_count(), 10);
         assert_eq!((r.width, r.height), (64, 48));
-        assert!((r.fps - 25.0).abs() < 1e-9);
+        assert_eq!(r.fps, FrameRate::FPS_25);
         let f = r.decode_frame(3).unwrap();
         assert!(f.get_pixel(10, 10)[0] > 150);
         let (sr, ch, a) = r.read_audio().unwrap().unwrap();

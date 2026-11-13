@@ -89,7 +89,9 @@ fn assert_no_panic(what: &str, i: usize, f: impl FnOnce()) {
 
 fn valid_avi() -> Vec<u8> {
     let p = tmp("base.avi");
-    let mut w = media::avi::AviWriter::create(&p, 32, 24, 25.0, Some(8000)).unwrap();
+    let mut w =
+        media::avi::AviWriter::create(&p, 32, 24, crate::time::FrameRate::FPS_25, Some(8000))
+            .unwrap();
     for i in 0..6u8 {
         let img = image::RgbImage::from_pixel(32, 24, image::Rgb([i * 40, 100, 200]));
         let mut jpg = Vec::new();
@@ -128,7 +130,7 @@ fn fuzz_avi() {
 
 fn valid_y4m() -> Vec<u8> {
     let p = tmp("base.y4m");
-    let mut w = media::y4m::Y4mWriter::create(&p, 16, 12, 25.0).unwrap();
+    let mut w = media::y4m::Y4mWriter::create(&p, 16, 12, crate::time::FrameRate::FPS_25).unwrap();
     let px = vec![128u8; 16 * 12 * 4];
     for _ in 0..3 {
         w.write_frame(&px).unwrap();
@@ -259,7 +261,7 @@ fn media_item(path: &std::path::Path) -> crate::model::MediaItem {
         has_audio: false,
         width: 0,
         height: 0,
-        fps: 0.0,
+        fps: None,
         info: String::new(),
     }
 }
@@ -277,7 +279,8 @@ fn exercise_project(text: &str) {
     if let Ok((p, _)) = Project::from_json(text) {
         let cache = media::MediaCache::default();
         // resolução reduzida para o teste ser rápido
-        for t in [0.0, 0.4, 1.0, 1.9, 50.0] {
+        for ms in [0, 400, 1000, 1900, 50_000] {
+            let t = crate::time::Ticks::from_millis_i64(ms);
             let _ = crate::engine::video::render_frame(&p, &cache, t, 32, 18);
         }
         let mut mixer = crate::engine::audio::Mixer::new(8000);
@@ -364,10 +367,10 @@ fn regressao_projeto_valores_hostis() {
     let (p, fixes) = Project::from_json(&text).unwrap();
     assert!(!fixes.is_empty());
     assert!(p.settings.width <= crate::model::MAX_DIM);
-    assert!(p.settings.fps >= 1.0);
+    assert!(p.settings.fps.as_f64() >= 1.0);
     let e = &p.tracks[0].events[0];
-    assert!(e.length > 0.0);
-    assert!(e.fade_in.len + e.fade_out.len <= e.length + 1e-9);
+    assert!(e.length > crate::time::Ticks::ZERO);
+    assert!(e.fade_in.len + e.fade_out.len <= e.length);
     exercise_project(&text);
 }
 
@@ -390,4 +393,54 @@ fn regressao_gif_tela_gigante_nao_aloca() {
     let mut item = media_item(&p);
     assert!(media::load_entry(&mut item).is_err());
     let _ = std::fs::remove_file(p);
+}
+
+#[test]
+fn fuzz_tempo_exato_e_parse_hostis() {
+    use crate::time::{parse_time, FrameRate, TimeFormat};
+
+    let hostis = [
+        "",
+        "   ",
+        "-1",
+        "NaN",
+        "inf",
+        "-inf",
+        "99999999999999999999999",
+        "9999999999999999999f",
+        "00:00:00;00;00:00",
+        "100000:00:00;99",
+        "00:00:00;00",
+        "00:01:00;00",
+        "00:01:00;01",
+        "00:10:00;00",
+        "abc:def:ghi.jkl",
+        ":::...",
+        "-9223372036854775808s",
+        "9223372036854775807f",
+    ];
+    for fmt in TimeFormat::ALL {
+        for fps in FrameRate::STANDARD {
+            for s in hostis {
+                assert_no_panic("parse_time", 0, || {
+                    let _ = parse_time(s, fps, 48000, fmt);
+                });
+            }
+        }
+    }
+
+    // Valores extremos no JSON do projeto não devem causar pânico nem divisão por zero
+    let json_extremo = PROJECT_JSON
+        .replace(r#""fps": 30.0"#, r#""fps": {"num": 0, "den": 0}"#)
+        .replace(
+            r#""length": 2.0"#,
+            r#""length": {"ticks": 9223372036854775807}"#,
+        )
+        .replace(
+            r#""start": 0.0"#,
+            r#""start": {"ticks": -9223372036854775808}"#,
+        );
+    assert_no_panic("project_json_extremo", 0, || {
+        exercise_project(&json_extremo);
+    });
 }

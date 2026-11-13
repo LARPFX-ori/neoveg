@@ -62,15 +62,15 @@ impl AudioData {
         self.data.len() / 2
     }
 
-    pub fn duration(&self) -> f64 {
-        self.frames() as f64 / self.sample_rate as f64
+    pub fn duration(&self) -> crate::time::Ticks {
+        crate::time::Ticks::from_samples(self.frames() as i64, self.sample_rate)
     }
 
-    /// Amostra (L, R) no tempo `t` (segundos), com interpolação linear.
+    /// Amostra (L, R) no tempo exato `t` (ticks), com interpolação linear.
     #[inline]
-    pub fn sample(&self, t: f64) -> (f32, f32) {
-        let pos = t * self.sample_rate as f64;
-        if pos < 0.0 {
+    pub fn sample(&self, t: crate::time::Ticks) -> (f32, f32) {
+        let (pos, fr) = t.to_sample_pos(self.sample_rate);
+        if pos < 0 {
             return (0.0, 0.0);
         }
         let i = pos as usize;
@@ -81,17 +81,17 @@ impl AudioData {
             }
             return (0.0, 0.0);
         }
-        let fr = (pos - i as f64) as f32;
         let l = self.data[i * 2] + (self.data[i * 2 + 2] - self.data[i * 2]) * fr;
         let r = self.data[i * 2 + 1] + (self.data[i * 2 + 3] - self.data[i * 2 + 1]) * fr;
         (l, r)
     }
 
-    /// Pico (mín, máx) entre os tempos t0..t1, usando a tabela de picos.
-    pub fn peak_range(&self, t0: f64, t1: f64) -> (f32, f32) {
-        let sr = self.sample_rate as f64;
-        let a = ((t0 * sr) as isize / PEAK_BLOCK as isize).max(0) as usize;
-        let b = (((t1 * sr) as isize / PEAK_BLOCK as isize).max(0) as usize).max(a + 1);
+    /// Pico (mín, máx) entre os tempos t0..t1 (ticks), usando a tabela de picos.
+    pub fn peak_range(&self, t0: crate::time::Ticks, t1: crate::time::Ticks) -> (f32, f32) {
+        let s0 = t0.to_samples_floor(self.sample_rate);
+        let s1 = t1.to_samples_floor(self.sample_rate);
+        let a = (s0 / PEAK_BLOCK as i64).max(0) as usize;
+        let b = ((s1 / PEAK_BLOCK as i64).max(0) as usize).max(a + 1);
         let (mut lo, mut hi) = (0f32, 0f32);
         for p in self.peaks.iter().take(b.min(self.peaks.len())).skip(a) {
             lo = lo.min(p.0);

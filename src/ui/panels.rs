@@ -150,13 +150,13 @@ impl App {
             pos2(rect.left() + 4.0, rect.bottom() - info_h + 2.0),
             egui::Align2::LEFT_TOP,
             format!(
-                "Projeto: {}x{}, {:.3}p   Prévia: {}x{}   Quadro: {}",
+                "Projeto: {}x{}, {}p   Prévia: {}x{}   Quadro: {}",
                 s.width,
                 s.height,
-                s.fps,
+                s.fps.label(),
                 (s.width as f32 * pq) as u32,
                 (s.height as f32 * pq) as u32,
-                (self.view_time() * s.fps).round() as i64
+                s.fps.ticks_to_frame_round(self.view_time())
             ),
             egui::FontId::proportional(11.0),
             Color32::from_gray(180),

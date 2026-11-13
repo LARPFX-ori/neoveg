@@ -156,9 +156,9 @@ fn hash(x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
-/// Aplica um efeito de vídeo. `t` é o tempo local usado para os keyframes
-/// dos parâmetros.
-pub fn apply(fx: &FxInstance, f: &mut Frame, t: f64) {
+/// Aplica um efeito de vídeo. `t` é o tempo local (em ticks) usado para os
+/// keyframes dos parâmetros.
+pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
     if !fx.enabled || fx.kind.is_audio() {
         return;
     }
@@ -370,7 +370,7 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: f64) {
         }
         FxKind::FilmGrain => {
             let (amt, mono) = (v[0], v[1] > 0.5);
-            let seed = (t * 1000.0) as u32;
+            let seed = t.div_i64(crate::time::TICKS_PER_MS).0 as u32;
             let w = f.w;
             f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
                 for (x, p) in row.iter_mut().enumerate() {

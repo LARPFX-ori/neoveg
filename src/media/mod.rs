@@ -6,7 +6,7 @@ pub mod generate;
 pub mod wav;
 pub mod y4m;
 
-use crate::model::{new_id, GenSpec, Id, MediaItem, MediaSource};
+use crate::model::{new_id, FrameRate, GenSpec, Id, MediaItem, MediaSource, Ticks, TICKS_PER_MS};
 use anyhow::{bail, Result};
 pub use audio::AudioData;
 use image::RgbaImage;
@@ -70,11 +70,11 @@ impl FrameCache {
 pub enum VideoSource {
     None,
     Still(Arc<RgbaImage>),
-    /// Quadros pré-decodificados (GIF animado) com tempos de início.
-    Frames(Vec<Arc<RgbaImage>>, Vec<f64>),
+    /// Quadros pré-decodificados (GIF animado) com tempos de início em ticks.
+    Frames(Vec<Arc<RgbaImage>>, Vec<Ticks>),
     Avi(Mutex<avi::AviReader>, Mutex<FrameCache>),
     Y4m(Mutex<y4m::Y4mReader>, Mutex<FrameCache>),
-    Sequence(Vec<String>, f64, Mutex<FrameCache>),
+    Sequence(Vec<String>, FrameRate, Mutex<FrameCache>),
     Generated,
 }
 
@@ -141,9 +141,15 @@ impl MediaCache {
             .retain(|k, _| k.0 != id);
     }
 
-    /// Quadro da mídia no tempo de mídia `t`. `w`,`h` são usados por mídia
-    /// gerada (que é produzida diretamente na resolução de saída).
-    pub fn video_frame(&self, item: &MediaItem, t: f64, w: u32, h: u32) -> Option<Arc<RgbaImage>> {
+    /// Quadro da mídia no tempo exato `t` (em ticks). `w`,`h` são usados por
+    /// mídia gerada (que é produzida diretamente na resolução de saída).
+    pub fn video_frame(
+        &self,
+        item: &MediaItem,
+        t: Ticks,
+        w: u32,
+        h: u32,
+    ) -> Option<Arc<RgbaImage>> {
         if let MediaSource::Generated(spec) = &item.source {
             return Some(self.generated_frame(item.id, spec, t, w, h));
         }
@@ -152,7 +158,7 @@ impl MediaCache {
             VideoSource::None | VideoSource::Generated => None,
             VideoSource::Still(img) => Some(img.clone()),
             VideoSource::Frames(frames, times) => {
-                let i = match times.binary_search_by(|x| x.total_cmp(&t)) {
+                let i = match times.binary_search(&t) {
                     Ok(i) => i,
                     Err(i) => i.saturating_sub(1),
                 };
@@ -160,7 +166,8 @@ impl MediaCache {
             }
             VideoSource::Avi(r, cache) => {
                 let mut rd = r.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let idx = ((t * rd.fps + 1e-6) as usize).min(rd.frame_count().saturating_sub(1));
+                let max_idx = rd.frame_count().saturating_sub(1) as i64;
+                let idx = rd.fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
                 if let Some(img) = cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -181,7 +188,8 @@ impl MediaCache {
             }
             VideoSource::Y4m(r, cache) => {
                 let mut rd = r.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let idx = ((t * rd.fps + 1e-6) as usize).min(rd.frames.saturating_sub(1));
+                let max_idx = rd.frames.saturating_sub(1) as i64;
+                let idx = rd.fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
                 if let Some(img) = cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -201,7 +209,8 @@ impl MediaCache {
                 Some(img)
             }
             VideoSource::Sequence(paths, fps, cache) => {
-                let idx = ((t * fps + 1e-6) as usize).min(paths.len().saturating_sub(1));
+                let max_idx = paths.len().saturating_sub(1) as i64;
+                let idx = fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
                 if let Some(img) = cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -225,9 +234,9 @@ impl MediaCache {
         }
     }
 
-    fn generated_frame(&self, id: Id, spec: &GenSpec, t: f64, w: u32, h: u32) -> Arc<RgbaImage> {
+    fn generated_frame(&self, id: Id, spec: &GenSpec, t: Ticks, w: u32, h: u32) -> Arc<RgbaImage> {
         let tk = if spec.is_animated() {
-            (t * 1000.0).round() as u64
+            (t.0 / TICKS_PER_MS).max(0) as u64
         } else {
             0
         };
@@ -241,7 +250,7 @@ impl MediaCache {
             return img.clone();
         }
         let img = match crate::util::guard("mídia gerada", || {
-            generate::render(spec, t, w, h, &self.fonts)
+            generate::render(spec, t.as_secs_f64(), w, h, &self.fonts)
         }) {
             Ok(i) => Arc::new(i),
             Err(_) => Arc::new(RgbaImage::new(w.max(1), h.max(1))),
@@ -269,7 +278,10 @@ impl MediaCache {
             ((w as f32 * s) as u32).max(1),
             ((h as f32 * s) as u32).max(1),
         );
-        let t = item.duration.map(|d| (d * 0.1).min(1.0)).unwrap_or(0.0);
+        let t = item
+            .duration
+            .map(|d| d.div_i64(10).min(Ticks::from_secs_i64(1)))
+            .unwrap_or(Ticks::ZERO);
         let f = self.video_frame(item, t, tw, th)?;
         if f.width() == tw && f.height() == th {
             return Some((*f).clone());
@@ -300,7 +312,7 @@ fn base_item(name: String, source: MediaSource) -> MediaItem {
         has_audio: false,
         width: 0,
         height: 0,
-        fps: 0.0,
+        fps: None,
         info: String::new(),
     }
 }
@@ -363,15 +375,15 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
             let first = image::open(first_path)?;
             item.width = first.width();
             item.height = first.height();
-            item.fps = fps;
+            item.fps = Some(fps);
             item.has_video = true;
-            item.duration = Some(paths.len() as f64 / fps);
+            item.duration = Some(fps.frame_to_ticks(paths.len() as i64));
             item.info = format!(
-                "Sequência de {} imagens, {}x{}, {:.3} qps",
+                "Sequência de {} imagens, {}x{}, {}",
                 paths.len(),
                 item.width,
                 item.height,
-                fps
+                fps.label()
             );
             MediaEntry {
                 video: VideoSource::Sequence(paths, fps, Mutex::new(FrameCache::new(16))),
@@ -415,7 +427,7 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                 item.has_audio = audio.is_some();
                 item.width = rd.width;
                 item.height = rd.height;
-                item.fps = rd.fps;
+                item.fps = Some(rd.fps);
                 let vd = if item.has_video {
                     Some(rd.duration())
                 } else {
@@ -432,11 +444,11 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                     );
                 }
                 item.info = format!(
-                    "AVI {} {}x{} {:.3} qps, {} quadros{}",
+                    "AVI {} {}x{} {}, {} quadros{}",
                     rd.video_fourcc,
                     rd.width,
                     rd.height,
-                    rd.fps,
+                    rd.fps.label(),
                     rd.frame_count(),
                     audio
                         .as_ref()
@@ -456,11 +468,14 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                 item.has_video = true;
                 item.width = rd.width;
                 item.height = rd.height;
-                item.fps = rd.fps;
+                item.fps = Some(rd.fps);
                 item.duration = Some(rd.duration());
                 item.info = format!(
-                    "Y4M {}x{} {:.3} qps, {} quadros",
-                    rd.width, rd.height, rd.fps, rd.frames
+                    "Y4M {}x{} {}, {} quadros",
+                    rd.width,
+                    rd.height,
+                    rd.fps.label(),
+                    rd.frames
                 );
                 MediaEntry {
                     video: VideoSource::Y4m(Mutex::new(rd), Mutex::new(FrameCache::new(12))),
@@ -478,8 +493,9 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                 }
                 let a = audio::decode_file(&p)?;
                 item.has_audio = true;
-                item.duration = Some(a.duration());
-                item.info = format!("Áudio {} Hz, {:.2} s", a.sample_rate, a.duration());
+                let dur = a.duration();
+                item.duration = Some(dur);
+                item.info = format!("Áudio {} Hz, {:.2} s", a.sample_rate, dur.as_secs_f64());
                 MediaEntry {
                     video: VideoSource::None,
                     audio: Some(Arc::new(a)),
@@ -518,7 +534,7 @@ fn load_gif(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
     let frames = dec.into_frames();
     let mut imgs = vec![];
     let mut times = vec![];
-    let mut t = 0.0;
+    let mut t = Ticks::ZERO;
     let mut total_bytes: u64 = 0;
     for fr in frames {
         let fr = fr?;
@@ -527,10 +543,13 @@ fn load_gif(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
             bail!("GIF animado grande demais para a memória");
         }
         let (n, d) = fr.delay().numer_denom_ms();
-        let ms = if d == 0 { 100.0 } else { n as f64 / d as f64 };
-        let ms = if ms < 10.0 { 100.0 } else { ms };
-        times.push(t / 1000.0);
-        t += ms;
+        let dur_ticks = if d == 0 || (n as u64) < (d as u64 * 10) {
+            Ticks::from_millis_i64(100)
+        } else {
+            Ticks::from_millis_ratio(n, d)
+        };
+        times.push(t);
+        t += dur_ticks;
         imgs.push(Arc::new(fr.into_buffer()));
     }
     let Some(first) = imgs.first() else {
@@ -547,15 +566,14 @@ fn load_gif(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
             audio: None,
         });
     }
-    let total = t / 1000.0;
-    item.duration = Some(total);
-    item.fps = imgs.len() as f64 / total;
+    item.duration = Some(t);
+    item.fps = FrameRate::from_f64(imgs.len() as f64 / t.as_secs_f64().max(1e-3));
     item.info = format!(
         "GIF animado {}x{}, {} quadros, {:.2} s",
         item.width,
         item.height,
         imgs.len(),
-        total
+        t.as_secs_f64()
     );
     Ok(MediaEntry {
         video: VideoSource::Frames(imgs, times),
@@ -599,7 +617,7 @@ pub fn detect_sequence(first: &Path) -> Vec<String> {
     out
 }
 
-pub fn import_sequence(first: &Path, fps: f64) -> Result<Imported> {
+pub fn import_sequence(first: &Path, fps: FrameRate) -> Result<Imported> {
     let paths = detect_sequence(first);
     if paths.is_empty() {
         bail!("nenhuma imagem encontrada");

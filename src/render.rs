@@ -5,7 +5,7 @@ use crate::engine::video::render_frame;
 use crate::media::avi::AviWriter;
 use crate::media::y4m::Y4mWriter;
 use crate::media::MediaCache;
-use crate::model::Project;
+use crate::model::{Project, Ticks, TICKS_PER_SEC};
 use crate::util::lock;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
@@ -62,8 +62,8 @@ pub struct RenderSettings {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
-    pub start: f64,
-    pub end: f64,
+    pub start: Ticks,
+    pub end: Ticks,
     pub jpeg_quality: u8,
     pub include_audio: bool,
     pub wav_bits: WavBits,
@@ -200,10 +200,12 @@ fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgres
     }
     let fps = p.settings.fps;
     let sr = p.settings.sample_rate;
-    let n_frames = ((s.end - s.start) * fps).round().max(1.0) as u64;
+    let dur = (s.end - s.start).0 as i128;
+    let den = TICKS_PER_SEC as i128 * fps.den.max(1) as i128;
+    let n_frames = ((dur * fps.num.max(1) as i128 + den / 2) / den).max(1) as u64;
     let (w, h) = (s.width.max(2) as usize, s.height.max(2) as usize);
     let mut mixer = Mixer::new(sr);
-    let sample_at = |i: u64| ((s.start + i as f64 / fps) * sr as f64).round() as i64;
+    let sample_at = |i: u64| (s.start + fps.frame_to_ticks(i as i64)).to_samples_round(sr);
 
     if s.format == RenderFormat::Wav {
         let total = (sample_at(n_frames) - sample_at(0)).max(0) as u64;
@@ -283,7 +285,7 @@ fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgres
         let encoded: Vec<Result<Vec<u8>>> = (i..b_end)
             .into_par_iter()
             .map(|fi| {
-                let t = s.start + fi as f64 / fps;
+                let t = s.start + fps.frame_to_ticks(fi as i64);
                 let f = render_frame(p, media, t, w, h);
                 match s.format {
                     RenderFormat::AviMjpeg => {
@@ -358,7 +360,7 @@ impl<W: Write> PngCompat for image::codecs::png::PngEncoder<W> {
 }
 
 /// Salva o quadro atual em PNG na resolução do projeto (Save Snapshot).
-pub fn save_snapshot(p: &Project, media: &MediaCache, t: f64, path: &Path) -> Result<()> {
+pub fn save_snapshot(p: &Project, media: &MediaCache, t: Ticks, path: &Path) -> Result<()> {
     let f = render_frame(
         p,
         media,

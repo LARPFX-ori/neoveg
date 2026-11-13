@@ -41,19 +41,19 @@ pub struct Dialogs {
     edit_in_progress: bool,
 }
 
-const PRESETS: [(&str, u32, u32, f64); 12] = [
-    ("HD 1080p 29,97", 1920, 1080, 29.97),
-    ("HD 1080p 30", 1920, 1080, 30.0),
-    ("HD 1080p 25 (PAL)", 1920, 1080, 25.0),
-    ("HD 1080p 24", 1920, 1080, 24.0),
-    ("HD 1080p 60", 1920, 1080, 60.0),
-    ("HD 720p 29,97", 1280, 720, 29.97),
-    ("HD 720p 30", 1280, 720, 30.0),
-    ("4K UHD 29,97", 3840, 2160, 29.97),
-    ("4K UHD 25", 3840, 2160, 25.0),
-    ("Vertical 1080x1920 30", 1080, 1920, 30.0),
-    ("Quadrado 1080x1080 30", 1080, 1080, 30.0),
-    ("SD 640x480 29,97", 640, 480, 29.97),
+const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
+    ("HD 1080p 29,97", 1920, 1080, FrameRate::FPS_29_97),
+    ("HD 1080p 30", 1920, 1080, FrameRate::FPS_30),
+    ("HD 1080p 25 (PAL)", 1920, 1080, FrameRate::FPS_25),
+    ("HD 1080p 24", 1920, 1080, FrameRate::FPS_24),
+    ("HD 1080p 60", 1920, 1080, FrameRate::FPS_60),
+    ("HD 720p 29,97", 1280, 720, FrameRate::FPS_29_97),
+    ("HD 720p 30", 1280, 720, FrameRate::FPS_30),
+    ("4K UHD 29,97", 3840, 2160, FrameRate::FPS_29_97),
+    ("4K UHD 25", 3840, 2160, FrameRate::FPS_25),
+    ("Vertical 1080x1920 30", 1080, 1920, FrameRate::FPS_30),
+    ("Quadrado 1080x1080 30", 1080, 1080, FrameRate::FPS_30),
+    ("SD 640x480 29,97", 640, 480, FrameRate::FPS_29_97),
 ];
 
 impl Dialogs {
@@ -96,15 +96,16 @@ impl Dialogs {
 
 fn time_field(
     ui: &mut egui::Ui,
-    value: &mut f64,
-    fps: f64,
+    value: &mut Ticks,
+    fps: FrameRate,
+    sample_rate: u32,
     fmt: TimeFormat,
     id: impl std::hash::Hash,
 ) -> bool {
     let key = egui::Id::new(id);
     let mut text = ui
         .data_mut(|d| d.get_temp::<String>(key))
-        .unwrap_or_else(|| format_time(*value, fps, fmt));
+        .unwrap_or_else(|| format_ticks(*value, fps, sample_rate, fmt));
     let r = ui.add(
         egui::TextEdit::singleline(&mut text)
             .desired_width(110.0)
@@ -117,9 +118,10 @@ fn time_field(
         ui.data_mut(|d| d.remove::<String>(key));
     }
     if r.lost_focus() {
-        if let Some(t) = parse_time(&text, fps) {
-            if (t - *value).abs() > 1e-9 {
-                *value = t.max(0.0);
+        if let Some(t) = parse_time(&text, fps, sample_rate, fmt) {
+            let t = t.max(Ticks::ZERO);
+            if t != *value {
+                *value = t;
                 changed = true;
             }
         }
@@ -204,20 +206,37 @@ impl App {
                     ui.end_row();
                     ui.label("Quadros por segundo");
                     ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut s.fps)
-                                    .range(1.0..=240.0)
-                                    .speed(0.01)
-                                    .max_decimals(3),
-                            )
+                        egui::ComboBox::from_id_salt("fps_std")
+                            .selected_text(s.fps.label())
+                            .show_ui(ui, |ui| {
+                                for f in FrameRate::STANDARD {
+                                    changed |=
+                                        ui.selectable_value(&mut s.fps, f, f.label()).changed();
+                                }
+                            });
+                        let (mut num, mut den) = (s.fps.num, s.fps.den);
+                        let c_n = ui
+                            .add(egui::DragValue::new(&mut num).range(1..=240_000))
                             .changed();
-                        for f in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0] {
-                            if ui.small_button(format!("{f}")).clicked() {
-                                s.fps = f;
-                                changed = true;
+                        ui.label("/");
+                        let c_d = ui
+                            .add(egui::DragValue::new(&mut den).range(1..=1001))
+                            .changed();
+                        if c_n || c_d {
+                            if let Some(fr) = FrameRate::new(num, den) {
+                                let fv = fr.as_f64();
+                                if (1.0..=240.0).contains(&fv) {
+                                    s.fps = fr;
+                                    changed = true;
+                                }
                             }
                         }
+                        ui.add_enabled_ui(s.fps.is_ntsc_drop_eligible(), |ui| {
+                            changed |= ui
+                                .checkbox(&mut s.drop_frame, "Drop-frame (;)")
+                                .on_hover_text("SMPTE Drop-Frame para 29,97 / 59,94 qps")
+                                .changed();
+                        });
                     });
                     ui.end_row();
                     ui.label("Taxa de amostragem (áudio)");
@@ -260,7 +279,12 @@ impl App {
         };
         let is_video = self.project.tracks[ti].kind == TrackKind::Video;
         let fps = self.project.settings.fps;
-        let tf = self.opts.time_format;
+        let sr = self.project.settings.sample_rate;
+        let fd = self.project.settings.frame_dur();
+        let tf = self
+            .project
+            .settings
+            .effective_time_format(self.opts.time_format);
         let mut open = true;
         let mut changed = false;
         let media_info = {
@@ -288,27 +312,22 @@ impl App {
                     changed |= ui.text_edit_singleline(&mut e.name).changed();
                     ui.end_row();
                     ui.label("Início");
-                    changed |= time_field(ui, &mut e.start, fps, tf, ("ep_start", id));
+                    changed |= time_field(ui, &mut e.start, fps, sr, tf, ("ep_start", id));
                     ui.end_row();
                     ui.label("Duração");
                     let mut len = e.length;
-                    if time_field(ui, &mut len, fps, tf, ("ep_len", id)) {
-                        e.length = len.max(1.0 / fps);
+                    if time_field(ui, &mut len, fps, sr, tf, ("ep_len", id)) {
+                        e.length = len.max(fd);
+                        e.fade_in.len = e.fade_in.len.min(e.length);
+                        e.fade_out.len = e.fade_out.len.min(e.length - e.fade_in.len);
                         changed = true;
                     }
                     ui.end_row();
-                    ui.label("Deslocamento na mídia (s)");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut e.offset)
-                                .speed(0.01)
-                                .range(0.0..=1e6)
-                                .suffix(" s"),
-                        )
-                        .changed();
+                    ui.label("Deslocamento na mídia");
+                    changed |= time_field(ui, &mut e.offset, fps, sr, tf, ("ep_off", id));
                     ui.end_row();
                     ui.label("Velocidade");
-                    let mut pct = e.rate * 100.0;
+                    let mut pct = e.rate.percent_f64();
                     if ui
                         .add(
                             egui::DragValue::new(&mut pct)
@@ -318,8 +337,10 @@ impl App {
                         )
                         .changed()
                     {
-                        e.rate = pct / 100.0;
-                        changed = true;
+                        if let Some(r) = Rate::from_f64(pct / 100.0) {
+                            e.rate = r;
+                            changed = true;
+                        }
                     }
                     ui.end_row();
                     if !is_video {
@@ -331,27 +352,21 @@ impl App {
                     }
                     ui.label("Fade de entrada");
                     ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut e.fade_in.len)
-                                    .speed(0.01)
-                                    .range(0.0..=e.length)
-                                    .suffix(" s"),
-                            )
-                            .changed();
+                        let mut fi = e.fade_in.len;
+                        if time_field(ui, &mut fi, fps, sr, tf, ("ep_fi", id)) {
+                            e.fade_in.len = fi.clamp_safe(Ticks::ZERO, e.length - e.fade_out.len);
+                            changed = true;
+                        }
                         changed |= curve_combo(ui, &mut e.fade_in.curve, ("fic", id));
                     });
                     ui.end_row();
                     ui.label("Fade de saída");
                     ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut e.fade_out.len)
-                                    .speed(0.01)
-                                    .range(0.0..=e.length)
-                                    .suffix(" s"),
-                            )
-                            .changed();
+                        let mut fo = e.fade_out.len;
+                        if time_field(ui, &mut fo, fps, sr, tf, ("ep_fo", id)) {
+                            e.fade_out.len = fo.clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
+                            changed = true;
+                        }
                         changed |= curve_combo(ui, &mut e.fade_out.curve, ("foc", id));
                     });
                     ui.end_row();
@@ -440,10 +455,10 @@ impl App {
             return;
         };
         let s = self.project.settings.clone();
-        let local = crate::util::clampd(self.cursor - ev.start, 0.0, ev.length);
-        let tol = 0.5 / s.fps;
+        let local = (self.cursor - ev.start).clamp_safe(Ticks::ZERO, ev.length);
+        let tol = s.frame_dur().div_i64(2);
         // textura da imagem de origem no tempo atual
-        let frame_key = (id, (local * s.fps).round() as i64);
+        let frame_key = (id, s.fps.ticks_to_frame_round(local));
         if self
             .dlg
             .pc_tex
@@ -452,7 +467,9 @@ impl App {
             .unwrap_or(true)
             || self.generation.is_multiple_of(97)
         {
-            let mt = ev.media_time(ev.start + local, m.duration).unwrap_or(0.0);
+            let mt = ev
+                .media_time(ev.start + local, m.duration)
+                .unwrap_or(Ticks::ZERO);
             let (gw, gh) = (s.width / 3, s.height / 3);
             if let Some(img) = self.media.video_frame(&m, mt, gw, gh) {
                 let max = 640u32;
@@ -478,7 +495,7 @@ impl App {
         let mut open = true;
         let mut new_key: Option<PanCropKey> = None;
         let mut key_action: Option<&str> = None;
-        let mut sel_key_time: Option<f64> = None;
+        let mut sel_key_time: Option<Ticks> = None;
         let mut key_curve_change: Option<(usize, Curve)> = None;
         let cur = ev.pan_crop.eval(local);
         egui::Window::new(format!("Pan/Crop do evento — {}", ev.name))
@@ -649,8 +666,10 @@ impl App {
                         let (kr, kresp) = ui.allocate_exact_size(vec2(260.0, 22.0), Sense::click());
                         let p = ui.painter_at(kr);
                         p.rect_filled(kr, 2.0, Color32::from_gray(30));
-                        let x_of =
-                            |t: f64| kr.left() + (t / ev.length.max(1e-6)) as f32 * kr.width();
+                        let min_span = ev.length.max(Ticks::from_raw(1));
+                        let x_of = |t: Ticks| {
+                            kr.left() + t.fraction_in(Ticks::ZERO, min_span) * kr.width()
+                        };
                         for kf in &ev.pan_crop.keys {
                             let x = x_of(kf.t);
                             p.add(Shape::convex_polygon(
@@ -671,7 +690,9 @@ impl App {
                         );
                         if kresp.clicked() {
                             if let Some(pp) = kresp.interact_pointer_pos() {
-                                let t = ((pp.x - kr.left()) / kr.width()) as f64 * ev.length;
+                                let frac = ((pp.x - kr.left()) / kr.width()).clamp(0.0, 1.0) as f64;
+                                let t =
+                                    Ticks::from_secs_f64_clamped(ev.length.as_secs_f64() * frac);
                                 // aproxima para um keyframe próximo
                                 let near = ev
                                     .pan_crop
@@ -748,13 +769,13 @@ impl App {
                 "add" => e.pan_crop.set(local, cur.clone(), tol),
                 "del" => {
                     if e.pan_crop.keys.len() > 1 {
-                        e.pan_crop.keys.retain(|k| (k.t - local).abs() > tol);
+                        e.pan_crop.keys.retain(|k| k.t.abs_diff(local) > tol);
                     }
                 }
                 "clear" => {
                     let v = cur.clone();
                     e.pan_crop.keys = vec![Keyframe {
-                        t: 0.0,
+                        t: Ticks::ZERO,
                         value: v,
                         curve: Curve::Smooth,
                     }];
@@ -775,7 +796,7 @@ impl App {
                     let (k0, k1) = if a == "kb_in" { (a_k, b_k) } else { (b_k, a_k) };
                     e.pan_crop.keys = vec![
                         Keyframe {
-                            t: 0.0,
+                            t: Ticks::ZERO,
                             value: k0,
                             curve: Curve::Linear,
                         },
@@ -813,9 +834,9 @@ impl App {
         };
         let s = self.project.settings.clone();
         let t = self.cursor;
-        let tol = 0.5 / s.fps;
+        let tol = s.frame_dur().div_i64(2);
         let cur = self.project.tracks[ti].motion.eval(t);
-        let keys: Vec<(f64, Curve)> = self.project.tracks[ti]
+        let keys: Vec<(Ticks, Curve)> = self.project.tracks[ti]
             .motion
             .keys
             .iter()
@@ -824,7 +845,7 @@ impl App {
         let mut open = true;
         let mut new_key: Option<MotionKey> = None;
         let mut action: Option<&str> = None;
-        let mut jump: Option<f64> = None;
+        let mut jump: Option<Ticks> = None;
         let name = self.project.tracks[ti].name.clone();
         egui::Window::new(format!("Movimento da trilha — {name}"))
             .open(&mut open)
@@ -1006,7 +1027,7 @@ impl App {
                 }
                 "add" => tr.motion.set(t, cur.clone(), tol),
                 "del" if tr.motion.keys.len() > 1 => {
-                    tr.motion.keys.retain(|k| (k.t - t).abs() > tol);
+                    tr.motion.keys.retain(|k| k.t.abs_diff(t) > tol);
                 }
                 _ => {}
             }
@@ -1054,7 +1075,7 @@ impl App {
                 (
                     format!("Efeitos do evento — {}", e.name),
                     self.project.tracks[ti].kind == TrackKind::Audio,
-                    crate::util::clampd(self.cursor - e.start, 0.0, e.length),
+                    (self.cursor - e.start).clamp_safe(Ticks::ZERO, e.length),
                 )
             }
             FxTarget::Track(id) => {
@@ -1071,7 +1092,7 @@ impl App {
             FxTarget::MasterAudio => ("Efeitos do master bus (áudio)".into(), true, self.cursor),
             FxTarget::MasterVideo => ("Efeitos de saída de vídeo".into(), false, self.cursor),
         };
-        let tol = 0.5 / self.project.settings.fps;
+        let tol = self.project.settings.frame_dur().div_i64(2);
         let fmt_local = self.fmt_time(local_t);
         let mut open = true;
         let mut changed = false;
@@ -1178,7 +1199,7 @@ impl App {
                                         }
                                         ui.horizontal(|ui| {
                                             let has_key_here =
-                                                p.keys.iter().any(|k| (k.0 - local_t).abs() <= tol);
+                                                p.keys.iter().any(|k| k.0.abs_diff(local_t) <= tol);
                                             let lbl = if has_key_here { "◆" } else { "◇" };
                                             if ui
                                                 .small_button(lbl)
@@ -1186,7 +1207,7 @@ impl App {
                                                 .clicked()
                                             {
                                                 if p.keys.is_empty() && local_t > tol {
-                                                    p.keys.push((0.0, p.value));
+                                                    p.keys.push((Ticks::ZERO, p.value));
                                                 }
                                                 p.set_key(local_t, v, tol);
                                                 changed = true;
@@ -1528,9 +1549,9 @@ impl App {
             };
             let (a, b) = match (self.dlg.render_use_loop, loop_r) {
                 (true, Some(lr)) => lr,
-                _ => (0.0, dur),
+                _ => (Ticks::ZERO, dur),
             };
-            if b - a <= 0.0 {
+            if b - a <= Ticks::ZERO {
                 self.set_status("Nada para renderizar (projeto vazio)");
             } else if self.render_job.is_some() {
                 self.set_status("Já existe uma renderização em andamento");
@@ -1634,7 +1655,13 @@ impl App {
                     if ui.button("Ir").clicked()
                         || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                     {
-                        go = parse_time(&self.dlg.goto_text, self.project.settings.fps);
+                        let s = &self.project.settings;
+                        go = parse_time(
+                            &self.dlg.goto_text,
+                            s.fps,
+                            s.sample_rate,
+                            s.effective_time_format(self.opts.time_format),
+                        );
                     }
                 });
             if let Some(t) = go {
