@@ -16,6 +16,7 @@ use neoveg_engine::commands::{
 };
 use neoveg_engine::media::{self, MediaCache};
 use neoveg_engine::model::*;
+use neoveg_engine::otio;
 use neoveg_engine::playback::{AudioOut, Preview, PreviewRequest};
 use neoveg_engine::recovery;
 use neoveg_engine::render::{RenderProgress, RenderSettings};
@@ -587,7 +588,34 @@ impl App {
         }
     }
 
+    fn reload_all_media(&mut self) {
+        self.thumbs.clear();
+        let items = self.project.media.clone();
+        for m in items {
+            self.media.remove(m.id);
+            let tx = self.loader_tx.clone();
+            self.loading += 1;
+            let spawned = util::spawn("recarregar-midia", move || {
+                let mut m = m;
+                let r = media::load_entry(&mut m).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(LoadMsg::Reloaded(m.id, r));
+            });
+            if let Err(e) = spawned {
+                self.loading = self.loading.saturating_sub(1);
+                self.set_status(e);
+            }
+        }
+    }
+
     pub fn open_project_path(&mut self, path: PathBuf) {
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("otio"))
+        {
+            self.import_otio_path(&path);
+            return;
+        }
         // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
         let res = Project::load_file(&path);
         match res {
@@ -597,23 +625,7 @@ impl App {
                     util::log_warn(&format!("projeto corrigido ao abrir: {f}"));
                 }
                 self.session.reset_project(p, Some(path.clone()));
-                self.thumbs.clear();
-                // recarrega as mídias em segundo plano
-                let items = self.project.media.clone();
-                for m in items {
-                    self.media.remove(m.id);
-                    let tx = self.loader_tx.clone();
-                    self.loading += 1;
-                    let spawned = util::spawn("recarregar-midia", move || {
-                        let mut m = m;
-                        let r = media::load_entry(&mut m).map_err(|e| format!("{e:#}"));
-                        let _ = tx.send(LoadMsg::Reloaded(m.id, r));
-                    });
-                    if let Err(e) = spawned {
-                        self.loading = self.loading.saturating_sub(1);
-                        self.set_status(e);
-                    }
-                }
+                self.reload_all_media();
                 if fixes.is_empty() {
                     self.set_status(format!("Projeto aberto: {}", path.display()));
                 } else {
@@ -625,6 +637,60 @@ impl App {
                 }
             }
             Err(e) => self.set_status(format!("Erro ao abrir projeto: {e}")),
+        }
+    }
+
+    pub fn import_otio_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("OpenTimelineIO", &["otio", "json"])
+            .pick_file()
+        {
+            self.import_otio_path(&p);
+        }
+    }
+
+    pub fn import_otio_path(&mut self, path: &std::path::Path) {
+        match otio::import_otio_file(path) {
+            Ok((p, warnings)) => {
+                self.stop(false);
+                for w in &warnings {
+                    util::log_warn(&format!("OTIO: {w}"));
+                }
+                self.session.reset_project(p, None);
+                self.reload_all_media();
+                if warnings.is_empty() {
+                    self.set_status(format!("OTIO importado: {}", path.display()));
+                } else {
+                    self.set_status(format!(
+                        "OTIO importado com {} aviso(s): {}",
+                        warnings.len(),
+                        path.display()
+                    ));
+                }
+            }
+            Err(e) => self.set_status(format!("Erro ao importar OTIO: {e}")),
+        }
+    }
+
+    pub fn export_otio_dialog(&mut self) {
+        let default_name = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s}.otio"))
+            .unwrap_or_else(|| "projeto.otio".into());
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("OpenTimelineIO", &["otio"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match otio::export_otio_file(&self.session.project, &p) {
+            Ok(()) => self.set_status(format!("OTIO exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar OTIO: {e}")),
         }
     }
 
@@ -1062,6 +1128,8 @@ impl App {
             UiAction::SaveVersion => self.save_version(),
             UiAction::ImportMediaDialog => self.import_dialog(),
             UiAction::ImportSequenceDialog => self.import_sequence_dialog(),
+            UiAction::ImportOtioDialog => self.import_otio_dialog(),
+            UiAction::ExportOtioDialog => self.export_otio_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -1286,6 +1354,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.import_media");
                 self.cmd_menu_btn(ui, "file.import_sequence");
+                self.cmd_menu_btn(ui, "file.import_otio");
+                self.cmd_menu_btn(ui, "file.export_otio");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.render");
                 self.cmd_menu_btn(ui, "file.snapshot");
@@ -1999,7 +2069,12 @@ impl App {
         let t = self.cursor;
         let projects: Vec<PathBuf> = files
             .iter()
-            .filter(|p| is_project_file(p))
+            .filter(|p| {
+                is_project_file(p)
+                    || p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("otio"))
+            })
             .cloned()
             .collect();
         if let Some(p) = projects.into_iter().next() {

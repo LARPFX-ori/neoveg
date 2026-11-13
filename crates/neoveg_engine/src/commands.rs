@@ -340,6 +340,8 @@ pub enum UiAction {
     SaveVersion,
     ImportMediaDialog,
     ImportSequenceDialog,
+    ImportOtioDialog,
+    ExportOtioDialog,
     OpenRenderDialog,
     SnapshotDialog,
     OpenProjectProps,
@@ -593,6 +595,34 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::ImportSequenceDialog, h),
+    },
+    CommandDef {
+        id: "file.import_otio",
+        label: "Importar OpenTimelineIO (.otio)...",
+        menu_path: "Arquivo/Importar OpenTimelineIO (.otio)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportOtioDialog, h),
+    },
+    CommandDef {
+        id: "file.export_otio",
+        label: "Exportar OpenTimelineIO (.otio)...",
+        menu_path: "Arquivo/Exportar OpenTimelineIO (.otio)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            if h.supports_ui() {
+                ui_action(UiAction::ExportOtioDialog, h)
+            } else if let Some(p) = s.path.as_ref() {
+                let out_path = p.with_extension("otio");
+                crate::otio::export_otio_file(&s.project, &out_path).map_err(|e| format!("{e}"))?;
+                Ok(CommandOutcome::Executed)
+            } else {
+                Err("projeto ainda não tem caminho definido para exportar OTIO sem diálogo".into())
+            }
+        },
     },
     CommandDef {
         id: "file.render",

@@ -529,3 +529,48 @@ fn fuzz_mp4_e_media_foundation_hostil() {
     }
     let _ = std::fs::remove_file(mut_path);
 }
+
+#[test]
+fn fuzz_otio_json() {
+    let valid_otio = r#"{
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "Fuzz OTIO",
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "name": "V1",
+                "kind": "Video",
+                "children": [{
+                    "OTIO_SCHEMA": "Clip.2",
+                    "name": "C1",
+                    "media_references": {
+                        "DEFAULT_MEDIA": {
+                            "OTIO_SCHEMA": "ExternalReference.1",
+                            "target_url": "file:///C:/a%20b.mp4"
+                        }
+                    },
+                    "active_media_reference_key": "DEFAULT_MEDIA",
+                    "source_range": {
+                        "OTIO_SCHEMA": "TimeRange.1",
+                        "start_time": {"OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 24},
+                        "duration": {"OTIO_SCHEMA": "RationalTime.1", "value": 48, "rate": 24}
+                    },
+                    "effects": [{"OTIO_SCHEMA": "LinearTimeWarp.1", "time_scalar": 1.5}],
+                    "markers": [{"OTIO_SCHEMA": "Marker.2", "name": "M", "marked_range": {"OTIO_SCHEMA": "TimeRange.1", "start_time": {"OTIO_SCHEMA": "RationalTime.1", "value": 12, "rate": 24}, "duration": {"OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 24}}}]
+                }]
+            }]
+        }
+    }"#;
+    for (i, m) in mutations(valid_otio.as_bytes(), 250, 0x4F54)
+        .iter()
+        .enumerate()
+    {
+        let text = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("OTIO", i, || {
+            if let Ok((p, _)) = crate::otio::import_otio_str(&text) {
+                let _ = crate::otio::export_otio_string(&p, Some("fuzz"));
+            }
+        });
+    }
+}

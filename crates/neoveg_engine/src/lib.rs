@@ -23,6 +23,8 @@ pub mod media;
 #[forbid(unsafe_code)]
 pub mod model;
 #[forbid(unsafe_code)]
+pub mod otio;
+#[forbid(unsafe_code)]
 pub mod playback;
 #[forbid(unsafe_code)]
 pub mod recovery;
