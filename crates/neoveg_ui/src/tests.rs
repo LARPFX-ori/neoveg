@@ -396,6 +396,7 @@ fn ui_smoke() {
         .unwrap();
     assert_narrow_layout_fixes(&mut app, avi_idx);
     assert_vegas21_ui_upgrades(&mut app);
+    assert_welcome_ui_layout(&mut app);
     if let Some(pf) = proxy_file {
         let _ = std::fs::remove_file(pf);
     }
@@ -740,4 +741,80 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     app.apply_window_layout(prev_layout_snap);
     app.apply_edit_layout(Some(&ctx), prev_edit_layout, false, false);
     app.set_theme(&ctx, prev_theme, false);
+}
+
+/// Garante o layout da Welcome Screen estilo VEGAS (barra lateral, 5 proporções,
+/// formulário de novo projeto e rodapé sem recorte em desktop e monitor 760x520).
+fn assert_welcome_ui_layout(app: &mut App) {
+    let prev_open = app.is_welcome_open();
+    let prev_welcome = app.welcome.clone();
+    let ctx = egui::Context::default();
+    app.open_welcome();
+    app.welcome.section = crate::welcome::WelcomeSection::NewProject;
+
+    let _ = ctx.run(raw(vec![], Modifiers::NONE, 1.0), |c| app.frame_ui(c));
+    let out = ctx.run(raw(vec![], Modifiers::NONE, 1.05), |c| app.frame_ui(c));
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    for expected in [
+        "Neoveg",
+        "Novo Projeto",
+        "Abrir Projeto",
+        "Primeiros Passos",
+        "Widescreen (16:9)",
+        "Fullscreen (4:3)",
+        "Portrait (9:16)",
+        "Square (1:1)",
+        "Scope (2.4:1)",
+        "Criar um novo projeto",
+        "Resolução:",
+        "Taxa de quadros:",
+        "Criar Projeto",
+        "Configurações Avançadas...",
+        "Mostrar tela de boas-vindas ao iniciar",
+    ] {
+        assert!(
+            texts.iter().any(|(txt, _, rc, clip)| {
+                txt == expected
+                    && rc.right() <= clip.right() + 1.5
+                    && rc.bottom() <= clip.bottom() + 1.5
+            }),
+            "Welcome Screen deve exibir '{expected}' sem recorte em 1500x920"
+        );
+    }
+
+    let small_raw = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(760.0, 520.0))),
+        time: Some(t),
+        ..Default::default()
+    };
+    let _ = ctx.run(small_raw(2.0), |c| app.frame_ui(c));
+    let small_out = ctx.run(small_raw(2.05), |c| app.frame_ui(c));
+    texts.clear();
+    for clipped in &small_out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    for expected in [
+        "Criar Projeto",
+        "Configurações Avançadas...",
+        "Mostrar tela de boas-vindas ao iniciar",
+    ] {
+        assert!(
+            texts.iter().any(|(txt, _, rc, clip)| {
+                txt == expected
+                    && rc.right() <= clip.right() + 1.5
+                    && rc.bottom() <= clip.bottom() + 1.5
+                    && rc.bottom() <= 520.0
+                    && rc.right() <= 760.0
+            }),
+            "Welcome Screen deve manter '{expected}' visível sem corte em monitor 760x520"
+        );
+    }
+
+    app.welcome = prev_welcome;
+    if !prev_open {
+        app.dismiss_welcome();
+    }
 }

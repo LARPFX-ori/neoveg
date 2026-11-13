@@ -121,6 +121,7 @@ pub struct App {
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
     pub(crate) splash: crate::splash::SplashState,
+    pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
 }
@@ -245,6 +246,7 @@ impl App {
             last_autosave: Instant::now(),
             recovery_offer,
             splash,
+            welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
         };
