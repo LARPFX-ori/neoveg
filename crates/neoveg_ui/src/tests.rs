@@ -257,6 +257,67 @@ fn ui_smoke() {
     frame(&mut app, vec![], Modifiers::NONE);
     app.dlg.prefs_open = false;
 
+    // Editar > Propriedades > Layout: diálogo + 3 tipos (Sonic Foundry, Sony, MAGIX)
+    struct PrefsGuard {
+        path: std::path::PathBuf,
+        prev: Option<Vec<u8>>,
+    }
+    impl Drop for PrefsGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(bytes) => {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+    let prefs_path = crate::Preferences::file_path();
+    let _prefs_guard = PrefsGuard {
+        prev: std::fs::read(&prefs_path).ok(),
+        path: prefs_path,
+    };
+
+    app.exec_cmd(Some(&ctx), "edit.properties.layout");
+    assert!(app.dlg.edit_layout_open);
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dlg.edit_layout_open = false;
+
+    app.exec_cmd(Some(&ctx), "edit.properties.layout.sonic_foundry");
+    assert_eq!(
+        app.prefs.edit_layout.layout_type,
+        crate::LayoutType::SonicFoundry
+    );
+    assert!(!app.prefs.edit_layout.timeline_at_bottom);
+    assert!(!app.prefs.edit_layout.tabs_at_top);
+    assert!(!app.prefs.edit_layout.transport_at_bottom);
+    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasClaro);
+    frame(&mut app, vec![], Modifiers::NONE);
+
+    app.exec_cmd(Some(&ctx), "edit.properties.layout.sony");
+    assert_eq!(app.prefs.edit_layout.layout_type, crate::LayoutType::Sony);
+    assert!(app.prefs.edit_layout.timeline_at_bottom);
+    assert!(!app.prefs.edit_layout.tabs_at_top);
+    assert!(app.prefs.edit_layout.transport_at_bottom);
+    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasMedio);
+    frame(&mut app, vec![], Modifiers::NONE);
+
+    // Alto Contraste AAA deve ser preservado ao alternar o tipo de layout
+    app.set_theme(&ctx, crate::theme::ThemeId::AltoContrasteEscuro, false);
+    app.exec_cmd(Some(&ctx), "edit.properties.layout.sonic_foundry");
+    assert_eq!(app.theme_id, crate::theme::ThemeId::AltoContrasteEscuro);
+    app.set_theme(&ctx, crate::theme::ThemeId::VegasEscuro, false);
+
+    app.exec_cmd(Some(&ctx), "edit.properties.layout.magix");
+    assert_eq!(app.prefs.edit_layout.layout_type, crate::LayoutType::Magix);
+    assert!(!app.prefs.edit_layout.timeline_at_bottom);
+    assert!(app.prefs.edit_layout.tabs_at_top);
+    assert!(!app.prefs.edit_layout.transport_at_bottom);
+    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasEscuro);
+    frame(&mut app, vec![], Modifiers::NONE);
+
     for preset in crate::layout::builtin_presets() {
         app.apply_window_layout(preset);
         frame(&mut app, vec![], Modifiers::NONE);

@@ -5,7 +5,7 @@ use crate::layout::{self, WindowLayout};
 use crate::theme::{self, ThemeColors, ThemeId};
 use eframe::egui;
 use egui::{Key, TextureHandle};
-pub use neoveg_common::prefs::{Preferences, PreviewQuality};
+pub use neoveg_common::prefs::{EditLayoutPrefs, LayoutType, Preferences, PreviewQuality};
 use neoveg_engine::commands::{
     self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
     ShortcutKey, UiAction, COMMANDS,
@@ -128,14 +128,21 @@ impl App {
     }
 
     pub fn with_context(egui_ctx: &egui::Context, open: Option<PathBuf>) -> Self {
-        let prefs = Preferences::load_or_default();
+        let mut prefs = Preferences::load_or_default();
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
-        let initial_layout = prefs
+        let loaded_layout = prefs
             .window_layout
             .as_deref()
-            .and_then(|p| layout::load_layout_file(std::path::Path::new(p)).ok())
-            .unwrap_or_default();
+            .and_then(|p| layout::load_layout_file(std::path::Path::new(p)).ok());
+        if let Some(el) = loaded_layout.as_ref().and_then(|l| l.edit_layout.clone()) {
+            prefs.edit_layout = el;
+        }
+        let initial_layout = loaded_layout.unwrap_or_else(|| layout::WindowLayout {
+            dock_height: prefs.edit_layout.layout_type.default_dock_height(),
+            preview_ratio: prefs.edit_layout.layout_type.default_preview_ratio(),
+            ..Default::default()
+        });
         let saved_layouts = layout::list_saved_layouts();
         let session = EditorSession::new(Project::new_default());
         let media = Arc::new(MediaCache::default());
@@ -969,6 +976,11 @@ impl App {
             UiAction::OpenFxMasterAudio => self.dlg.fx_target = Some(FxTarget::MasterAudio),
             UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
             UiAction::OpenGoto => self.dlg.goto_open = true,
+            UiAction::OpenEditLayoutProps => {
+                self.dlg
+                    .open_edit_layout(&self.prefs, self.dock_height, self.preview_ratio);
+            }
+            UiAction::SetLayoutType(lt) => self.select_layout_type(ctx, lt, true),
             UiAction::OpenShortcuts => self.dlg.shortcuts = true,
             UiAction::OpenPrefs => self.dlg.open_prefs(&self.prefs),
             UiAction::OpenAbout => self.dlg.about = true,
@@ -1175,6 +1187,29 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.select_all");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.goto");
+                ui.separator();
+                ui.menu_button("Propriedades", |ui| {
+                    ui.menu_button("Layout", |ui| {
+                        self.cmd_menu_btn(ui, "edit.properties.layout");
+                        ui.separator();
+                        ui.label(egui::RichText::new("Tipos de layout").small().weak());
+                        for (cmd_id, lt) in [
+                            (
+                                "edit.properties.layout.sonic_foundry",
+                                LayoutType::SonicFoundry,
+                            ),
+                            ("edit.properties.layout.sony", LayoutType::Sony),
+                            ("edit.properties.layout.magix", LayoutType::Magix),
+                        ] {
+                            let selected = self.prefs.edit_layout.layout_type == lt;
+                            let label = menu_label(cmd_id, &self.prefs.shortcuts);
+                            if ui.selectable_label(selected, label).clicked() {
+                                self.exec_cmd(Some(ui.ctx()), cmd_id);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
             });
             ui.menu_button("Exibir", |ui| {
                 for tab in DockPanel::ALL {
@@ -1699,18 +1734,21 @@ impl App {
             self.toolbar(ui);
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
-        if self.dock_visible {
-            let resp = egui::TopBottomPanel::bottom("dock")
-                .resizable(true)
-                .default_height(self.dock_height)
-                .min_height(160.0)
-                .show(ctx, |ui| self.dock_area(ui));
-            let h = resp.response.rect.height();
-            if h.is_finite() && h >= 160.0 {
-                self.dock_height = h.clamp(160.0, 720.0);
-            }
+
+        let tl_bottom = self.prefs.edit_layout.timeline_at_bottom;
+        let tr_bottom = self.prefs.edit_layout.transport_at_bottom;
+        if tr_bottom {
+            egui::TopBottomPanel::bottom("transport_bot").show(ctx, |ui| self.transport_bar(ui));
         }
-        egui::TopBottomPanel::bottom("transport").show(ctx, |ui| self.transport_bar(ui));
+        self.show_dock_panel(ctx, tl_bottom);
+        if !tr_bottom {
+            let tr_panel = if tl_bottom {
+                egui::TopBottomPanel::top("transport_mid_top")
+            } else {
+                egui::TopBottomPanel::bottom("transport_mid_bot")
+            };
+            tr_panel.show(ctx, |ui| self.transport_bar(ui));
+        }
         egui::CentralPanel::default().show(ctx, |ui| self.timeline_ui(ui));
 
         self.floating_panel_windows(ctx);
@@ -1756,6 +1794,67 @@ impl App {
 }
 
 impl App {
+    fn show_dock_panel(&mut self, ctx: &egui::Context, at_top: bool) {
+        if !self.dock_visible {
+            return;
+        }
+        let panel = if at_top {
+            egui::TopBottomPanel::top("dock_top")
+        } else {
+            egui::TopBottomPanel::bottom("dock_bot")
+        };
+        let resp = panel
+            .resizable(true)
+            .default_height(self.dock_height)
+            .min_height(160.0)
+            .show(ctx, |ui| self.dock_area(ui));
+        let h = resp.response.rect.height();
+        if h.is_finite() && h >= 160.0 {
+            self.dock_height = h.clamp(160.0, 720.0);
+        }
+    }
+
+    pub fn apply_edit_layout(
+        &mut self,
+        ctx: Option<&egui::Context>,
+        next: EditLayoutPrefs,
+        apply_metrics: bool,
+        save_prefs: bool,
+    ) {
+        let lt = next.layout_type;
+        self.prefs.edit_layout = next;
+        if apply_metrics {
+            self.dock_height = lt.default_dock_height();
+            self.preview_ratio = lt.default_preview_ratio();
+        }
+        if self.prefs.edit_layout.sync_theme_with_layout && !self.theme_id.is_high_contrast() {
+            let target_theme = ThemeId::from_pref(lt.default_theme_id());
+            if let Some(c) = ctx {
+                self.set_theme(c, target_theme, false);
+            } else {
+                self.theme_id = target_theme;
+                self.prefs.theme = target_theme.id().to_string();
+            }
+        }
+        if save_prefs {
+            if let Err(e) = self.prefs.save() {
+                self.set_status(format!("Aviso ao salvar layout: {e}"));
+            }
+        }
+    }
+
+    pub fn select_layout_type(
+        &mut self,
+        ctx: Option<&egui::Context>,
+        lt: LayoutType,
+        save_prefs: bool,
+    ) {
+        let mut next = self.prefs.edit_layout.clone();
+        next.apply_type(lt);
+        self.apply_edit_layout(ctx, next, true, save_prefs);
+        self.set_status(format!("Layout {} aplicado ({})", lt.label(), lt.era()));
+    }
+
     pub fn set_theme(&mut self, ctx: &egui::Context, id: ThemeId, save_prefs: bool) {
         self.theme_id = id;
         self.theme = theme::apply_theme(ctx, id);
@@ -1787,6 +1886,7 @@ impl App {
             active_tab: layout::panel_key(self.dock_tab).to_string(),
             detached_tabs: detached,
             px_per_sec: Some(self.tl.px_per_sec),
+            edit_layout: Some(self.prefs.edit_layout.clone()),
         };
         l.sanitize();
         l
@@ -1809,6 +1909,9 @@ impl App {
         }
         if let Some(pps) = l.px_per_sec {
             self.tl.px_per_sec = pps;
+        }
+        if let Some(el) = l.edit_layout {
+            self.prefs.edit_layout = el;
         }
         self.set_status(format!("Layout aplicado: {}", l.name));
     }

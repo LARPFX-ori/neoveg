@@ -66,6 +66,13 @@ impl ThemeId {
             _ => ThemeId::VegasEscuro,
         }
     }
+
+    pub fn is_high_contrast(self) -> bool {
+        matches!(
+            self,
+            ThemeId::AltoContrasteEscuro | ThemeId::AltoContrasteClaro
+        )
+    }
 }
 
 /// Paleta semântica completa para interface e timeline.

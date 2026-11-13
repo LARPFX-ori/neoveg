@@ -2,7 +2,7 @@
 //! Motion, cadeias de efeitos, editor de mídia gerada, Renderizar Como,
 //! atalhos e "sobre".
 
-use super::{App, FxTarget, Preferences, RenderJob};
+use super::{App, EditLayoutPrefs, FxTarget, LayoutType, Preferences, RenderJob};
 use crate::model::*;
 use crate::render::{RenderFormat, RenderSettings, WavBits};
 use crate::theme::ThemeId;
@@ -34,6 +34,9 @@ pub struct Dialogs {
     pub prefs_open: bool,
     prefs_draft: Option<Preferences>,
     prefs_orig_theme: Option<String>,
+    pub edit_layout_open: bool,
+    edit_layout_draft: Option<EditLayoutPrefs>,
+    edit_layout_orig: Option<(EditLayoutPrefs, String, f32, f32)>,
     shortcut_filter: String,
     pub capturing_shortcut: Option<&'static str>,
     pub save_layout_open: bool,
@@ -71,6 +74,22 @@ impl Dialogs {
         self.prefs_draft = Some(current.clone());
         self.prefs_orig_theme = Some(current.theme.clone());
         self.prefs_open = true;
+    }
+
+    pub fn open_edit_layout(
+        &mut self,
+        current: &Preferences,
+        dock_height: f32,
+        preview_ratio: f32,
+    ) {
+        self.edit_layout_draft = Some(current.edit_layout.clone());
+        self.edit_layout_orig = Some((
+            current.edit_layout.clone(),
+            current.theme.clone(),
+            dock_height,
+            preview_ratio,
+        ));
+        self.edit_layout_open = true;
     }
 
     pub fn open_render(&mut self, p: &Project, proj_path: Option<&Path>) {
@@ -1692,6 +1711,9 @@ impl App {
         if self.dlg.prefs_open {
             self.prefs_window(ctx);
         }
+        if self.dlg.edit_layout_open {
+            self.edit_layout_window(ctx);
+        }
         if self.dlg.save_layout_open {
             self.save_layout_window(ctx);
         }
@@ -1867,6 +1889,13 @@ impl App {
                     ui.label("Idioma da interface:");
                     ui.label(egui::RichText::new(&draft.language).strong());
                 });
+                if ui
+                    .button("Editar > Propriedades > Layout (Sonic Foundry / Sony / MAGIX)...")
+                    .clicked()
+                {
+                    self.dlg
+                        .open_edit_layout(&self.prefs, self.dock_height, self.preview_ratio);
+                }
 
                 ui.separator();
                 ui.heading("Desempenho e Hardware Limitado (§3.6)");
@@ -1962,6 +1991,190 @@ impl App {
             }
         } else {
             self.dlg.prefs_draft = Some(draft);
+        }
+    }
+
+    fn edit_layout_window(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.dlg.edit_layout_draft.take() else {
+            self.dlg.edit_layout_open = false;
+            return;
+        };
+        let mut open = true;
+        let mut apply_type_live: Option<LayoutType> = None;
+        let mut live_tweak = false;
+        let mut restore_default = false;
+        let mut save_and_close = false;
+        let mut apply_and_keep = false;
+        let mut cancel_close = false;
+
+        egui::Window::new("Editar > Propriedades > Layout")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(600.0)
+            .show(ctx, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(280.0);
+                        ui.heading("Tipos de layout");
+                        ui.add_space(4.0);
+                        for lt in LayoutType::ALL {
+                            let selected = draft.layout_type == lt;
+                            if ui
+                                .radio(
+                                    selected,
+                                    egui::RichText::new(format!("{}  ({})", lt.label(), lt.era()))
+                                        .strong(),
+                                )
+                                .clicked()
+                                && !selected
+                            {
+                                apply_type_live = Some(lt);
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(draft.layout_type.description())
+                                .small()
+                                .weak(),
+                        );
+                    });
+
+                    ui.separator();
+
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Pré-visualização da janela").strong());
+                        ui.add_space(4.0);
+                        draw_layout_schematic(ui, &draft, &self.theme);
+                    });
+                });
+
+                ui.separator();
+                ui.heading("Opções da área de trabalho");
+                if ui
+                    .checkbox(
+                        &mut draft.timeline_at_bottom,
+                        "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
+                    )
+                    .changed()
+                {
+                    live_tweak = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut draft.tabs_at_top,
+                        "Posicionar abas no topo das janelas acopladas",
+                    )
+                    .changed()
+                {
+                    live_tweak = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut draft.transport_at_bottom,
+                        "Fixar barra de transporte no rodapé da janela",
+                    )
+                    .changed()
+                {
+                    live_tweak = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut draft.preview_on_left,
+                        "Posicionar Prévia de Vídeo à esquerda na área acoplável",
+                    )
+                    .changed()
+                {
+                    live_tweak = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut draft.sync_theme_with_layout,
+                        "Aplicar tema visual da era ao selecionar tipo de layout",
+                    )
+                    .changed()
+                {
+                    live_tweak = true;
+                }
+                if self.theme_id.is_high_contrast() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Tema Alto Contraste AAA ativo: a paleta de acessibilidade é preservada ao alternar tipos de layout.",
+                        )
+                        .small()
+                        .color(self.theme.accent),
+                    );
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        save_and_close = true;
+                    }
+                    if ui.button("Aplicar").clicked() {
+                        apply_and_keep = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel_close = true;
+                    }
+                    if ui
+                        .button("Restaurar padrão do tipo")
+                        .on_hover_text("Repõe a disposição clássica padrão do tipo selecionado")
+                        .clicked()
+                    {
+                        restore_default = true;
+                    }
+                });
+            });
+
+        if cancel_close || (!open && !save_and_close) {
+            if let Some((orig_el, orig_theme, orig_dock_h, orig_prev_r)) =
+                self.dlg.edit_layout_orig.take()
+            {
+                self.prefs.edit_layout = orig_el;
+                self.dock_height = orig_dock_h;
+                self.preview_ratio = orig_prev_r;
+                let tid = ThemeId::from_pref(&orig_theme);
+                self.set_theme(ctx, tid, false);
+            }
+            self.dlg.edit_layout_open = false;
+            self.dlg.edit_layout_draft = None;
+            return;
+        }
+
+        if let Some(lt) = apply_type_live {
+            draft.apply_type(lt);
+            self.apply_edit_layout(Some(ctx), draft.clone(), true, false);
+        } else if restore_default {
+            draft.apply_type(draft.layout_type);
+            self.apply_edit_layout(Some(ctx), draft.clone(), true, false);
+        } else if live_tweak {
+            self.apply_edit_layout(Some(ctx), draft.clone(), false, false);
+        }
+
+        if apply_and_keep || save_and_close {
+            self.apply_edit_layout(Some(ctx), draft.clone(), false, true);
+            if save_and_close {
+                self.dlg.edit_layout_orig = None;
+                self.dlg.edit_layout_open = false;
+                self.dlg.edit_layout_draft = None;
+                self.set_status(format!(
+                    "Layout {} ({}) salvo.",
+                    draft.layout_type.label(),
+                    draft.layout_type.era()
+                ));
+            } else {
+                self.dlg.edit_layout_orig = Some((
+                    draft.clone(),
+                    self.prefs.theme.clone(),
+                    self.dock_height,
+                    self.preview_ratio,
+                ));
+                self.dlg.edit_layout_draft = Some(draft);
+                self.set_status("Propriedades de layout aplicadas.");
+            }
+        } else {
+            self.dlg.edit_layout_draft = Some(draft);
         }
     }
 
@@ -2082,3 +2295,135 @@ const MOUSE_HINTS: &[(&str, &str)] = &[
     ("Duplo clique no envelope", "Adicionar ponto"),
     ("Botão do meio", "Mover a vista (pan)"),
 ];
+
+fn draw_layout_schematic(
+    ui: &mut egui::Ui,
+    cfg: &EditLayoutPrefs,
+    theme: &crate::theme::ThemeColors,
+) {
+    let size = vec2(270.0, 146.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 4.0, theme.extreme_bg);
+    p.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0_f32, theme.border),
+        StrokeKind::Outside,
+    );
+
+    let inner = rect.shrink(5.0);
+    let mut top_y = inner.top();
+    let mut bot_y = inner.bottom();
+
+    let box_labeled = |r: Rect, fill: Color32, stroke: Color32, text: &str| {
+        p.rect_filled(r, 2.0, fill);
+        p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, stroke), StrokeKind::Inside);
+        p.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(10.0),
+            theme.text_primary,
+        );
+    };
+
+    // Menu + Toolbar no topo
+    let menu_r = Rect::from_min_max(pos2(inner.left(), top_y), pos2(inner.right(), top_y + 15.0));
+    top_y += 18.0;
+    box_labeled(menu_r, theme.tl_header_bg, theme.border, "Menu / Toolbar");
+
+    // Status no rodapé
+    let status_r = Rect::from_min_max(pos2(inner.left(), bot_y - 13.0), pos2(inner.right(), bot_y));
+    bot_y -= 16.0;
+    box_labeled(
+        status_r,
+        theme.tl_header_bg,
+        theme.border,
+        "Barra de estado",
+    );
+
+    let transport_fill = theme.widget_bg;
+    if cfg.transport_at_bottom {
+        let tr_r = Rect::from_min_max(pos2(inner.left(), bot_y - 16.0), pos2(inner.right(), bot_y));
+        bot_y -= 19.0;
+        box_labeled(tr_r, transport_fill, theme.accent, "Barra de transporte");
+    }
+
+    let dock_h = ((bot_y - top_y) * 0.44).clamp(32.0, 56.0);
+    let (dock_r, tl_r, tr_r_opt) = if cfg.timeline_at_bottom {
+        let dr = Rect::from_min_max(
+            pos2(inner.left(), top_y),
+            pos2(inner.right(), top_y + dock_h),
+        );
+        let mut tl_top = dr.bottom() + 3.0;
+        let tr_mid = if !cfg.transport_at_bottom {
+            let r = Rect::from_min_max(
+                pos2(inner.left(), tl_top),
+                pos2(inner.right(), tl_top + 16.0),
+            );
+            tl_top += 19.0;
+            Some(r)
+        } else {
+            None
+        };
+        let tl = Rect::from_min_max(pos2(inner.left(), tl_top), pos2(inner.right(), bot_y));
+        (dr, tl, tr_mid)
+    } else {
+        let dr = Rect::from_min_max(
+            pos2(inner.left(), bot_y - dock_h),
+            pos2(inner.right(), bot_y),
+        );
+        let mut tl_bot = dr.top() - 3.0;
+        let tr_mid = if !cfg.transport_at_bottom {
+            let r = Rect::from_min_max(
+                pos2(inner.left(), tl_bot - 16.0),
+                pos2(inner.right(), tl_bot),
+            );
+            tl_bot -= 19.0;
+            Some(r)
+        } else {
+            None
+        };
+        let tl = Rect::from_min_max(pos2(inner.left(), top_y), pos2(inner.right(), tl_bot));
+        (dr, tl, tr_mid)
+    };
+
+    if let Some(tr_r) = tr_r_opt {
+        box_labeled(tr_r, transport_fill, theme.accent, "Barra de transporte");
+    }
+
+    // Timeline (track list + faixas)
+    box_labeled(
+        tl_r,
+        theme.tl_lane_even,
+        theme.border,
+        "Timeline (Track View)",
+    );
+    let split_x = tl_r.left() + tl_r.width() * 0.25;
+    p.line_segment(
+        [pos2(split_x, tl_r.top()), pos2(split_x, tl_r.bottom())],
+        Stroke::new(1.0_f32, theme.border),
+    );
+
+    // Área acoplável (Painéis + Prévia + barra de abas no topo/base)
+    let split = dock_r.width() * if cfg.preview_on_left { 0.40 } else { 0.60 };
+    let left_sub = Rect::from_min_max(
+        dock_r.min,
+        pos2(dock_r.left() + split - 2.0, dock_r.bottom()),
+    );
+    let right_sub = Rect::from_min_max(pos2(dock_r.left() + split + 1.0, dock_r.top()), dock_r.max);
+    let (tabs_sub, prev_sub) = if cfg.preview_on_left {
+        (right_sub, left_sub)
+    } else {
+        (left_sub, right_sub)
+    };
+    box_labeled(tabs_sub, theme.panel_fill, theme.border, "Painéis");
+    box_labeled(prev_sub, theme.tl_preview_bg, theme.accent, "Prévia");
+    let strip_r = if cfg.tabs_at_top {
+        Rect::from_min_max(tabs_sub.min, pos2(tabs_sub.right(), tabs_sub.top() + 6.0))
+    } else {
+        Rect::from_min_max(pos2(tabs_sub.left(), tabs_sub.bottom() - 6.0), tabs_sub.max)
+    };
+    p.rect_filled(strip_r, 1.0, theme.accent);
+}

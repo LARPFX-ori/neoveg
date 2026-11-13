@@ -8,35 +8,10 @@ use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind};
 use std::path::PathBuf;
 
 impl App {
-    pub fn dock_area(&mut self, ui: &mut egui::Ui) {
-        let avail = ui.available_rect_before_wrap();
-        let preview_w = (avail.width() * self.preview_ratio).clamp(260.0, 900.0);
-        let left_rect = Rect::from_min_max(
-            avail.min,
-            pos2(avail.right() - preview_w - 6.0, avail.bottom()),
-        );
-        let right_rect =
-            Rect::from_min_max(pos2(avail.right() - preview_w, avail.top()), avail.max);
-        ui.allocate_rect(avail, Sense::hover());
-
-        let mut left = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(left_rect)
-                .id_salt("dock_left"),
-        );
-        left.set_clip_rect(left_rect);
-        let docked: Vec<DockTab> = DockTab::ALL
-            .into_iter()
-            .filter(|t| !self.detached_tabs.contains(t))
-            .collect();
-        if !docked.contains(&self.dock_tab) {
-            if let Some(&first) = docked.first() {
-                self.dock_tab = first;
-            }
-        }
+    fn dock_tab_strip(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
         let mut detach_req: Option<DockTab> = None;
-        left.horizontal_wrapped(|ui| {
-            for &tab in &docked {
+        ui.horizontal_wrapped(|ui| {
+            for &tab in docked {
                 if ui
                     .selectable_label(self.dock_tab == tab, tab.name())
                     .clicked()
@@ -62,9 +37,11 @@ impl App {
                 self.dock_tab = next;
             }
         }
-        left.separator();
+    }
+
+    fn dock_tab_contents(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
         if docked.is_empty() {
-            left.label(
+            ui.label(
                 egui::RichText::new(
                     "Todas as abas estão destacadas em janelas flutuantes (clique em Acoplar ou use Exibir/Layouts).",
                 )
@@ -75,15 +52,95 @@ impl App {
             egui::ScrollArea::both()
                 .id_salt("dock_scroll")
                 .auto_shrink([false, false])
-                .show(&mut left, |ui| self.show_dock_tab_contents(ui, tab));
+                .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
+        }
+    }
+
+    pub fn dock_area(&mut self, ui: &mut egui::Ui) {
+        let avail = ui.available_rect_before_wrap();
+        let preview_w = (avail.width() * self.preview_ratio).clamp(260.0, 900.0);
+        let (tabs_rect, preview_rect) = if self.prefs.edit_layout.preview_on_left {
+            (
+                Rect::from_min_max(pos2(avail.left() + preview_w + 6.0, avail.top()), avail.max),
+                Rect::from_min_max(avail.min, pos2(avail.left() + preview_w, avail.bottom())),
+            )
+        } else {
+            (
+                Rect::from_min_max(
+                    avail.min,
+                    pos2(avail.right() - preview_w - 6.0, avail.bottom()),
+                ),
+                Rect::from_min_max(pos2(avail.right() - preview_w, avail.top()), avail.max),
+            )
+        };
+        ui.allocate_rect(avail, Sense::hover());
+
+        let docked: Vec<DockTab> = DockTab::ALL
+            .into_iter()
+            .filter(|t| !self.detached_tabs.contains(t))
+            .collect();
+        if !docked.contains(&self.dock_tab) {
+            if let Some(&first) = docked.first() {
+                self.dock_tab = first;
+            }
+        }
+
+        if self.prefs.edit_layout.tabs_at_top {
+            let mut left = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(tabs_rect)
+                    .id_salt("dock_tabs_pane_top"),
+            );
+            left.set_clip_rect(tabs_rect);
+            self.dock_tab_strip(&mut left, &docked);
+            left.separator();
+            self.dock_tab_contents(&mut left, &docked);
+        } else {
+            // Nas gerações Sonic Foundry e Sony, as abas ficam na borda inferior do dock.
+            let base_h: f32 = if tabs_rect.width() < 560.0 {
+                48.0
+            } else {
+                28.0
+            };
+            let strip_h = base_h.min((tabs_rect.height() * 0.4).max(24.0));
+            let content_rect = Rect::from_min_max(
+                tabs_rect.min,
+                pos2(
+                    tabs_rect.right(),
+                    (tabs_rect.bottom() - strip_h - 4.0).max(tabs_rect.top() + 20.0),
+                ),
+            );
+            let strip_rect = Rect::from_min_max(
+                pos2(
+                    tabs_rect.left(),
+                    (tabs_rect.bottom() - strip_h).max(tabs_rect.top()),
+                ),
+                tabs_rect.max,
+            );
+            let mut content_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(content_rect)
+                    .id_salt("dock_content_pane_bot"),
+            );
+            content_ui.set_clip_rect(content_rect);
+            self.dock_tab_contents(&mut content_ui, &docked);
+
+            let mut strip_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(strip_rect)
+                    .id_salt("dock_strip_pane_bot"),
+            );
+            strip_ui.set_clip_rect(strip_rect);
+            strip_ui.separator();
+            self.dock_tab_strip(&mut strip_ui, &docked);
         }
 
         let mut right = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(right_rect)
+                .max_rect(preview_rect)
                 .id_salt("dock_right"),
         );
-        right.set_clip_rect(right_rect);
+        right.set_clip_rect(preview_rect);
         self.preview_panel(&mut right);
     }
 

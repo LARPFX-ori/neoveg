@@ -14,7 +14,7 @@ Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativ
 
 - **Timeline e Edição VEGAS Pro:** múltiplas trilhas A/V, auto-crossfade ao sobrepor eventos, alças de fade nos cantos superiores, alça de ganho em dB no topo de eventos de áudio, playhead físico de `1 px`, controle contínuo de taxa (*Playback Rate*), divisão (`S`), marcações (`M`), regiões (`R`), *Auto Ripple* (`Ctrl+L`), encaixe (`F8`) e *scrub* (`J`/`K`/`L`).
 - **Tabela Única de Comandos e Atalhos Regraváveis:** menus, barra de ferramentas, atalhos e comandos CLI despacham pelo mesmo `id`; atalhos personalizados podem ser gravados/limpos em *Ajuda → Atalhos de teclado*.
-- **Personalização e Acessibilidade:** 7 temas selecionáveis em *Exibir → Tema* ou *Opções → Preferências...* (incluindo *Alto Contraste AAA Escuro* e *Claro* com contraste >= 7:1), abas inferiores acopláveis/destacáveis em janelas flutuantes e 4 presets + arquivos `.neoveglayout` salvos pelo usuário.
+- **Personalização e Acessibilidade:** 7 temas selecionáveis em *Exibir → Tema* ou *Opções → Preferências...* (incluindo *Alto Contraste AAA Escuro* e *Claro* com contraste >= 7:1), **Editar → Propriedades → Layout** com os três tipos clássicos de disposição (*Sonic Foundry*, *Sony* e *MAGIX*), abas acopláveis/destacáveis em janelas flutuantes e 4 presets + arquivos `.neoveglayout` salvos pelo usuário.
 - **Formatos Suportados:**
   - **Rust puro (multiplataforma):** projetos `.neoveg` (e legado `.nvp`), `AVI (MJPEG/PCM)`, `Y4M`, `GIF`, sequências de imagens (`PNG`, `JPEG`, `BMP`, `TIFF`, `WebP`), áudio `WAV`, `AIFF`, `FLAC`, `OGG` e `MP3`.
   - **Windows nativo (Media Foundation):** importação e decodificação em streaming de `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `M4A`, `AAC`, `WMV` e `ASF`.

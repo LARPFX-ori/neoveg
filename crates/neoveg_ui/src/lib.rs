@@ -24,7 +24,8 @@ mod tests;
 
 pub(crate) use app::rgba_to_color_image;
 pub use app::{
-    App, DndPayload, DockTab, FxTarget, Preferences, PreviewQuality, RenderJob, TimelineState,
+    App, DndPayload, DockTab, EditLayoutPrefs, FxTarget, LayoutType, Preferences, PreviewQuality,
+    RenderJob, TimelineState,
 };
 pub use neoveg_engine::{media, model, playback, recovery, render, session, util};
 

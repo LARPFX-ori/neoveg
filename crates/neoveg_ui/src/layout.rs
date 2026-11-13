@@ -2,6 +2,7 @@
 //! no VEGAS Pro e suporte a painéis destacáveis (§2.2 / §3.2).
 
 use crate::{DockTab, Preferences};
+use neoveg_common::EditLayoutPrefs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,8 @@ pub struct WindowLayout {
     pub detached_tabs: Vec<String>,
     #[serde(default)]
     pub px_per_sec: Option<f32>,
+    #[serde(default)]
+    pub edit_layout: Option<EditLayoutPrefs>,
 }
 
 fn default_dock_height() -> f32 {
@@ -70,6 +73,7 @@ impl Default for WindowLayout {
             active_tab: default_active_tab(),
             detached_tabs: Vec::new(),
             px_per_sec: None,
+            edit_layout: None,
         }
     }
 }
@@ -136,6 +140,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             active_tab: panel_key(DockTab::Scopes).into(),
             detached_tabs: vec![panel_key(DockTab::VideoFx).into()],
             px_per_sec: None,
+            edit_layout: None,
         },
         WindowLayout {
             name: "Mixagem de Áudio".into(),
@@ -145,6 +150,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             active_tab: panel_key(DockTab::Mixer).into(),
             detached_tabs: vec![panel_key(DockTab::AudioFx).into()],
             px_per_sec: None,
+            edit_layout: None,
         },
         WindowLayout {
             name: "Timeline Ampla".into(),
@@ -154,6 +160,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             active_tab: panel_key(DockTab::ProjectMedia).into(),
             detached_tabs: Vec::new(),
             px_per_sec: None,
+            edit_layout: None,
         },
     ]
 }
@@ -250,6 +257,7 @@ mod tests {
                 "scopes".into(),
             ],
             px_per_sec: Some(-10.0),
+            edit_layout: Some(EditLayoutPrefs::for_type(neoveg_common::LayoutType::Sony)),
         };
         bad.sanitize();
         assert_eq!(bad.dock_height, 330.0);

@@ -16,7 +16,8 @@ Registro factual dos recursos comparados à semântica e ao fluxo operacional do
 | **Hardware Limitado** | Orçamento de cache em RAM/quadros, proxies `.avi`, pré-render seletivo de região e threads proporcionais | Implementado | `crates/neoveg_engine/src/media/mod.rs`, `crates/neoveg/src/main.rs` |
 | **Áudio & Mixer** | Mixer multifaixa, envelopes de volume/pan, DSP nativo, medidores de pico e saída `cpal` | Implementado | `crates/neoveg_engine/src/engine/{audio,afx}.rs`, `playback.rs`, `panels.rs` |
 | **Áudio Avançado** | Até 26 barramentos auxiliares + roteamento completo de buses | Planejado | Estrutura inicial Master em `crates/neoveg_engine/src/model.rs` |
-| **UI & Acessibilidade** | Painéis inferiores acopláveis/destacáveis em janelas flutuantes + `.neoveglayout` | Implementado | `crates/neoveg_ui/src/{panels,layout,app}.rs` |
+| **UI & Acessibilidade** | Painéis acopláveis/destacáveis em janelas flutuantes + `.neoveglayout` | Implementado | `crates/neoveg_ui/src/{panels,layout,app}.rs` |
+| **UI & Acessibilidade** | *Editar → Propriedades → Layout* (`Sonic Foundry`, `Sony`, `MAGIX`) + posição da timeline/abas/transporte | Implementado | `crates/neoveg_common/src/prefs.rs`, `crates/neoveg_ui/src/{app,dialogs,panels}.rs` |
 | **UI & Acessibilidade** | 7 temas (incluindo 2 temas Alto Contraste WCAG AAA >= 7:1) + diálogo Preferências | Implementado | `crates/neoveg_ui/src/{theme,dialogs}.rs` |
 | **Comandos & Atalhos** | Tabela Única de Comandos (`COMMANDS`) + editor interativo de atalhos persistido | Implementado | `crates/neoveg_engine/src/commands.rs`, `crates/neoveg_ui/src/dialogs.rs` |
 | **Codecs & Containers** | AVI (MJPEG/PCM), Y4M, GIF, WAV/AIFF/FLAC/OGG/MP3 em Rust puro | Implementado | `crates/neoveg_engine/src/media/` |

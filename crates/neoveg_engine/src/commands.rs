@@ -8,6 +8,7 @@ use crate::media::MediaCache;
 use crate::model::{EnvKind, GenSpec, Id, TextSpec, TrackKind};
 use crate::session::EditorSession;
 use crate::time::Ticks;
+use neoveg_common::LayoutType;
 use std::collections::HashMap;
 
 /// Tecla portátil (independente de biblioteca de UI).
@@ -344,6 +345,8 @@ pub enum UiAction {
     OpenFxMasterAudio,
     OpenFxMasterVideo,
     OpenGoto,
+    OpenEditLayoutProps,
+    SetLayoutType(LayoutType),
     OpenShortcuts,
     OpenPrefs,
     OpenAbout,
@@ -892,6 +895,42 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenGoto, h),
+    },
+    CommandDef {
+        id: "edit.properties.layout",
+        label: "Configurar Layout...",
+        menu_path: "Editar/Propriedades/Layout/Configurar Layout...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenEditLayoutProps, h),
+    },
+    CommandDef {
+        id: "edit.properties.layout.sonic_foundry",
+        label: "Sonic Foundry",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sonic Foundry",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SetLayoutType(LayoutType::SonicFoundry), h),
+    },
+    CommandDef {
+        id: "edit.properties.layout.sony",
+        label: "Sony",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sony",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SetLayoutType(LayoutType::Sony), h),
+    },
+    CommandDef {
+        id: "edit.properties.layout.magix",
+        label: "MAGIX",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/MAGIX",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SetLayoutType(LayoutType::Magix), h),
     },
     // --- Exibir ---
     CommandDef {

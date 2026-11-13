@@ -28,6 +28,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1);
   - Playhead físico de **1 px**, alça de ganho em dB na borda superior de eventos de áudio, controle contínuo de taxa (*Playback Rate*);
   - Painéis acopláveis/destacáveis em janelas flutuantes + layouts `.neoveglayout` (4 presets + salvamento/carregamento em arquivo);
+  - **Editar > Propriedades > Layout** com seção **Tipos de layout** (*Sonic Foundry*, *Sony* e *MAGIX*) e opções de disposição da janela (timeline superior/inferior, abas no topo/base, barra de transporte e prévia à esquerda);
   - Janela dinâmica de **Atalhos de teclado** (regravação, remoção e filtro ligados à Tabela Única) e janela **Preferências...**.
 - **Empacotamento portátil (`build_portable.py`):** build `--release` portátil sem `target-cpu=native` e auditoria contra assets/fontes/ferramentas não redistribuíveis.
 

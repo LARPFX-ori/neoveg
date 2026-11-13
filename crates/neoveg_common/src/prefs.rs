@@ -181,6 +181,174 @@ impl PreviewQuality {
     }
 }
 
+/// Tipos clássicos de layout de interface inspirados nas três eras do VEGAS Pro (§2.2).
+///
+/// Cada variante reflete a organização estrutural descrita nos manuais oficiais:
+/// - **Sonic Foundry** (Vegas Pro 1.0–4.0): timeline no topo, transport acima do dock,
+///   abas na base do dock e estética clara clássica.
+/// - **Sony** (Sony Vegas Pro 8–13): área de acoplamento no topo (*Display timeline at
+///   bottom*), timeline embaixo, transport no rodapé, abas na base e cinza médio Sony.
+/// - **MAGIX** (VEGAS Pro 14–21): timeline no topo, barra unificada de transporte/edição,
+///   abas no topo dos painéis acopláveis e interface escura moderna.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LayoutType {
+    #[serde(
+        alias = "sonic_foundry",
+        alias = "sonic-foundry",
+        alias = "Sonic Foundry",
+        alias = "Sonic Fonudry"
+    )]
+    SonicFoundry,
+    #[serde(alias = "sony", alias = "Sony")]
+    Sony,
+    #[default]
+    #[serde(alias = "magix", alias = "MAGIX")]
+    Magix,
+}
+
+impl LayoutType {
+    pub const ALL: [LayoutType; 3] = [
+        LayoutType::SonicFoundry,
+        LayoutType::Sony,
+        LayoutType::Magix,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            LayoutType::SonicFoundry => "sonic_foundry",
+            LayoutType::Sony => "sony",
+            LayoutType::Magix => "magix",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LayoutType::SonicFoundry => "Sonic Foundry",
+            LayoutType::Sony => "Sony",
+            LayoutType::Magix => "MAGIX",
+        }
+    }
+
+    pub fn era(self) -> &'static str {
+        match self {
+            LayoutType::SonicFoundry => "Vegas Pro 1.0–4.0",
+            LayoutType::Sony => "Sony Vegas Pro 8–13",
+            LayoutType::Magix => "MAGIX VEGAS Pro 14–21",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            LayoutType::SonicFoundry => {
+                "Timeline (Track View) no topo, barra de transporte logo abaixo da timeline, \
+                 área acoplável na parte inferior com abas na base e tema claro clássico."
+            }
+            LayoutType::Sony => {
+                "Área acoplável (Prévia e painéis) no topo, timeline na parte inferior da janela, \
+                 barra de transporte no rodapé, abas na base e cinza médio Sony."
+            }
+            LayoutType::Magix => {
+                "Timeline no topo, barra unificada de transporte e edição, \
+                 área acoplável embaixo com abas no topo e interface escura moderna."
+            }
+        }
+    }
+
+    pub fn from_pref(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "sonic_foundry" | "sonic-foundry" | "sonic foundry" | "sonic fonudry"
+            | "sonicfoundry" => LayoutType::SonicFoundry,
+            "sony" => LayoutType::Sony,
+            _ => LayoutType::Magix,
+        }
+    }
+
+    pub fn default_theme_id(self) -> &'static str {
+        match self {
+            LayoutType::SonicFoundry => "vegas-claro",
+            LayoutType::Sony => "vegas-medio",
+            LayoutType::Magix => "vegas-escuro",
+        }
+    }
+
+    pub fn default_dock_height(self) -> f32 {
+        match self {
+            LayoutType::SonicFoundry => 270.0,
+            LayoutType::Sony => 310.0,
+            LayoutType::Magix => 330.0,
+        }
+    }
+
+    pub fn default_preview_ratio(self) -> f32 {
+        match self {
+            LayoutType::SonicFoundry => 0.36,
+            LayoutType::Sony => 0.42,
+            LayoutType::Magix => 0.44,
+        }
+    }
+}
+
+/// Opções de disposição da área de trabalho configuradas em `Editar > Propriedades > Layout`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditLayoutPrefs {
+    pub layout_type: LayoutType,
+    /// Exibe a área acoplável no topo e a timeline na metade inferior (clássico Sony).
+    pub timeline_at_bottom: bool,
+    /// Posiciona as abas das janelas acopladas na borda superior em vez da base.
+    pub tabs_at_top: bool,
+    /// Fixa a barra de transporte no rodapé da janela principal (abaixo da área inferior).
+    pub transport_at_bottom: bool,
+    /// Exibe a janela de prévia à esquerda na área acoplável.
+    pub preview_on_left: bool,
+    /// Aplica automaticamente a paleta visual da era ao escolher um tipo de layout
+    /// (preservando temas de Alto Contraste AAA quando ativos).
+    pub sync_theme_with_layout: bool,
+}
+
+impl EditLayoutPrefs {
+    pub fn for_type(layout_type: LayoutType) -> Self {
+        match layout_type {
+            LayoutType::SonicFoundry => Self {
+                layout_type,
+                timeline_at_bottom: false,
+                tabs_at_top: false,
+                transport_at_bottom: false,
+                preview_on_left: false,
+                sync_theme_with_layout: true,
+            },
+            LayoutType::Sony => Self {
+                layout_type,
+                timeline_at_bottom: true,
+                tabs_at_top: false,
+                transport_at_bottom: true,
+                preview_on_left: false,
+                sync_theme_with_layout: true,
+            },
+            LayoutType::Magix => Self {
+                layout_type,
+                timeline_at_bottom: false,
+                tabs_at_top: true,
+                transport_at_bottom: false,
+                preview_on_left: false,
+                sync_theme_with_layout: true,
+            },
+        }
+    }
+
+    pub fn apply_type(&mut self, layout_type: LayoutType) {
+        let sync = self.sync_theme_with_layout;
+        *self = Self::for_type(layout_type);
+        self.sync_theme_with_layout = sync;
+    }
+}
+
+impl Default for EditLayoutPrefs {
+    fn default() -> Self {
+        Self::for_type(LayoutType::Magix)
+    }
+}
+
 /// Preferências persistidas em JSON com proteção contra entradas hostis (§0.4 / §3.6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
@@ -200,6 +368,9 @@ pub struct Preferences {
     /// Caminho opcional do último layout `.neoveglayout` carregado.
     #[serde(default)]
     pub window_layout: Option<String>,
+    /// Tipo e disposição clássica de layout configurados em `Editar > Propriedades > Layout`.
+    #[serde(default)]
+    pub edit_layout: EditLayoutPrefs,
 }
 
 fn default_lang() -> String {
@@ -241,6 +412,7 @@ impl Default for Preferences {
             worker_threads: 0,
             shortcuts: HashMap::new(),
             window_layout: None,
+            edit_layout: EditLayoutPrefs::default(),
         }
     }
 }
@@ -334,5 +506,40 @@ mod tests {
             PreviewQuality::from_parts(PreviewTier::Best, PreviewResolution::Full).scale(),
             1.0
         );
+    }
+
+    #[test]
+    fn tipos_de_layout_e_aliases_funcionam() {
+        assert_eq!(LayoutType::ALL.len(), 3);
+        assert_eq!(
+            LayoutType::from_pref("Sonic Fonudry"),
+            LayoutType::SonicFoundry
+        );
+        assert_eq!(
+            LayoutType::from_pref("Sonic Foundry"),
+            LayoutType::SonicFoundry
+        );
+        assert_eq!(LayoutType::from_pref("Sony"), LayoutType::Sony);
+        assert_eq!(LayoutType::from_pref("MAGIX"), LayoutType::Magix);
+        assert_eq!(LayoutType::from_pref("desconhecido"), LayoutType::Magix);
+
+        let sf = EditLayoutPrefs::for_type(LayoutType::SonicFoundry);
+        assert!(!sf.timeline_at_bottom);
+        assert!(!sf.tabs_at_top);
+        assert!(!sf.transport_at_bottom);
+
+        let sony = EditLayoutPrefs::for_type(LayoutType::Sony);
+        assert!(sony.timeline_at_bottom);
+        assert!(!sony.tabs_at_top);
+        assert!(sony.transport_at_bottom);
+
+        let magix = EditLayoutPrefs::for_type(LayoutType::Magix);
+        assert!(!magix.timeline_at_bottom);
+        assert!(magix.tabs_at_top);
+        assert!(!magix.transport_at_bottom);
+
+        let raw = r#"{"edit_layout":{"layout_type":"Sonic Fonudry"}}"#;
+        let p: Preferences = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.edit_layout.layout_type, LayoutType::SonicFoundry);
     }
 }
