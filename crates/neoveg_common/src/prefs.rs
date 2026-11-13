@@ -371,6 +371,9 @@ pub struct Preferences {
     /// Tipo e disposição clássica de layout configurados em `Editar > Propriedades > Layout`.
     #[serde(default)]
     pub edit_layout: EditLayoutPrefs,
+    /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
+    #[serde(default = "default_show_splash")]
+    pub show_splash: bool,
 }
 
 fn default_lang() -> String {
@@ -387,6 +390,10 @@ fn default_ram_cache_mb() -> u32 {
 
 fn default_frame_cache() -> usize {
     48
+}
+
+fn default_show_splash() -> bool {
+    true
 }
 
 /// Número padrão de workers proporcionais aos núcleos disponíveis (§3.6),
@@ -413,6 +420,7 @@ impl Default for Preferences {
             shortcuts: HashMap::new(),
             window_layout: None,
             edit_layout: EditLayoutPrefs::default(),
+            show_splash: default_show_splash(),
         }
     }
 }
@@ -493,6 +501,10 @@ mod tests {
         assert_eq!(p.ram_preview_mb, 8192);
         assert_eq!(p.frame_cache_cap, 4);
         assert_eq!(p.worker_threads, 16);
+        assert!(p.show_splash);
+
+        let p_no_splash: Preferences = serde_json::from_str(r#"{"show_splash":false}"#).unwrap();
+        assert!(!p_no_splash.show_splash);
     }
 
     #[test]

@@ -105,6 +105,7 @@ pub struct App {
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
+    pub(crate) splash: crate::splash::SplashState,
 }
 
 impl Deref for App {
@@ -156,6 +157,8 @@ impl App {
         );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let recovery_offer = recovery::find_existing_recovery().is_some();
+        let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
         let mut app = App {
             session,
             prefs,
@@ -195,7 +198,8 @@ impl App {
             shuttle: 0.0,
             gen_fonts: vec![],
             last_autosave: Instant::now(),
-            recovery_offer: recovery::find_existing_recovery().is_some(),
+            recovery_offer,
+            splash,
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -216,6 +220,18 @@ impl App {
     // -----------------------------------------------------------------
     // Estado / desfazer
     // -----------------------------------------------------------------
+
+    pub fn is_splash_open(&self) -> bool {
+        self.splash.active
+    }
+
+    pub fn open_splash(&mut self) {
+        self.splash.open_manual();
+    }
+
+    pub fn dismiss_splash(&mut self) {
+        self.splash.dismiss();
+    }
 
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.session.set_status(s);
@@ -984,6 +1000,7 @@ impl App {
             UiAction::SetLayoutType(lt) => self.select_layout_type(ctx, lt, true),
             UiAction::OpenShortcuts => self.dlg.shortcuts = true,
             UiAction::OpenPrefs => self.dlg.open_prefs(&self.prefs),
+            UiAction::OpenSplash => self.open_splash(),
             UiAction::OpenAbout => self.dlg.about = true,
             UiAction::BuildProxySelected => self.build_proxy_selected(),
             UiAction::PrerenderRegion => self.prerender_region(),
@@ -1025,7 +1042,7 @@ impl App {
     // -----------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
+        if self.splash.active || ctx.wants_keyboard_input() {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
@@ -1341,6 +1358,7 @@ impl App {
                 self.cmd_menu_btn(ui, "options.prefs");
             });
             ui.menu_button("Ajuda", |ui| {
+                self.cmd_menu_btn(ui, "help.splash");
                 self.cmd_menu_btn(ui, "help.shortcuts");
                 self.cmd_menu_btn(ui, "help.about");
             });
@@ -1796,6 +1814,7 @@ impl App {
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
         self.recovery_window(ctx);
+        self.show_splash_overlay(ctx);
         self.autosave();
         let audio_err = crate::util::lock(&self.audio.shared).error.take();
         if let Some(e) = audio_err {
@@ -1836,6 +1855,47 @@ impl App {
 }
 
 impl App {
+    fn show_splash_overlay(&mut self, ctx: &egui::Context) {
+        if !self.splash.update_tick(self.loading) {
+            return;
+        }
+        let workers = self.prefs.effective_worker_threads();
+        let notice = self
+            .preview
+            .error
+            .as_deref()
+            .or(self.audio.error.as_deref());
+        let snap = crate::splash::SplashSnapshot {
+            theme_id: self.theme_id,
+            theme: &self.theme,
+            layout_type: self.prefs.edit_layout.layout_type,
+            audio_device: &self.audio.device_name,
+            audio_sr: self.audio.sr,
+            workers,
+            ram_preview_mb: self.prefs.ram_preview_mb,
+            frame_cache_cap: self.prefs.frame_cache_cap,
+            loading: self.loading,
+            commands_count: COMMANDS.len(),
+            fallback_notice: notice,
+        };
+        let out = crate::splash::show_splash_screen(
+            ctx,
+            &mut self.splash,
+            &mut self.prefs.show_splash,
+            &snap,
+        );
+        if out.pref_changed {
+            if let Err(e) = self.prefs.save() {
+                self.set_status(format!(
+                    "Aviso ao salvar preferência da tela de abertura: {e}"
+                ));
+            }
+        }
+        if self.splash.active {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    }
+
     fn show_dock_panel(&mut self, ctx: &egui::Context, at_top: bool) {
         if !self.dock_visible {
             return;

@@ -17,6 +17,7 @@ mod edit;
 mod icons;
 pub mod layout;
 mod panels;
+mod splash;
 pub mod theme;
 mod timeline;
 

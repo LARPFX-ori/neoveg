@@ -1972,6 +1972,10 @@ impl App {
                     ui.label("Idioma da interface:");
                     ui.label(egui::RichText::new(&draft.language).strong());
                 });
+                ui.checkbox(
+                    &mut draft.show_splash,
+                    "Mostrar tela de abertura (Splash Screen) ao iniciar",
+                );
                 if ui
                     .button("Editar > Propriedades > Layout (Sonic Foundry / Sony / MAGIX)...")
                     .clicked()
@@ -2061,6 +2065,7 @@ impl App {
             self.prefs.frame_cache_cap = draft.frame_cache_cap;
             self.prefs.worker_threads = draft.worker_threads;
             self.prefs.language = draft.language.clone();
+            self.prefs.show_splash = draft.show_splash;
             self.set_theme(ctx, tid, true);
             if save_and_close {
                 self.dlg.prefs_orig_theme = None;

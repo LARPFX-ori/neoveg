@@ -349,6 +349,7 @@ pub enum UiAction {
     SetLayoutType(LayoutType),
     OpenShortcuts,
     OpenPrefs,
+    OpenSplash,
     OpenAbout,
     BuildProxySelected,
     PrerenderRegion,
@@ -1699,6 +1700,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::ZoomBy(0.5), h),
     },
     // --- Ajuda ---
+    CommandDef {
+        id: "help.splash",
+        label: "Tela de abertura",
+        menu_path: "Ajuda/Tela de abertura",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenSplash, h),
+    },
     CommandDef {
         id: "help.shortcuts",
         label: "Atalhos de teclado",

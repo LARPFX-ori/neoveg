@@ -20,3 +20,10 @@ Até o momento o repositório **não contém nenhum asset**:
 - **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, criados do zero em código Rust sem cópia ou traçado de terceiros)
 - **Licença:** `MIT OR Apache-2.0`
 - **Observações:** Nenhuma imagem ou SVG foi importada de bancos com licença restritiva/não-SPDX; os ícones se adaptam automaticamente aos 7 temas de cor (incluindo Alto Contraste WCAG AAA).
+
+## Arte vetorial da Tela de abertura / Splash Screen (`crates/neoveg_ui/src/splash.rs`)
+
+- **Recurso:** Emblema `"N"`, marcador/playhead, onda sonora estilizada e indicador animado de carregamento desenhados programaticamente via `egui::Painter`
+- **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, criados do zero em código Rust sem cópia, extração ou traçado de arte proprietária ou referências de terceiros)
+- **Licença:** `MIT OR Apache-2.0`
+- **Observações:** Adapta-se automaticamente aos 7 temas do Neoveg (incluindo Alto Contraste WCAG AAA) e funciona em hardware limitado (`wgpu` ou fallback `glow`/software).

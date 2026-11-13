@@ -76,7 +76,13 @@ fn ui_smoke() {
         t += 1.0 / 60.0;
         let _ = ctx.run(raw(ev, mods, t), |c| app.frame_ui(c));
     };
+    assert_eq!(
+        app.is_splash_open(),
+        app.prefs.show_splash && neoveg_engine::recovery::find_existing_recovery().is_none()
+    );
     frame(&mut app, vec![], Modifiers::NONE);
+    app.dismiss_splash();
+    assert!(!app.is_splash_open());
 
     app.import_paths(vec![make_avi()], Some(Ticks::ZERO));
     for _ in 0..200 {
@@ -256,6 +262,12 @@ fn ui_smoke() {
     assert!(app.dlg.prefs_open);
     frame(&mut app, vec![], Modifiers::NONE);
     app.dlg.prefs_open = false;
+
+    app.exec_cmd(Some(&ctx), "help.splash");
+    assert!(app.is_splash_open());
+    frame(&mut app, vec![], Modifiers::NONE);
+    frame(&mut app, key(Key::Escape, Modifiers::NONE), Modifiers::NONE);
+    assert!(!app.is_splash_open());
 
     // Editar > Propriedades > Layout: diálogo + 3 tipos (Sonic Foundry, Sony, MAGIX)
     struct PrefsGuard {
