@@ -74,6 +74,10 @@ pub struct Project {
     pub regions: Vec<Region>,
     #[serde(default)]
     pub master: MasterBus,
+    /// Barramentos auxiliares de áudio (até 26, endereçáveis de trilhas ou entre si
+    /// de forma acíclica para o Master Bus).
+    #[serde(default)]
+    pub audio_buses: Vec<AudioBus>,
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
@@ -122,6 +126,107 @@ impl Project {
         self.tracks.iter().any(|t| t.kind == kind && t.solo)
     }
 
+    pub fn any_bus_solo(&self) -> bool {
+        self.audio_buses.iter().any(|b| b.solo)
+    }
+
+    pub fn audio_bus(&self, id: Id) -> Option<&AudioBus> {
+        self.audio_buses.iter().find(|b| b.id == id)
+    }
+
+    pub fn audio_bus_mut(&mut self, id: Id) -> Option<&mut AudioBus> {
+        self.audio_buses.iter_mut().find(|b| b.id == id)
+    }
+
+    pub fn next_audio_bus_name(&self) -> String {
+        for idx in 0..MAX_AUDIO_BUSES {
+            let letter = (b'A' + idx as u8) as char;
+            let candidate = format!("Bus {letter}");
+            if !self.audio_buses.iter().any(|b| b.name == candidate) {
+                return candidate;
+            }
+        }
+        format!("Bus {}", self.audio_buses.len() + 1)
+    }
+
+    pub fn add_audio_bus(&mut self, name: Option<&str>) -> Option<Id> {
+        if self.audio_buses.len() >= MAX_AUDIO_BUSES {
+            return None;
+        }
+        let label = name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.next_audio_bus_name());
+        let bus = AudioBus::new(&label);
+        let id = bus.id;
+        self.audio_buses.push(bus);
+        Some(id)
+    }
+
+    /// Garante que atribuir `target` como saída do barramento `bus_id` não cria ciclo
+    /// nem ultrapassa o limite máximo de profundidade (`AGENTS.md §0.5`).
+    pub fn validate_bus_route(&self, bus_id: Id, target: Option<Id>) -> bool {
+        let Some(mut cur) = target else {
+            return true;
+        };
+        if cur == bus_id {
+            return false;
+        }
+        let mut steps = 0usize;
+        while steps < MAX_AUDIO_BUSES {
+            let Some(next_bus) = self.audio_bus(cur) else {
+                return false;
+            };
+            let Some(next) = next_bus.output_bus else {
+                return true;
+            };
+            if next == bus_id {
+                return false;
+            }
+            cur = next;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Ordem topológica dos índices de `audio_buses` (emissores antes dos destinos),
+    /// protegida contra ciclos para uso seguro na mixagem em passada única.
+    pub fn topological_bus_order(&self) -> Vec<usize> {
+        let n = self.audio_buses.len().min(MAX_AUDIO_BUSES);
+        let mut emitted = vec![false; n];
+        let mut order = Vec::with_capacity(n);
+        for _pass in 0..n {
+            let mut progressed = false;
+            for idx in 0..n {
+                if emitted[idx] {
+                    continue;
+                }
+                let bid = self.audio_buses[idx].id;
+                let blocked = self.audio_buses[..n]
+                    .iter()
+                    .enumerate()
+                    .any(|(src_idx, src)| {
+                        src_idx != idx && !emitted[src_idx] && src.output_bus == Some(bid)
+                    });
+                if !blocked {
+                    emitted[idx] = true;
+                    order.push(idx);
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        for (idx, done) in emitted.into_iter().enumerate() {
+            if !done {
+                order.push(idx);
+            }
+        }
+        order
+    }
+
     /// Maior id usado em qualquer objeto do projeto (para continuar a numeração
     /// após carregar um arquivo).
     pub fn max_id(&self) -> Id {
@@ -143,6 +248,12 @@ impl Project {
         }
         for f in self.master.fx.iter().chain(self.master.video_fx.iter()) {
             m = m.max(f.id);
+        }
+        for b in &self.audio_buses {
+            m = m.max(b.id);
+            for f in &b.fx {
+                m = m.max(f.id);
+            }
         }
         for x in &self.markers {
             m = m.max(x.id);
@@ -316,6 +427,64 @@ impl Project {
             sanitize_fx(f);
         }
         self.master.volume_db = clampf(fin32(self.master.volume_db, 0.0), -120.0, 24.0);
+        if self.audio_buses.len() > MAX_AUDIO_BUSES {
+            self.audio_buses.truncate(MAX_AUDIO_BUSES);
+            fixes.push(format!(
+                "barramentos de áudio limitados ao máximo de {MAX_AUDIO_BUSES}"
+            ));
+        }
+        let mut seen_buses = std::collections::HashSet::new();
+        for b in &mut self.audio_buses {
+            if !seen_buses.insert(b.id) {
+                let old = b.id;
+                b.id = new_id();
+                fixes.push(format!("id de barramento duplicado {old} renumerado"));
+                seen_buses.insert(b.id);
+            }
+            b.volume_db = clampf(fin32(b.volume_db, 0.0), -120.0, 24.0);
+            b.pan = clampf(fin32(b.pan, 0.0), -1.0, 1.0);
+            for f in &mut b.fx {
+                sanitize_fx(f);
+            }
+        }
+        let bus_ids: std::collections::HashSet<Id> =
+            self.audio_buses.iter().map(|b| b.id).collect();
+        for bi in 0..self.audio_buses.len() {
+            let bid = self.audio_buses[bi].id;
+            let tgt = self.audio_buses[bi].output_bus;
+            if let Some(tid) = tgt {
+                if !bus_ids.contains(&tid) || !self.validate_bus_route(bid, Some(tid)) {
+                    self.audio_buses[bi].output_bus = None;
+                    fixes.push(format!(
+                        "roteamento inválido/cíclico do barramento \"{}\" restaurado para Master",
+                        self.audio_buses[bi].name
+                    ));
+                }
+            }
+        }
+        for t in &mut self.tracks {
+            if t.kind != TrackKind::Audio {
+                t.output_bus = None;
+                t.sends.clear();
+                continue;
+            }
+            if let Some(bid) = t.output_bus {
+                if !bus_ids.contains(&bid) {
+                    t.output_bus = None;
+                    fixes.push(format!(
+                        "barramento de saída inexistente na trilha \"{}\" restaurado para Master",
+                        t.name
+                    ));
+                }
+            }
+            t.sends.retain(|s| bus_ids.contains(&s.bus_id));
+            if t.sends.len() > MAX_AUDIO_BUSES {
+                t.sends.truncate(MAX_AUDIO_BUSES);
+            }
+            for s in &mut t.sends {
+                s.level_db = clampf(fin32(s.level_db, -6.0), -120.0, 24.0);
+            }
+        }
         for m in &mut self.markers {
             m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
         }
@@ -978,6 +1147,64 @@ pub struct Track {
     pub envelopes: Vec<Envelope>,
     #[serde(default)]
     pub color: [u8; 3],
+    /// Barramento auxiliar de destino (`None` = Master Bus). Apenas trilhas de áudio.
+    #[serde(default)]
+    pub output_bus: Option<Id>,
+    /// Envios auxiliares para barramentos de áudio (`sends`).
+    #[serde(default)]
+    pub sends: Vec<AudioSend>,
+}
+
+/// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
+pub const MAX_AUDIO_BUSES: usize = 26;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AudioSend {
+    pub bus_id: Id,
+    #[serde(default)]
+    pub level_db: f32,
+    #[serde(default)]
+    pub pre_fader: bool,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioBus {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default)]
+    pub volume_db: f32,
+    #[serde(default)]
+    pub pan: f32,
+    /// Saída do barramento (`None` = Master Bus, `Some(id)` = outro barramento acíclico).
+    #[serde(default)]
+    pub output_bus: Option<Id>,
+    #[serde(default)]
+    pub fx: Vec<FxInstance>,
+}
+
+impl AudioBus {
+    pub fn new(name: &str) -> Self {
+        AudioBus {
+            id: new_id(),
+            name: name.into(),
+            mute: false,
+            solo: false,
+            volume_db: 0.0,
+            pan: 0.0,
+            output_bus: None,
+            fx: vec![],
+        }
+    }
+
+    pub fn is_audible(&self, any_bus_solo: bool) -> bool {
+        !self.mute && (!any_bus_solo || self.solo)
+    }
 }
 
 fn default_track_height() -> f32 {
@@ -1018,6 +1245,8 @@ impl Track {
             fx: vec![],
             envelopes: vec![],
             color: TRACK_COLORS[(id as usize) % TRACK_COLORS.len()],
+            output_bus: None,
+            sends: vec![],
         }
     }
 
@@ -1307,6 +1536,7 @@ pub enum FxKind {
     Reverb,
     Chorus,
     Distortion,
+    Limiter,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1359,12 +1589,13 @@ impl FxKind {
         FxKind::Posterize,
         FxKind::Colorize,
     ];
-    pub const AUDIO: [FxKind; 10] = [
+    pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
         FxKind::ParametricEq,
         FxKind::HighPass,
         FxKind::LowPass,
         FxKind::Compressor,
+        FxKind::Limiter,
         FxKind::NoiseGate,
         FxKind::Delay,
         FxKind::Reverb,
@@ -1406,6 +1637,7 @@ impl FxKind {
             FxKind::Reverb => "Reverb",
             FxKind::Chorus => "Chorus",
             FxKind::Distortion => "Distorção",
+            FxKind::Limiter => "Limiter",
         }
     }
 
@@ -1584,6 +1816,16 @@ impl FxKind {
                 }
             }
             FxKind::Distortion => const { &[p("Drive", 1.0, 50.0, 5.0), p("Mix", 0.0, 1.0, 1.0)] },
+            FxKind::Limiter => {
+                const {
+                    &[
+                        p("Ataque (ms)", 0.5, 50.0, 5.0),
+                        p("Liberação (ms)", 10.0, 1000.0, 100.0),
+                        p("Drive (dB)", -12.0, 24.0, 0.0),
+                        p("Teto (dB)", -24.0, 0.0, -0.3),
+                    ]
+                }
+            }
         }
     }
 }
@@ -1782,5 +2024,34 @@ mod tests {
             e.media_time(Ticks::from_secs_i64(11), dur),
             Some(Ticks::from_secs_i64(3))
         );
+    }
+
+    #[test]
+    fn audio_buses_limite_26_e_saneamento_de_ciclos() {
+        let mut p = Project::new_default();
+        for _ in 0..30 {
+            let _ = p.add_audio_bus(None);
+        }
+        assert_eq!(p.audio_buses.len(), MAX_AUDIO_BUSES);
+        assert_eq!(p.audio_buses[0].name, "Bus A");
+        assert_eq!(p.audio_buses[25].name, "Bus Z");
+
+        let a = p.audio_buses[0].id;
+        let b = p.audio_buses[1].id;
+        // Roteamento válido A -> B -> Master
+        assert!(p.validate_bus_route(a, Some(b)));
+        p.audio_buses[0].output_bus = Some(b);
+        // Ciclo B -> A precisa ser rejeitado na validação e quebrado por sanitize()
+        assert!(!p.validate_bus_route(b, Some(a)));
+        assert!(!p.validate_bus_route(a, Some(a)));
+
+        p.audio_buses[1].output_bus = Some(a);
+        let fixes = p.sanitize();
+        assert!(!fixes.is_empty());
+        assert!(p.validate_bus_route(a, p.audio_buses[0].output_bus));
+        assert!(p.validate_bus_route(b, p.audio_buses[1].output_bus));
+
+        let order = p.topological_bus_order();
+        assert_eq!(order.len(), MAX_AUDIO_BUSES);
     }
 }

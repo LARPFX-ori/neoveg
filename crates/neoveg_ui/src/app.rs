@@ -45,6 +45,7 @@ pub enum DndPayload {
 pub enum FxTarget {
     Event(Id),
     Track(Id),
+    AudioBus(Id),
     MasterAudio,
     MasterVideo,
 }
@@ -470,7 +471,7 @@ impl App {
             1.0
         };
         s.speed = rate;
-        s.mixer.reset();
+        s.reset_dsp();
         s.playing = true;
         self.shuttle = rate;
     }
@@ -490,7 +491,7 @@ impl App {
         s.loop_range = None;
         s.speed = speed;
         s.playing = true;
-        s.mixer.reset();
+        s.reset_dsp();
         self.shuttle = speed;
     }
 
@@ -504,6 +505,7 @@ impl App {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.playing = false;
             s.speed = 1.0;
+            s.reset_dsp();
             s.pos
         };
         self.shuttle = 0.0;
@@ -542,7 +544,7 @@ impl App {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.pos = t.to_samples_round(sr);
-            s.mixer.reset();
+            s.reset_dsp();
             self.session.play_start = t;
         }
     }
@@ -1500,6 +1502,7 @@ impl App {
             ui.menu_button("Inserir", |ui| {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
+                self.cmd_menu_btn(ui, "insert.audio_bus");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
                 self.cmd_menu_btn(ui, "insert.region");
@@ -2026,7 +2029,7 @@ impl App {
             .meters
             .clone();
         let decay = (-dt * 3.0).exp();
-        for (id, v) in m.tracks {
+        for (id, v) in m.tracks.into_iter().chain(m.buses) {
             let h = self.meters_hold.entry(id).or_insert([0.0; 2]);
             for k in 0..2 {
                 h[k] = (h[k] * decay).max(v[k]);

@@ -158,3 +158,28 @@ fn kittest_layout_salvo_e_preferencias_navegacao() {
     harness.run_steps(2);
     assert!(!harness.state().dlg.prefs_open);
 }
+
+#[test]
+fn kittest_mixer_barramentos_auxiliares_e_taxa_reproducao() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    harness.get_by_label("Mixer").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().dock_tab, DockTab::Mixer);
+    assert!(harness.state().project.audio_buses.is_empty());
+
+    harness.get_by_label("＋ Barramento").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.audio_buses.len(), 1);
+    assert_eq!(harness.state().project.audio_buses[0].name, "Bus A");
+
+    assert!(harness.get_all_by_label("1.00×").count() >= 1);
+    harness.state_mut().playback_rate = 1.5;
+    harness.state_mut().play();
+    harness.run_steps(2);
+    harness.state_mut().stop(false);
+    harness.run_steps(2);
+}

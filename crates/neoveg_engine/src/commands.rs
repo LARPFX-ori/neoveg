@@ -1125,6 +1125,20 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "insert.audio_bus",
+        label: "Barramento de áudio",
+        menu_path: "Inserir/Barramento de áudio",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.audio_buses.len() < crate::model::MAX_AUDIO_BUSES,
+        run: |s, h| {
+            if s.add_audio_bus().is_none() {
+                return Err("limite de 26 barramentos auxiliares atingido".into());
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.marker",
         label: "Marcador",
         menu_path: "Inserir/Marcador",

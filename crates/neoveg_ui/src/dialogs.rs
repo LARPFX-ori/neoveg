@@ -1327,6 +1327,7 @@ impl App {
                 .iter_mut()
                 .find(|t| t.id == id)
                 .map(|t| &mut t.fx),
+            FxTarget::AudioBus(id) => self.project.audio_bus_mut(id).map(|b| &mut b.fx),
             FxTarget::MasterAudio => Some(&mut self.project.master.fx),
             FxTarget::MasterVideo => Some(&mut self.project.master.video_fx),
         }
@@ -1359,6 +1360,17 @@ impl App {
                 (
                     format!("Efeitos da trilha — {}", t.name),
                     t.kind == TrackKind::Audio,
+                    self.cursor,
+                )
+            }
+            FxTarget::AudioBus(id) => {
+                let Some(b) = self.project.audio_bus(id) else {
+                    self.dlg.fx_target = None;
+                    return;
+                };
+                (
+                    format!("Efeitos do barramento — {}", b.name),
+                    true,
                     self.cursor,
                 )
             }

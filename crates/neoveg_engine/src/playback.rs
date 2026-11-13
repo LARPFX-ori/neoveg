@@ -1,7 +1,7 @@
 //! Reprodução em tempo real: saída de áudio (cpal/WASAPI) que também serve de
 //! relógio mestre, e um worker de prévia de vídeo em segundo plano.
 
-use crate::engine::audio::{Meters, Mixer};
+use crate::engine::audio::{Meters, Mixer, TransportVarispeed};
 use crate::engine::video::render_frame_preview;
 use crate::media::{AudioData, MediaCache};
 use crate::model::{Id, Project, Ticks};
@@ -19,14 +19,22 @@ pub struct Shared {
     pub pos: i64,
     pub loop_range: Option<(i64, i64)>,
     pub mixer: Mixer,
+    pub varispeed: TransportVarispeed,
     pub meters: Meters,
-    /// Velocidade de reprodução (J/K/L). Áudio só é tocado em 1x.
+    /// Velocidade de reprodução (`Playback Rate` contínuo / shuttle J-K-L).
     pub speed: f64,
     pub frac: f64,
     pub dim: bool,
     pub mono_downmix: bool,
     /// Erro ocorrido na thread de áudio, exibido pela interface.
     pub error: Option<String>,
+}
+
+impl Shared {
+    pub fn reset_dsp(&mut self) {
+        self.mixer.reset();
+        self.varispeed.reset();
+    }
 }
 
 pub struct AudioOut {
@@ -55,6 +63,7 @@ impl AudioOut {
             pos: 0,
             loop_range: None,
             mixer: Mixer::new(sr),
+            varispeed: TransportVarispeed::new(),
             meters: Meters::default(),
             speed: 1.0,
             frac: 0.0,
@@ -169,7 +178,7 @@ fn fill<T: Copy>(
         buf.iter_mut().for_each(|v| *v = 0.0);
         let mut s = crate::util::lock(shared);
         s.playing = false;
-        s.mixer.reset();
+        s.reset_dsp();
         s.error = Some("falha interna na mixagem de áudio; reprodução interrompida".into());
     }
     for f in 0..frames {
@@ -192,54 +201,48 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
     {
         let mut s = crate::util::lock(shared);
         if s.playing {
-            let sr = s.mixer.sr as f64;
-            if (s.speed - 1.0).abs() < 1e-9 {
-                // mixa em partes para respeitar o loop
-                let mut done = 0usize;
-                while done < frames {
-                    let mut n = frames - done;
-                    if let Some((a, b)) = s.loop_range {
-                        if s.pos >= b {
-                            s.pos = a;
-                            s.mixer.reset();
-                        }
-                        n = n.min((b - s.pos).max(1) as usize);
-                    }
-                    let project = s.project.clone();
-                    let pos = s.pos;
-                    let sh = &mut *s;
-                    sh.mixer
-                        .process(&project, &sh.audio, pos, &mut buf[done * 2..(done + n) * 2]);
-                    s.pos += n as i64;
-                    done += n;
+            let project = s.project.clone();
+            let speed = s.speed;
+            let loop_range = s.loop_range;
+            let sh = &mut *s;
+            let mut pos = sh.pos;
+            let mut frac = sh.frac;
+            let hit_start = sh.varispeed.process(
+                speed,
+                &mut pos,
+                &mut frac,
+                loop_range,
+                &mut buf[..frames * 2],
+                |sample_pos, chunk| {
+                    sh.mixer.process(&project, &sh.audio, sample_pos, chunk);
+                },
+            );
+            sh.pos = pos;
+            sh.frac = frac;
+            if hit_start {
+                sh.playing = false;
+                sh.reset_dsp();
+            }
+            s.meters = s.mixer.meters.clone();
+            if s.mono_downmix {
+                let mut mono_peak = 0.0_f32;
+                for pair in buf.as_chunks_mut::<2>().0.iter_mut().take(frames) {
+                    let m = 0.5 * (pair[0] + pair[1]);
+                    pair[0] = m;
+                    pair[1] = m;
+                    mono_peak = mono_peak.max(m.abs());
                 }
-                s.meters = s.mixer.meters.clone();
-                if s.mono_downmix {
-                    let mut mono_peak = 0.0_f32;
-                    for pair in buf.as_chunks_mut::<2>().0.iter_mut().take(frames) {
-                        let m = 0.5 * (pair[0] + pair[1]);
-                        pair[0] = m;
-                        pair[1] = m;
-                        mono_peak = mono_peak.max(m.abs());
-                    }
-                    s.meters.master = [mono_peak, mono_peak];
-                }
-                if s.dim {
-                    buf.iter_mut().take(frames * 2).for_each(|v| *v *= 0.1);
-                }
-            } else {
-                let adv = frames as f64 * s.speed + s.frac;
-                s.pos += adv.trunc() as i64;
-                s.frac = adv.fract();
-                if s.pos < 0 {
-                    s.pos = 0;
-                    s.playing = false;
-                }
-                let _ = sr;
+                s.meters.master = [mono_peak, mono_peak];
+            }
+            if s.dim {
+                buf.iter_mut().take(frames * 2).for_each(|v| *v *= 0.1);
             }
         } else {
             s.meters.master = [0.0, 0.0];
             for v in s.meters.tracks.values_mut() {
+                *v = [0.0, 0.0];
+            }
+            for v in s.meters.buses.values_mut() {
                 *v = [0.0, 0.0];
             }
         }

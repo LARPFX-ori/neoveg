@@ -1,25 +1,402 @@
-//! Mixagem de áudio: eventos -> trilhas (FX, volume, pan, envelopes) ->
-//! master bus (FX, volume).
+//! Mixagem de áudio: eventos (com reamostragem Sinc `rubato`) -> trilhas
+//! (FX, volume, pan, envelopes, sends pré/pós-fader) -> barramentos auxiliares
+//! (até 26 barramentos acíclicos com FX `fundsp`) -> Master Bus -> `TransportVarispeed`.
+
+// Laços indexam buffers estéreo intercalados em paralelo.
+#![allow(clippy::needless_range_loop)]
 
 use super::afx::{self, FxState};
 use crate::media::AudioData;
 use crate::model::*;
-use std::collections::HashMap;
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
+use rubato::{
+    Adjustable, Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 #[derive(Default, Clone)]
 pub struct Meters {
     /// Pico por trilha (L, R).
     pub tracks: HashMap<Id, [f32; 2]>,
+    /// Pico por barramento auxiliar (L, R).
+    pub buses: HashMap<Id, [f32; 2]>,
     pub master: [f32; 2],
+}
+
+fn sinc_params() -> SincInterpolationParameters {
+    SincInterpolationParameters {
+        sinc_len: 64,
+        f_cutoff: None,
+        oversampling_factor: 64,
+        interpolation: SincInterpolationType::Cubic,
+        window: WindowFunction::BlackmanHarris2,
+    }
+}
+
+/// Limite seguro de taxa relativa para `rubato` (evita alocações extremas por entrada hostil).
+const MIN_RUBATO_RATIO: f64 = 0.0625;
+const MAX_RUBATO_RATIO: f64 = 16.0;
+const VARISPEED_CHUNK: usize = 256;
+
+/// Reamostrador estéreo contínuo baseado em `rubato::Async<f32>` (Sinc) usado
+/// tanto para `Playback Rate` contínuo / shuttle J-K-L quanto para clipes com
+/// taxa diferente da taxa do projeto.
+pub struct TransportVarispeed {
+    resampler: Option<Async<f32>>,
+    fifo: VecDeque<f32>,
+    head_pos: i64,
+    active_pos: Option<i64>,
+    in_buf: Vec<f32>,
+    out_buf: Vec<f32>,
+    scratch: Vec<f32>,
+    scratch_part: Vec<f32>,
+}
+
+impl Default for TransportVarispeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransportVarispeed {
+    pub fn new() -> Self {
+        let resampler = Async::<f32>::new_sinc(
+            1.0,
+            MAX_RUBATO_RATIO,
+            &sinc_params(),
+            VARISPEED_CHUNK,
+            2,
+            FixedAsync::Output,
+        )
+        .ok();
+        Self {
+            resampler,
+            fifo: VecDeque::with_capacity(VARISPEED_CHUNK * 4),
+            head_pos: 0,
+            active_pos: None,
+            in_buf: Vec::new(),
+            out_buf: vec![0.0_f32; VARISPEED_CHUNK * 2],
+            scratch: Vec::new(),
+            scratch_part: Vec::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(r) = &mut self.resampler {
+            r.reset();
+        }
+        self.fifo.clear();
+        self.active_pos = None;
+    }
+
+    fn pull_forward_chunk(
+        &mut self,
+        frames_needed: usize,
+        loop_range: Option<(i64, i64)>,
+        mix_fn: &mut dyn FnMut(i64, &mut [f32]),
+    ) {
+        self.scratch.resize(frames_needed * 2, 0.0);
+        let mut done = 0usize;
+        while done < frames_needed {
+            let mut take = frames_needed - done;
+            if let Some((a, b)) = loop_range {
+                if self.head_pos >= b && b > a {
+                    self.head_pos = a;
+                }
+                if self.head_pos < b {
+                    take = take.min((b - self.head_pos).max(1) as usize);
+                }
+            }
+            let part = &mut self.scratch[done * 2..(done + take) * 2];
+            mix_fn(self.head_pos, part);
+            self.head_pos = self.head_pos.saturating_add(take as i64);
+            done += take;
+        }
+    }
+
+    fn pull_reverse_chunk(
+        &mut self,
+        frames_needed: usize,
+        mix_fn: &mut dyn FnMut(i64, &mut [f32]),
+    ) {
+        self.scratch.resize(frames_needed * 2, 0.0);
+        self.scratch.fill(0.0);
+        if self.head_pos <= 0 {
+            return;
+        }
+        let avail = (self.head_pos as usize).min(frames_needed);
+        let start = self.head_pos - avail as i64;
+        self.scratch_part.resize(avail * 2, 0.0);
+        mix_fn(start, &mut self.scratch_part[..avail * 2]);
+        for i in 0..avail {
+            let src_idx = avail - 1 - i;
+            self.scratch[i * 2] = self.scratch_part[src_idx * 2];
+            self.scratch[i * 2 + 1] = self.scratch_part[src_idx * 2 + 1];
+        }
+        self.head_pos = start;
+    }
+
+    /// Produz `out.len()/2` quadros na saída de áudio avançando/retrocedendo a posição
+    /// de timeline `pos` conforme `speed` (`0.25..=4.0` ou reverso para shuttle).
+    /// Retorna `true` se o cursor atingiu o início (<= 0 em reverso) e deve pausar.
+    pub fn process(
+        &mut self,
+        speed: f64,
+        pos: &mut i64,
+        frac: &mut f64,
+        loop_range: Option<(i64, i64)>,
+        out: &mut [f32],
+        mut mix_fn: impl FnMut(i64, &mut [f32]),
+    ) -> bool {
+        let out_frames = out.len() / 2;
+        if out_frames == 0 || !speed.is_finite() || speed.abs() < 1e-4 {
+            out.fill(0.0);
+            return false;
+        }
+
+        // Caminho direto em 1,0x sem latência adicional.
+        if (speed - 1.0).abs() < 1e-6 {
+            self.reset();
+            let mut done = 0usize;
+            while done < out_frames {
+                let mut n = out_frames - done;
+                if let Some((a, b)) = loop_range {
+                    if *pos >= b && b > a {
+                        *pos = a;
+                    }
+                    if *pos < b {
+                        n = n.min((b - *pos).max(1) as usize);
+                    }
+                }
+                mix_fn(*pos, &mut out[done * 2..(done + n) * 2]);
+                *pos = pos.saturating_add(n as i64);
+                done += n;
+            }
+            *frac = 0.0;
+            return false;
+        }
+
+        let dir = if speed >= 0.0 { 1.0_f64 } else { -1.0_f64 };
+        let mag = speed.abs();
+
+        // Fora do intervalo seguro do Sinc resampler, apenas avança o relógio sem aliasing.
+        if !(MIN_RUBATO_RATIO..=MAX_RUBATO_RATIO).contains(&(1.0 / mag)) || self.resampler.is_none()
+        {
+            out.fill(0.0);
+            let adv = out_frames as f64 * speed + *frac;
+            *pos = pos.saturating_add(adv.trunc() as i64);
+            *frac = adv.fract();
+            if *pos <= 0 && dir < 0.0 {
+                *pos = 0;
+                return true;
+            }
+            return false;
+        }
+
+        if self.active_pos.is_none() {
+            self.head_pos = *pos;
+            self.active_pos = Some(*pos);
+        }
+
+        let target_ratio = (1.0 / mag).clamp(MIN_RUBATO_RATIO, MAX_RUBATO_RATIO);
+        let mut hit_start = false;
+
+        while self.fifo.len() < out_frames * 2 {
+            let in_needed = {
+                let Some(res) = self.resampler.as_mut() else {
+                    break;
+                };
+                if res.set_resample_ratio(target_ratio, true).is_err() {
+                    break;
+                }
+                res.input_frames_next().max(1)
+            };
+            if dir >= 0.0 {
+                self.pull_forward_chunk(in_needed, loop_range, &mut mix_fn);
+            } else {
+                self.pull_reverse_chunk(in_needed, &mut mix_fn);
+                if self.head_pos <= 0 {
+                    hit_start = true;
+                }
+            }
+            self.in_buf.resize(in_needed * 2, 0.0);
+            self.in_buf.copy_from_slice(&self.scratch[..in_needed * 2]);
+            self.out_buf.resize(VARISPEED_CHUNK * 2, 0.0);
+
+            let in_slice = InterleavedSlice::new(&self.in_buf, 2, in_needed);
+            let out_slice = InterleavedSlice::new_mut(&mut self.out_buf, 2, VARISPEED_CHUNK);
+            if let (Ok(inp), Ok(mut outp), Some(res)) =
+                (in_slice, out_slice, self.resampler.as_mut())
+            {
+                if res.process_into_buffer(&inp, &mut outp, None).is_err() {
+                    self.out_buf.fill(0.0);
+                }
+            } else {
+                self.out_buf.fill(0.0);
+            }
+            self.fifo.extend(self.out_buf.iter().copied());
+            if hit_start && self.fifo.len() >= out_frames * 2 {
+                break;
+            }
+        }
+
+        for i in 0..out_frames * 2 {
+            out[i] = self.fifo.pop_front().unwrap_or(0.0);
+        }
+
+        let exact = *pos as f64 + out_frames as f64 * speed + *frac;
+        *pos = exact.trunc() as i64;
+        *frac = exact.fract();
+        if let Some((a, b)) = loop_range {
+            if dir > 0.0 && *pos >= b && b > a {
+                *pos = a;
+                self.head_pos = a;
+                self.fifo.clear();
+            }
+        }
+        if dir < 0.0 && *pos <= 0 {
+            *pos = 0;
+            *frac = 0.0;
+            return true;
+        }
+        false
+    }
+}
+
+struct EventResampler {
+    src_sr: u32,
+    ratio: f64,
+    next_timeline_sample: i64,
+    in_pos: i64,
+    resampler: Async<f32>,
+    fifo: VecDeque<f32>,
+    in_buf: Vec<f32>,
+    out_buf: Vec<f32>,
+}
+
+const EV_RESAMP_CHUNK: usize = 256;
+
+impl EventResampler {
+    fn new(src_sr: u32, ratio: f64) -> Option<Self> {
+        let clamped = ratio.clamp(MIN_RUBATO_RATIO, MAX_RUBATO_RATIO);
+        let resampler = Async::<f32>::new_sinc(
+            clamped,
+            2.0,
+            &sinc_params(),
+            EV_RESAMP_CHUNK,
+            2,
+            FixedAsync::Output,
+        )
+        .ok()?;
+        Some(Self {
+            src_sr: src_sr.max(1),
+            ratio: clamped,
+            next_timeline_sample: i64::MIN,
+            in_pos: 0,
+            resampler,
+            fifo: VecDeque::with_capacity(EV_RESAMP_CHUNK * 4),
+            in_buf: Vec::new(),
+            out_buf: vec![0.0_f32; EV_RESAMP_CHUNK * 2],
+        })
+    }
+
+    fn reset_at(
+        &mut self,
+        start_timeline: i64,
+        ratio: f64,
+        e: &Event,
+        a: &AudioData,
+        dur: Option<Ticks>,
+        sr: u32,
+    ) {
+        self.resampler.reset();
+        self.fifo.clear();
+        self.ratio = ratio.clamp(MIN_RUBATO_RATIO, MAX_RUBATO_RATIO);
+        let _ = self.resampler.set_resample_ratio(self.ratio, false);
+        self.next_timeline_sample = start_timeline;
+
+        let t0 = timeline_sample_time(start_timeline, sr);
+        let src_frame0 = e
+            .media_time(t0, dur)
+            .map(|mt| mt.to_sample_pos(a.sample_rate).0)
+            .unwrap_or(0);
+        // Alinha o início descontando o atraso do filtro Sinc sem alterar a fase contínua.
+        let delay_in = ((self.resampler.output_delay() as f64) / self.ratio).round() as i64;
+        self.in_pos = src_frame0.saturating_sub(delay_in);
+        let delay_out = self.resampler.output_delay();
+        if delay_out > 0 {
+            self.pump(delay_out, e, a);
+            let drop_samples = (delay_out * 2).min(self.fifo.len());
+            self.fifo.drain(..drop_samples);
+        }
+    }
+
+    fn pump(&mut self, need_frames: usize, e: &Event, a: &AudioData) {
+        let src_frames = a.frames();
+        let dir: i64 = if e.reverse { -1 } else { 1 };
+        while self.fifo.len() < need_frames * 2 {
+            let in_n = self.resampler.input_frames_next().max(1);
+            self.in_buf.resize(in_n * 2, 0.0);
+            for k in 0..in_n {
+                let idx = self.in_pos.saturating_add((k as i64).saturating_mul(dir));
+                let valid = if src_frames == 0 {
+                    None
+                } else if e.looped {
+                    Some(idx.rem_euclid(src_frames as i64) as usize)
+                } else if idx >= 0 && (idx as usize) < src_frames {
+                    Some(idx as usize)
+                } else {
+                    None
+                };
+                if let Some(f) = valid {
+                    self.in_buf[k * 2] = a.data[f * 2];
+                    self.in_buf[k * 2 + 1] = a.data[f * 2 + 1];
+                } else {
+                    self.in_buf[k * 2] = 0.0;
+                    self.in_buf[k * 2 + 1] = 0.0;
+                }
+            }
+            self.in_pos = self
+                .in_pos
+                .saturating_add((in_n as i64).saturating_mul(dir));
+            self.out_buf.resize(EV_RESAMP_CHUNK * 2, 0.0);
+            if let (Ok(inp), Ok(mut outp)) = (
+                InterleavedSlice::new(&self.in_buf, 2, in_n),
+                InterleavedSlice::new_mut(&mut self.out_buf, 2, EV_RESAMP_CHUNK),
+            ) {
+                if self
+                    .resampler
+                    .process_into_buffer(&inp, &mut outp, None)
+                    .is_err()
+                {
+                    self.out_buf.fill(0.0);
+                }
+            } else {
+                self.out_buf.fill(0.0);
+            }
+            self.fifo.extend(self.out_buf.iter().copied());
+        }
+    }
+}
+
+#[inline]
+fn timeline_sample_time(idx: i64, sr: u32) -> Ticks {
+    match Ticks::exact_step_for_sample_rate(sr) {
+        Some(k) => Ticks(idx.saturating_mul(k)),
+        None => Ticks::from_samples(idx, sr),
+    }
 }
 
 pub struct Mixer {
     pub sr: u32,
     states: HashMap<Id, FxState>,
+    event_resamplers: HashMap<Id, EventResampler>,
     pub meters: Meters,
     track_buf: Vec<f32>,
     ev_buf: Vec<f32>,
+    bus_bufs: Vec<Vec<f32>>,
     master_buf: Vec<f32>,
 }
 
@@ -63,21 +440,28 @@ fn fade_gain(e: &Event, fi: &Fade, fo: &Fade, t: Ticks) -> f32 {
     g
 }
 
+fn find_bus_index(buses: &[AudioBus], limit: usize, bus_id: Id) -> Option<usize> {
+    buses[..limit].iter().position(|b| b.id == bus_id)
+}
+
 impl Mixer {
     pub fn new(sr: u32) -> Self {
         Mixer {
-            sr,
+            sr: sr.max(8000),
             states: HashMap::new(),
+            event_resamplers: HashMap::new(),
             meters: Meters::default(),
             track_buf: vec![],
             ev_buf: vec![],
+            bus_bufs: vec![],
             master_buf: vec![],
         }
     }
 
-    /// Zera o estado dos efeitos (após salto de posição).
+    /// Zera o estado dos efeitos e reamostradores (após salto de posição).
     pub fn reset(&mut self) {
         self.states.clear();
+        self.event_resamplers.clear();
     }
 
     fn run_fx(&mut self, fx: &FxInstance, buf: &mut [f32], t: Ticks) {
@@ -89,6 +473,74 @@ impl Mixer {
         afx::process(fx, st, sr, buf, t);
     }
 
+    fn sample_event_block(
+        &mut self,
+        e: &Event,
+        media_dur: Option<Ticks>,
+        a: &AudioData,
+        start: i64,
+        n: usize,
+        buf: &mut [f32],
+    ) {
+        let sr = self.sr;
+        let ev_rate = e.rate.as_f64();
+        let needs_resamp = (a.sample_rate != sr || !e.rate.is_normal()) && ev_rate > 0.0;
+        let ratio = if ev_rate > 0.0 {
+            (sr as f64) / (a.sample_rate.max(1) as f64 * ev_rate)
+        } else {
+            1.0
+        };
+        if needs_resamp && (MIN_RUBATO_RATIO..=MAX_RUBATO_RATIO).contains(&ratio) {
+            let entry = match self.event_resamplers.get_mut(&e.id) {
+                Some(er) if er.src_sr == a.sample_rate && (er.ratio - ratio).abs() < 1e-6 => {
+                    Some(er)
+                }
+                _ => {
+                    if let Some(fresh) = EventResampler::new(a.sample_rate, ratio) {
+                        self.event_resamplers.insert(e.id, fresh);
+                    }
+                    self.event_resamplers.get_mut(&e.id)
+                }
+            };
+            if let Some(er) = entry {
+                if er.next_timeline_sample != start {
+                    er.reset_at(start, ratio, e, a, media_dur, sr);
+                }
+                er.pump(n, e, a);
+                for i in 0..n {
+                    let l = er.fifo.pop_front().unwrap_or(0.0);
+                    let r = er.fifo.pop_front().unwrap_or(0.0);
+                    let t = timeline_sample_time(start.saturating_add(i as i64), sr);
+                    if e.contains(t) && e.media_time(t, media_dur).is_some() {
+                        buf[i * 2] = l;
+                        buf[i * 2 + 1] = r;
+                    } else {
+                        buf[i * 2] = 0.0;
+                        buf[i * 2 + 1] = 0.0;
+                    }
+                }
+                er.next_timeline_sample = start.saturating_add(n as i64);
+                return;
+            }
+        }
+        for i in 0..n {
+            let t = timeline_sample_time(start.saturating_add(i as i64), sr);
+            if !e.contains(t) {
+                buf[i * 2] = 0.0;
+                buf[i * 2 + 1] = 0.0;
+                continue;
+            }
+            let Some(mt) = e.media_time(t, media_dur) else {
+                buf[i * 2] = 0.0;
+                buf[i * 2 + 1] = 0.0;
+                continue;
+            };
+            let (l, r) = a.sample(mt);
+            buf[i * 2] = l;
+            buf[i * 2 + 1] = r;
+        }
+    }
+
     /// Mixa `out.len()/2` quadros a partir da amostra `start` (na taxa `sr`).
     pub fn process(
         &mut self,
@@ -98,19 +550,25 @@ impl Mixer {
         out: &mut [f32],
     ) {
         let n = out.len() / 2;
+        if n == 0 {
+            return;
+        }
         let sr = self.sr;
-        let step = Ticks::exact_step_for_sample_rate(sr);
-        let sample_time = |idx: i64| -> Ticks {
-            match step {
-                Some(k) => Ticks(idx.saturating_mul(k)),
-                None => Ticks::from_samples(idx, sr),
-            }
-        };
-        let t0 = sample_time(start);
-        let t1 = sample_time(start.saturating_add(n as i64));
-        out.iter_mut().for_each(|s| *s = 0.0);
+        let t0 = timeline_sample_time(start, sr);
+        let t1 = timeline_sample_time(start.saturating_add(n as i64), sr);
+        out.fill(0.0);
         self.master_buf.resize(n * 2, 0.0);
-        self.master_buf.iter_mut().for_each(|s| *s = 0.0);
+        self.master_buf.fill(0.0);
+
+        let num_buses = p.audio_buses.len().min(MAX_AUDIO_BUSES);
+        if self.bus_bufs.len() < num_buses {
+            self.bus_bufs.resize_with(num_buses, Vec::new);
+        }
+        for bi in 0..num_buses {
+            self.bus_bufs[bi].resize(n * 2, 0.0);
+            self.bus_bufs[bi].fill(0.0);
+        }
+
         let any_solo = p.any_solo(TrackKind::Audio);
         let mut track_buf = std::mem::take(&mut self.track_buf);
         let mut ev_buf = std::mem::take(&mut self.ev_buf);
@@ -125,8 +583,7 @@ impl Mixer {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
                 continue;
             }
-            track_buf.iter_mut().for_each(|s| *s = 0.0);
-            let mut any = false;
+            track_buf.fill(0.0);
             for (ei, e) in track.events.iter().enumerate() {
                 if e.mute || e.end() <= t0 || e.start >= t1 {
                     continue;
@@ -140,55 +597,152 @@ impl Mixer {
                 let dur = m.duration.or_else(|| Some(a.duration()));
                 let (fi, fo) = effective_fades(track, ei);
                 let g = db_to_lin(e.gain_db);
-                ev_buf.iter_mut().for_each(|s| *s = 0.0);
+                ev_buf.fill(0.0);
+                self.sample_event_block(e, dur, a, start, n, &mut ev_buf[..n * 2]);
                 for i in 0..n {
-                    let t = sample_time(start.saturating_add(i as i64));
-                    if !e.contains(t) {
-                        continue;
-                    }
-                    let Some(mt) = e.media_time(t, dur) else {
-                        continue;
+                    let t = timeline_sample_time(start.saturating_add(i as i64), sr);
+                    let k = if e.contains(t) {
+                        g * fade_gain(e, &fi, &fo, t)
+                    } else {
+                        0.0
                     };
-                    let (l, r) = a.sample(mt);
-                    let k = g * fade_gain(e, &fi, &fo, t);
-                    ev_buf[i * 2] = l * k;
-                    ev_buf[i * 2 + 1] = r * k;
+                    ev_buf[i * 2] *= k;
+                    ev_buf[i * 2 + 1] *= k;
                 }
                 for fx in &e.fx {
-                    self.run_fx(fx, &mut ev_buf, t0 - e.start);
+                    self.run_fx(fx, &mut ev_buf[..n * 2], t0 - e.start);
                 }
-                for (d, s) in track_buf.iter_mut().zip(ev_buf.iter()) {
-                    *d += *s;
+                for i in 0..n * 2 {
+                    track_buf[i] += ev_buf[i];
                 }
-                any = true;
             }
-            let _ = any;
             for fx in &track.fx {
-                self.run_fx(fx, &mut track_buf, t0);
+                self.run_fx(fx, &mut track_buf[..n * 2], t0);
             }
-            // volume, envelope de volume e pan
+
+            // Envios auxiliares pré-fader (pre-fader sends)
+            for send in &track.sends {
+                if send.mute || !send.pre_fader {
+                    continue;
+                }
+                let Some(bi) = find_bus_index(&p.audio_buses, num_buses, send.bus_id) else {
+                    continue;
+                };
+                let sg = db_to_lin(send.level_db);
+                let dst = &mut self.bus_bufs[bi];
+                for i in 0..n * 2 {
+                    dst[i] += track_buf[i] * sg;
+                }
+            }
+
+            // Volume, envelope de volume e pan
             let vol = db_to_lin(track.volume_db);
             let venv = track.envelope(EnvKind::Volume);
             let penv = track.envelope(EnvKind::Pan);
             let mut peak = [0f32; 2];
             for i in 0..n {
-                let t = sample_time(start.saturating_add(i as i64));
+                let t = timeline_sample_time(start.saturating_add(i as i64), sr);
                 let ve = venv.map(|e| e.eval(t)).unwrap_or(1.0);
                 let pan = (track.pan + penv.map(|e| e.eval(t)).unwrap_or(0.0)).clamp(-1.0, 1.0);
                 let gl = vol * ve * (1.0 - pan).min(1.0);
                 let gr = vol * ve * (1.0 + pan).min(1.0);
                 let l = track_buf[i * 2] * gl;
                 let r = track_buf[i * 2 + 1] * gr;
+                track_buf[i * 2] = l;
+                track_buf[i * 2 + 1] = r;
                 peak[0] = peak[0].max(l.abs());
                 peak[1] = peak[1].max(r.abs());
-                self.master_buf[i * 2] += l;
-                self.master_buf[i * 2 + 1] += r;
             }
             self.meters.tracks.insert(track.id, peak);
+
+            // Envios auxiliares pós-fader (post-fader sends)
+            for send in &track.sends {
+                if send.mute || send.pre_fader {
+                    continue;
+                }
+                let Some(bi) = find_bus_index(&p.audio_buses, num_buses, send.bus_id) else {
+                    continue;
+                };
+                let sg = db_to_lin(send.level_db);
+                let dst = &mut self.bus_bufs[bi];
+                for i in 0..n * 2 {
+                    dst[i] += track_buf[i] * sg;
+                }
+            }
+
+            // Saída principal da trilha: barramento atribuído ou Master Bus
+            if let Some(dst_bi) = track
+                .output_bus
+                .and_then(|bid| find_bus_index(&p.audio_buses, num_buses, bid))
+            {
+                let dst = &mut self.bus_bufs[dst_bi];
+                for i in 0..n * 2 {
+                    dst[i] += track_buf[i];
+                }
+            } else {
+                for i in 0..n * 2 {
+                    self.master_buf[i] += track_buf[i];
+                }
+            }
         }
+
+        // Processamento dos barramentos auxiliares em ordem topológica (acíclica)
+        let any_bus_solo = p.any_bus_solo();
+        let topo = p.topological_bus_order();
+        for pos_idx in 0..topo.len() {
+            let bi = topo[pos_idx];
+            let Some(bus) = p.audio_buses.get(bi) else {
+                continue;
+            };
+            let mut bbuf = std::mem::take(&mut self.bus_bufs[bi]);
+            if !bus.is_audible(any_bus_solo) {
+                self.meters.buses.insert(bus.id, [0.0, 0.0]);
+                self.bus_bufs[bi] = bbuf;
+                continue;
+            }
+            for fx in &bus.fx {
+                self.run_fx(fx, &mut bbuf[..n * 2], t0);
+            }
+            let bvol = db_to_lin(bus.volume_db);
+            let bpan = bus.pan.clamp(-1.0, 1.0);
+            let gl = bvol * (1.0 - bpan).min(1.0);
+            let gr = bvol * (1.0 + bpan).min(1.0);
+            let mut bpeak = [0f32; 2];
+            for i in 0..n {
+                let l = bbuf[i * 2] * gl;
+                let r = bbuf[i * 2 + 1] * gr;
+                bbuf[i * 2] = l;
+                bbuf[i * 2 + 1] = r;
+                bpeak[0] = bpeak[0].max(l.abs());
+                bpeak[1] = bpeak[1].max(r.abs());
+            }
+            self.meters.buses.insert(bus.id, bpeak);
+
+            let mut sent_to_downstream = false;
+            if let Some(dst_id) = bus.output_bus {
+                if let Some(dst_bi) = find_bus_index(&p.audio_buses, num_buses, dst_id) {
+                    // Evita realimentação se o projeto não foi saneado previamente.
+                    let dst_is_later = topo[pos_idx + 1..].contains(&dst_bi);
+                    if dst_bi != bi && dst_is_later {
+                        let dst = &mut self.bus_bufs[dst_bi];
+                        for i in 0..n * 2 {
+                            dst[i] += bbuf[i];
+                        }
+                        sent_to_downstream = true;
+                    }
+                }
+            }
+            if !sent_to_downstream {
+                for i in 0..n * 2 {
+                    self.master_buf[i] += bbuf[i];
+                }
+            }
+            self.bus_bufs[bi] = bbuf;
+        }
+
         let mut master = std::mem::take(&mut self.master_buf);
         for fx in &p.master.fx {
-            self.run_fx(fx, &mut master, t0);
+            self.run_fx(fx, &mut master[..n * 2], t0);
         }
         let mv = if p.master.mute {
             0.0
@@ -215,25 +769,29 @@ impl Mixer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn master_mute_silencia_mixagem_e_zera_medidor() {
-        let mut p = Project::new_default();
-        let mid = new_id();
-        let item = MediaItem {
+    fn test_audio_item(mid: Id, dur_secs: i64) -> MediaItem {
+        MediaItem {
             id: mid,
             name: "tom".into(),
             source: MediaSource::Generated(GenSpec::SolidColor {
                 color: [0.0, 0.0, 0.0, 1.0],
             }),
-            duration: Some(Ticks::from_secs_i64(2)),
+            duration: Some(Ticks::from_secs_i64(dur_secs)),
             has_video: false,
             has_audio: true,
             width: 0,
             height: 0,
             fps: None,
-            info: "48k".into(),
+            info: "test".into(),
             proxy_path: None,
-        };
+        }
+    }
+
+    #[test]
+    fn master_mute_silencia_mixagem_e_zera_medidor() {
+        let mut p = Project::new_default();
+        let mid = new_id();
+        let item = test_audio_item(mid, 2);
         let audio_track = p
             .tracks
             .iter_mut()
@@ -259,5 +817,111 @@ mod tests {
         mixer.process(&p, &audio, 0, &mut out);
         assert!(out.iter().all(|&v| v == 0.0));
         assert_eq!(mixer.meters.master, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn barramentos_encadeados_pre_e_pos_fader_mixam_para_master() {
+        let mut p = Project::new_default();
+        let bus_a = p.add_audio_bus(Some("Bus A")).expect("bus A");
+        let bus_b = p.add_audio_bus(Some("Bus B")).expect("bus B");
+        if let Some(a) = p.audio_bus_mut(bus_a) {
+            a.output_bus = Some(bus_b);
+            a.volume_db = -6.0;
+        }
+        let mid = new_id();
+        let item = test_audio_item(mid, 2);
+        let ti = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio");
+        p.tracks[ti].output_bus = Some(bus_a);
+        p.tracks[ti].sends.push(AudioSend {
+            bus_id: bus_b,
+            level_db: -12.0,
+            pre_fader: true,
+            mute: false,
+        });
+        p.tracks[ti]
+            .events
+            .push(Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(1)));
+        p.media.push(item);
+
+        let mut audio = HashMap::new();
+        audio.insert(
+            mid,
+            Arc::new(AudioData::from_stereo(48000, vec![0.4; 48000 * 2])),
+        );
+
+        let mut mixer = Mixer::new(48000);
+        let mut out = vec![0.0_f32; 256 * 2];
+        mixer.process(&p, &audio, 0, &mut out);
+        let m_a = mixer.meters.buses.get(&bus_a).copied().unwrap_or([0.0; 2]);
+        let m_b = mixer.meters.buses.get(&bus_b).copied().unwrap_or([0.0; 2]);
+        assert!(m_a[0] > 0.05);
+        assert!(m_b[0] > m_a[0]);
+        assert!(out.iter().any(|&v| v.abs() > 0.1));
+
+        // Mutar Bus B silencia o caminho encaminhado por B -> Master
+        p.audio_bus_mut(bus_b).expect("bus B").mute = true;
+        mixer.process(&p, &audio, 0, &mut out);
+        assert!(out.iter().all(|&v| v.abs() < 1e-6));
+    }
+
+    #[test]
+    fn rubato_reamostra_clipe_44k1_e_playback_rate_variavel() {
+        let mut p = Project::new_default();
+        let mid = new_id();
+        let item = test_audio_item(mid, 4);
+        let mut sine = vec![0.0_f32; 44_100 * 2 * 2];
+        for i in 0..44_100 * 2 {
+            let v = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin();
+            sine[i * 2] = v;
+            sine[i * 2 + 1] = v;
+        }
+        let ti = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio");
+        let mut ev = Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(2));
+        ev.rate = Rate::from_f64(1.5).expect("taxa 1.5x");
+        p.tracks[ti].events.push(ev);
+        p.media.push(item);
+
+        let mut audio = HashMap::new();
+        audio.insert(mid, Arc::new(AudioData::from_stereo(44_100, sine)));
+
+        let mut mixer = Mixer::new(48_000);
+        let mut varispeed = TransportVarispeed::new();
+        let mut pos = 0_i64;
+        let mut frac = 0.0_f64;
+        for speed in [0.25_f64, 0.5, 1.0, 2.0, 4.0] {
+            let mut out = vec![0.0_f32; 1024 * 2];
+            varispeed.process(speed, &mut pos, &mut frac, None, &mut out, |s_pos, buf| {
+                mixer.process(&p, &audio, s_pos, buf);
+            });
+            assert!(out.iter().all(|v| v.is_finite()));
+            assert!(
+                out.iter().any(|&v| v.abs() > 0.01),
+                "playback rate {speed} deve produzir áudio reamostrado"
+            );
+        }
+
+        // Shuttle reverso retrocede cursor e não entra em pânico antes de 0
+        pos = 1200;
+        let mut out_rev = vec![0.0_f32; 2048 * 2];
+        let _stopped = varispeed.process(
+            -1.5,
+            &mut pos,
+            &mut frac,
+            None,
+            &mut out_rev,
+            |s_pos, buf| {
+                mixer.process(&p, &audio, s_pos, buf);
+            },
+        );
+        assert!(out_rev.iter().all(|v| v.is_finite()));
+        assert!(pos >= 0);
     }
 }

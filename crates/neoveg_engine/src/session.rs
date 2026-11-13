@@ -307,6 +307,37 @@ impl EditorSession {
         idx
     }
 
+    pub fn add_audio_bus(&mut self) -> Option<Id> {
+        if self.project.audio_buses.len() >= MAX_AUDIO_BUSES {
+            return None;
+        }
+        self.checkpoint();
+        let id = self.project.add_audio_bus(None)?;
+        self.changed();
+        Some(id)
+    }
+
+    pub fn remove_audio_bus(&mut self, bus_id: Id) -> bool {
+        let Some(pos) = self.project.audio_buses.iter().position(|b| b.id == bus_id) else {
+            return false;
+        };
+        self.checkpoint();
+        self.project.audio_buses.remove(pos);
+        for t in &mut self.project.tracks {
+            if t.output_bus == Some(bus_id) {
+                t.output_bus = None;
+            }
+            t.sends.retain(|s| s.bus_id != bus_id);
+        }
+        for b in &mut self.project.audio_buses {
+            if b.output_bus == Some(bus_id) {
+                b.output_bus = None;
+            }
+        }
+        self.changed();
+        true
+    }
+
     /// Ids dos eventos selecionados expandidos pelos grupos (a menos que o
     /// agrupamento esteja sendo ignorado).
     pub fn expand_groups(&self, ids: &HashSet<Id>) -> HashSet<Id> {
