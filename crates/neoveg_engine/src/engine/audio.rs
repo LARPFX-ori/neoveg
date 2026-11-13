@@ -190,7 +190,11 @@ impl Mixer {
         for fx in &p.master.fx {
             self.run_fx(fx, &mut master, t0);
         }
-        let mv = db_to_lin(p.master.volume_db);
+        let mv = if p.master.mute {
+            0.0
+        } else {
+            db_to_lin(p.master.volume_db)
+        };
         let mut peak = [0f32; 2];
         for i in 0..n {
             let l = master[i * 2] * mv;
@@ -204,5 +208,56 @@ impl Mixer {
         self.master_buf = master;
         self.track_buf = track_buf;
         self.ev_buf = ev_buf;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_mute_silencia_mixagem_e_zera_medidor() {
+        let mut p = Project::new_default();
+        let mid = new_id();
+        let item = MediaItem {
+            id: mid,
+            name: "tom".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [0.0, 0.0, 0.0, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(2)),
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: "48k".into(),
+            proxy_path: None,
+        };
+        let audio_track = p
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::Audio)
+            .expect("projeto padrão contém faixa de áudio");
+        audio_track
+            .events
+            .push(Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(1)));
+        p.media.push(item);
+        let mut audio = HashMap::new();
+        audio.insert(
+            mid,
+            Arc::new(AudioData::from_stereo(48000, vec![0.5; 48000 * 2])),
+        );
+
+        let mut mixer = Mixer::new(48000);
+        let mut out = vec![0.0_f32; 256 * 2];
+        mixer.process(&p, &audio, 0, &mut out);
+        assert!(out.iter().any(|&v| v.abs() > 0.1));
+        assert!(mixer.meters.master[0] > 0.1);
+
+        p.master.mute = true;
+        mixer.process(&p, &audio, 0, &mut out);
+        assert!(out.iter().all(|&v| v == 0.0));
+        assert_eq!(mixer.meters.master, [0.0, 0.0]);
     }
 }

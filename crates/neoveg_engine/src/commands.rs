@@ -360,6 +360,8 @@ pub enum UiAction {
     PrerenderRegion,
     ExitApp,
     SelectDock(DockPanel),
+    TogglePreview,
+    ToggleMasterBus,
     TogglePlay,
     PlayFromStart,
     Play,
@@ -1076,6 +1078,24 @@ pub static COMMANDS: &[CommandDef] = &[
             s.opts.safe_areas = !s.opts.safe_areas;
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "view.preview",
+        label: "Prévia de Vídeo",
+        menu_path: "Exibir/Prévia de Vídeo",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::TogglePreview, h),
+    },
+    CommandDef {
+        id: "view.master_bus",
+        label: "Master Bus",
+        menu_path: "Exibir/Master Bus",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleMasterBus, h),
     },
     // --- Inserir ---
     CommandDef {

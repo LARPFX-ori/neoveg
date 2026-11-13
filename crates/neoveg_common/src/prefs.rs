@@ -189,8 +189,9 @@ impl PreviewQuality {
 ///   abas na base do dock e estética clara clássica.
 /// - **Sony** (Sony Vegas Pro 8–13): área de acoplamento no topo (*Display timeline at
 ///   bottom*), timeline embaixo, transport no rodapé, abas na base e cinza médio Sony.
-/// - **MAGIX** (VEGAS Pro 14–21): área acoplável e Prévia no topo, abas no topo,
-///   timeline embaixo, barra de transporte/edição no rodapé e interface escura moderna.
+/// - **MAGIX** (VEGAS Pro 14–21): área acoplável no topo com 3 colunas (Painéis,
+///   Prévia de Vídeo e Master Bus) e abas na base, Visor de tempo e Track List abaixo,
+///   timeline com Status de renderização, barra de transporte/edição no rodapé e tema escuro.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LayoutType {
     #[serde(
@@ -249,8 +250,8 @@ impl LayoutType {
                  barra de transporte no rodapé, abas na base e cinza médio Sony."
             }
             LayoutType::Magix => {
-                "Área acoplável (Prévia e painéis) no topo com abas no topo, \
-                 timeline embaixo, barra de transporte e edição no rodapé e tema escuro."
+                "Área acoplável no topo em 3 painéis (Abas, Prévia e Master Bus) com abas na base, \
+                 timeline na metade inferior, barra de transporte/edição no rodapé e tema escuro."
             }
         }
     }
@@ -275,8 +276,8 @@ impl LayoutType {
     pub fn default_dock_height(self) -> f32 {
         match self {
             LayoutType::SonicFoundry => 270.0,
-            LayoutType::Sony => 310.0,
-            LayoutType::Magix => 330.0,
+            LayoutType::Sony => 300.0,
+            LayoutType::Magix => 320.0,
         }
     }
 
@@ -284,7 +285,7 @@ impl LayoutType {
         match self {
             LayoutType::SonicFoundry => 0.36,
             LayoutType::Sony => 0.42,
-            LayoutType::Magix => 0.44,
+            LayoutType::Magix => 0.40,
         }
     }
 }
@@ -302,6 +303,8 @@ pub struct EditLayoutPrefs {
     pub transport_at_bottom: bool,
     /// Exibe a janela de prévia à esquerda na área acoplável.
     pub preview_on_left: bool,
+    /// Exibe o painel Master Bus acoplado à direita na área de janelas (padrão VEGAS Pro 21).
+    pub master_bus_docked: bool,
     /// Aplica automaticamente a paleta visual da era ao escolher um tipo de layout
     /// (preservando temas de Alto Contraste AAA quando ativos).
     pub sync_theme_with_layout: bool,
@@ -316,6 +319,7 @@ impl EditLayoutPrefs {
                 tabs_at_top: false,
                 transport_at_bottom: false,
                 preview_on_left: false,
+                master_bus_docked: false,
                 sync_theme_with_layout: true,
             },
             LayoutType::Sony => Self {
@@ -324,14 +328,16 @@ impl EditLayoutPrefs {
                 tabs_at_top: false,
                 transport_at_bottom: true,
                 preview_on_left: false,
+                master_bus_docked: false,
                 sync_theme_with_layout: true,
             },
             LayoutType::Magix => Self {
                 layout_type,
                 timeline_at_bottom: true,
-                tabs_at_top: true,
+                tabs_at_top: false,
                 transport_at_bottom: true,
                 preview_on_left: false,
+                master_bus_docked: true,
                 sync_theme_with_layout: true,
             },
         }
@@ -820,16 +826,19 @@ mod tests {
         assert!(!sf.timeline_at_bottom);
         assert!(!sf.tabs_at_top);
         assert!(!sf.transport_at_bottom);
+        assert!(!sf.master_bus_docked);
 
         let sony = EditLayoutPrefs::for_type(LayoutType::Sony);
         assert!(sony.timeline_at_bottom);
         assert!(!sony.tabs_at_top);
         assert!(sony.transport_at_bottom);
+        assert!(!sony.master_bus_docked);
 
         let magix = EditLayoutPrefs::for_type(LayoutType::Magix);
         assert!(magix.timeline_at_bottom);
-        assert!(magix.tabs_at_top);
+        assert!(!magix.tabs_at_top);
         assert!(magix.transport_at_bottom);
+        assert!(magix.master_bus_docked);
 
         let raw = r#"{"edit_layout":{"layout_type":"Sonic Fonudry"}}"#;
         let p: Preferences = serde_json::from_str(raw).unwrap();

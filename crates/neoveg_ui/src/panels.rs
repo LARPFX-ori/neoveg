@@ -23,6 +23,189 @@ fn dock_tab_icon(tab: DockTab) -> Icon {
     }
 }
 
+#[derive(Default)]
+struct SingleTabAction {
+    detach: bool,
+    close: bool,
+}
+
+fn split_pane_chrome(rect: Rect, strip_h: f32, tabs_at_top: bool) -> (Rect, Rect) {
+    let clamped_strip = strip_h.min((rect.height() * 0.52).max(24.0));
+    if tabs_at_top {
+        let strip = Rect::from_min_max(
+            rect.min,
+            pos2(
+                rect.right(),
+                (rect.top() + clamped_strip).min(rect.bottom()),
+            ),
+        );
+        let content = Rect::from_min_max(
+            pos2(rect.left(), (strip.bottom() + 2.0).min(rect.bottom())),
+            rect.max,
+        );
+        (content, strip)
+    } else {
+        let content = Rect::from_min_max(
+            rect.min,
+            pos2(
+                rect.right(),
+                (rect.bottom() - clamped_strip - 2.0).max(rect.top() + 16.0),
+            ),
+        );
+        let strip = Rect::from_min_max(
+            pos2(rect.left(), (rect.bottom() - clamped_strip).max(rect.top())),
+            rect.max,
+        );
+        (content, strip)
+    }
+}
+
+struct PaneTabSpec<'a> {
+    icon: Icon,
+    title: &'a str,
+    popout_tip: &'a str,
+    close_tip: &'a str,
+}
+
+fn draw_single_pane_tab_bar(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    tabs_at_top: bool,
+    spec: &PaneTabSpec<'_>,
+    theme: &crate::theme::ThemeColors,
+) -> SingleTabAction {
+    let mut act = SingleTabAction::default();
+    let mut strip_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .id_salt(("single_tab_strip", spec.title)),
+    );
+    strip_ui.set_clip_rect(rect);
+    if !tabs_at_top {
+        strip_ui.separator();
+    }
+    strip_ui.horizontal(|ui| {
+        let tab_resp = icons::small_icon_button(ui, spec.icon, Some(spec.title), true, theme);
+        tab_resp.context_menu(|ui| {
+            if ui.button("Destacar em janela do Windows").clicked() {
+                act.detach = true;
+                ui.close_menu();
+            }
+            if ui.button("Fechar janela").clicked() {
+                act.close = true;
+                ui.close_menu();
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icons::small_icon_button(ui, Icon::CloseX, None, false, theme)
+                .on_hover_text(spec.close_tip)
+                .clicked()
+            {
+                act.close = true;
+            }
+            if icons::small_icon_button(ui, Icon::PopOut, None, false, theme)
+                .on_hover_text(spec.popout_tip)
+                .clicked()
+            {
+                act.detach = true;
+            }
+        });
+    });
+    if tabs_at_top {
+        strip_ui.separator();
+    }
+    act
+}
+
+struct FloatingViewportSpec<'a> {
+    title: &'a str,
+    inner_size: [f32; 2],
+    min_size: [f32; 2],
+    icon: std::sync::Arc<egui::IconData>,
+    theme: &'a crate::theme::ThemeColors,
+}
+
+struct FloatingOutcome {
+    open: bool,
+    reattach: bool,
+}
+
+fn show_floating_viewport(
+    ctx: &egui::Context,
+    id_salt: impl std::hash::Hash,
+    win_id_salt: impl std::hash::Hash,
+    spec: &FloatingViewportSpec<'_>,
+    mut body: impl FnMut(&mut egui::Ui),
+) -> FloatingOutcome {
+    let mut out = FloatingOutcome {
+        open: true,
+        reattach: false,
+    };
+    let vid = egui::ViewportId::from_hash_of(&id_salt);
+    let builder = egui::ViewportBuilder::default()
+        .with_title(format!("{} - Neoveg", spec.title))
+        .with_inner_size(spec.inner_size)
+        .with_min_inner_size(spec.min_size)
+        .with_resizable(true)
+        .with_decorations(true)
+        .with_icon(spec.icon.clone());
+    ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
+        if class == egui::ViewportClass::Embedded {
+            egui::Window::new(spec.title)
+                .id(egui::Id::new(&win_id_salt))
+                .open(&mut out.open)
+                .default_size([spec.inner_size[0] - 40.0, spec.inner_size[1] - 40.0])
+                .min_size([spec.min_size[0] - 20.0, spec.min_size[1] - 20.0])
+                .show(v_ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if icons::small_icon_button(
+                            ui,
+                            Icon::DockIn,
+                            Some("Acoplar na área de janelas"),
+                            false,
+                            spec.theme,
+                        )
+                        .clicked()
+                        {
+                            out.reattach = true;
+                        }
+                    });
+                    ui.separator();
+                    body(ui);
+                });
+        } else {
+            if v_ctx.input(|i| i.viewport().close_requested()) {
+                out.open = false;
+            }
+            egui::CentralPanel::default().show(v_ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if icons::small_icon_button(
+                        ui,
+                        Icon::DockIn,
+                        Some("Acoplar na área de janelas"),
+                        false,
+                        spec.theme,
+                    )
+                    .clicked()
+                    {
+                        out.reattach = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "Janela independente (arraste pela barra de título para mover entre monitores)",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+                ui.separator();
+                body(ui);
+            });
+        }
+    });
+    out
+}
+
 impl App {
     pub fn detach_dock_tab(&mut self, tab: DockTab) {
         self.detached_tabs.insert(tab);
@@ -40,6 +223,7 @@ impl App {
         let mut detach_req: Option<DockTab> = None;
         let mut detach_all = false;
         let mut toggle_preview = false;
+        let mut toggle_master = false;
         ui.horizontal_wrapped(|ui| {
             for &tab in docked {
                 let resp = icons::small_icon_button(
@@ -71,6 +255,15 @@ impl App {
                         toggle_preview = true;
                         ui.close_menu();
                     }
+                    let mb_label = if self.master_bus_detached {
+                        "Acoplar Master Bus"
+                    } else {
+                        "Destacar Master Bus em janela do Windows"
+                    };
+                    if ui.button(mb_label).clicked() {
+                        toggle_master = true;
+                        ui.close_menu();
+                    }
                 });
             }
             if docked.contains(&self.dock_tab)
@@ -92,6 +285,15 @@ impl App {
         }
         if toggle_preview {
             self.preview_detached = !self.preview_detached;
+            if !self.preview_detached {
+                self.preview_visible = true;
+            }
+        }
+        if toggle_master {
+            self.master_bus_detached = !self.master_bus_detached;
+            if !self.master_bus_detached {
+                self.master_bus_visible = true;
+            }
         }
     }
 
@@ -114,37 +316,60 @@ impl App {
 
     pub fn dock_area(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_rect_before_wrap();
-        let (tabs_rect, preview_rect_opt) = if self.preview_detached {
-            (avail, None)
+        ui.allocate_rect(avail, Sense::hover());
+
+        let show_preview = self.preview_visible && !self.preview_detached;
+        let min_w_for_master = if show_preview { 640.0 } else { 420.0 };
+        let show_master = self.master_bus_visible
+            && !self.master_bus_detached
+            && avail.width() >= min_w_for_master;
+
+        let (main_avail, master_rect_opt) = if show_master {
+            let master_w = (avail.width() * 0.105).clamp(110.0, 126.0);
+            (
+                Rect::from_min_max(
+                    avail.min,
+                    pos2(avail.right() - master_w - 6.0, avail.bottom()),
+                ),
+                Some(Rect::from_min_max(
+                    pos2(avail.right() - master_w, avail.top()),
+                    avail.max,
+                )),
+            )
         } else {
-            let min_pv = 220.0_f32.min((avail.width() * 0.45).max(120.0));
-            let max_pv = (avail.width() * 0.68).max(min_pv);
-            let preview_w = (avail.width() * self.preview_ratio).clamp(min_pv, max_pv);
+            (avail, None)
+        };
+
+        let (tabs_rect, preview_rect_opt) = if !show_preview {
+            (main_avail, None)
+        } else {
+            let min_pv = 220.0_f32.min((main_avail.width() * 0.45).max(120.0));
+            let max_pv = (main_avail.width() * 0.68).max(min_pv);
+            let preview_w = (main_avail.width() * self.preview_ratio).clamp(min_pv, max_pv);
             if self.prefs.edit_layout.preview_on_left {
                 (
                     Rect::from_min_max(
-                        pos2(avail.left() + preview_w + 6.0, avail.top()),
-                        avail.max,
+                        pos2(main_avail.left() + preview_w + 6.0, main_avail.top()),
+                        main_avail.max,
                     ),
                     Some(Rect::from_min_max(
-                        avail.min,
-                        pos2(avail.left() + preview_w, avail.bottom()),
+                        main_avail.min,
+                        pos2(main_avail.left() + preview_w, main_avail.bottom()),
                     )),
                 )
             } else {
                 (
                     Rect::from_min_max(
-                        avail.min,
-                        pos2(avail.right() - preview_w - 6.0, avail.bottom()),
+                        main_avail.min,
+                        pos2(main_avail.right() - preview_w - 6.0, main_avail.bottom()),
                     ),
                     Some(Rect::from_min_max(
-                        pos2(avail.right() - preview_w, avail.top()),
-                        avail.max,
+                        pos2(main_avail.right() - preview_w, main_avail.top()),
+                        main_avail.max,
                     )),
                 )
             }
         };
-        ui.allocate_rect(avail, Sense::hover());
 
         let docked: Vec<DockTab> = DockTab::ALL
             .into_iter()
@@ -156,28 +381,37 @@ impl App {
             }
         }
 
-        if self.prefs.edit_layout.tabs_at_top {
+        let painter = ui.painter();
+        painter.rect_stroke(
+            tabs_rect,
+            2.0,
+            Stroke::new(1.0_f32, self.theme.border),
+            StrokeKind::Inside,
+        );
+        let tabs_inner = tabs_rect.shrink(3.0);
+
+        let tabs_at_top = self.prefs.edit_layout.tabs_at_top;
+        if tabs_at_top {
             let mut left = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(tabs_rect)
+                    .max_rect(tabs_inner)
                     .id_salt("dock_tabs_pane_top"),
             );
-            left.set_clip_rect(tabs_rect);
+            left.set_clip_rect(tabs_inner);
             self.dock_tab_strip(&mut left, &docked);
             left.separator();
             self.dock_tab_contents(&mut left, &docked);
         } else {
-            // Nas gerações Sonic Foundry e Sony, as abas ficam na borda inferior do dock.
             // Calcula quantas linhas serão usadas em `dock_tab_strip` para não cortar abas
             // como `Color Grading`, `Notas` ou `Destacar` em janelas médias/estreitas.
-            let max_w = (tabs_rect.width() - 8.0).max(120.0);
+            let max_w = (tabs_inner.width() - 6.0).max(120.0);
             let mut rows = 1usize;
             let mut cur_x = 0.0_f32;
             for item_w in docked
                 .iter()
-                .map(|t| 30.0 + t.name().chars().count() as f32 * 6.8)
+                .map(|t| 32.0 + t.name().chars().count() as f32 * 7.0)
                 .chain(std::iter::once(
-                    30.0 + "Destacar".chars().count() as f32 * 6.8,
+                    32.0 + "Destacar".chars().count() as f32 * 7.0,
                 ))
             {
                 if cur_x > 0.0 && cur_x + item_w + 4.0 > max_w {
@@ -187,22 +421,8 @@ impl App {
                     cur_x += item_w + 4.0;
                 }
             }
-            let base_h: f32 = (rows.min(4) as f32) * 24.0 + 4.0;
-            let strip_h = base_h.min((tabs_rect.height() * 0.45).max(24.0));
-            let content_rect = Rect::from_min_max(
-                tabs_rect.min,
-                pos2(
-                    tabs_rect.right(),
-                    (tabs_rect.bottom() - strip_h - 4.0).max(tabs_rect.top() + 20.0),
-                ),
-            );
-            let strip_rect = Rect::from_min_max(
-                pos2(
-                    tabs_rect.left(),
-                    (tabs_rect.bottom() - strip_h).max(tabs_rect.top()),
-                ),
-                tabs_rect.max,
-            );
+            let base_h: f32 = (rows.min(5) as f32) * 24.0 + 4.0;
+            let (content_rect, strip_rect) = split_pane_chrome(tabs_inner, base_h, false);
             let mut content_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(content_rect)
@@ -222,86 +442,128 @@ impl App {
         }
 
         if let Some(preview_rect) = preview_rect_opt {
+            ui.painter().rect_stroke(
+                preview_rect,
+                2.0,
+                Stroke::new(1.0_f32, self.theme.border),
+                StrokeKind::Inside,
+            );
+            let (content_rect, tab_rect) =
+                split_pane_chrome(preview_rect.shrink(3.0), 24.0, tabs_at_top);
+            let act = draw_single_pane_tab_bar(
+                ui,
+                tab_rect,
+                tabs_at_top,
+                &PaneTabSpec {
+                    icon: Icon::VideoTrack,
+                    title: "Prévia de Vídeo",
+                    popout_tip: "Destacar Prévia de Vídeo em janela normal do Windows",
+                    close_tip: "Fechar Prévia de Vídeo",
+                },
+                &self.theme,
+            );
+            if act.detach {
+                self.preview_detached = true;
+            } else if act.close {
+                self.preview_visible = false;
+            }
+            let mut center = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(content_rect)
+                    .id_salt("dock_preview"),
+            );
+            center.set_clip_rect(content_rect);
+            self.preview_panel(&mut center, false);
+        }
+
+        if let Some(master_rect) = master_rect_opt {
+            ui.painter().rect_stroke(
+                master_rect,
+                2.0,
+                Stroke::new(1.0_f32, self.theme.border),
+                StrokeKind::Inside,
+            );
+            let (content_rect, tab_rect) =
+                split_pane_chrome(master_rect.shrink(3.0), 24.0, tabs_at_top);
+            let act = draw_single_pane_tab_bar(
+                ui,
+                tab_rect,
+                tabs_at_top,
+                &PaneTabSpec {
+                    icon: Icon::MasterBus,
+                    title: "Master",
+                    popout_tip: "Destacar Master Bus em janela normal do Windows",
+                    close_tip: "Fechar Master Bus",
+                },
+                &self.theme,
+            );
+            if act.detach {
+                self.master_bus_detached = true;
+            } else if act.close {
+                self.master_bus_visible = false;
+            }
             let mut right = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(preview_rect)
-                    .id_salt("dock_right"),
+                    .max_rect(content_rect)
+                    .id_salt("dock_master_bus"),
             );
-            right.set_clip_rect(preview_rect);
-            self.preview_panel(&mut right, false);
+            right.set_clip_rect(content_rect);
+            self.master_bus_panel(&mut right, false);
         }
     }
 
     pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
+        let icon = self.window_icon.clone();
+        let theme = self.theme.clone();
+
         if self.preview_detached {
-            let mut open = true;
-            let mut reattach = false;
-            let vid = egui::ViewportId::from_hash_of("neoveg_floating_preview_viewport");
-            let builder = egui::ViewportBuilder::default()
-                .with_title("Prévia de Vídeo - Neoveg")
-                .with_inner_size([560.0, 380.0])
-                .with_min_inner_size([280.0, 200.0])
-                .with_resizable(true)
-                .with_decorations(true)
-                .with_icon(self.window_icon.clone());
-            ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
-                if class == egui::ViewportClass::Embedded {
-                    egui::Window::new("Prévia de Vídeo")
-                        .id(egui::Id::new("floating_preview_window"))
-                        .open(&mut open)
-                        .default_size([520.0, 340.0])
-                        .min_size([260.0, 180.0])
-                        .show(v_ctx, |ui| {
-                            ui.horizontal(|ui| {
-                                if icons::small_icon_button(
-                                    ui,
-                                    Icon::DockIn,
-                                    Some("Acoplar na área de janelas"),
-                                    false,
-                                    &self.theme,
-                                )
-                                .clicked()
-                                {
-                                    reattach = true;
-                                }
-                            });
-                            ui.separator();
-                            self.preview_panel(ui, true);
-                        });
-                } else {
-                    if v_ctx.input(|i| i.viewport().close_requested()) {
-                        open = false;
-                    }
-                    egui::CentralPanel::default().show(v_ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            if icons::small_icon_button(
-                                ui,
-                                Icon::DockIn,
-                                Some("Acoplar na área de janelas"),
-                                false,
-                                &self.theme,
-                            )
-                            .clicked()
-                            {
-                                reattach = true;
-                            }
-                            ui.label(
-                                egui::RichText::new(
-                                    "Janela independente (arraste pela barra de título para mover entre monitores)",
-                                )
-                                .small()
-                                .weak(),
-                            );
-                        });
-                        ui.separator();
-                        self.preview_panel(ui, true);
-                    });
-                }
-            });
-            if !open || reattach {
+            let spec = FloatingViewportSpec {
+                title: "Prévia de Vídeo",
+                inner_size: [560.0, 380.0],
+                min_size: [280.0, 200.0],
+                icon: icon.clone(),
+                theme: &theme,
+            };
+            let out = show_floating_viewport(
+                ctx,
+                "neoveg_floating_preview_viewport",
+                "floating_preview_window",
+                &spec,
+                |ui| self.preview_panel(ui, true),
+            );
+            if !out.open || out.reattach {
                 self.preview_detached = false;
-                if reattach {
+                if out.reattach {
+                    self.preview_visible = true;
                     self.dock_visible = true;
+                } else {
+                    self.preview_visible = false;
+                }
+            }
+        }
+
+        if self.master_bus_detached {
+            let spec = FloatingViewportSpec {
+                title: "Master Bus",
+                inner_size: [220.0, 420.0],
+                min_size: [140.0, 260.0],
+                icon: icon.clone(),
+                theme: &theme,
+            };
+            let out = show_floating_viewport(
+                ctx,
+                "neoveg_floating_master_bus_viewport",
+                "floating_master_bus_window",
+                &spec,
+                |ui| self.master_bus_panel(ui, true),
+            );
+            if !out.open || out.reattach {
+                self.master_bus_detached = false;
+                if out.reattach {
+                    self.master_bus_visible = true;
+                    self.dock_visible = true;
+                } else {
+                    self.master_bus_visible = false;
                 }
             }
         }
@@ -311,80 +573,29 @@ impl App {
             .filter(|t| self.detached_tabs.contains(t))
             .collect();
         for tab in detached {
-            let mut open = true;
-            let mut reattach = false;
             let key = crate::layout::panel_key(tab);
-            let vid = egui::ViewportId::from_hash_of(("neoveg_floating_dock_viewport", key));
-            let builder = egui::ViewportBuilder::default()
-                .with_title(format!("{} - Neoveg", tab.name()))
-                .with_inner_size([520.0, 360.0])
-                .with_min_inner_size([260.0, 180.0])
-                .with_resizable(true)
-                .with_decorations(true)
-                .with_icon(self.window_icon.clone());
-            ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
-                if class == egui::ViewportClass::Embedded {
-                    egui::Window::new(tab.name())
-                        .id(egui::Id::new(("floating_dock", tab.command_id())))
-                        .open(&mut open)
-                        .default_size([460.0, 320.0])
-                        .min_size([240.0, 160.0])
-                        .show(v_ctx, |ui| {
-                            ui.horizontal(|ui| {
-                                if icons::small_icon_button(
-                                    ui,
-                                    Icon::DockIn,
-                                    Some("Acoplar na área de janelas"),
-                                    false,
-                                    &self.theme,
-                                )
-                                .clicked()
-                                {
-                                    reattach = true;
-                                }
-                            });
-                            ui.separator();
-                            egui::ScrollArea::both()
-                                .id_salt(("floating_scroll", tab.command_id()))
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
-                        });
-                } else {
-                    if v_ctx.input(|i| i.viewport().close_requested()) {
-                        open = false;
-                    }
-                    egui::CentralPanel::default().show(v_ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            if icons::small_icon_button(
-                                ui,
-                                Icon::DockIn,
-                                Some("Acoplar na área de janelas"),
-                                false,
-                                &self.theme,
-                            )
-                            .clicked()
-                            {
-                                reattach = true;
-                            }
-                            ui.label(
-                                egui::RichText::new(
-                                    "Janela independente (arraste pela barra de título para mover entre monitores)",
-                                )
-                                .small()
-                                .weak(),
-                            );
-                        });
-                        ui.separator();
-                        egui::ScrollArea::both()
-                            .id_salt(("floating_os_scroll", tab.command_id()))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
-                    });
-                }
-            });
-            if !open || reattach {
+            let spec = FloatingViewportSpec {
+                title: tab.name(),
+                inner_size: [520.0, 360.0],
+                min_size: [260.0, 180.0],
+                icon: icon.clone(),
+                theme: &theme,
+            };
+            let out = show_floating_viewport(
+                ctx,
+                ("neoveg_floating_dock_viewport", key),
+                ("floating_dock", tab.command_id()),
+                &spec,
+                |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt(("floating_os_scroll", tab.command_id()))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
+                },
+            );
+            if !out.open || out.reattach {
                 self.detached_tabs.remove(&tab);
-                if reattach {
+                if out.reattach {
                     self.dock_visible = true;
                     self.dock_tab = tab;
                 }
@@ -421,8 +632,8 @@ impl App {
 
     fn preview_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Prévia de Vídeo").strong());
-            egui::ComboBox::from_id_salt("pq")
+            self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
+            egui::ComboBox::from_id_salt(("pq", is_floating))
                 .selected_text(self.opts.preview_quality.name())
                 .show_ui(ui, |ui| {
                     for q in PreviewQuality::ALL {
@@ -476,19 +687,21 @@ impl App {
             }
         });
         let avail = ui.available_rect_before_wrap();
-        let (rect, _resp) = ui.allocate_exact_size(avail.size(), Sense::hover());
+        let transport_h = if avail.height() >= 132.0 { 24.0 } else { 0.0 };
+        let two_line_info = avail.height() >= 96.0;
+        let info_h = if two_line_info { 28.0 } else { 18.0 };
+        let canvas_h = (avail.height() - transport_h - info_h).max(24.0);
+        let (rect, _resp) = ui.allocate_exact_size(vec2(avail.width(), canvas_h), Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
-        let s = &self.project.settings;
-        let aspect = s.width as f32 / s.height.max(1) as f32;
-        let info_h = 18.0;
-        let area = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - info_h));
-        let (mut w, mut h) = (area.width(), area.width() / aspect);
-        if h > area.height() {
-            h = area.height();
+        let (proj_w, proj_h) = (self.project.settings.width, self.project.settings.height);
+        let aspect = proj_w as f32 / proj_h.max(1) as f32;
+        let (mut w, mut h) = (rect.width(), rect.width() / aspect);
+        if h > rect.height() {
+            h = rect.height();
             w = h * aspect;
         }
-        let img_rect = Rect::from_center_size(area.center(), vec2(w, h));
+        let img_rect = Rect::from_center_size(rect.center(), vec2(w, h));
         if let Some(tex) = &self.preview_tex {
             painter.image(
                 tex.id(),
@@ -519,22 +732,206 @@ impl App {
                 Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
             );
         }
+
+        if transport_h > 0.0 {
+            let playing = self.is_playing();
+            ui.horizontal(|ui| {
+                let pad_x = ((ui.available_width() - 88.0) * 0.5).max(0.0);
+                ui.add_space(pad_x);
+                self.cmd_tool_toggle(
+                    ui,
+                    playing,
+                    if playing { Icon::Pause } else { Icon::Play },
+                    None,
+                    "transport.play_toggle",
+                );
+                self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
+                self.cmd_tool_btn(ui, Icon::PlayFromStart, None, "transport.play_from_start");
+            });
+        }
+
+        let s = &self.project.settings;
         let pq = self.opts.preview_quality.scale();
-        painter.text(
-            pos2(rect.left() + 4.0, rect.bottom() - info_h + 2.0),
-            egui::Align2::LEFT_TOP,
-            format!(
-                "Projeto: {}x{}, {}p   Prévia: {}x{}   Quadro: {}",
-                s.width,
-                s.height,
-                s.fps.label(),
-                (s.width as f32 * pq) as u32,
-                (s.height as f32 * pq) as u32,
-                s.fps.ticks_to_frame_round(self.view_time())
-            ),
-            egui::FontId::proportional(11.0),
-            Color32::from_gray(180),
+        let (pw, ph) = (
+            ((s.width as f32 * pq).round() as u32).max(1),
+            ((s.height as f32 * pq).round() as u32).max(1),
         );
+        let (dw, dh) = (
+            (img_rect.width().round() as u32).max(1),
+            (img_rect.height().round() as u32).max(1),
+        );
+        let frame_no = s.fps.ticks_to_frame_round(self.view_time());
+        let (info_rect, _) =
+            ui.allocate_exact_size(vec2(avail.width().max(80.0), info_h), Sense::hover());
+        let ip = ui.painter_at(info_rect);
+        let font = egui::FontId::proportional(10.5);
+        let fg = self.theme.text_muted;
+        if two_line_info {
+            ip.text(
+                pos2(info_rect.left() + 2.0, info_rect.top() + 1.0),
+                egui::Align2::LEFT_TOP,
+                format!("Projeto: {}x{}; {}p", s.width, s.height, s.fps.label()),
+                font.clone(),
+                fg,
+            );
+            ip.text(
+                pos2(info_rect.left() + 2.0, info_rect.top() + 14.0),
+                egui::Align2::LEFT_TOP,
+                format!("Prévia: {pw}x{ph}; {}p", s.fps.label()),
+                font.clone(),
+                fg,
+            );
+            ip.text(
+                pos2(info_rect.right() - 2.0, info_rect.top() + 1.0),
+                egui::Align2::RIGHT_TOP,
+                format!("Quadro: {frame_no}"),
+                font.clone(),
+                fg,
+            );
+            ip.text(
+                pos2(info_rect.right() - 2.0, info_rect.top() + 14.0),
+                egui::Align2::RIGHT_TOP,
+                format!("Exibição: {dw}x{dh}"),
+                font,
+                fg,
+            );
+        } else {
+            ip.text(
+                pos2(info_rect.left() + 2.0, info_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!(
+                    "Projeto: {}x{}  Prévia: {pw}x{ph}  Quadro: {frame_no}",
+                    s.width, s.height
+                ),
+                font,
+                fg,
+            );
+        }
+    }
+
+    fn sync_master_monitor_audio(&self) {
+        let mut s = crate::util::lock(&self.audio.shared);
+        s.dim = self.master_dim;
+        s.mono_downmix = self.master_mono;
+    }
+
+    fn master_bus_controls(&mut self, ui: &mut egui::Ui, tall_dock: bool) {
+        let mut changed = false;
+        let mut monitor_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            if ui
+                .small_button("fx")
+                .on_hover_text("Efeitos do Master Bus (áudio)")
+                .clicked()
+            {
+                self.dlg.fx_target = Some(FxTarget::MasterAudio);
+            }
+            if ui
+                .selectable_label(self.master_mono, "Mono")
+                .on_hover_text("Downmix Stereo -> Mono na monitoração")
+                .clicked()
+            {
+                self.master_mono = !self.master_mono;
+                monitor_changed = true;
+            }
+            if ui
+                .selectable_label(self.master_dim, "Dim")
+                .on_hover_text("Atenuar saída de monitoração em -20 dB (Dim Output)")
+                .clicked()
+            {
+                self.master_dim = !self.master_dim;
+                monitor_changed = true;
+            }
+            if ui
+                .selectable_label(self.project.master.mute, "M")
+                .on_hover_text("Silenciar Master Bus (Mute)")
+                .clicked()
+            {
+                self.checkpoint();
+                self.project.master.mute = !self.project.master.mute;
+                changed = true;
+            }
+        });
+        if monitor_changed {
+            self.sync_master_monitor_audio();
+        }
+        let pk = lin_to_db(self.master_hold[0].max(self.master_hold[1]));
+        let peak_str = if pk < -100.0 {
+            "-inf".to_string()
+        } else {
+            format!("{pk:+.1}")
+        };
+        ui.label(
+            egui::RichText::new(format!("pico: {peak_str} dB"))
+                .monospace()
+                .small()
+                .color(if pk > -0.1 {
+                    self.theme.offline_fg
+                } else {
+                    self.theme.text_muted
+                }),
+        );
+        let meter_h = if tall_dock {
+            (ui.available_height() - 22.0).clamp(64.0, 240.0)
+        } else {
+            110.0
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let slider = ui.add_sized(
+                [22.0, meter_h],
+                egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
+                    .vertical()
+                    .show_value(false),
+            );
+            if slider.drag_started() {
+                self.checkpoint();
+            }
+            if slider.double_clicked() {
+                self.checkpoint();
+                self.project.master.volume_db = 0.0;
+                changed = true;
+            }
+            changed |= slider
+                .on_hover_text("Volume do Master Bus (duplo clique para 0,0 dB)")
+                .changed();
+            let (mr, _) = ui.allocate_exact_size(vec2(18.0, meter_h), Sense::hover());
+            draw_meter(ui.painter(), mr, self.master_hold);
+            if tall_dock && meter_h >= 78.0 {
+                let (sr, _) = ui.allocate_exact_size(vec2(22.0, meter_h), Sense::hover());
+                let sp = ui.painter_at(sr);
+                let font = egui::FontId::monospace(8.5);
+                for db in [0, -6, -12, -24, -48] {
+                    let n = ((db as f32 + 60.0) / 66.0).clamp(0.0, 1.0);
+                    let y = sr.bottom() - n * sr.height();
+                    sp.text(
+                        pos2(sr.left() + 1.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{db}"),
+                        font.clone(),
+                        self.theme.text_muted,
+                    );
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new(format!("{:+.1} dB", self.project.master.volume_db))
+                .monospace()
+                .small(),
+        );
+        if changed {
+            self.changed();
+        }
+    }
+
+    fn master_bus_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+        ui.vertical(|ui| {
+            if !is_floating {
+                ui.label(egui::RichText::new("Master").strong().small());
+            }
+            self.master_bus_controls(ui, true);
+        });
     }
 
     // -----------------------------------------------------------------
@@ -542,7 +939,7 @@ impl App {
     // -----------------------------------------------------------------
 
     fn media_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if icons::icon_button(
                 ui,
                 Icon::ImportMedia,
@@ -1102,40 +1499,10 @@ impl App {
             }
             // master
             ui.group(|ui| {
-                ui.set_width(100.0);
+                ui.set_width(114.0);
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Master").strong());
-                    if ui.small_button("FX master").clicked() {
-                        self.dlg.fx_target = Some(FxTarget::MasterAudio);
-                    }
-                    let mut changed = false;
-                    ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
-                                    .vertical()
-                                    .show_value(false),
-                            )
-                            .changed();
-                        let (mr, _) = ui.allocate_exact_size(vec2(16.0, 110.0), Sense::hover());
-                        draw_meter(ui.painter(), mr, self.master_hold);
-                    });
-                    ui.label(
-                        egui::RichText::new(format!("{:+.1} dB", self.project.master.volume_db))
-                            .small(),
-                    );
-                    let pk = lin_to_db(self.master_hold[0].max(self.master_hold[1]));
-                    ui.label(
-                        egui::RichText::new(if pk < -100.0 {
-                            "pico: -inf".into()
-                        } else {
-                            format!("pico: {pk:.1} dB")
-                        })
-                        .small(),
-                    );
-                    if changed {
-                        self.changed();
-                    }
+                    self.master_bus_controls(ui, false);
                 });
             });
         });

@@ -1683,6 +1683,8 @@ pub struct MasterBus {
     #[serde(default)]
     pub volume_db: f32,
     #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
     pub fx: Vec<FxInstance>,
     /// Efeitos de saída de vídeo (Video Output FX).
     #[serde(default)]

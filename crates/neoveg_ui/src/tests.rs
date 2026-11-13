@@ -321,6 +321,7 @@ fn ui_smoke() {
     assert!(!app.prefs.edit_layout.timeline_at_bottom);
     assert!(!app.prefs.edit_layout.tabs_at_top);
     assert!(!app.prefs.edit_layout.transport_at_bottom);
+    assert!(!app.prefs.edit_layout.master_bus_docked);
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasClaro);
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -329,6 +330,7 @@ fn ui_smoke() {
     assert!(app.prefs.edit_layout.timeline_at_bottom);
     assert!(!app.prefs.edit_layout.tabs_at_top);
     assert!(app.prefs.edit_layout.transport_at_bottom);
+    assert!(!app.prefs.edit_layout.master_bus_docked);
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasMedio);
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -341,8 +343,9 @@ fn ui_smoke() {
     app.exec_cmd(Some(&ctx), "edit.properties.layout.magix");
     assert_eq!(app.prefs.edit_layout.layout_type, crate::LayoutType::Magix);
     assert!(app.prefs.edit_layout.timeline_at_bottom);
-    assert!(app.prefs.edit_layout.tabs_at_top);
+    assert!(!app.prefs.edit_layout.tabs_at_top);
     assert!(app.prefs.edit_layout.transport_at_bottom);
+    assert!(app.prefs.edit_layout.master_bus_docked);
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasEscuro);
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -426,6 +429,7 @@ fn collect_galley_shapes(
 /// não corte a barra de ferramentas nem esconda as abas inferiores.
 fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     let prev_layout = app.prefs.edit_layout.layout_type;
+    let prev_master_docked = app.prefs.edit_layout.master_bus_docked;
     let prev_tab = app.dock_tab;
     let prev_dock_vis = app.dock_visible;
     let prev_loading = app.loading;
@@ -434,6 +438,7 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
         item.name = "BigBuckBunny_320x180.mp4".to_owned();
     }
     app.prefs.edit_layout.layout_type = LayoutType::Sony;
+    app.prefs.edit_layout.master_bus_docked = false;
     app.dock_tab = DockTab::ProjectMedia;
     app.dock_visible = true;
     app.detached_tabs.clear();
@@ -482,18 +487,26 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
         );
     }
 
-    let ignore_groups = texts.iter().find(|(txt, _, _, _)| txt == "Ignorar grupos");
+    let import_btn = texts.iter().find(|(txt, _, _, _)| txt == "Importar...");
     assert!(
-        ignore_groups.is_some(),
-        "botão 'Ignorar grupos' deve aparecer na barra de ferramentas; textos={}",
+        import_btn.is_some(),
+        "botão 'Importar...' deve aparecer na Mídia do Projeto; textos={}",
         sample_texts()
     );
-    if let Some((_, rows, rect, clip)) = ignore_groups {
+    if let Some((_, rows, rect, clip)) = import_btn {
         assert_eq!(*rows, 1);
         assert!(
             rect.right() <= clip.right() + 1.5 && rect.bottom() <= clip.bottom() + 1.5,
-            "'Ignorar grupos' não pode ser cortado na direita em janela estreita: rect={rect:?}, clip={clip:?}"
+            "'Importar...' não pode ser cortado em janela estreita: rect={rect:?}, clip={clip:?}"
         );
+    }
+    for (txt, _, rect, clip) in &texts {
+        if rect.top() < 60.0 {
+            assert!(
+                rect.right() <= clip.right() + 1.5 && rect.right() <= 840.0 + 1.5,
+                "texto do topo '{txt}' não pode vazar à direita em 840x800: rect={rect:?}, clip={clip:?}"
+            );
+        }
     }
 
     for tab_label in ["Escopos", "Color Grading", "Notas", "Destacar"] {
@@ -521,6 +534,7 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
         }
     }
     app.prefs.edit_layout.layout_type = prev_layout;
+    app.prefs.edit_layout.master_bus_docked = prev_master_docked;
     app.dock_tab = prev_tab;
     app.dock_visible = prev_dock_vis;
     app.loading = prev_loading;
@@ -530,11 +544,13 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
 /// de Layout em monitor pequeno, janelas destacáveis e legibilidade em temas claros.
 fn assert_vegas21_ui_upgrades(app: &mut App) {
     let prev_theme = app.theme_id;
-    let prev_preview_detached = app.preview_detached;
-    let prev_detached = app.detached_tabs.clone();
+    let prev_layout_snap = app.current_window_layout("test_prev");
+    let prev_edit_layout = app.prefs.edit_layout.clone();
     let prev_prerendered = app.session.prerendered_ranges.clone();
 
     let ctx = egui::Context::default();
+    app.apply_window_layout(crate::layout::WindowLayout::default());
+    app.exec_cmd(Some(&ctx), "edit.properties.layout.magix");
     let small_raw = |t: f64| egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(760.0, 520.0))),
         time: Some(t),
@@ -592,6 +608,20 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
             .any(|(t, _, _, _)| t == "Status de renderização: 1 trecho(s) pré-renderizado(s)"),
         "Barra de Status deve indicar trechos pré-renderizados registrados"
     );
+    assert!(
+        texts.iter().any(|(t, _, _, _)| t == "Prévia de Vídeo")
+            && texts.iter().any(|(t, _, _, _)| t == "Master")
+            && texts.iter().any(|(t, _, _, _)| t.starts_with("Projeto:")),
+        "Área 2 (VEGAS 21) deve exibir Prévia de Vídeo, Master Bus acoplado à direita e resumo do projeto"
+    );
+    assert!(
+        texts.iter().any(|(t, _, _, _)| t == "Tam:"),
+        "Área 6 (VEGAS 21) deve exibir o bloco In/Fim/Tam na barra de transporte em largura desktop"
+    );
+    app.exec_cmd(Some(&ctx), "view.master_bus");
+    assert!(!app.master_bus_visible);
+    app.exec_cmd(Some(&ctx), "view.master_bus");
+    assert!(app.master_bus_visible);
 
     // 2. Janela "Editar > Propriedades > Layout" deve caber integralmente em 760x520
     app.exec_cmd(Some(&ctx), "edit.properties.layout");
@@ -625,8 +655,9 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     }
     app.dlg.edit_layout_open = false;
 
-    // 3. Temas claros + Prévia destacada e janelas do dock destacadas sem pânico
+    // 3. Temas claros + Prévia destacada, Master Bus destacado e janelas do dock destacadas sem pânico
     app.preview_detached = true;
+    app.master_bus_detached = true;
     app.detached_tabs.insert(DockTab::Mixer);
     for tid in [
         crate::theme::ThemeId::VegasClaro,
@@ -640,6 +671,7 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     // 4. Janela Preferências em 2 painéis (VEGAS) adaptável em monitor pequeno, compacto e temas claro/escuro
     app.detached_tabs.clear();
     app.preview_detached = false;
+    app.master_bus_detached = false;
     let prev_prefs_tab = app.dlg.prefs_tab;
     app.exec_cmd(Some(&ctx), "options.prefs");
     assert!(app.dlg.prefs_open);
@@ -705,7 +737,7 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     app.dlg.prefs_open = false;
 
     app.session.prerendered_ranges = prev_prerendered;
-    app.detached_tabs = prev_detached;
-    app.preview_detached = prev_preview_detached;
+    app.apply_window_layout(prev_layout_snap);
+    app.apply_edit_layout(Some(&ctx), prev_edit_layout, false, false);
     app.set_theme(&ctx, prev_theme, false);
 }

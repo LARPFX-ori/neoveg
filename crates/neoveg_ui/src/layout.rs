@@ -44,6 +44,12 @@ pub struct WindowLayout {
     pub detached_tabs: Vec<String>,
     #[serde(default)]
     pub preview_detached: bool,
+    #[serde(default = "yes")]
+    pub preview_visible: bool,
+    #[serde(default = "yes")]
+    pub master_bus_visible: bool,
+    #[serde(default)]
+    pub master_bus_detached: bool,
     #[serde(default)]
     pub px_per_sec: Option<f32>,
     #[serde(default)]
@@ -51,11 +57,11 @@ pub struct WindowLayout {
 }
 
 fn default_dock_height() -> f32 {
-    330.0
+    320.0
 }
 
 fn default_preview_ratio() -> f32 {
-    0.42
+    0.40
 }
 
 fn default_active_tab() -> String {
@@ -76,6 +82,9 @@ impl Default for WindowLayout {
             active_tab: default_active_tab(),
             detached_tabs: Vec::new(),
             preview_detached: false,
+            preview_visible: true,
+            master_bus_visible: true,
+            master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
         }
@@ -139,11 +148,14 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
         WindowLayout {
             name: "Correção de Cor (Escopos)".into(),
             dock_height: 390.0,
-            preview_ratio: 0.46,
+            preview_ratio: 0.44,
             dock_visible: true,
             active_tab: panel_key(DockTab::Scopes).into(),
             detached_tabs: vec![panel_key(DockTab::VideoFx).into()],
             preview_detached: false,
+            preview_visible: true,
+            master_bus_visible: false,
+            master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
         },
@@ -155,6 +167,9 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             active_tab: panel_key(DockTab::Mixer).into(),
             detached_tabs: vec![panel_key(DockTab::AudioFx).into()],
             preview_detached: false,
+            preview_visible: true,
+            master_bus_visible: true,
+            master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
         },
@@ -166,6 +181,9 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             active_tab: panel_key(DockTab::ProjectMedia).into(),
             detached_tabs: Vec::new(),
             preview_detached: false,
+            preview_visible: true,
+            master_bus_visible: false,
+            master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
         },
@@ -264,11 +282,14 @@ mod tests {
                 "scopes".into(),
             ],
             preview_detached: true,
+            preview_visible: true,
+            master_bus_visible: true,
+            master_bus_detached: true,
             px_per_sec: Some(-10.0),
             edit_layout: Some(EditLayoutPrefs::for_type(neoveg_common::LayoutType::Sony)),
         };
         bad.sanitize();
-        assert_eq!(bad.dock_height, 330.0);
+        assert_eq!(bad.dock_height, 320.0);
         assert_eq!(bad.preview_ratio, 0.72);
         assert_eq!(bad.active_panel(), DockTab::ProjectMedia);
         assert_eq!(bad.detached_tabs, vec!["mixer", "scopes"]);

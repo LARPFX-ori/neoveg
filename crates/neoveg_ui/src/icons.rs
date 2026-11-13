@@ -27,6 +27,7 @@ pub enum Icon {
     Envelopes,
     LayoutWindow,
     GoStart,
+    PlayFromStart,
     PrevFrame,
     Play,
     Pause,
@@ -34,6 +35,7 @@ pub enum Icon {
     NextFrame,
     GoEnd,
     LoopPlayback,
+    MasterBus,
     SpeedGauge,
     ZoomGlass,
     VideoTrack,
@@ -67,7 +69,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 55] = [
+    pub const ALL: [Icon; 57] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -87,6 +89,7 @@ impl Icon {
         Icon::Envelopes,
         Icon::LayoutWindow,
         Icon::GoStart,
+        Icon::PlayFromStart,
         Icon::PrevFrame,
         Icon::Play,
         Icon::Pause,
@@ -94,6 +97,7 @@ impl Icon {
         Icon::NextFrame,
         Icon::GoEnd,
         Icon::LoopPlayback,
+        Icon::MasterBus,
         Icon::SpeedGauge,
         Icon::ZoomGlass,
         Icon::VideoTrack,
@@ -519,6 +523,14 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.poly(&[(0.24, 0.50), (0.56, 0.22), (0.56, 0.78)], pal.blue, None);
             c.poly(&[(0.54, 0.50), (0.86, 0.22), (0.86, 0.78)], pal.blue, None);
         }
+        Icon::PlayFromStart => {
+            c.line(0.18, 0.18, 0.18, 0.82, pal.cyan, 0.12);
+            c.poly(
+                &[(0.32, 0.18), (0.84, 0.50), (0.32, 0.82)],
+                pal.green,
+                Some((0.06, pal.ink)),
+            );
+        }
         Icon::PrevFrame => {
             c.line(0.24, 0.20, 0.24, 0.80, pal.cyan, 0.12);
             c.poly(&[(0.32, 0.50), (0.80, 0.20), (0.80, 0.80)], pal.blue, None);
@@ -561,6 +573,12 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 0.11,
             );
             c.poly(&[(0.10, 0.52), (0.32, 0.68), (0.16, 0.80)], pal.green, None);
+        }
+        Icon::MasterBus => {
+            c.p.rect_filled(c.rect(0.18, 0.16, 0.34, 0.84), 0.0, pal.green);
+            c.p.rect_filled(c.rect(0.40, 0.26, 0.56, 0.84), 0.0, pal.amber);
+            c.line(0.74, 0.16, 0.74, 0.84, pal.muted, 0.09);
+            c.p.rect_filled(c.rect(0.62, 0.38, 0.86, 0.54), c.u(0.04), pal.ink);
         }
         Icon::SpeedGauge => {
             c.polyline(

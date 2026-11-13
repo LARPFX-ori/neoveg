@@ -88,6 +88,11 @@ pub struct App {
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
     pub preview_detached: bool,
+    pub preview_visible: bool,
+    pub master_bus_visible: bool,
+    pub master_bus_detached: bool,
+    pub master_dim: bool,
+    pub master_mono: bool,
     pub dock_visible: bool,
     pub dock_height: f32,
     pub preview_ratio: f32,
@@ -161,9 +166,14 @@ impl App {
         if let Some(el) = loaded_layout.as_ref().and_then(|l| l.edit_layout.clone()) {
             prefs.edit_layout = el;
         }
+        let master_bus_visible = loaded_layout
+            .as_ref()
+            .map(|l| l.master_bus_visible)
+            .unwrap_or(prefs.edit_layout.master_bus_docked);
         let initial_layout = loaded_layout.unwrap_or_else(|| layout::WindowLayout {
             dock_height: prefs.edit_layout.layout_type.default_dock_height(),
             preview_ratio: prefs.edit_layout.layout_type.default_preview_ratio(),
+            master_bus_visible,
             ..Default::default()
         });
         let saved_layouts = layout::list_saved_layouts();
@@ -198,6 +208,11 @@ impl App {
             last_req: (Ticks::from_raw(-1), 0, 0, 0, false, false),
             detached_tabs: initial_layout.detached_panels(),
             preview_detached: initial_layout.preview_detached,
+            preview_visible: initial_layout.preview_visible,
+            master_bus_visible,
+            master_bus_detached: initial_layout.master_bus_detached,
+            master_dim: false,
+            master_mono: false,
             dock_visible: initial_layout.dock_visible,
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
@@ -1069,6 +1084,28 @@ impl App {
                 self.detached_tabs.remove(&panel);
                 self.dock_tab = panel;
             }
+            UiAction::TogglePreview => {
+                if self.preview_detached {
+                    self.preview_detached = false;
+                    self.preview_visible = true;
+                } else {
+                    self.preview_visible = !self.preview_visible;
+                }
+                if self.preview_visible {
+                    self.dock_visible = true;
+                }
+            }
+            UiAction::ToggleMasterBus => {
+                if self.master_bus_detached {
+                    self.master_bus_detached = false;
+                    self.master_bus_visible = true;
+                } else {
+                    self.master_bus_visible = !self.master_bus_visible;
+                }
+                if self.master_bus_visible {
+                    self.dock_visible = true;
+                }
+            }
             UiAction::TogglePlay => self.toggle_play(),
             UiAction::PlayFromStart => {
                 self.set_cursor(Ticks::ZERO);
@@ -1298,11 +1335,47 @@ impl App {
                     }
                 }
                 ui.separator();
+                let pv_open = (self.dock_visible && self.preview_visible && !self.preview_detached)
+                    || self.preview_detached;
+                let pv_label = if self.preview_detached {
+                    "Prévia de Vídeo (flutuante)"
+                } else {
+                    "Prévia de Vídeo"
+                };
+                if ui.selectable_label(pv_open, pv_label).clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "view.preview");
+                    ui.close_menu();
+                }
+                let mb_open =
+                    (self.dock_visible && self.master_bus_visible && !self.master_bus_detached)
+                        || self.master_bus_detached;
+                let mb_label = if self.master_bus_detached {
+                    "Master Bus (flutuante)"
+                } else {
+                    "Master Bus"
+                };
+                if ui.selectable_label(mb_open, mb_label).clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "view.master_bus");
+                    ui.close_menu();
+                }
                 if ui
                     .selectable_label(self.preview_detached, "Prévia de Vídeo em janela separada")
                     .clicked()
                 {
                     self.preview_detached = !self.preview_detached;
+                    if !self.preview_detached {
+                        self.preview_visible = true;
+                    }
+                    ui.close_menu();
+                }
+                if ui
+                    .selectable_label(self.master_bus_detached, "Master Bus em janela separada")
+                    .clicked()
+                {
+                    self.master_bus_detached = !self.master_bus_detached;
+                    if !self.master_bus_detached {
+                        self.master_bus_visible = true;
+                    }
                     ui.close_menu();
                 }
                 if ui
@@ -1319,11 +1392,20 @@ impl App {
                     self.detach_dock_tab(self.dock_tab);
                     ui.close_menu();
                 }
-                if (!self.detached_tabs.is_empty() || self.preview_detached)
+                if (!self.detached_tabs.is_empty()
+                    || self.preview_detached
+                    || self.master_bus_detached)
                     && ui.button("Acoplar todas as janelas flutuantes").clicked()
                 {
+                    if self.preview_detached {
+                        self.preview_visible = true;
+                    }
+                    if self.master_bus_detached {
+                        self.master_bus_visible = true;
+                    }
                     self.detached_tabs.clear();
                     self.preview_detached = false;
+                    self.master_bus_detached = false;
                     self.dock_visible = true;
                     ui.close_menu();
                 }
@@ -1458,7 +1540,13 @@ impl App {
             .unwrap_or_else(|| fallback.unwrap_or(id).to_string())
     }
 
-    fn cmd_tool_btn(&mut self, ui: &mut egui::Ui, icon: Icon, text: Option<&str>, id: &str) {
+    pub(crate) fn cmd_tool_btn(
+        &mut self,
+        ui: &mut egui::Ui,
+        icon: Icon,
+        text: Option<&str>,
+        id: &str,
+    ) {
         let hover = self.cmd_hover_text(id, text);
         let enabled = self.cmd_enabled(id);
         if icons::icon_button(ui, icon, text, false, enabled, &self.theme)
@@ -1469,7 +1557,7 @@ impl App {
         }
     }
 
-    fn cmd_tool_toggle(
+    pub(crate) fn cmd_tool_toggle(
         &mut self,
         ui: &mut egui::Ui,
         active: bool,
@@ -1492,10 +1580,10 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NewFile, None, "file.new");
             self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
             self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
-            self.cmd_tool_btn(ui, Icon::RenderClapper, Some("Renderizar"), "file.render");
+            self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             ui.separator();
-            self.cmd_tool_btn(ui, Icon::ImportMedia, Some("Importar"), "file.import_media");
+            self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
             ui.separator();
             self.cmd_tool_btn(ui, Icon::Cut, None, "edit.cut");
             self.cmd_tool_btn(ui, Icon::Copy, None, "edit.copy");
@@ -1504,36 +1592,33 @@ impl App {
             self.cmd_tool_btn(ui, Icon::Undo, None, "edit.undo");
             self.cmd_tool_btn(ui, Icon::Redo, None, "edit.redo");
             ui.separator();
-            self.cmd_tool_btn(ui, Icon::Split, Some("Dividir"), "edit.split");
-            self.cmd_tool_btn(ui, Icon::DeleteTrash, None, "edit.delete");
-            ui.separator();
             self.cmd_tool_toggle(
                 ui,
                 self.opts.snapping,
                 Icon::MagnetSnap,
-                Some("Encaixe"),
+                None,
                 "options.snapping",
             );
             self.cmd_tool_toggle(
                 ui,
                 self.opts.auto_ripple,
                 Icon::AutoRipple,
-                Some("Ripple"),
+                None,
                 "options.auto_ripple",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.ignore_grouping,
-                Icon::IgnoreGrouping,
-                Some("Ignorar grupos"),
-                "options.ignore_grouping",
             );
             self.cmd_tool_toggle(
                 ui,
                 self.opts.show_envelopes,
                 Icon::Envelopes,
-                Some("Envelopes"),
+                None,
                 "view.envelopes",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.ignore_grouping,
+                Icon::IgnoreGrouping,
+                None,
+                "options.ignore_grouping",
             );
             ui.separator();
             self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
@@ -1545,114 +1630,177 @@ impl App {
         });
     }
 
+    fn time_readout_chip(&self, ui: &mut egui::Ui, label: &str, t: Ticks, tooltip: &str) {
+        let txt = self.fmt_time(t);
+        egui::Frame::new()
+            .fill(self.theme.extreme_bg)
+            .stroke(egui::Stroke::new(1.0_f32, self.theme.border))
+            .corner_radius(2.0)
+            .inner_margin(egui::Margin::symmetric(5, 1))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.label(
+                        egui::RichText::new(label)
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                    ui.label(
+                        egui::RichText::new(txt)
+                            .monospace()
+                            .small()
+                            .color(self.theme.text_primary),
+                    );
+                });
+            })
+            .response
+            .on_hover_text(tooltip);
+    }
+
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let playing = self.is_playing();
-            if icons::icon_button(ui, Icon::GoStart, None, false, true, &self.theme)
-                .on_hover_text("Início do projeto (Ctrl+Home)")
-                .clicked()
-            {
-                self.set_cursor(Ticks::ZERO);
-            }
-            if icons::icon_button(ui, Icon::PrevFrame, None, false, true, &self.theme)
-                .on_hover_text("Quadro anterior (Alt+←)")
-                .clicked()
-            {
-                let t = self
-                    .project
-                    .settings
-                    .quantize((self.cursor - self.project.settings.frame_dur()).max(Ticks::ZERO));
-                self.set_cursor(t);
-            }
-            if icons::icon_button(
+            // Bloco 1: Transporte (Manual VEGAS Pro 21 §6)
+            self.cmd_tool_toggle(
                 ui,
-                if playing { Icon::Pause } else { Icon::Play },
-                None,
-                playing,
-                true,
-                &self.theme,
-            )
-            .on_hover_text("Reproduzir/Pausar (Enter)")
-            .clicked()
-            {
-                if playing {
-                    self.stop(true);
-                } else {
-                    self.play();
-                }
-            }
-            if icons::icon_button(ui, Icon::Stop, None, false, true, &self.theme)
-                .on_hover_text("Parar (Espaço/Esc)")
-                .clicked()
-            {
-                self.stop(false);
-            }
-            if icons::icon_button(ui, Icon::NextFrame, None, false, true, &self.theme)
-                .on_hover_text("Próximo quadro (Alt+→)")
-                .clicked()
-            {
-                let t = self
-                    .project
-                    .settings
-                    .quantize(self.cursor + self.project.settings.frame_dur());
-                self.set_cursor(t);
-            }
-            if icons::icon_button(ui, Icon::GoEnd, None, false, true, &self.theme)
-                .on_hover_text("Fim do projeto (Ctrl+End)")
-                .clicked()
-            {
-                let d = self.project.duration();
-                self.set_cursor(d);
-            }
-            if icons::icon_button(
-                ui,
+                self.opts.loop_playback,
                 Icon::LoopPlayback,
                 None,
-                self.opts.loop_playback,
-                true,
-                &self.theme,
-            )
-            .on_hover_text("Reprodução em loop (Q)")
-            .clicked()
-            {
-                self.opts.loop_playback = !self.opts.loop_playback;
-            }
-            ui.separator();
-            let t = self.view_time();
-            ui.label(
-                egui::RichText::new(self.fmt_time(t))
-                    .monospace()
-                    .size(20.0)
-                    .color(self.theme.timecode_fg),
+                "options.loop_playback",
             );
-            if let Some((a, b)) = self.time_sel {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Seleção: {} → {} ({})",
-                        self.fmt_time(a),
-                        self.fmt_time(b),
-                        self.fmt_time(b - a)
-                    ))
-                    .monospace()
-                    .small(),
-                );
+            self.cmd_tool_btn(ui, Icon::PlayFromStart, None, "transport.play_from_start");
+            self.cmd_tool_toggle(
+                ui,
+                playing,
+                if playing { Icon::Pause } else { Icon::Play },
+                None,
+                "transport.play_toggle",
+            );
+            self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
+            self.cmd_tool_btn(ui, Icon::GoStart, None, "transport.project_start");
+            self.cmd_tool_btn(ui, Icon::GoEnd, None, "transport.project_end");
+            self.cmd_tool_btn(ui, Icon::PrevFrame, None, "transport.frame_back");
+            self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
+            ui.separator();
+
+            // Bloco 2: Ferramentas de Edição da Timeline (Manual VEGAS Pro 21 §6)
+            self.cmd_tool_btn(ui, Icon::Split, None, "edit.split");
+            self.cmd_tool_btn(ui, Icon::DeleteTrash, None, "edit.delete");
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.snapping,
+                Icon::MagnetSnap,
+                None,
+                "options.snapping",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.auto_ripple,
+                Icon::AutoRipple,
+                None,
+                "options.auto_ripple",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.show_envelopes,
+                Icon::Envelopes,
+                None,
+                "view.envelopes",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.ignore_grouping,
+                Icon::IgnoreGrouping,
+                None,
+                "options.ignore_grouping",
+            );
+            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
+            self.cmd_tool_toggle(
+                ui,
+                self.is_panel_open(DockTab::ColorGrading),
+                Icon::ColorWheels,
+                None,
+                "view.tab.color_grading",
+            );
+
+            if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
+                ui.label(egui::RichText::new(format!("Shuttle {:+.2}x", self.shuttle)).small());
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut z = self.tl.px_per_sec.ln();
-                if ui
-                    .add(
-                        egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln())
-                            .show_value(false),
-                    )
-                    .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
-                    .changed()
-                {
-                    self.tl.px_per_sec = z.exp();
-                }
-                icons::icon_label(ui, Icon::ZoomGlass, 14.0, "Zoom", &self.theme);
-                ui.separator();
-                ui.horizontal(|ui| self.playback_rate_control(ui, false));
-            });
+
+            // Bloco 3 (direita): Zoom horizontal + Selection Start/End/Length boxes (Manual p. 73)
+            let avail_w = ui.available_width();
+            if avail_w >= 135.0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (sel_start, sel_end, sel_len) = match self.time_sel {
+                        Some((a, b)) if b >= a => (a, b, b - a),
+                        _ => (self.view_time(), Ticks::ZERO, Ticks::ZERO),
+                    };
+                    if avail_w >= 430.0 {
+                        self.time_readout_chip(
+                            ui,
+                            "Tam:",
+                            sel_len,
+                            "Duração da seleção (Selection Length)",
+                        );
+                        self.time_readout_chip(
+                            ui,
+                            "Fim:",
+                            sel_end,
+                            "Fim da seleção (Selection End)",
+                        );
+                        self.time_readout_chip(
+                            ui,
+                            if self.time_sel.is_some() {
+                                "In:"
+                            } else {
+                                "Pos:"
+                            },
+                            sel_start,
+                            "Início da seleção / posição do cursor",
+                        );
+                        ui.separator();
+                    } else if avail_w >= 260.0 {
+                        self.time_readout_chip(
+                            ui,
+                            "Tam:",
+                            sel_len,
+                            "Duração da seleção (Selection Length)",
+                        );
+                        ui.separator();
+                    }
+                    if ui
+                        .small_button("+")
+                        .on_hover_text(
+                            self.cmd_hover_text("timeline.zoom_in", Some("Aproximar zoom")),
+                        )
+                        .clicked()
+                    {
+                        self.exec_cmd(Some(ui.ctx()), "timeline.zoom_in");
+                    }
+                    let mut z = self.tl.px_per_sec.ln();
+                    if ui
+                        .add_sized(
+                            [72.0, 16.0],
+                            egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln())
+                                .show_value(false),
+                        )
+                        .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
+                        .changed()
+                    {
+                        self.tl.px_per_sec = z.exp();
+                    }
+                    if ui
+                        .small_button("-")
+                        .on_hover_text(
+                            self.cmd_hover_text("timeline.zoom_out", Some("Afastar zoom")),
+                        )
+                        .clicked()
+                    {
+                        self.exec_cmd(Some(ui.ctx()), "timeline.zoom_out");
+                    }
+                    icons::paint_inline(ui, Icon::ZoomGlass, 13.0, &self.theme);
+                });
+            }
         });
     }
 
@@ -1708,23 +1856,38 @@ impl App {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if self.status_at.elapsed().as_secs() < 20 {
+            if self.status_at.elapsed().as_secs() < 20 && !self.status.is_empty() {
                 ui.label(&self.status);
+            } else {
+                ui.label(egui::RichText::new("Pronto").small().color(self.theme.text_muted));
             }
+            let dur_str = self.fmt_time(self.project.duration());
+            let wide = ui.available_width() >= 680.0;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let s = &self.project.settings;
-                ui.label(format!(
-                    "{}x{} {} qps | {} Hz | prévia {:.0} ms | {}",
-                    s.width,
-                    s.height,
-                    s.fps.label(),
-                    s.sample_rate,
-                    self.preview_ms,
-                    self.path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(sem título)".into())
-                ));
+                let file_name = self
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "(sem título)".into());
+                let ch_label = if self.master_mono {
+                    "Mono (1 ch)"
+                } else {
+                    "Estéreo (2 ch)"
+                };
+                let info_text = if wide {
+                    format!(
+                        "{ch_label} | {} Hz | {}x{} {} qps | prévia {:.0} ms | Duração: {dur_str} | {file_name}",
+                        s.sample_rate, s.width, s.height, s.fps.label(), self.preview_ms,
+                    )
+                } else {
+                    format!(
+                        "{ch_label} | {}x{} {} qps | {} Hz | {file_name}",
+                        s.width, s.height, s.fps.label(), s.sample_rate
+                    )
+                };
+                ui.label(egui::RichText::new(info_text).small().color(self.theme.text_muted));
                 if let Some(job) = &self.render_job {
                     crate::splash::spinner_inline(
                         ui,
@@ -2067,13 +2230,17 @@ impl App {
         } else {
             egui::TopBottomPanel::bottom("dock_bot")
         };
+        let screen_h = ctx.screen_rect().height();
+        let max_h = (screen_h * 0.56).max(160.0);
+        let eff_h = self.dock_height.min(max_h);
         let resp = panel
             .resizable(true)
-            .default_height(self.dock_height)
-            .min_height(160.0)
+            .default_height(eff_h)
+            .min_height(150.0)
+            .max_height(max_h)
             .show(ctx, |ui| self.dock_area(ui));
         let h = resp.response.rect.height();
-        if h.is_finite() && h >= 160.0 {
+        if resp.response.dragged() && h.is_finite() && h >= 150.0 {
             self.dock_height = h.clamp(160.0, 720.0);
         }
     }
@@ -2090,6 +2257,10 @@ impl App {
         if apply_metrics {
             self.dock_height = lt.default_dock_height();
             self.preview_ratio = lt.default_preview_ratio();
+        }
+        self.master_bus_visible = self.prefs.edit_layout.master_bus_docked;
+        if !self.master_bus_visible {
+            self.master_bus_detached = false;
         }
         if self.prefs.edit_layout.sync_theme_with_layout && !self.theme_id.is_high_contrast() {
             let target_theme = ThemeId::from_pref(lt.default_theme_id());
@@ -2150,6 +2321,9 @@ impl App {
             active_tab: layout::panel_key(self.dock_tab).to_string(),
             detached_tabs: detached,
             preview_detached: self.preview_detached,
+            preview_visible: self.preview_visible,
+            master_bus_visible: self.master_bus_visible,
+            master_bus_detached: self.master_bus_detached,
             px_per_sec: Some(self.tl.px_per_sec),
             edit_layout: Some(self.prefs.edit_layout.clone()),
         };
@@ -2165,6 +2339,9 @@ impl App {
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
         self.preview_detached = l.preview_detached;
+        self.preview_visible = l.preview_visible;
+        self.master_bus_visible = l.master_bus_visible;
+        self.master_bus_detached = l.master_bus_detached;
         if self.detached_tabs.contains(&self.dock_tab) {
             if let Some(next) = DockTab::ALL
                 .into_iter()

@@ -2841,51 +2841,7 @@ impl App {
 
                         ui.separator();
                         ui.heading("Opções da área de trabalho");
-                        if ui
-                            .checkbox(
-                                &mut draft.timeline_at_bottom,
-                                "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
-                            )
-                            .changed()
-                        {
-                            live_tweak = true;
-                        }
-                        if ui
-                            .checkbox(
-                                &mut draft.tabs_at_top,
-                                "Posicionar abas no topo das janelas acopladas",
-                            )
-                            .changed()
-                        {
-                            live_tweak = true;
-                        }
-                        if ui
-                            .checkbox(
-                                &mut draft.transport_at_bottom,
-                                "Fixar barra de transporte no rodapé da janela",
-                            )
-                            .changed()
-                        {
-                            live_tweak = true;
-                        }
-                        if ui
-                            .checkbox(
-                                &mut draft.preview_on_left,
-                                "Posicionar Prévia de Vídeo à esquerda na área acoplável",
-                            )
-                            .changed()
-                        {
-                            live_tweak = true;
-                        }
-                        if ui
-                            .checkbox(
-                                &mut draft.sync_theme_with_layout,
-                                "Aplicar tema visual da era ao selecionar tipo de layout",
-                            )
-                            .changed()
-                        {
-                            live_tweak = true;
-                        }
+                        live_tweak |= edit_layout_checkboxes(ui, &mut draft, None);
                         if self.theme_id.is_high_contrast() {
                             ui.label(
                                 egui::RichText::new(
@@ -3209,13 +3165,23 @@ fn draw_layout_schematic(
         Stroke::new(1.0_f32, theme.border),
     );
 
-    // Área acoplável (Painéis + Prévia + barra de abas no topo/base)
-    let split = dock_r.width() * if cfg.preview_on_left { 0.40 } else { 0.60 };
+    // Área acoplável (Painéis + Prévia + Master Bus opcional + barra de abas no topo/base)
+    let master_w = if cfg.master_bus_docked {
+        (dock_r.width() * 0.14).clamp(26.0, 38.0)
+    } else {
+        0.0
+    };
+    let main_dock_w =
+        (dock_r.width() - if master_w > 0.0 { master_w + 2.0 } else { 0.0 }).max(40.0);
+    let split = main_dock_w * if cfg.preview_on_left { 0.42 } else { 0.58 };
     let left_sub = Rect::from_min_max(
         dock_r.min,
         pos2(dock_r.left() + split - 2.0, dock_r.bottom()),
     );
-    let right_sub = Rect::from_min_max(pos2(dock_r.left() + split + 1.0, dock_r.top()), dock_r.max);
+    let right_sub = Rect::from_min_max(
+        pos2(dock_r.left() + split + 1.0, dock_r.top()),
+        pos2(dock_r.left() + main_dock_w, dock_r.bottom()),
+    );
     let (tabs_sub, prev_sub) = if cfg.preview_on_left {
         (right_sub, left_sub)
     } else {
@@ -3223,12 +3189,81 @@ fn draw_layout_schematic(
     };
     box_labeled(tabs_sub, theme.panel_fill, theme.border, "Painéis");
     box_labeled(prev_sub, theme.tl_preview_bg, theme.accent, "Prévia");
-    let strip_r = if cfg.tabs_at_top {
-        Rect::from_min_max(tabs_sub.min, pos2(tabs_sub.right(), tabs_sub.top() + 6.0))
+    let strip_span = if master_w > 0.0 {
+        let master_sub =
+            Rect::from_min_max(pos2(dock_r.right() - master_w, dock_r.top()), dock_r.max);
+        box_labeled(master_sub, theme.panel_fill, theme.border, "Master");
+        dock_r
     } else {
-        Rect::from_min_max(pos2(tabs_sub.left(), tabs_sub.bottom() - 6.0), tabs_sub.max)
+        tabs_sub
+    };
+    let strip_r = if cfg.tabs_at_top {
+        Rect::from_min_max(
+            strip_span.min,
+            pos2(strip_span.right(), strip_span.top() + 5.0),
+        )
+    } else {
+        Rect::from_min_max(
+            pos2(strip_span.left(), strip_span.bottom() - 5.0),
+            strip_span.max,
+        )
     };
     p.rect_filled(strip_r, 1.0, theme.accent);
+}
+
+fn edit_layout_checkboxes(
+    ui: &mut egui::Ui,
+    cfg: &mut EditLayoutPrefs,
+    sync_theme: Option<&mut String>,
+) -> bool {
+    let mut changed = false;
+    changed |= ui
+        .checkbox(
+            &mut cfg.timeline_at_bottom,
+            "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut cfg.tabs_at_top,
+            "Posicionar abas no topo das janelas acopladas",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut cfg.transport_at_bottom,
+            "Fixar barra de transporte no rodapé da janela",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut cfg.preview_on_left,
+            "Posicionar Prévia de Vídeo à esquerda na área acoplável",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut cfg.master_bus_docked,
+            "Exibir Master Bus acoplado à direita (padrão VEGAS Pro 21)",
+        )
+        .changed();
+    if ui
+        .checkbox(
+            &mut cfg.sync_theme_with_layout,
+            "Aplicar tema visual da era ao selecionar tipo de layout",
+        )
+        .changed()
+    {
+        if cfg.sync_theme_with_layout {
+            if let Some(theme_pref) = sync_theme {
+                if !ThemeId::from_pref(theme_pref).is_high_contrast() {
+                    *theme_pref = cfg.layout_type.default_theme_id().to_string();
+                }
+            }
+        }
+        changed = true;
+    }
+    changed
 }
 
 struct PrefsFormContext<'a> {
@@ -3535,46 +3570,7 @@ fn prefs_appearance(
             });
 
             prefs_indented(ui, inner_lw, |ui| {
-                let mut layout_changed = false;
-                layout_changed |= ui
-                    .checkbox(
-                        &mut draft.edit_layout.timeline_at_bottom,
-                        "Timeline na parte inferior (estilo Sony / MAGIX)",
-                    )
-                    .changed();
-                layout_changed |= ui
-                    .checkbox(
-                        &mut draft.edit_layout.tabs_at_top,
-                        "Abas das janelas acopladas na borda superior",
-                    )
-                    .changed();
-                layout_changed |= ui
-                    .checkbox(
-                        &mut draft.edit_layout.transport_at_bottom,
-                        "Fixar barra de transporte no rodapé principal",
-                    )
-                    .changed();
-                layout_changed |= ui
-                    .checkbox(
-                        &mut draft.edit_layout.preview_on_left,
-                        "Exibir Prévia de Vídeo à esquerda na área acoplável",
-                    )
-                    .changed();
-                if ui
-                    .checkbox(
-                        &mut draft.edit_layout.sync_theme_with_layout,
-                        "Sincronizar tema da era ao trocar o tipo de layout",
-                    )
-                    .changed()
-                {
-                    if draft.edit_layout.sync_theme_with_layout
-                        && !ThemeId::from_pref(&draft.theme).is_high_contrast()
-                    {
-                        draft.theme = draft.edit_layout.layout_type.default_theme_id().to_string();
-                    }
-                    layout_changed = true;
-                }
-                if layout_changed {
+                if edit_layout_checkboxes(ui, &mut draft.edit_layout, Some(&mut draft.theme)) {
                     *act.live_layout_preview = true;
                 }
 

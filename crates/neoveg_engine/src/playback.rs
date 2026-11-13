@@ -24,6 +24,7 @@ pub struct Shared {
     pub speed: f64,
     pub frac: f64,
     pub dim: bool,
+    pub mono_downmix: bool,
     /// Erro ocorrido na thread de áudio, exibido pela interface.
     pub error: Option<String>,
 }
@@ -58,6 +59,7 @@ impl AudioOut {
             speed: 1.0,
             frac: 0.0,
             dim: false,
+            mono_downmix: false,
             error: None,
         }));
         let mut stream = None;
@@ -212,8 +214,18 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                     done += n;
                 }
                 s.meters = s.mixer.meters.clone();
+                if s.mono_downmix {
+                    let mut mono_peak = 0.0_f32;
+                    for pair in buf.as_chunks_mut::<2>().0.iter_mut().take(frames) {
+                        let m = 0.5 * (pair[0] + pair[1]);
+                        pair[0] = m;
+                        pair[1] = m;
+                        mono_peak = mono_peak.max(m.abs());
+                    }
+                    s.meters.master = [mono_peak, mono_peak];
+                }
                 if s.dim {
-                    buf.iter_mut().for_each(|v| *v *= 0.1);
+                    buf.iter_mut().take(frames * 2).for_each(|v| *v *= 0.1);
                 }
             } else {
                 let adv = frames as f64 * s.speed + s.frac;
