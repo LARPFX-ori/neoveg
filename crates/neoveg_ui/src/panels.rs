@@ -2,26 +2,45 @@
 
 use super::timeline::draw_meter;
 use super::{App, DndPayload, DockTab, FxTarget, PreviewQuality};
+use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind};
 use std::path::PathBuf;
+
+fn dock_tab_icon(tab: DockTab) -> Icon {
+    match tab {
+        DockTab::ProjectMedia => Icon::MediaItem,
+        DockTab::Explorer => Icon::FolderItem,
+        DockTab::Transitions => Icon::TransitionSplit,
+        DockTab::VideoFx => Icon::FxSparkle,
+        DockTab::AudioFx => Icon::FxAudio,
+        DockTab::Generators => Icon::GeneratorFrame,
+        DockTab::Mixer => Icon::MixerFaders,
+        DockTab::Scopes => Icon::ScopesWave,
+        DockTab::Notes => Icon::NotesPad,
+    }
+}
 
 impl App {
     fn dock_tab_strip(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
         let mut detach_req: Option<DockTab> = None;
         ui.horizontal_wrapped(|ui| {
             for &tab in docked {
-                if ui
-                    .selectable_label(self.dock_tab == tab, tab.name())
-                    .clicked()
+                if icons::small_icon_button(
+                    ui,
+                    dock_tab_icon(tab),
+                    Some(tab.name()),
+                    self.dock_tab == tab,
+                    &self.theme,
+                )
+                .clicked()
                 {
                     self.dock_tab = tab;
                 }
             }
             if docked.contains(&self.dock_tab)
-                && ui
-                    .small_button("↗ Destacar")
+                && icons::small_icon_button(ui, Icon::PopOut, Some("Destacar"), false, &self.theme)
                     .on_hover_text("Abrir a aba ativa em janela flutuante")
                     .clicked()
             {
@@ -158,7 +177,15 @@ impl App {
                 .default_size([460.0, 320.0])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.small_button("↙ Acoplar na área inferior").clicked() {
+                        if icons::small_icon_button(
+                            ui,
+                            Icon::DockIn,
+                            Some("Acoplar na área inferior"),
+                            false,
+                            &self.theme,
+                        )
+                        .clicked()
+                        {
                             reattach = true;
                         }
                     });
@@ -214,10 +241,20 @@ impl App {
                         ui.selectable_value(&mut self.opts.preview_quality, q, q.name());
                     }
                 });
-            ui.toggle_value(&mut self.opts.safe_areas, "▣")
-                .on_hover_text("Áreas de segurança");
-            if ui
-                .button("📷")
+            if icons::icon_button(
+                ui,
+                Icon::SafeAreas,
+                None,
+                self.opts.safe_areas,
+                true,
+                &self.theme,
+            )
+            .on_hover_text("Áreas de segurança")
+            .clicked()
+            {
+                self.opts.safe_areas = !self.opts.safe_areas;
+            }
+            if icons::icon_button(ui, Icon::CameraSnap, None, false, true, &self.theme)
                 .on_hover_text("Salvar quadro em PNG")
                 .clicked()
             {
@@ -297,7 +334,16 @@ impl App {
 
     fn media_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("➕ Importar...").clicked() {
+            if icons::icon_button(
+                ui,
+                Icon::ImportMedia,
+                Some("Importar..."),
+                false,
+                true,
+                &self.theme,
+            )
+            .clicked()
+            {
                 self.import_dialog();
             }
             if ui.button("Sequência de imagens...").clicked() {
@@ -330,7 +376,16 @@ impl App {
                                     let h = 36.0;
                                     ui.image((t.id(), vec2(h * s.x / s.y.max(1.0), h)));
                                 } else {
-                                    ui.label(if m.has_audio { "🔊" } else { "❔" });
+                                    icons::paint_inline(
+                                        ui,
+                                        if m.has_audio {
+                                            Icon::AudioTrack
+                                        } else {
+                                            Icon::MediaItem
+                                        },
+                                        18.0,
+                                        &self.theme,
+                                    );
                                 }
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new(&m.name).strong());
@@ -427,7 +482,10 @@ impl App {
 
     fn explorer_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("⬆").on_hover_text("Pasta acima").clicked() {
+            if icons::icon_button(ui, Icon::FolderUp, None, false, true, &self.theme)
+                .on_hover_text("Pasta acima")
+                .clicked()
+            {
                 if let Some(p) = self.explorer_dir.parent() {
                     self.explorer_dir = p.to_path_buf();
                 }
@@ -484,12 +542,21 @@ impl App {
             if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
                 continue;
             }
-            let label = if is_dir {
-                format!("📁 {name}")
-            } else {
-                format!("🎞 {name}")
-            };
-            let r = ui.selectable_label(false, label);
+            let r = ui
+                .horizontal(|ui| {
+                    icons::paint_inline(
+                        ui,
+                        if is_dir {
+                            Icon::FolderItem
+                        } else {
+                            Icon::MediaItem
+                        },
+                        14.0,
+                        &self.theme,
+                    );
+                    ui.selectable_label(false, name)
+                })
+                .inner;
             if r.double_clicked() {
                 if is_dir {
                     go = Some(p.clone());
@@ -527,7 +594,7 @@ impl App {
                 for k in TransitionKind::ALL {
                     let id = egui::Id::new(("tr", k as u32));
                     ui.dnd_drag_source(id, DndPayload::Transition(k), |ui| {
-                        ui.label(format!("◪ {}", k.name()));
+                        icons::icon_label(ui, Icon::TransitionSplit, 14.0, k.name(), &self.theme);
                     });
                     if ui
                         .add_enabled(!sel.is_empty(), egui::Button::new("Aplicar"))
@@ -566,7 +633,17 @@ impl App {
                 for k in list {
                     let id = egui::Id::new(("fx", k as u32));
                     ui.dnd_drag_source(id, DndPayload::Fx(k), |ui| {
-                        ui.label(format!("✨ {}", k.name()));
+                        icons::icon_label(
+                            ui,
+                            if audio {
+                                Icon::FxAudio
+                            } else {
+                                Icon::FxSparkle
+                            },
+                            14.0,
+                            k.name(),
+                            &self.theme,
+                        );
                     });
                     let sel_ev: Vec<Id> = self
                         .sel_events
@@ -743,7 +820,7 @@ impl App {
                         egui::Id::new(("gen", i)),
                         DndPayload::Generator(spec.clone()),
                         |ui| {
-                            ui.label(format!("🖼 {name}"));
+                            icons::icon_label(ui, Icon::GeneratorFrame, 14.0, name, &self.theme);
                         },
                     );
                     if ui.button("Inserir no cursor").clicked() {

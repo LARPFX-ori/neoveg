@@ -3,6 +3,7 @@
 //! slip, envelopes, seleção de tempo, arrastar e soltar).
 
 use super::{App, DndPayload, FxTarget};
+use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
 use egui::{
@@ -428,16 +429,14 @@ impl App {
         ui.painter().rect_filled(r, 0.0, self.theme.tl_bg);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(4.0)));
         child.horizontal(|ui| {
-            if ui
-                .small_button("+ Vídeo")
+            if icons::small_icon_button(ui, Icon::VideoTrack, Some("+ Vídeo"), false, &self.theme)
                 .on_hover_text("Inserir trilha de vídeo (Ctrl+Shift+Q)")
                 .clicked()
             {
                 self.checkpoint();
                 self.insert_track(TrackKind::Video);
             }
-            if ui
-                .small_button("+ Áudio")
+            if icons::small_icon_button(ui, Icon::AudioTrack, Some("+ Áudio"), false, &self.theme)
                 .on_hover_text("Inserir trilha de áudio (Ctrl+Q)")
                 .clicked()
             {
@@ -943,11 +942,16 @@ impl App {
             let mut want_checkpoint = false;
             child.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{}", ti + 1)).strong());
-                ui.label(if kind == TrackKind::Video {
-                    "🎞"
-                } else {
-                    "🔊"
-                });
+                icons::paint_inline(
+                    ui,
+                    if kind == TrackKind::Video {
+                        Icon::VideoTrack
+                    } else {
+                        Icon::AudioTrack
+                    },
+                    14.0,
+                    &self.theme,
+                );
                 let t = &mut self.project.tracks[ti];
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut t.name)
@@ -978,8 +982,7 @@ impl App {
                     self.dlg.fx_target = Some(FxTarget::Track(tid));
                 }
                 if kind == TrackKind::Video
-                    && ui
-                        .small_button("✥")
+                    && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
                         .on_hover_text("Movimento da trilha (Track Motion)")
                         .clicked()
                 {
@@ -2413,7 +2416,7 @@ impl App {
                     label.push_str(&format!("  [{:.0}%]", e.rate.percent_f64()));
                 }
                 if e.reverse {
-                    label.push_str("  ⇄");
+                    label.push_str("  [Rev]");
                 }
                 if e.looped
                     && self
@@ -2423,13 +2426,13 @@ impl App {
                         .map(|d| e.rate.scale_ticks(e.length) > d + Ticks::from_millis_i64(1))
                         .unwrap_or(false)
                 {
-                    label.push_str("  ⟲");
+                    label.push_str("  [Loop]");
                 }
                 if e.group.is_some() {
-                    label.push_str("  ⛓");
+                    label.push_str("  [Grp]");
                 }
                 if let Some(tr) = &e.transition {
-                    label = format!("◪ {} | {}", tr.kind.name(), label);
+                    label = format!("[{}] {}", tr.kind.name(), label);
                 }
                 painter.with_clip_rect(hdr.intersect(lanes)).text(
                     pos2(r.left().max(lanes.left()) + 4.0, hdr.top() + 1.0),
@@ -2463,13 +2466,7 @@ impl App {
                         Color32::from_gray(150)
                     };
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
-                    painter.text(
-                        b.center(),
-                        Align2::CENTER_CENTER,
-                        "⛶",
-                        FontId::proportional(9.0),
-                        col,
-                    );
+                    icons::paint(&painter, b.shrink(1.5), Icon::PanCrop, &self.theme, active);
                 }
                 // fades
                 let fade_col = Stroke::new(1.5_f32, self.theme.tl_fade);
@@ -2538,12 +2535,17 @@ impl App {
                 };
                 painter.rect_stroke(r, 2.0, border, StrokeKind::Inside);
                 if e.locked {
-                    painter.text(
-                        pos2(r.right() - 4.0, r.bottom() - 2.0),
-                        Align2::RIGHT_BOTTOM,
-                        "🔒",
-                        FontId::proportional(10.0),
-                        Color32::WHITE,
+                    let lock_rect = Rect::from_min_size(
+                        pos2(r.right() - 15.0, r.bottom() - 14.0),
+                        vec2(11.0, 11.0),
+                    );
+                    let lock_painter = painter.with_clip_rect(r.intersect(lanes));
+                    icons::paint(
+                        &lock_painter,
+                        lock_rect,
+                        Icon::LockClosed,
+                        &self.theme,
+                        true,
                     );
                 }
             }

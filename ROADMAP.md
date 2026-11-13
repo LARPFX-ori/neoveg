@@ -25,7 +25,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Pool global do `rayon` dimensionado pelos núcleos da máquina (`Preferences.effective_worker_threads()`).
 - **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de MP4, MOV, MKV, WEBM, M4V, M4A, AAC, WMV e ASF.
 - **Experiência VEGAS Pro em `neoveg_ui`:**
-  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1);
+  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **54 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
   - Playhead físico de **1 px**, alça de ganho em dB na borda superior de eventos de áudio, controle contínuo de taxa (*Playback Rate*);
   - Painéis acopláveis/destacáveis em janelas flutuantes + layouts `.neoveglayout` (4 presets + salvamento/carregamento em arquivo);
   - **Editar > Propriedades > Layout** com seção **Tipos de layout** (*Sonic Foundry*, *Sony* e *MAGIX*) e opções de disposição da janela (timeline superior/inferior, abas no topo/base, barra de transporte e prévia à esquerda);

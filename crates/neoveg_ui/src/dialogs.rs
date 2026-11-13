@@ -3,6 +3,7 @@
 //! atalhos e "sobre".
 
 use super::{App, EditLayoutPrefs, FxTarget, LayoutType, Preferences, RenderJob};
+use crate::icons::{self, Icon};
 use crate::model::*;
 use crate::render::{RenderFormat, RenderSettings, WavBits};
 use crate::theme::ThemeId;
@@ -678,7 +679,16 @@ impl App {
                         ui.separator();
                         ui.label(egui::RichText::new("Keyframes").strong());
                         ui.horizontal(|ui| {
-                            if ui.button("◆ Adicionar no cursor").clicked() {
+                            if icons::icon_button(
+                                ui,
+                                Icon::KeyframeFilled,
+                                Some("Adicionar no cursor"),
+                                false,
+                                true,
+                                &self.theme,
+                            )
+                            .clicked()
+                            {
                                 key_action = Some("add");
                             }
                             if ui.button("Excluir no cursor").clicked() {
@@ -742,9 +752,15 @@ impl App {
                             .show(ui, |ui| {
                                 for (i, kf) in ev.pan_crop.keys.iter().enumerate() {
                                     ui.horizontal(|ui| {
-                                        if ui
-                                            .small_button(format!("◆ {}", self.fmt_time(kf.t)))
-                                            .clicked()
+                                        let t_txt = self.fmt_time(kf.t);
+                                        if icons::small_icon_button(
+                                            ui,
+                                            Icon::KeyframeFilled,
+                                            Some(&t_txt),
+                                            false,
+                                            &self.theme,
+                                        )
+                                        .clicked()
                                         {
                                             sel_key_time = Some(kf.t);
                                         }
@@ -1006,7 +1022,16 @@ impl App {
                         });
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("◆ Keyframe no cursor").clicked() {
+                            if icons::icon_button(
+                                ui,
+                                Icon::KeyframeFilled,
+                                Some("Keyframe no cursor"),
+                                false,
+                                true,
+                                &self.theme,
+                            )
+                            .clicked()
+                            {
                                 action = Some("add");
                             }
                             if ui.button("Excluir no cursor").clicked() {
@@ -1017,9 +1042,15 @@ impl App {
                             .max_height(140.0)
                             .show(ui, |ui| {
                                 for (kt, _) in &keys {
-                                    if ui
-                                        .small_button(format!("◆ {}", self.fmt_time(*kt)))
-                                        .clicked()
+                                    let t_txt = self.fmt_time(*kt);
+                                    if icons::small_icon_button(
+                                        ui,
+                                        Icon::KeyframeFilled,
+                                        Some(&t_txt),
+                                        false,
+                                        &self.theme,
+                                    )
+                                    .clicked()
                                     {
                                         jump = Some(*kt);
                                     }
@@ -1142,7 +1173,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("fx_add")
-                        .selected_text("➕ Adicionar efeito...")
+                        .selected_text("+ Adicionar efeito...")
                         .show_ui(ui, |ui| {
                             let list: &[FxKind] = if audio {
                                 &FxKind::AUDIO
@@ -1176,23 +1207,53 @@ impl App {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui
-                                                .small_button("✕")
-                                                .on_hover_text("Remover")
-                                                .clicked()
+                                            if icons::small_icon_button(
+                                                ui,
+                                                Icon::CloseX,
+                                                None,
+                                                false,
+                                                &self.theme,
+                                            )
+                                            .on_hover_text("Remover")
+                                            .clicked()
                                             {
                                                 op = Some((i, "del"));
                                             }
-                                            if i + 1 < n && ui.small_button("▼").clicked() {
+                                            if i + 1 < n
+                                                && icons::small_icon_button(
+                                                    ui,
+                                                    Icon::MoveDown,
+                                                    None,
+                                                    false,
+                                                    &self.theme,
+                                                )
+                                                .on_hover_text("Mover para baixo")
+                                                .clicked()
+                                            {
                                                 op = Some((i, "down"));
                                             }
-                                            if i > 0 && ui.small_button("▲").clicked() {
+                                            if i > 0
+                                                && icons::small_icon_button(
+                                                    ui,
+                                                    Icon::MoveUp,
+                                                    None,
+                                                    false,
+                                                    &self.theme,
+                                                )
+                                                .on_hover_text("Mover para cima")
+                                                .clicked()
+                                            {
                                                 op = Some((i, "up"));
                                             }
-                                            if ui
-                                                .small_button("⟲")
-                                                .on_hover_text("Valores padrão")
-                                                .clicked()
+                                            if icons::small_icon_button(
+                                                ui,
+                                                Icon::ResetSpin,
+                                                None,
+                                                false,
+                                                &self.theme,
+                                            )
+                                            .on_hover_text("Valores padrão")
+                                            .clicked()
                                             {
                                                 op = Some((i, "reset"));
                                             }
@@ -1234,11 +1295,19 @@ impl App {
                                         ui.horizontal(|ui| {
                                             let has_key_here =
                                                 p.keys.iter().any(|k| k.0.abs_diff(local_t) <= tol);
-                                            let lbl = if has_key_here { "◆" } else { "◇" };
-                                            if ui
-                                                .small_button(lbl)
-                                                .on_hover_text("Criar keyframe neste tempo")
-                                                .clicked()
+                                            if icons::small_icon_button(
+                                                ui,
+                                                if has_key_here {
+                                                    Icon::KeyframeFilled
+                                                } else {
+                                                    Icon::KeyframeEmpty
+                                                },
+                                                None,
+                                                has_key_here,
+                                                &self.theme,
+                                            )
+                                            .on_hover_text("Criar keyframe neste tempo")
+                                            .clicked()
                                             {
                                                 if p.keys.is_empty() && local_t > tol {
                                                     p.keys.push((Ticks::ZERO, p.value));
@@ -1254,10 +1323,15 @@ impl App {
                                                     ))
                                                     .small(),
                                                 );
-                                                if ui
-                                                    .small_button("⌫")
-                                                    .on_hover_text("Remover keyframes")
-                                                    .clicked()
+                                                if icons::small_icon_button(
+                                                    ui,
+                                                    Icon::Backspace,
+                                                    None,
+                                                    false,
+                                                    &self.theme,
+                                                )
+                                                .on_hover_text("Remover keyframes")
+                                                .clicked()
                                                 {
                                                     p.value = v;
                                                     p.keys.clear();
@@ -1571,7 +1645,16 @@ impl App {
                 ui.label(egui::RichText::new("AVI Motion-JPEG é lido por VLC, ffmpeg, editores e pelo próprio Neoveg. Limite de 4 GB por arquivo.").small().weak());
             }
             ui.horizontal(|ui| {
-                if ui.button("🎬 Renderizar").clicked() {
+                if icons::icon_button(
+                    ui,
+                    Icon::RenderClapper,
+                    Some("Renderizar"),
+                    false,
+                    true,
+                    &self.theme,
+                )
+                .clicked()
+                {
                     start = true;
                 }
             });

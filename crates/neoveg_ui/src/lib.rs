@@ -14,6 +14,7 @@
 pub mod app;
 mod dialogs;
 mod edit;
+mod icons;
 pub mod layout;
 mod panels;
 pub mod theme;

@@ -13,3 +13,10 @@ Até o momento o repositório **não contém nenhum asset**:
   do egui como alternativa;
 - a mídia de teste é gerada pelos próprios testes ou fica fora do controle de
   versão.
+
+## Ícones vetoriais nativos (`crates/neoveg_ui/src/icons.rs`)
+
+- **Recurso:** 54 ícones coloridos de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
+- **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, criados do zero em código Rust sem cópia ou traçado de terceiros)
+- **Licença:** `MIT OR Apache-2.0`
+- **Observações:** Nenhuma imagem ou SVG foi importada de bancos com licença restritiva/não-SPDX; os ícones se adaptam automaticamente aos 7 temas de cor (incluindo Alto Contraste WCAG AAA).

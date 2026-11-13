@@ -18,7 +18,7 @@ Registro factual dos recursos comparados à semântica e ao fluxo operacional do
 | **Áudio Avançado** | Até 26 barramentos auxiliares + roteamento completo de buses | Planejado | Estrutura inicial Master em `crates/neoveg_engine/src/model.rs` |
 | **UI & Acessibilidade** | Painéis acopláveis/destacáveis em janelas flutuantes + `.neoveglayout` | Implementado | `crates/neoveg_ui/src/{panels,layout,app}.rs` |
 | **UI & Acessibilidade** | *Editar → Propriedades → Layout* (`Sonic Foundry`, `Sony`, `MAGIX`) + posição da timeline/abas/transporte | Implementado | `crates/neoveg_common/src/prefs.rs`, `crates/neoveg_ui/src/{app,dialogs,panels}.rs` |
-| **UI & Acessibilidade** | 7 temas (incluindo 2 temas Alto Contraste WCAG AAA >= 7:1) + diálogo Preferências | Implementado | `crates/neoveg_ui/src/{theme,dialogs}.rs` |
+| **UI & Acessibilidade** | 7 temas (incluindo 2 temas Alto Contraste WCAG AAA >= 7:1), 54 ícones vetoriais coloridos nativos (`icons.rs`) e diálogo Preferências | Implementado | `crates/neoveg_ui/src/{theme,icons,dialogs}.rs` |
 | **Comandos & Atalhos** | Tabela Única de Comandos (`COMMANDS`) + editor interativo de atalhos persistido | Implementado | `crates/neoveg_engine/src/commands.rs`, `crates/neoveg_ui/src/dialogs.rs` |
 | **Codecs & Containers** | AVI (MJPEG/PCM), Y4M, GIF, WAV/AIFF/FLAC/OGG/MP3 em Rust puro | Implementado | `crates/neoveg_engine/src/media/` |
 | **Codecs OS** | Windows Media Foundation (MP4/MOV/MKV/WEBM/M4A/AAC) via FFI isolado em streaming | Implementado (Windows) | `crates/neoveg_engine/src/media/mf.rs` |

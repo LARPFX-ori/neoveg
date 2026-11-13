@@ -1,6 +1,7 @@
 //! Interface gráfica (`eframe` + `wgpu`) no estilo do VEGAS Pro: timeline com
 //! lista de trilhas em cima, área de janelas acopláveis embaixo e prévia.
 
+use crate::icons::{self, Icon};
 use crate::layout::{self, WindowLayout};
 use crate::theme::{self, ThemeColors, ThemeId};
 use eframe::egui;
@@ -1346,15 +1347,19 @@ impl App {
         });
     }
 
-    fn cmd_tool_btn(&mut self, ui: &mut egui::Ui, text: &str, id: &str) {
-        let hover = commands::find_command(id)
+    fn cmd_hover_text(&self, id: &str, fallback: Option<&str>) -> String {
+        commands::find_command(id)
             .map(|c| match resolved_shortcut(c, &self.prefs.shortcuts) {
                 Some(sc) => format!("{} ({})", c.label, sc.format()),
                 None => c.label.to_string(),
             })
-            .unwrap_or_else(|| text.to_string());
-        if ui
-            .add_enabled(self.cmd_enabled(id), egui::Button::new(text))
+            .unwrap_or_else(|| fallback.unwrap_or(id).to_string())
+    }
+
+    fn cmd_tool_btn(&mut self, ui: &mut egui::Ui, icon: Icon, text: Option<&str>, id: &str) {
+        let hover = self.cmd_hover_text(id, text);
+        let enabled = self.cmd_enabled(id);
+        if icons::icon_button(ui, icon, text, false, enabled, &self.theme)
             .on_hover_text(hover)
             .clicked()
         {
@@ -1362,16 +1367,17 @@ impl App {
         }
     }
 
-    fn cmd_tool_toggle(&mut self, ui: &mut egui::Ui, active: bool, text: &str, id: &str) {
-        let hover = commands::find_command(id)
-            .map(|c| match resolved_shortcut(c, &self.prefs.shortcuts) {
-                Some(sc) => format!("{} ({})", c.label, sc.format()),
-                None => c.label.to_string(),
-            })
-            .unwrap_or_else(|| text.to_string());
-        let mut on = active;
-        if ui
-            .toggle_value(&mut on, text)
+    fn cmd_tool_toggle(
+        &mut self,
+        ui: &mut egui::Ui,
+        active: bool,
+        icon: Icon,
+        text: Option<&str>,
+        id: &str,
+    ) {
+        let hover = self.cmd_hover_text(id, text);
+        let enabled = self.cmd_enabled(id);
+        if icons::icon_button(ui, icon, text, active, enabled, &self.theme)
             .on_hover_text(hover)
             .clicked()
         {
@@ -1381,34 +1387,54 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            self.cmd_tool_btn(ui, "🗋", "file.new");
-            self.cmd_tool_btn(ui, "🗁", "file.open");
-            self.cmd_tool_btn(ui, "💾", "file.save");
-            self.cmd_tool_btn(ui, "🎬 Renderizar", "file.render");
-            self.cmd_tool_btn(ui, "⚙", "file.project_props");
+            self.cmd_tool_btn(ui, Icon::NewFile, None, "file.new");
+            self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
+            self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
+            self.cmd_tool_btn(ui, Icon::RenderClapper, Some("Renderizar"), "file.render");
+            self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             ui.separator();
-            self.cmd_tool_btn(ui, "➕ Importar", "file.import_media");
+            self.cmd_tool_btn(ui, Icon::ImportMedia, Some("Importar"), "file.import_media");
             ui.separator();
-            self.cmd_tool_btn(ui, "↶", "edit.undo");
-            self.cmd_tool_btn(ui, "↷", "edit.redo");
+            self.cmd_tool_btn(ui, Icon::Cut, None, "edit.cut");
+            self.cmd_tool_btn(ui, Icon::Copy, None, "edit.copy");
+            self.cmd_tool_btn(ui, Icon::Paste, None, "edit.paste");
             ui.separator();
-            self.cmd_tool_btn(ui, "✂ Dividir", "edit.split");
-            self.cmd_tool_btn(ui, "🗑", "edit.delete");
+            self.cmd_tool_btn(ui, Icon::Undo, None, "edit.undo");
+            self.cmd_tool_btn(ui, Icon::Redo, None, "edit.redo");
             ui.separator();
-            self.cmd_tool_toggle(ui, self.opts.snapping, "🧲 Encaixe", "options.snapping");
-            self.cmd_tool_toggle(ui, self.opts.auto_ripple, "⇥ Ripple", "options.auto_ripple");
+            self.cmd_tool_btn(ui, Icon::Split, Some("Dividir"), "edit.split");
+            self.cmd_tool_btn(ui, Icon::DeleteTrash, None, "edit.delete");
+            ui.separator();
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.snapping,
+                Icon::MagnetSnap,
+                Some("Encaixe"),
+                "options.snapping",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.auto_ripple,
+                Icon::AutoRipple,
+                Some("Ripple"),
+                "options.auto_ripple",
+            );
             self.cmd_tool_toggle(
                 ui,
                 self.opts.ignore_grouping,
-                "⛓ Ignorar grupos",
+                Icon::IgnoreGrouping,
+                Some("Ignorar grupos"),
                 "options.ignore_grouping",
             );
             self.cmd_tool_toggle(
                 ui,
                 self.opts.show_envelopes,
-                "〰 Envelopes",
+                Icon::Envelopes,
+                Some("Envelopes"),
                 "view.envelopes",
             );
+            ui.separator();
+            self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
             if self.loading > 0 {
                 ui.separator();
                 ui.spinner();
@@ -1420,15 +1446,13 @@ impl App {
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let playing = self.is_playing();
-            if ui
-                .button("⏮")
+            if icons::icon_button(ui, Icon::GoStart, None, false, true, &self.theme)
                 .on_hover_text("Início do projeto (Ctrl+Home)")
                 .clicked()
             {
                 self.set_cursor(Ticks::ZERO);
             }
-            if ui
-                .button("⏪")
+            if icons::icon_button(ui, Icon::PrevFrame, None, false, true, &self.theme)
                 .on_hover_text("Quadro anterior (Alt+←)")
                 .clicked()
             {
@@ -1438,10 +1462,16 @@ impl App {
                     .quantize((self.cursor - self.project.settings.frame_dur()).max(Ticks::ZERO));
                 self.set_cursor(t);
             }
-            if ui
-                .button(if playing { "⏸" } else { "▶" })
-                .on_hover_text("Reproduzir/Pausar (Enter)")
-                .clicked()
+            if icons::icon_button(
+                ui,
+                if playing { Icon::Pause } else { Icon::Play },
+                None,
+                playing,
+                true,
+                &self.theme,
+            )
+            .on_hover_text("Reproduzir/Pausar (Enter)")
+            .clicked()
             {
                 if playing {
                     self.stop(true);
@@ -1449,11 +1479,13 @@ impl App {
                     self.play();
                 }
             }
-            if ui.button("⏹").on_hover_text("Parar (Espaço/Esc)").clicked() {
+            if icons::icon_button(ui, Icon::Stop, None, false, true, &self.theme)
+                .on_hover_text("Parar (Espaço/Esc)")
+                .clicked()
+            {
                 self.stop(false);
             }
-            if ui
-                .button("⏩")
+            if icons::icon_button(ui, Icon::NextFrame, None, false, true, &self.theme)
                 .on_hover_text("Próximo quadro (Alt+→)")
                 .clicked()
             {
@@ -1463,16 +1495,26 @@ impl App {
                     .quantize(self.cursor + self.project.settings.frame_dur());
                 self.set_cursor(t);
             }
-            if ui
-                .button("⏭")
+            if icons::icon_button(ui, Icon::GoEnd, None, false, true, &self.theme)
                 .on_hover_text("Fim do projeto (Ctrl+End)")
                 .clicked()
             {
                 let d = self.project.duration();
                 self.set_cursor(d);
             }
-            ui.toggle_value(&mut self.opts.loop_playback, "🔁")
-                .on_hover_text("Reprodução em loop (Q)");
+            if icons::icon_button(
+                ui,
+                Icon::LoopPlayback,
+                None,
+                self.opts.loop_playback,
+                true,
+                &self.theme,
+            )
+            .on_hover_text("Reprodução em loop (Q)")
+            .clicked()
+            {
+                self.opts.loop_playback = !self.opts.loop_playback;
+            }
             ui.separator();
             let t = self.view_time();
             ui.label(
@@ -1505,7 +1547,7 @@ impl App {
                 {
                     self.tl.px_per_sec = z.exp();
                 }
-                ui.label("Zoom");
+                icons::icon_label(ui, Icon::ZoomGlass, 14.0, "Zoom", &self.theme);
                 ui.separator();
                 let mut rate_changed = false;
                 if ui
@@ -1524,7 +1566,7 @@ impl App {
                     )
                     .on_hover_text("Taxa de reprodução contínua (Playback Rate)")
                     .changed();
-                ui.label("Taxa:");
+                icons::icon_label(ui, Icon::SpeedGauge, 14.0, "Taxa:", &self.theme);
                 if rate_changed && playing {
                     self.shuttle = self.playback_rate;
                     let mut s = self
