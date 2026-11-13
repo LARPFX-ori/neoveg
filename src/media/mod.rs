@@ -1,4 +1,4 @@
-﻿//! Gerenciamento de mÃ­dia: importaÃ§Ã£o, decodificaÃ§Ã£o e cache de quadros.
+//! Gerenciamento de mídia: importação, decodificação e cache de quadros.
 
 pub mod audio;
 pub mod avi;
@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 pub const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"];
 pub const AUDIO_EXTS: [&str; 12] = ["wav", "mp3", "flac", "ogg", "oga", "m4a", "aac", "aif", "aiff", "caf", "mka", "wv"];
 pub const VIDEO_EXTS: [&str; 2] = ["avi", "y4m"];
-/// ContÃªineres cujo vÃ­deo (H.264/H.265/VP9...) nÃ£o possui decodificador maduro
-/// em Rust puro: importamos apenas o Ã¡udio.
+/// Contêineres cujo vídeo (H.264/H.265/VP9...) não possui decodificador maduro
+/// em Rust puro: importamos apenas o áudio.
 pub const AUDIO_ONLY_CONTAINERS: [&str; 5] = ["mp4", "mov", "mkv", "webm", "m4v"];
 
 pub fn is_supported(path: &Path) -> bool {
@@ -62,7 +62,7 @@ impl FrameCache {
 pub enum VideoSource {
     None,
     Still(Arc<RgbaImage>),
-    /// Quadros prÃ©-decodificados (GIF animado) com tempos de inÃ­cio.
+    /// Quadros pré-decodificados (GIF animado) com tempos de início.
     Frames(Vec<Arc<RgbaImage>>, Vec<f64>, f64),
     Avi(Mutex<avi::AviReader>, Mutex<FrameCache>),
     Y4m(Mutex<y4m::Y4mReader>, Mutex<FrameCache>),
@@ -75,7 +75,7 @@ pub struct MediaEntry {
     pub audio: Option<Arc<AudioData>>,
 }
 
-/// Cache compartilhado entre interface, prÃ©via, reproduÃ§Ã£o e renderizaÃ§Ã£o.
+/// Cache compartilhado entre interface, prévia, reprodução e renderização.
 #[derive(Default)]
 pub struct MediaCache {
     entries: Mutex<HashMap<Id, Arc<MediaEntry>>>,
@@ -113,13 +113,13 @@ impl MediaCache {
             .collect()
     }
 
-    /// Limpa o cache de mÃ­dia gerada de um item (apÃ³s ediÃ§Ã£o).
+    /// Limpa o cache de mídia gerada de um item (após edição).
     pub fn invalidate_generated(&self, id: Id) {
         self.generated.lock().unwrap().retain(|k, _| k.0 != id);
     }
 
-    /// Quadro da mÃ­dia no tempo de mÃ­dia `t`. `w`,`h` sÃ£o usados por mÃ­dia
-    /// gerada (que Ã© produzida diretamente na resoluÃ§Ã£o de saÃ­da).
+    /// Quadro da mídia no tempo de mídia `t`. `w`,`h` são usados por mídia
+    /// gerada (que é produzida diretamente na resolução de saída).
     pub fn video_frame(&self, item: &MediaItem, t: f64, w: u32, h: u32) -> Option<Arc<RgbaImage>> {
         if let MediaSource::Generated(spec) = &item.source {
             return Some(self.generated_frame(item.id, spec, t, w, h));
@@ -182,7 +182,7 @@ impl MediaCache {
         img
     }
 
-    /// Miniatura (para a janela de mÃ­dia do projeto e eventos).
+    /// Miniatura (para a janela de mídia do projeto e eventos).
     pub fn thumbnail(&self, item: &MediaItem, max: u32) -> Option<RgbaImage> {
         let (w, h) = if item.width > 0 && item.height > 0 {
             (item.width, item.height)
@@ -200,7 +200,7 @@ impl MediaCache {
     }
 }
 
-/// Resultado da importaÃ§Ã£o: item para o projeto e dados para o cache.
+/// Resultado da importação: item para o projeto e dados para o cache.
 pub struct Imported {
     pub item: MediaItem,
     pub entry: MediaEntry,
@@ -225,7 +225,7 @@ fn base_item(name: String, source: MediaSource) -> MediaItem {
 pub fn import_generated(spec: GenSpec) -> Imported {
     let mut item = base_item(spec.label(), MediaSource::Generated(spec));
     item.has_video = true;
-    item.info = "MÃ­dia gerada".into();
+    item.info = "Mídia gerada".into();
     Imported {
         item,
         entry: MediaEntry {
@@ -236,7 +236,7 @@ pub fn import_generated(spec: GenSpec) -> Imported {
     }
 }
 
-/// Importa um arquivo de mÃ­dia do disco.
+/// Importa um arquivo de mídia do disco.
 pub fn import_file(path: &Path) -> Result<Imported> {
     let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let mut item = base_item(name, MediaSource::File {
@@ -247,8 +247,8 @@ pub fn import_file(path: &Path) -> Result<Imported> {
     Ok(imp)
 }
 
-/// Carrega (ou recarrega, ao abrir um projeto) os dados de um item de mÃ­dia.
-/// Atualiza as informaÃ§Ãµes do item (duraÃ§Ã£o, dimensÃµes...).
+/// Carrega (ou recarrega, ao abrir um projeto) os dados de um item de mídia.
+/// Atualiza as informações do item (duração, dimensões...).
 pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
     let mut warning = None;
     let entry = match item.source.clone() {
@@ -258,7 +258,7 @@ pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
         },
         MediaSource::ImageSequence { paths, fps } => {
             if paths.is_empty() {
-                bail!("sequÃªncia vazia");
+                bail!("sequência vazia");
             }
             let first = image::open(&paths[0])?;
             item.width = first.width();
@@ -266,7 +266,7 @@ pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
             item.fps = fps;
             item.has_video = true;
             item.duration = Some(paths.len() as f64 / fps);
-            item.info = format!("SequÃªncia de {} imagens, {}x{}, {:.3} qps", paths.len(), item.width, item.height, fps);
+            item.info = format!("Sequência de {} imagens, {}x{}, {:.3} qps", paths.len(), item.width, item.height, fps);
             MediaEntry {
                 video: VideoSource::Sequence(paths, fps, Mutex::new(FrameCache::new(16))),
                 audio: None,
@@ -275,7 +275,7 @@ pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
         MediaSource::File { path } => {
             let p = PathBuf::from(&path);
             if !p.exists() {
-                bail!("arquivo nÃ£o encontrado: {path}");
+                bail!("arquivo não encontrado: {path}");
             }
             let ext = ext_of(&p);
             if ext == "gif" {
@@ -298,7 +298,7 @@ pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
                     _ => None,
                 };
                 if rd.audio.is_some() && audio.is_none() {
-                    warning = Some(format!("{}: Ã¡udio do AVI nÃ£o Ã© PCM; ignorado", item.name));
+                    warning = Some(format!("{}: áudio do AVI não é PCM; ignorado", item.name));
                 }
                 if let Some(m) = rd.video_supported_msg() {
                     warning = Some(format!("{}: {m}", item.name));
@@ -321,7 +321,7 @@ pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
                     rd.height,
                     rd.fps,
                     rd.frame_count(),
-                    audio.as_ref().map(|a| format!(", Ã¡udio {} Hz", a.sample_rate)).unwrap_or_default()
+                    audio.as_ref().map(|a| format!(", áudio {} Hz", a.sample_rate)).unwrap_or_default()
                 );
                 MediaEntry {
                     video: if item.has_video {
@@ -344,18 +344,18 @@ pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
                     audio: None,
                 }
             } else {
-                // Ã¡udio (ou contÃªiner do qual sÃ³ extraÃ­mos o Ã¡udio)
+                // áudio (ou contêiner do qual só extraímos o áudio)
                 let a = audio::decode_file(&p)?;
                 if AUDIO_ONLY_CONTAINERS.contains(&ext.as_str()) {
                     warning = Some(format!(
-                        "{}: apenas o Ã¡udio foi importado. NÃ£o hÃ¡ decodificador H.264/H.265 em Rust puro; \
-                         converta o vÃ­deo para AVI MJPEG (ex.: ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi)",
+                        "{}: apenas o áudio foi importado. Não há decodificador H.264/H.265 em Rust puro; \
+                         converta o vídeo para AVI MJPEG (ex.: ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi)",
                         item.name
                     ));
                 }
                 item.has_audio = true;
                 item.duration = Some(a.duration());
-                item.info = format!("Ãudio {} Hz, {:.2} s", a.sample_rate, a.duration());
+                item.info = format!("Áudio {} Hz, {:.2} s", a.sample_rate, a.duration());
                 MediaEntry {
                     video: VideoSource::None,
                     audio: Some(Arc::new(a)),
@@ -410,7 +410,7 @@ fn load_gif(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
     })
 }
 
-/// Detecta uma sequÃªncia numerada a partir do primeiro arquivo
+/// Detecta uma sequência numerada a partir do primeiro arquivo
 /// (ex.: quadro_0001.png, quadro_0002.png, ...).
 pub fn detect_sequence(first: &Path) -> Vec<String> {
     let Some(stem) = first.file_stem().and_then(|s| s.to_str()) else { return vec![] };
@@ -443,7 +443,7 @@ pub fn import_sequence(first: &Path, fps: f64) -> Result<Imported> {
         bail!("nenhuma imagem encontrada");
     }
     let name = format!(
-        "{} (sequÃªncia)",
+        "{} (sequência)",
         first.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
     );
     let mut item = base_item(name, MediaSource::ImageSequence { paths, fps });
