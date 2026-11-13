@@ -63,7 +63,7 @@ def is_ok(name, expr):
 def used_packages():
     """Pacotes realmente presentes no grafo de dependências normais da plataforma atual."""
     out = subprocess.run(
-        ["cargo", "tree", "-e", "normal", "--prefix", "none", "--format", "{p}"],
+        ["cargo", "tree", "--workspace", "-e", "normal", "--prefix", "none", "--format", "{p}"],
         capture_output=True, text=True, check=True,
     ).stdout
     names = set()

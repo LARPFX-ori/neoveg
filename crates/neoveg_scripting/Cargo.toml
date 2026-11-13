@@ -1,0 +1,13 @@
+[package]
+name = "neoveg_scripting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ponte de scripting (.NET Host / ScriptPortal.Vegas) e automação headless do Neoveg"
+
+[dependencies]
+neoveg_common.workspace = true
+neoveg_engine.workspace = true
+
+[lints]
+workspace = true

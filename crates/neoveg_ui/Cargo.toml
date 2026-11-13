@@ -1,0 +1,18 @@
+[package]
+name = "neoveg_ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interface gráfica nativa (eframe + wgpu) do Neoveg com semântica e layout do VEGAS Pro"
+
+[dependencies]
+neoveg_common.workspace = true
+neoveg_engine.workspace = true
+neoveg_scripting.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+image.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

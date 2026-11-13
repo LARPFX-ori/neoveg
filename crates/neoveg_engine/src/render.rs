@@ -194,7 +194,12 @@ fn to_i16(s: &[f32]) -> Vec<i16> {
         .collect()
 }
 
-fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgress) -> Result<()> {
+pub fn run(
+    p: &Project,
+    media: &MediaCache,
+    s: &RenderSettings,
+    prog: &RenderProgress,
+) -> Result<()> {
     if s.end <= s.start {
         bail!("intervalo de renderização vazio");
     }

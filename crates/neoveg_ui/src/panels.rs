@@ -336,7 +336,8 @@ impl App {
             if name.starts_with('.') {
                 continue;
             }
-            if !is_dir && !crate::media::is_supported(&p) && !name.ends_with(".nvp") {
+            let is_proj = crate::model::is_project_file(&p);
+            if !is_dir && !crate::media::is_supported(&p) && !is_proj {
                 continue;
             }
             if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
@@ -351,7 +352,7 @@ impl App {
             if r.double_clicked() {
                 if is_dir {
                     go = Some(p.clone());
-                } else if name.ends_with(".nvp") {
+                } else if is_proj {
                     self.open_project_path(p.clone());
                 } else {
                     import.push(p.clone());
@@ -516,7 +517,8 @@ impl App {
             (
                 "Créditos rolando",
                 GenSpec::Text(TextSpec {
-                    text: "Direção\nFulano de Tal\n\nEdição\nNVOV\n\nObrigado por assistir".into(),
+                    text: "Direção\nFulano de Tal\n\nEdição\nNeoveg\n\nObrigado por assistir"
+                        .into(),
                     size: 6.0,
                     anim: TextAnim::ScrollUp,
                     anim_duration: 10.0,
@@ -627,7 +629,7 @@ impl App {
                 ui.group(|ui| {
                     ui.set_width(92.0);
                     ui.vertical(|ui| {
-                        let t = &mut self.project.tracks[ti];
+                        let t = &mut self.session.project.tracks[ti];
                         ui.label(egui::RichText::new(&t.name).strong().small());
                         let mut changed = false;
                         ui.horizontal(|ui| {
@@ -637,7 +639,7 @@ impl App {
                                 self.dlg.fx_target = Some(FxTarget::Track(tid));
                             }
                         });
-                        let t = &mut self.project.tracks[ti];
+                        let t = &mut self.session.project.tracks[ti];
                         ui.horizontal(|ui| {
                             let r = ui.add(
                                 egui::Slider::new(&mut t.volume_db, -60.0..=12.0)

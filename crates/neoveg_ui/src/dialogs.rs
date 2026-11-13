@@ -146,8 +146,9 @@ impl App {
     /// Registra desfazer para edições feitas em diálogos (uma vez por gesto).
     fn dialog_change(&mut self) {
         if !self.dlg.edit_in_progress {
-            self.undo.push((*self.snapshot).clone());
-            self.redo.clear();
+            let snap = (*self.session.snapshot).clone();
+            self.session.undo.push(snap);
+            self.session.redo.clear();
             self.dlg.edit_in_progress = true;
         }
         self.changed();
@@ -484,10 +485,7 @@ impl App {
                 } else {
                     (*img).clone()
                 };
-                let ci = egui::ColorImage::from_rgba_unmultiplied(
-                    [small.width() as usize, small.height() as usize],
-                    small.as_raw(),
-                );
+                let ci = super::rgba_to_color_image(&small);
                 let tex = ctx.load_texture("pancrop_src", ci, egui::TextureOptions::LINEAR);
                 self.dlg.pc_tex = Some((tex, frame_key));
             }
@@ -729,7 +727,7 @@ impl App {
         }
         let mut changed = false;
         if let Some(k) = new_key {
-            let Some(e) = self.project.event_mut(id) else {
+            let Some(e) = self.session.project.event_mut(id) else {
                 return;
             };
             if self.dlg.pc_animate || e.pan_crop.keys.len() > 1 {
@@ -999,7 +997,7 @@ impl App {
         }
         let mut changed = false;
         if let Some(k) = new_key {
-            let tr = &mut self.project.tracks[ti];
+            let tr = &mut self.session.project.tracks[ti];
             if self.dlg.tm_animate || tr.motion.keys.len() > 1 {
                 tr.motion.set(t, k, tol);
             } else if let Some(f) = tr.motion.keys.first_mut() {
@@ -1534,7 +1532,7 @@ impl App {
             });
             ui.separator();
             if r.format == RenderFormat::AviMjpeg {
-                ui.label(egui::RichText::new("AVI Motion-JPEG é lido por VLC, ffmpeg, editores e pelo próprio NVOV. Limite de 4 GB por arquivo.").small().weak());
+                ui.label(egui::RichText::new("AVI Motion-JPEG é lido por VLC, ffmpeg, editores e pelo próprio Neoveg. Limite de 4 GB por arquivo.").small().weak());
             }
             ui.horizontal(|ui| {
                 if ui.button("🎬 Renderizar").clicked() {
@@ -1696,16 +1694,15 @@ impl App {
         }
         if self.dlg.about {
             let mut open = true;
-            egui::Window::new("Sobre o NVOV").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.heading("NVOV");
+            egui::Window::new("Sobre o Neoveg").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.heading("Neoveg");
                 ui.label(format!("Versão {}", env!("CARGO_PKG_VERSION")));
-                ui.label("Editor de vídeo não-linear escrito em Rust puro (egui, symphonia, image, cpal).");
-                ui.label("Fluxo de trabalho e atalhos inspirados nos manuais do VEGAS Pro.");
+                ui.label("Editor de vídeo não-linear escrito em Rust puro (eframe + wgpu, cpal, claxon, lewton, puremp3, image).");
+                ui.label("Fluxo de trabalho e atalhos baseados na semântica do VEGAS Pro.");
                 ui.separator();
                 ui.label(egui::RichText::new(
                     "Formatos de vídeo: AVI (MJPEG/RGB), Y4M, GIF, sequências de imagens. \
-                     Áudio: WAV, MP3, FLAC, OGG, AAC/M4A, AIFF, CAF. \
-                     H.264/H.265 não possuem decodificador em Rust puro: converta para AVI MJPEG.",
+                     Áudio: WAV, AIFF, FLAC, OGG, MP3.",
                 ).small());
             });
             self.dlg.about = open;

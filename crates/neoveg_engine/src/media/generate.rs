@@ -12,11 +12,16 @@ pub struct Fonts {
     cache: Mutex<HashMap<String, Option<FontArc>>>,
 }
 
-const SYSTEM_FONTS: [&str; 4] = [
+const SYSTEM_FONTS: [&str; 9] = [
     "C:\\Windows\\Fonts\\segoeui.ttf",
+    "C:\\Windows\\Fonts\\tahoma.ttf",
     "C:\\Windows\\Fonts\\arial.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "/System/Library/Fonts/SFNS.ttf",
 ];
 
 impl Fonts {
@@ -49,10 +54,15 @@ fn default_font() -> Option<FontArc> {
             }
         }
     }
-    // fonte embutida do egui (Ubuntu-Light)
-    let defs = eframe::egui::FontDefinitions::default();
-    let fd = defs.font_data.get("Ubuntu-Light")?;
-    FontArc::try_from_vec(fd.font.to_vec()).ok()
+    // Fallback em tempo de execução para qualquer fonte TTF/OTF do sistema operacional (§1.5).
+    for p in list_system_fonts() {
+        if let Ok(b) = std::fs::read(&p) {
+            if let Ok(f) = FontArc::try_from_vec(b) {
+                return Some(f);
+            }
+        }
+    }
+    None
 }
 
 /// Lista fontes TTF/OTF instaladas no sistema (para o seletor de fonte).
@@ -61,6 +71,9 @@ pub fn list_system_fonts() -> Vec<String> {
     for dir in [
         "C:\\Windows\\Fonts",
         "/usr/share/fonts/truetype",
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/liberation",
+        "/usr/share/fonts/truetype/noto",
         "/Library/Fonts",
     ] {
         if let Ok(rd) = std::fs::read_dir(dir) {

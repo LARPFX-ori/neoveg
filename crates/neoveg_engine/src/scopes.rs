@@ -6,29 +6,30 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::engine::Frame;
-use eframe::egui::{Color32, ColorImage};
+use image::{Rgba, RgbaImage};
 
 pub struct ScopeImages {
-    pub histogram: ColorImage,
-    pub waveform: ColorImage,
-    pub vectorscope: ColorImage,
-    pub parade: ColorImage,
+    pub histogram: RgbaImage,
+    pub waveform: RgbaImage,
+    pub vectorscope: RgbaImage,
+    pub parade: RgbaImage,
 }
 
-fn img(w: usize, h: usize) -> ColorImage {
-    ColorImage::new([w, h], Color32::from_rgb(12, 12, 14))
+fn img(w: usize, h: usize) -> RgbaImage {
+    RgbaImage::from_pixel(w as u32, h as u32, Rgba([12, 12, 14, 255]))
 }
 
-fn add(img: &mut ColorImage, x: usize, y: usize, c: [u8; 3], k: u8) {
-    let w = img.size[0];
-    let p = &mut img.pixels[y * w + x];
-    let [r, g, b, _] = p.to_array();
-    let s = |c: u8| ((c as u16 * k as u16) / 255) as u8;
-    *p = Color32::from_rgb(
-        r.saturating_add(s(c[0])),
-        g.saturating_add(s(c[1])),
-        b.saturating_add(s(c[2])),
-    );
+fn add(img: &mut RgbaImage, x: usize, y: usize, c: [u8; 3], k: u8) {
+    let Some(p) = img.get_pixel_mut_checked(x as u32, y as u32) else {
+        return;
+    };
+    let s = |v: u8| ((v as u16 * k as u16) / 255) as u8;
+    p.0 = [
+        p.0[0].saturating_add(s(c[0])),
+        p.0[1].saturating_add(s(c[1])),
+        p.0[2].saturating_add(s(c[2])),
+        255,
+    ];
 }
 
 pub fn compute(f: &Frame) -> ScopeImages {
@@ -95,17 +96,28 @@ pub fn compute(f: &Frame) -> ScopeImages {
     }
     let intensity = |n: u32| -> u8 { ((n as f32).sqrt() * 40.0).min(255.0) as u8 };
     let mut waveform = img(ww, wh);
-    for i in 0..ww * wh {
-        let k = intensity(wf[i]);
+    for (dst, &count) in waveform
+        .as_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(wf.iter())
+    {
+        let k = intensity(count);
         if k > 0 {
-            waveform.pixels[i] = Color32::from_rgb(k / 3, k, k / 3);
+            *dst = [k / 3, k, k / 3, 255];
         }
     }
     let mut parade = img(ww, wh);
-    for i in 0..ww * wh {
-        let [r, g, b] = par[i];
+    for (dst, &[r, g, b]) in parade
+        .as_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(par.iter())
+    {
         if r + g + b > 0 {
-            parade.pixels[i] = Color32::from_rgb(intensity(r), intensity(g), intensity(b));
+            *dst = [intensity(r), intensity(g), intensity(b), 255];
         }
     }
     // linhas de referência 0/50/100 IRE
@@ -116,10 +128,16 @@ pub fn compute(f: &Frame) -> ScopeImages {
         }
     }
     let mut vectorscope = img(vs, vs);
-    for i in 0..vs * vs {
-        let k = intensity(vec_acc[i]);
+    for (dst, &count) in vectorscope
+        .as_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(vec_acc.iter())
+    {
+        let k = intensity(count);
         if k > 0 {
-            vectorscope.pixels[i] = Color32::from_rgb(k / 2, k, k / 2);
+            *dst = [k / 2, k, k / 2, 255];
         }
     }
     // círculo e alvos das cores primárias (75%)

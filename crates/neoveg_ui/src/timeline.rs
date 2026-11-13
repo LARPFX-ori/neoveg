@@ -765,17 +765,32 @@ impl App {
                     ui.close_menu();
                 }
                 if ui.button("Selecionar região").clicked() {
-                    if let Some(r) = self.project.regions.iter().find(|r| r.id == id) {
-                        self.time_sel = Some((r.start, r.end));
-                        self.project.loop_region = Some((r.start, r.end));
+                    if let Some((start, end)) = self
+                        .session
+                        .project
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| (r.start, r.end))
+                    {
+                        self.session.time_sel = Some((start, end));
+                        self.session.project.loop_region = Some((start, end));
                     }
                     ui.close_menu();
                 }
                 if ui.button("Renderizar região...").clicked() {
-                    if let Some(r) = self.project.regions.iter().find(|r| r.id == id) {
-                        self.project.loop_region = Some((r.start, r.end));
+                    if let Some((start, end)) = self
+                        .session
+                        .project
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| (r.start, r.end))
+                    {
+                        self.session.project.loop_region = Some((start, end));
                     }
-                    self.dlg.open_render(&self.project, self.path.as_deref());
+                    self.dlg
+                        .open_render(&self.session.project, self.session.path.as_deref());
                     self.dlg.render_use_loop = true;
                     ui.close_menu();
                 }
@@ -885,11 +900,11 @@ impl App {
             );
 
             // clique no fundo seleciona a trilha
-            let bresp = ui.interact(r, ui.id().with(("thdr", track.id)), Sense::click());
-            if bresp.clicked() {
-                self.sel_track = Some(ti);
-            }
             let tid = track.id;
+            let bresp = ui.interact(r, ui.id().with(("thdr", tid)), Sense::click());
+            if bresp.clicked() {
+                self.session.sel_track = Some(ti);
+            }
             bresp.context_menu(|ui| self.track_menu(ui, ti));
             // o menu pode ter excluído trilhas: os índices calculados no início
             // do quadro deixam de valer (evita acesso fora dos limites)

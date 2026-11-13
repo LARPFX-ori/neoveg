@@ -1,16 +1,25 @@
-[package]
-name = "nvov"
+[workspace]
+resolver = "2"
+members = [
+    "crates/neoveg_common",
+    "crates/neoveg_engine",
+    "crates/neoveg_scripting",
+    "crates/neoveg_ui",
+    "crates/neoveg",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Neoveg - editor de vídeo não-linear em Rust puro, com a semântica de edição do VEGAS Pro"
 license = "MIT OR Apache-2.0"
 
-[[bin]]
-name = "nvov"
-path = "src/main.rs"
+[workspace.dependencies]
+neoveg_common = { path = "crates/neoveg_common" }
+neoveg_engine = { path = "crates/neoveg_engine" }
+neoveg_scripting = { path = "crates/neoveg_scripting" }
+neoveg_ui = { path = "crates/neoveg_ui" }
 
-[dependencies]
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "glow", "accesskit"] }
 rfd = "0.15"
 cpal = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp", "rayon"] }
@@ -24,7 +33,7 @@ claxon = "0.4.3"
 lewton = "0.10.2"
 puremp3 = "0.1.0"
 
-[lints.rust]
+[workspace.lints.rust]
 # AGENTS.md §0.3: unsafe proibido fora de módulos de fronteira FFI nomeados.
 unsafe_code = "forbid"
 

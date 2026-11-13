@@ -1,91 +1,30 @@
-//! Interface gráfica (egui/eframe) no estilo do VEGAS Pro: timeline com lista
-//! de trilhas em cima, área de janelas acopláveis embaixo (mídia do projeto,
-//! explorer, transições, efeitos, geradores, mixer, escopos) e prévia de vídeo.
+//! Interface gráfica (`eframe` + `wgpu`) no estilo do VEGAS Pro: timeline com
+//! lista de trilhas em cima, área de janelas acopláveis embaixo e prévia.
 
-mod dialogs;
-mod edit;
-mod panels;
-#[cfg(test)]
-mod tests;
-mod timeline;
-
-use crate::media::{self, MediaCache};
-use crate::model::*;
-use crate::playback::{AudioOut, Preview, PreviewRequest};
-use crate::render::{RenderProgress, RenderSettings};
 use eframe::egui;
 use egui::{Color32, Key, TextureHandle};
-use std::collections::{HashMap, HashSet};
+pub use neoveg_common::prefs::{Preferences, PreviewQuality};
+use neoveg_engine::commands::{
+    self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
+    ShortcutKey, UiAction, COMMANDS,
+};
+use neoveg_engine::media::{self, MediaCache};
+use neoveg_engine::model::*;
+use neoveg_engine::playback::{AudioOut, Preview, PreviewRequest};
+use neoveg_engine::recovery;
+use neoveg_engine::render::{RenderProgress, RenderSettings};
+pub use neoveg_engine::session::{ClipItem, EditorOptions as Options, EditorSession};
+use neoveg_engine::util;
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub use timeline::TimelineState;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DockTab {
-    ProjectMedia,
-    Explorer,
-    Transitions,
-    VideoFx,
-    AudioFx,
-    Generators,
-    Mixer,
-    Scopes,
-    Notes,
-}
-
-impl DockTab {
-    const ALL: [DockTab; 9] = [
-        DockTab::ProjectMedia,
-        DockTab::Explorer,
-        DockTab::Transitions,
-        DockTab::VideoFx,
-        DockTab::AudioFx,
-        DockTab::Generators,
-        DockTab::Mixer,
-        DockTab::Scopes,
-        DockTab::Notes,
-    ];
-    fn name(self) -> &'static str {
-        match self {
-            DockTab::ProjectMedia => "Mídia do Projeto",
-            DockTab::Explorer => "Explorer",
-            DockTab::Transitions => "Transições",
-            DockTab::VideoFx => "Efeitos de Vídeo",
-            DockTab::AudioFx => "Efeitos de Áudio",
-            DockTab::Generators => "Geradores de Mídia",
-            DockTab::Mixer => "Mixer",
-            DockTab::Scopes => "Escopos",
-            DockTab::Notes => "Notas",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PreviewQuality {
-    Draft,
-    Preview,
-    Good,
-}
-
-impl PreviewQuality {
-    fn name(self) -> &'static str {
-        match self {
-            PreviewQuality::Draft => "Rascunho (1/4)",
-            PreviewQuality::Preview => "Prévia (1/2)",
-            PreviewQuality::Good => "Boa (completa)",
-        }
-    }
-    fn scale(self) -> f32 {
-        match self {
-            PreviewQuality::Draft => 0.25,
-            PreviewQuality::Preview => 0.5,
-            PreviewQuality::Good => 1.0,
-        }
-    }
-}
+pub use crate::dialogs::Dialogs;
+pub use crate::timeline::TimelineState;
+pub use neoveg_engine::commands::DockPanel as DockTab;
 
 /// Itens arrastáveis entre janelas (drag and drop).
 #[derive(Clone, Debug)]
@@ -102,27 +41,6 @@ pub enum FxTarget {
     Track(Id),
     MasterAudio,
     MasterVideo,
-}
-
-pub struct Options {
-    pub snapping: bool,
-    pub quantize: bool,
-    pub auto_ripple: bool,
-    pub ignore_grouping: bool,
-    pub show_envelopes: bool,
-    pub show_waveforms: bool,
-    pub show_thumbs: bool,
-    pub time_format: TimeFormat,
-    pub preview_quality: PreviewQuality,
-    pub safe_areas: bool,
-    pub loop_playback: bool,
-}
-
-#[derive(Clone)]
-pub struct ClipItem {
-    pub track_rel: usize,
-    pub kind: TrackKind,
-    pub ev: Event,
 }
 
 #[derive(Clone, Copy)]
@@ -143,55 +61,52 @@ pub struct RenderJob {
 }
 
 pub struct App {
-    pub project: Project,
-    pub snapshot: Arc<Project>,
-    generation: u64,
-    sent_generation: u64,
-    pub path: Option<PathBuf>,
-    pub dirty: bool,
-    undo: Vec<Project>,
-    redo: Vec<Project>,
+    pub session: EditorSession,
+    pub prefs: Preferences,
     pub media: Arc<MediaCache>,
     pub audio: AudioOut,
-    preview: Preview,
-    preview_tex: Option<TextureHandle>,
-    preview_inflight: bool,
-    preview_inflight_since: Instant,
-    last_req: (Ticks, u64, usize, usize, bool),
-    preview_ms: f64,
-    scopes_tex: Option<[TextureHandle; 4]>,
-    pub cursor: Ticks,
-    play_start: Ticks,
-    pub sel_events: HashSet<Id>,
-    pub sel_track: Option<usize>,
-    pub time_sel: Option<(Ticks, Ticks)>,
+    pub(crate) preview: Preview,
+    pub(crate) preview_tex: Option<TextureHandle>,
+    pub(crate) preview_inflight: bool,
+    pub(crate) preview_inflight_since: Instant,
+    pub(crate) last_req: (Ticks, u64, usize, usize, bool),
+    pub(crate) preview_ms: f64,
+    pub(crate) scopes_tex: Option<[TextureHandle; 4]>,
     pub tl: TimelineState,
-    pub opts: Options,
-    pub clipboard: Vec<ClipItem>,
-    pub clip_base: Ticks,
     pub dock_tab: DockTab,
-    pub dlg: dialogs::Dialogs,
-    pub status: String,
-    status_at: Instant,
+    pub dlg: Dialogs,
+    pub status_at: Instant,
     pub thumbs: HashMap<Id, TextureHandle>,
-    loader_tx: Sender<LoadMsg>,
-    loader_rx: Receiver<LoadMsg>,
+    pub(crate) loader_tx: Sender<LoadMsg>,
+    pub(crate) loader_rx: Receiver<LoadMsg>,
     pub loading: usize,
     pub explorer_dir: PathBuf,
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
-    last_frame: Instant,
-    meters_hold: HashMap<Id, [f32; 2]>,
-    master_hold: [f32; 2],
-    confirm_close: bool,
-    allow_close: bool,
+    pub(crate) last_frame: Instant,
+    pub(crate) meters_hold: HashMap<Id, [f32; 2]>,
+    pub(crate) master_hold: [f32; 2],
+    pub(crate) confirm_close: bool,
+    pub(crate) allow_close: bool,
     pub shuttle: f64,
     pub gen_fonts: Vec<String>,
-    last_autosave: Instant,
-    recovery_offer: bool,
+    pub(crate) last_autosave: Instant,
+    pub(crate) recovery_offer: bool,
 }
 
-const MAX_UNDO: usize = 200;
+impl Deref for App {
+    type Target = EditorSession;
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
+}
+
 /// Intervalo do salvamento automático de recuperação.
 const AUTOSAVE_SECS: u64 = 60;
 
@@ -202,22 +117,20 @@ impl App {
 
     pub fn with_context(egui_ctx: &egui::Context, open: Option<PathBuf>) -> Self {
         setup_style(egui_ctx);
-        let project = Project::new_default();
-        let snapshot = Arc::new(project.clone());
+        let prefs = Preferences::load_or_default();
+        let session = EditorSession::new(Project::new_default());
         let media = Arc::new(MediaCache::default());
-        let audio = AudioOut::new(snapshot.clone());
-        let preview = Preview::new(media.clone(), egui_ctx.clone());
+        let audio = AudioOut::new(session.snapshot.clone());
+        let repaint_ctx = egui_ctx.clone();
+        let preview = Preview::new(
+            media.clone(),
+            Box::new(move || repaint_ctx.request_repaint()),
+        );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut app = App {
-            project,
-            snapshot,
-            generation: 1,
-            sent_generation: 0,
-            path: None,
-            dirty: false,
-            undo: vec![],
-            redo: vec![],
+            session,
+            prefs,
             media,
             audio,
             preview,
@@ -227,30 +140,9 @@ impl App {
             last_req: (Ticks::from_raw(-1), 0, 0, 0, false),
             preview_ms: 0.0,
             scopes_tex: None,
-            cursor: Ticks::ZERO,
-            play_start: Ticks::ZERO,
-            sel_events: HashSet::new(),
-            sel_track: Some(0),
-            time_sel: None,
             tl: TimelineState::default(),
-            opts: Options {
-                snapping: true,
-                quantize: true,
-                auto_ripple: false,
-                ignore_grouping: false,
-                show_envelopes: true,
-                show_waveforms: true,
-                show_thumbs: true,
-                time_format: TimeFormat::SmpteDrop,
-                preview_quality: PreviewQuality::Preview,
-                safe_areas: false,
-                loop_playback: false,
-            },
-            clipboard: vec![],
-            clip_base: Ticks::ZERO,
             dock_tab: DockTab::ProjectMedia,
-            dlg: dialogs::Dialogs::default(),
-            status: String::new(),
+            dlg: Dialogs::default(),
             status_at: Instant::now(),
             thumbs: HashMap::new(),
             loader_tx,
@@ -267,7 +159,7 @@ impl App {
             shuttle: 0.0,
             gen_fonts: vec![],
             last_autosave: Instant::now(),
-            recovery_offer: crate::util::recovery_path().exists(),
+            recovery_offer: recovery::find_existing_recovery().is_some(),
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -276,10 +168,7 @@ impl App {
             app.set_status(format!("Áudio: {e} (reprodução sem som)"));
         }
         if let Some(p) = open {
-            if p.extension()
-                .map(|e| e.eq_ignore_ascii_case("nvp"))
-                .unwrap_or(false)
-            {
+            if is_project_file(&p) {
                 app.open_project_path(p);
             } else {
                 app.import_paths(vec![p], Some(Ticks::ZERO));
@@ -293,10 +182,35 @@ impl App {
     // -----------------------------------------------------------------
 
     pub fn set_status(&mut self, s: impl Into<String>) {
-        self.status = s.into();
+        self.session.set_status(s);
         self.status_at = Instant::now();
-        if self.status.starts_with("Erro") || self.status.contains("falh") {
-            crate::util::log_error(&self.status);
+        if self.session.status.starts_with("Erro") || self.session.status.contains("falh") {
+            util::log_error(&self.session.status);
+        }
+    }
+
+    pub fn sync_status_from_session(&mut self) {
+        self.status_at = Instant::now();
+    }
+
+    pub fn sync_after_session(&mut self) {
+        self.sync_status_from_session();
+        let removed = std::mem::take(&mut self.session.removed_media_ids);
+        for id in removed {
+            self.thumbs.remove(&id);
+        }
+        for m in &self.session.project.media {
+            if let MediaSource::Generated(_) = m.source {
+                if !self.media.contains(m.id) {
+                    self.media.insert(
+                        m.id,
+                        media::MediaEntry {
+                            video: media::VideoSource::Generated,
+                            audio: None,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -306,7 +220,7 @@ impl App {
             return;
         }
         self.last_autosave = Instant::now();
-        if let Err(e) = crate::util::write_recovery(&self.project) {
+        if let Err(e) = recovery::write_recovery(&self.project) {
             self.set_status(format!("Falha no salvamento automático: {e}"));
         }
     }
@@ -334,15 +248,16 @@ impl App {
         match choice {
             Some(true) => {
                 self.recovery_offer = false;
-                let p = crate::util::recovery_path();
-                self.open_project_path(p);
-                self.path = None;
-                self.dirty = true;
-                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
+                if let Some(p) = recovery::find_existing_recovery() {
+                    self.open_project_path(p);
+                    self.path = None;
+                    self.dirty = true;
+                    self.set_status("Projeto recuperado. Salve-o com Salvar como...");
+                }
             }
             Some(false) => {
                 self.recovery_offer = false;
-                crate::util::clear_recovery();
+                recovery::clear_recovery();
             }
             None => {}
         }
@@ -350,73 +265,46 @@ impl App {
 
     /// Salva um ponto de desfazer antes de uma modificação.
     pub fn checkpoint(&mut self) {
-        self.undo.push(self.project.clone());
-        if self.undo.len() > MAX_UNDO {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
+        self.session.checkpoint();
     }
 
     /// Marca o projeto como modificado (atualiza prévia e áudio).
     pub fn changed(&mut self) {
-        self.generation += 1;
-        self.dirty = true;
+        self.session.changed();
     }
 
     pub fn undo(&mut self) {
-        if let Some(p) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.project, p));
+        if self.session.undo() {
             self.after_history();
-            self.set_status("Desfazer");
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(p) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.project, p));
+        if self.session.redo() {
             self.after_history();
-            self.set_status("Refazer");
         }
     }
 
     fn after_history(&mut self) {
-        self.sel_events
-            .retain(|id| self.project.find_event(*id).is_some());
-        if let Some(t) = self.sel_track {
-            if t >= self.project.tracks.len() {
-                self.sel_track = if self.project.tracks.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
-            }
-        }
-        for m in &self.project.media {
+        for m in &self.session.project.media {
             if let MediaSource::Generated(_) = m.source {
                 self.media.invalidate_generated(m.id);
                 self.thumbs.remove(&m.id);
             }
         }
-        self.changed();
+        self.sync_after_session();
     }
 
     fn sync_snapshot(&mut self) {
-        if self.sent_generation == self.generation {
+        if self.session.sent_generation == self.session.generation {
             return;
         }
-        self.project.sort_events();
-        self.snapshot = Arc::new(self.project.clone());
-        crate::util::remember_snapshot(self.snapshot.clone());
+        self.session.project.sort_events();
+        self.session.refresh_snapshot();
         let audio_map = self.media.audio_map();
-        let mut s = self
-            .audio
-            .shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        s.project = self.snapshot.clone();
+        let mut s = util::lock(&self.audio.shared);
+        s.project = self.session.snapshot.clone();
         s.audio = audio_map;
-        drop(s);
-        self.sent_generation = self.generation;
     }
 
     // -----------------------------------------------------------------
@@ -529,7 +417,7 @@ impl App {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.pos = t.to_samples_round(sr);
             s.mixer.reset();
-            self.play_start = t;
+            self.session.play_start = t;
         }
     }
 
@@ -554,24 +442,14 @@ impl App {
 
     pub fn new_project(&mut self) {
         self.stop(false);
-        self.project = Project::new_default();
-        self.path = None;
-        self.dirty = false;
-        self.undo.clear();
-        self.redo.clear();
-        self.sel_events.clear();
-        self.sel_track = Some(0);
-        self.cursor = Ticks::ZERO;
-        self.time_sel = None;
+        self.session.reset_project(Project::new_default(), None);
         self.thumbs.clear();
-        self.changed();
-        self.dirty = false;
         self.set_status("Novo projeto");
     }
 
     pub fn open_project_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Projeto NVOV", &["nvp"])
+            .add_filter("Projeto Neoveg", &["neoveg", "nvp"])
             .pick_file()
         {
             self.open_project_path(p);
@@ -580,26 +458,14 @@ impl App {
 
     pub fn open_project_path(&mut self, path: PathBuf) {
         // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
-        let res = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|s| Project::from_json(&s));
+        let res = Project::load_file(&path);
         match res {
             Ok((p, fixes)) => {
                 self.stop(false);
                 for f in &fixes {
-                    crate::util::log_warn(&format!("projeto corrigido ao abrir: {f}"));
+                    util::log_warn(&format!("projeto corrigido ao abrir: {f}"));
                 }
-                self.project = p;
-                self.path = Some(path.clone());
-                self.undo.clear();
-                self.redo.clear();
-                self.sel_events.clear();
-                self.sel_track = if self.project.tracks.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
-                self.cursor = Ticks::ZERO;
+                self.session.reset_project(p, Some(path.clone()));
                 self.thumbs.clear();
                 // recarrega as mídias em segundo plano
                 let items = self.project.media.clone();
@@ -607,7 +473,7 @@ impl App {
                     self.media.remove(m.id);
                     let tx = self.loader_tx.clone();
                     self.loading += 1;
-                    let spawned = crate::util::spawn("recarregar-midia", move || {
+                    let spawned = util::spawn("recarregar-midia", move || {
                         let mut m = m;
                         let r = media::load_entry(&mut m).map_err(|e| format!("{e:#}"));
                         let _ = tx.send(LoadMsg::Reloaded(m.id, r));
@@ -617,8 +483,6 @@ impl App {
                         self.set_status(e);
                     }
                 }
-                self.changed();
-                self.dirty = false;
                 if fixes.is_empty() {
                     self.set_status(format!("Projeto aberto: {}", path.display()));
                 } else {
@@ -632,8 +496,9 @@ impl App {
     pub fn save_project(&mut self, save_as: bool) -> bool {
         let path = if save_as || self.path.is_none() {
             match rfd::FileDialog::new()
-                .add_filter("Projeto NVOV", &["nvp"])
-                .set_file_name("projeto.nvp")
+                .add_filter("Projeto Neoveg", &["neoveg"])
+                .add_filter("Projeto legado (NVP)", &["nvp"])
+                .set_file_name("projeto.neoveg")
                 .save_file()
             {
                 Some(p) => p,
@@ -648,30 +513,24 @@ impl App {
         self.write_project(&path)
     }
 
-    fn write_project(&mut self, path: &std::path::Path) -> bool {
-        self.project.sort_events();
-        match serde_json::to_string_pretty(&self.project) {
-            Ok(s) => match std::fs::write(path, s) {
-                Ok(_) => {
-                    self.path = Some(path.to_path_buf());
-                    self.dirty = false;
-                    crate::util::clear_recovery();
-                    self.set_status(format!("Projeto salvo: {}", path.display()));
-                    true
-                }
-                Err(e) => {
-                    self.set_status(format!("Erro ao salvar: {e}"));
-                    false
-                }
-            },
+    pub(crate) fn write_project(&mut self, path: &std::path::Path) -> bool {
+        self.session.project.sort_events();
+        match self.session.project.save_file(path) {
+            Ok(()) => {
+                self.path = Some(path.to_path_buf());
+                self.dirty = false;
+                recovery::clear_recovery();
+                self.set_status(format!("Projeto salvo: {}", path.display()));
+                true
+            }
             Err(e) => {
-                self.set_status(format!("Erro ao serializar: {e}"));
+                self.set_status(format!("Erro ao salvar: {e}"));
                 false
             }
         }
     }
 
-    /// Salvar versão (incremental): projeto_01.nvp, projeto_02.nvp...
+    /// Salvar versão (incremental): projeto_01.neoveg, projeto_02.neoveg...
     pub fn save_version(&mut self) {
         let Some(p) = self.path.clone() else {
             self.save_project(true);
@@ -688,8 +547,8 @@ impl App {
         };
         let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
         for i in 1..1000 {
-            let cand = dir.join(format!("{base}_{i:02}.nvp"));
-            if !cand.exists() {
+            let cand = dir.join(format!("{base}_{i:02}.neoveg"));
+            if !cand.exists() && !dir.join(format!("{base}_{i:02}.nvp")).exists() {
                 self.write_project(&cand);
                 return;
             }
@@ -892,37 +751,7 @@ impl App {
     }
 
     pub fn insert_track(&mut self, kind: TrackKind) -> usize {
-        let n = self
-            .project
-            .tracks
-            .iter()
-            .filter(|t| t.kind == kind)
-            .count()
-            + 1;
-        let name = match kind {
-            TrackKind::Video => format!("Vídeo {n}"),
-            TrackKind::Audio => format!("Áudio {n}"),
-        };
-        let t = Track::new(kind, &name);
-        // vídeo: insere acima das trilhas de áudio; áudio: no final
-        let idx = match kind {
-            TrackKind::Video => match self.sel_track {
-                Some(i) if self.project.tracks.get(i).map(|t| t.kind) == Some(TrackKind::Video) => {
-                    i
-                }
-                _ => self
-                    .project
-                    .tracks
-                    .iter()
-                    .position(|t| t.kind == TrackKind::Audio)
-                    .unwrap_or(self.project.tracks.len()),
-            },
-            TrackKind::Audio => self.project.tracks.len(),
-        };
-        self.project.tracks.insert(idx, t);
-        self.sel_track = Some(idx);
-        self.changed();
-        idx
+        self.session.insert_track(kind)
     }
 
     pub fn thumb(&mut self, ctx: &egui::Context, id: Id) -> Option<TextureHandle> {
@@ -936,10 +765,7 @@ impl App {
             return None;
         }
         let img = self.media.thumbnail(&m, 160)?;
-        let ci = egui::ColorImage::from_rgba_unmultiplied(
-            [img.width() as usize, img.height() as usize],
-            img.as_raw(),
-        );
+        let ci = rgba_to_color_image(&img);
         let tex = ctx.load_texture(format!("thumb{id}"), ci, egui::TextureOptions::LINEAR);
         self.thumbs.insert(id, tex.clone());
         Some(tex)
@@ -957,28 +783,33 @@ impl App {
             if let Some(e) = res.error {
                 self.set_status(format!("Prévia: {e}"));
             }
+            let image = rgba_to_color_image(&res.image);
             match &mut self.preview_tex {
-                Some(t) => t.set(res.image, egui::TextureOptions::LINEAR),
+                Some(t) => t.set(image, egui::TextureOptions::LINEAR),
                 None => {
                     self.preview_tex =
-                        Some(ctx.load_texture("preview", res.image, egui::TextureOptions::LINEAR))
+                        Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR))
                 }
             }
             if let Some(sc) = res.scopes {
                 let opts = egui::TextureOptions::NEAREST;
+                let hist = rgba_to_color_image(&sc.histogram);
+                let wave = rgba_to_color_image(&sc.waveform);
+                let vec = rgba_to_color_image(&sc.vectorscope);
+                let par = rgba_to_color_image(&sc.parade);
                 match &mut self.scopes_tex {
                     Some(t) => {
-                        t[0].set(sc.histogram, opts);
-                        t[1].set(sc.waveform, opts);
-                        t[2].set(sc.vectorscope, opts);
-                        t[3].set(sc.parade, opts);
+                        t[0].set(hist, opts);
+                        t[1].set(wave, opts);
+                        t[2].set(vec, opts);
+                        t[3].set(par, opts);
                     }
                     None => {
                         self.scopes_tex = Some([
-                            ctx.load_texture("sc_hist", sc.histogram, opts),
-                            ctx.load_texture("sc_wave", sc.waveform, opts),
-                            ctx.load_texture("sc_vec", sc.vectorscope, opts),
-                            ctx.load_texture("sc_par", sc.parade, opts),
+                            ctx.load_texture("sc_hist", hist, opts),
+                            ctx.load_texture("sc_wave", wave, opts),
+                            ctx.load_texture("sc_vec", vec, opts),
+                            ctx.load_texture("sc_par", par, opts),
                         ]);
                     }
                 }
@@ -1012,7 +843,111 @@ impl App {
     }
 
     // -----------------------------------------------------------------
-    // Atalhos de teclado (baseados nos atalhos padrão do VEGAS Pro)
+    // Despacho pela Tabela Única de Comandos (§3.3)
+    // -----------------------------------------------------------------
+
+    pub fn cmd_enabled(&self, id: &str) -> bool {
+        let host = GuiQueryHost {
+            playing: self.is_playing(),
+            shuttle: self.shuttle,
+            media: &self.media,
+        };
+        is_command_enabled(id, &self.session, &host)
+    }
+
+    pub fn exec_cmd(&mut self, ctx: Option<&egui::Context>, id: &str) {
+        let mut host = GuiHost {
+            playing: self.is_playing(),
+            shuttle: self.shuttle,
+            media: &self.media,
+            actions: Vec::new(),
+            removed_media: Vec::new(),
+            pending_generated: Vec::new(),
+        };
+        let res = run_command(id, &mut self.session, &mut host);
+        let GuiHost {
+            actions,
+            removed_media,
+            pending_generated,
+            ..
+        } = host;
+        for removed_id in removed_media {
+            self.thumbs.remove(&removed_id);
+        }
+        for spec in pending_generated {
+            self.insert_generated(spec);
+        }
+        self.sync_after_session();
+        match res {
+            Ok(_) => {
+                for act in actions {
+                    self.dispatch_ui_action(ctx, act);
+                }
+            }
+            Err(msg) => self.set_status(msg),
+        }
+    }
+
+    fn dispatch_ui_action(&mut self, ctx: Option<&egui::Context>, action: UiAction) {
+        match action {
+            UiAction::NewProject => self.new_project(),
+            UiAction::OpenProjectDialog => self.open_project_dialog(),
+            UiAction::SaveProject { save_as } => {
+                self.save_project(save_as);
+            }
+            UiAction::SaveVersion => self.save_version(),
+            UiAction::ImportMediaDialog => self.import_dialog(),
+            UiAction::ImportSequenceDialog => self.import_sequence_dialog(),
+            UiAction::OpenRenderDialog => self
+                .dlg
+                .open_render(&self.session.project, self.session.path.as_deref()),
+            UiAction::SnapshotDialog => self.snapshot_dialog(),
+            UiAction::OpenProjectProps => self.dlg.project_props = true,
+            UiAction::OpenEventProps => {
+                self.dlg.event_props = self.sel_events.iter().next().copied();
+            }
+            UiAction::OpenPanCrop => {
+                self.dlg.pan_crop = self.sel_events.iter().next().copied();
+            }
+            UiAction::OpenFxEvent => {
+                self.dlg.fx_target = self.sel_events.iter().next().map(|i| FxTarget::Event(*i));
+            }
+            UiAction::OpenFxMasterAudio => self.dlg.fx_target = Some(FxTarget::MasterAudio),
+            UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
+            UiAction::OpenGoto => self.dlg.goto_open = true,
+            UiAction::OpenShortcuts => self.dlg.shortcuts = true,
+            UiAction::OpenAbout => self.dlg.about = true,
+            UiAction::ExitApp => {
+                if let Some(c) = ctx {
+                    c.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            UiAction::SelectDock(panel) => self.dock_tab = panel,
+            UiAction::TogglePlay => self.toggle_play(),
+            UiAction::PlayFromStart => {
+                self.set_cursor(Ticks::ZERO);
+                self.play();
+            }
+            UiAction::Play => self.play(),
+            UiAction::Stop { restore_cursor } => self.stop(restore_cursor),
+            UiAction::Shuttle(s) => self.shuttle_play(s),
+            UiAction::SetCursor(t) => self.set_cursor(t),
+            UiAction::CenterTimeline => {
+                let c = self.cursor;
+                self.tl.center_on(c);
+            }
+            UiAction::ZoomBy(f) => self.tl.zoom_by(f, None),
+            UiAction::JumpMarker(forward) => self.jump_marker(forward),
+            UiAction::JumpMarkerIndex(idx) => {
+                if let Some(t) = self.session.jump_to_marker_index(idx) {
+                    self.set_cursor(t);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Atalhos de teclado (despachados via Tabela Única de Comandos)
     // -----------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -1022,9 +957,16 @@ impl App {
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
         for ev in &events {
             match ev {
-                egui::Event::Copy => self.copy_selection(),
-                egui::Event::Cut => self.cut_selection(),
-                egui::Event::Paste(_) => self.paste(mods.shift),
+                egui::Event::Copy => self.exec_cmd(Some(ctx), "edit.copy"),
+                egui::Event::Cut => self.exec_cmd(Some(ctx), "edit.cut"),
+                egui::Event::Paste(_) => self.exec_cmd(
+                    Some(ctx),
+                    if mods.shift {
+                        "edit.paste_insert"
+                    } else {
+                        "edit.paste"
+                    },
+                ),
                 _ => {}
             }
         }
@@ -1032,474 +974,159 @@ impl App {
         let ctrl = mods.command;
         let shift = mods.shift;
         let alt = mods.alt;
-        let fd = self.project.settings.frame_dur();
 
-        if pressed(Key::Space) {
-            if shift {
-                self.set_cursor(Ticks::ZERO);
-                self.play();
-            } else {
-                self.toggle_play();
-            }
+        // Alias clássico Ctrl+Shift+Z para Refazer além do Ctrl+Y da tabela
+        if ctrl && shift && !alt && pressed(Key::Z) {
+            self.exec_cmd(Some(ctx), "edit.redo");
+            return;
         }
-        if pressed(Key::Enter) && !alt {
-            if self.is_playing() {
-                self.stop(true);
-            } else {
-                self.play();
-            }
-        }
-        if pressed(Key::Enter) && alt {
-            self.dlg.project_props = true;
-        }
-        if pressed(Key::Escape) && self.is_playing() {
-            self.stop(false);
-        }
-        if ctrl && pressed(Key::Z) {
-            if shift {
-                self.redo();
-            } else {
-                self.undo();
-            }
-        }
-        if ctrl && pressed(Key::Y) {
-            self.redo();
-        }
-        if ctrl && pressed(Key::S) {
-            if alt {
-                self.save_version();
-            } else {
-                self.save_project(shift);
-            }
-        }
-        if ctrl && pressed(Key::O) {
-            self.open_project_dialog();
-        }
-        if ctrl && pressed(Key::N) {
-            self.new_project();
-        }
-        if ctrl && pressed(Key::M) {
-            self.dlg.open_render(&self.project, self.path.as_deref());
-        }
-        if ctrl && pressed(Key::I) {
-            self.import_dialog();
-        }
-        if ctrl && pressed(Key::A) {
-            if shift {
-                self.sel_events.clear();
-            } else {
-                self.sel_events = self
-                    .project
-                    .tracks
-                    .iter()
-                    .flat_map(|t| t.events.iter().map(|e| e.id))
-                    .collect();
-            }
-        }
-        if ctrl && pressed(Key::Q) {
-            self.checkpoint();
-            self.insert_track(if shift {
-                TrackKind::Video
-            } else {
-                TrackKind::Audio
-            });
-        }
-        if ctrl && pressed(Key::T) {
-            self.trim_to_selection();
-        }
-        if ctrl && pressed(Key::G) {
-            self.dlg.goto_open = true;
-        }
-        if ctrl && pressed(Key::L) {
-            self.opts.auto_ripple = !self.opts.auto_ripple;
-            self.set_status(if self.opts.auto_ripple {
-                "Ripple automático ligado"
-            } else {
-                "Ripple automático desligado"
-            });
-        }
-        if ctrl {
-            if pressed(Key::Home) {
-                self.set_cursor(Ticks::ZERO);
-            }
-            if pressed(Key::End) {
-                let d = self.project.duration();
-                self.set_cursor(d);
-            }
+
+        // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
+        if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                self.jump_marker(false);
+                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
+                    .max(Ticks::from_raw(1));
+                let c = self.cursor;
+                self.set_cursor(c - dt);
+                return;
             }
             if pressed(Key::ArrowRight) {
-                self.jump_marker(true);
+                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
+                    .max(Ticks::from_raw(1));
+                let c = self.cursor;
+                self.set_cursor(c + dt);
+                return;
             }
-            if pressed(Key::ArrowUp) {
-                self.tl.zoom_by(2.0, None);
+        }
+
+        // Despacho unificado na Tabela Única de Comandos (com atalhos regraváveis)
+        let mut to_run: Option<&'static str> = None;
+        for cmd in COMMANDS {
+            let Some(sc) = resolved_shortcut(cmd, &self.prefs.shortcuts) else {
+                continue;
+            };
+            if sc.ctrl == ctrl && sc.shift == shift && sc.alt == alt && pressed(to_egui_key(sc.key))
+            {
+                to_run = Some(cmd.id);
+                break;
             }
-            if pressed(Key::ArrowDown) {
-                self.tl.zoom_by(0.5, None);
+        }
+        if let Some(id) = to_run {
+            if self.cmd_enabled(id) {
+                self.exec_cmd(Some(ctx), id);
             }
             return;
         }
-        if pressed(Key::Delete) {
-            self.delete_selection();
-        }
-        if pressed(Key::S) && !alt {
-            self.split_at_cursor();
-        }
-        if pressed(Key::M) {
-            self.insert_marker();
-        }
-        if pressed(Key::R) {
-            self.insert_region();
-        }
-        if pressed(Key::Q) {
-            if shift {
-                if let Some(r) = self.project.loop_region {
-                    self.time_sel = Some(r);
-                }
-            } else {
-                self.opts.loop_playback = !self.opts.loop_playback;
-            }
-        }
-        if pressed(Key::I) {
-            let c = self.cursor;
-            let end = self
-                .time_sel
-                .map(|s| s.1)
-                .filter(|e| *e > c)
-                .unwrap_or(c + Ticks::from_secs_i64(5));
-            self.time_sel = Some((c, end));
-            self.project.loop_region = Some((c, end));
-        }
-        if pressed(Key::O) {
-            let c = self.cursor;
-            let start = self
-                .time_sel
-                .map(|s| s.0)
-                .filter(|s| *s < c)
-                .unwrap_or(Ticks::ZERO);
-            self.time_sel = Some((start, c));
-            self.project.loop_region = Some((start, c));
-        }
-        if pressed(Key::Home) || pressed(Key::W) {
-            let t = self.time_sel.map(|s| s.0).unwrap_or(Ticks::ZERO);
-            self.set_cursor(t);
-        }
-        if pressed(Key::End) {
-            let t = self
-                .time_sel
-                .map(|s| s.1)
-                .unwrap_or(self.project.duration());
-            self.set_cursor(t);
-        }
-        if alt && pressed(Key::ArrowLeft) {
-            let t = self
-                .project
-                .settings
-                .quantize((self.cursor - fd).max(Ticks::ZERO));
-            self.set_cursor(t);
-        } else if pressed(Key::ArrowLeft) {
-            let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                .max(Ticks::from_raw(1));
-            self.set_cursor(self.cursor - dt);
-        }
-        if alt && pressed(Key::ArrowRight) {
-            let t = self.project.settings.quantize(self.cursor + fd);
-            self.set_cursor(t);
-        } else if pressed(Key::ArrowRight) {
-            let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                .max(Ticks::from_raw(1));
-            self.set_cursor(self.cursor + dt);
-        }
-        if !alt && pressed(Key::ArrowUp) {
-            self.tl.zoom_by(1.25, None);
-        }
-        if !alt && pressed(Key::ArrowDown) {
-            self.tl.zoom_by(0.8, None);
-        }
-        if pressed(Key::J) {
-            let s = if self.shuttle < 0.0 {
-                (self.shuttle * 2.0).max(-8.0)
-            } else {
-                -1.0
-            };
-            self.shuttle_play(s);
-        }
-        if pressed(Key::K) && self.is_playing() {
-            self.stop(true);
-        }
-        if pressed(Key::L) {
-            let s = if self.shuttle > 0.0 && self.is_playing() {
-                (self.shuttle * 2.0).min(8.0)
-            } else {
-                1.0
-            };
-            if s == 1.0 {
-                self.play();
-            } else {
-                self.shuttle_play(s);
-            }
-        }
-        if pressed(Key::F8) {
-            self.opts.snapping = !self.opts.snapping;
-        }
-        if pressed(Key::G) {
-            if shift {
-                self.select_group();
-            } else {
-                self.group_selected();
-            }
-        }
-        if pressed(Key::U) {
-            self.ungroup_selected();
-        }
-        if pressed(Key::Z) {
-            if let Some(t) = self.sel_track {
-                self.checkpoint();
-                self.project.tracks[t].mute = !self.project.tracks[t].mute;
-                self.changed();
-            }
-        }
-        if pressed(Key::X) {
-            if let Some(t) = self.sel_track {
-                self.checkpoint();
-                self.project.tracks[t].solo = !self.project.tracks[t].solo;
-                self.changed();
-            }
-        }
-        if pressed(Key::V) {
-            if shift {
-                self.remove_envelope(EnvKind::Volume);
-            } else {
-                self.toggle_envelope_for_selected(EnvKind::Volume, EnvKind::Opacity);
-            }
-        }
-        if pressed(Key::P) {
-            if shift {
-                self.remove_envelope(EnvKind::Pan);
-            } else {
-                self.toggle_envelope_for_selected(EnvKind::Pan, EnvKind::FadeToColor);
-            }
-        }
-        if alt && pressed(Key::OpenBracket) {
-            self.trim_selected_start_to_cursor();
-        }
-        if alt && pressed(Key::CloseBracket) {
-            self.trim_selected_end_to_cursor();
-        }
-        if pressed(Key::F2) {
-            if let Some(id) = self.sel_events.iter().next().cloned() {
-                self.dlg.event_props = Some(id);
-            }
-        }
-        if pressed(Key::Backslash) {
-            self.tl.center_on(self.cursor);
-        }
-        let nums = [
-            Key::Num0,
-            Key::Num1,
-            Key::Num2,
-            Key::Num3,
-            Key::Num4,
-            Key::Num5,
-            Key::Num6,
-            Key::Num7,
-            Key::Num8,
-            Key::Num9,
-        ];
-        for (i, k) in nums.iter().enumerate() {
-            if pressed(*k) {
-                let mut ms: Vec<Ticks> = self.project.markers.iter().map(|m| m.t).collect();
-                ms.sort();
-                let idx = if i == 0 { 9 } else { i - 1 };
-                if let Some(t) = ms.get(idx) {
-                    self.set_cursor(*t);
+
+        // Teclas numéricas 0-9: ir para o marcador correspondente
+        if !ctrl && !alt {
+            let nums = [
+                Key::Num0,
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+                Key::Num7,
+                Key::Num8,
+                Key::Num9,
+            ];
+            for (i, k) in nums.iter().enumerate() {
+                if pressed(*k) {
+                    let idx = if i == 0 { 9 } else { i - 1 };
+                    if let Some(t) = self.session.jump_to_marker_index(idx) {
+                        self.set_cursor(t);
+                    }
                 }
             }
         }
     }
 
     fn jump_marker(&mut self, forward: bool) {
-        let mut pts: Vec<Ticks> = self.project.markers.iter().map(|m| m.t).collect();
-        pts.extend(self.project.regions.iter().flat_map(|r| [r.start, r.end]));
-        pts.push(Ticks::ZERO);
-        pts.push(self.project.duration());
-        pts.sort();
-        let c = self.cursor;
-        let t = if forward {
-            pts.into_iter().find(|t| *t > c)
-        } else {
-            pts.into_iter().rev().find(|t| *t < c)
-        };
-        if let Some(t) = t {
+        if let Some(t) = self.session.jump_marker_time(forward) {
             self.set_cursor(t);
         }
     }
 
     // -----------------------------------------------------------------
-    // Barras de menu e ferramentas
+    // Barras de menu e ferramentas (despachadas pela Tabela Única)
     // -----------------------------------------------------------------
+
+    fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
+        let label = menu_label(id, &self.prefs.shortcuts);
+        if ui
+            .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
+            .clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), id);
+            ui.close_menu();
+        }
+    }
+
+    fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
+        let label = menu_label(id, &self.prefs.shortcuts);
+        if ui.checkbox(&mut value, label).changed() {
+            self.exec_cmd(Some(ui.ctx()), id);
+        }
+    }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("Arquivo", |ui| {
-                if ui.button("Novo projeto        Ctrl+N").clicked() {
-                    self.new_project();
-                    ui.close_menu();
-                }
-                if ui.button("Abrir...            Ctrl+O").clicked() {
-                    self.open_project_dialog();
-                    ui.close_menu();
-                }
-                if ui.button("Salvar              Ctrl+S").clicked() {
-                    self.save_project(false);
-                    ui.close_menu();
-                }
-                if ui.button("Salvar como...      Ctrl+Shift+S").clicked() {
-                    self.save_project(true);
-                    ui.close_menu();
-                }
-                if ui.button("Salvar versão       Ctrl+Alt+S").clicked() {
-                    self.save_version();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "file.new");
+                self.cmd_menu_btn(ui, "file.open");
+                self.cmd_menu_btn(ui, "file.save");
+                self.cmd_menu_btn(ui, "file.save_as");
+                self.cmd_menu_btn(ui, "file.save_version");
                 ui.separator();
-                if ui.button("Importar mídia...   Ctrl+I").clicked() {
-                    self.import_dialog();
-                    ui.close_menu();
-                }
-                if ui.button("Importar sequência de imagens...").clicked() {
-                    self.import_sequence_dialog();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "file.import_media");
+                self.cmd_menu_btn(ui, "file.import_sequence");
                 ui.separator();
-                if ui.button("Renderizar como...  Ctrl+M").clicked() {
-                    self.dlg.open_render(&self.project, self.path.as_deref());
-                    ui.close_menu();
-                }
-                if ui.button("Salvar quadro (snapshot) em PNG...").clicked() {
-                    self.snapshot_dialog();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "file.render");
+                self.cmd_menu_btn(ui, "file.snapshot");
                 ui.separator();
-                if ui.button("Propriedades do projeto...  Alt+Enter").clicked() {
-                    self.dlg.project_props = true;
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "file.project_props");
                 ui.separator();
-                if ui.button("Sair").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "file.exit");
             });
             ui.menu_button("Editar", |ui| {
-                if ui
-                    .add_enabled(
-                        !self.undo.is_empty(),
-                        egui::Button::new("Desfazer   Ctrl+Z"),
-                    )
-                    .clicked()
-                {
-                    self.undo();
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(
-                        !self.redo.is_empty(),
-                        egui::Button::new("Refazer    Ctrl+Y"),
-                    )
-                    .clicked()
-                {
-                    self.redo();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "edit.undo");
+                self.cmd_menu_btn(ui, "edit.redo");
                 ui.separator();
-                if ui.button("Recortar   Ctrl+X").clicked() {
-                    self.cut_selection();
-                    ui.close_menu();
-                }
-                if ui.button("Copiar     Ctrl+C").clicked() {
-                    self.copy_selection();
-                    ui.close_menu();
-                }
-                if ui.button("Colar      Ctrl+V").clicked() {
-                    self.paste(false);
-                    ui.close_menu();
-                }
-                if ui
-                    .button("Colar inserindo (ripple)  Ctrl+Shift+V")
-                    .clicked()
-                {
-                    self.paste(true);
-                    ui.close_menu();
-                }
-                if ui.button("Excluir    Delete").clicked() {
-                    self.delete_selection();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "edit.cut");
+                self.cmd_menu_btn(ui, "edit.copy");
+                self.cmd_menu_btn(ui, "edit.paste");
+                self.cmd_menu_btn(ui, "edit.paste_insert");
+                self.cmd_menu_btn(ui, "edit.delete");
                 ui.separator();
-                if ui.button("Dividir no cursor   S").clicked() {
-                    self.split_at_cursor();
-                    ui.close_menu();
-                }
-                if ui.button("Aparar para a seleção   Ctrl+T").clicked() {
-                    self.trim_to_selection();
-                    ui.close_menu();
-                }
-                if ui
-                    .button("Excluir intervalo selecionado (ripple)")
-                    .clicked()
-                {
-                    self.delete_time_range();
-                    ui.close_menu();
-                }
-                if ui.button("Inserir tempo na seleção").clicked() {
-                    self.insert_time();
-                    ui.close_menu();
-                }
-                if ui.button("Fechar lacunas da trilha selecionada").clicked() {
-                    self.close_gaps();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "edit.split");
+                self.cmd_menu_btn(ui, "edit.trim_to_selection");
+                self.cmd_menu_btn(ui, "edit.delete_range_ripple");
+                self.cmd_menu_btn(ui, "edit.insert_time");
+                self.cmd_menu_btn(ui, "edit.close_gaps");
                 ui.separator();
-                if ui.button("Agrupar   G").clicked() {
-                    self.group_selected();
-                    ui.close_menu();
-                }
-                if ui.button("Desagrupar   U").clicked() {
-                    self.ungroup_selected();
-                    ui.close_menu();
-                }
-                if ui.button("Selecionar todos   Ctrl+A").clicked() {
-                    self.sel_events = self
-                        .project
-                        .tracks
-                        .iter()
-                        .flat_map(|t| t.events.iter().map(|e| e.id))
-                        .collect();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "edit.group");
+                self.cmd_menu_btn(ui, "edit.ungroup");
+                self.cmd_menu_btn(ui, "edit.select_all");
                 ui.separator();
-                if ui.button("Ir para...   Ctrl+G").clicked() {
-                    self.dlg.goto_open = true;
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "edit.goto");
             });
             ui.menu_button("Exibir", |ui| {
-                for tab in DockTab::ALL {
+                for tab in DockPanel::ALL {
                     if ui
                         .selectable_label(self.dock_tab == tab, tab.name())
                         .clicked()
                     {
-                        self.dock_tab = tab;
+                        self.exec_cmd(Some(ui.ctx()), tab.command_id());
                         ui.close_menu();
                     }
                 }
                 ui.separator();
-                ui.checkbox(&mut self.opts.show_envelopes, "Mostrar envelopes");
-                ui.checkbox(&mut self.opts.show_waveforms, "Mostrar formas de onda");
-                ui.checkbox(&mut self.opts.show_thumbs, "Mostrar miniaturas de vídeo");
-                ui.checkbox(&mut self.opts.safe_areas, "Áreas de segurança na prévia");
+                self.cmd_menu_chk(ui, self.opts.show_envelopes, "view.envelopes");
+                self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
+                self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
+                self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 ui.separator();
                 ui.label("Formato de tempo:");
                 for fmt in TimeFormat::ALL {
@@ -1507,103 +1134,35 @@ impl App {
                 }
             });
             ui.menu_button("Inserir", |ui| {
-                if ui.button("Trilha de vídeo   Ctrl+Shift+Q").clicked() {
-                    self.checkpoint();
-                    self.insert_track(TrackKind::Video);
-                    ui.close_menu();
-                }
-                if ui.button("Trilha de áudio   Ctrl+Q").clicked() {
-                    self.checkpoint();
-                    self.insert_track(TrackKind::Audio);
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "insert.track_video");
+                self.cmd_menu_btn(ui, "insert.track_audio");
                 ui.separator();
-                if ui.button("Marcador   M").clicked() {
-                    self.insert_marker();
-                    ui.close_menu();
-                }
-                if ui.button("Região   R").clicked() {
-                    self.insert_region();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "insert.marker");
+                self.cmd_menu_btn(ui, "insert.region");
                 ui.separator();
-                if ui.button("Texto / título...").clicked() {
-                    self.insert_generated(GenSpec::Text(TextSpec::default()));
-                    ui.close_menu();
-                }
-                if ui.button("Cor sólida").clicked() {
-                    self.insert_generated(GenSpec::SolidColor {
-                        color: [0.1, 0.2, 0.5, 1.0],
-                    });
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "insert.gen_text");
+                self.cmd_menu_btn(ui, "insert.gen_solid");
                 ui.separator();
                 ui.label("Envelopes da trilha selecionada:");
-                if ui.button("Volume / Nível de composição   V").clicked() {
-                    self.toggle_envelope_for_selected(EnvKind::Volume, EnvKind::Opacity);
-                    ui.close_menu();
-                }
-                if ui.button("Pan / Fade para cor   P").clicked() {
-                    self.toggle_envelope_for_selected(EnvKind::Pan, EnvKind::FadeToColor);
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "insert.env_volume");
+                self.cmd_menu_btn(ui, "insert.env_pan");
             });
             ui.menu_button("Ferramentas", |ui| {
-                if ui.button("Efeitos do master bus (áudio)...").clicked() {
-                    self.dlg.fx_target = Some(FxTarget::MasterAudio);
-                    ui.close_menu();
-                }
-                if ui.button("Efeitos de saída de vídeo...").clicked() {
-                    self.dlg.fx_target = Some(FxTarget::MasterVideo);
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "tools.fx_master_audio");
+                self.cmd_menu_btn(ui, "tools.fx_master_video");
                 ui.separator();
-                let has_sel = !self.sel_events.is_empty();
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("Propriedades do evento..."))
-                    .clicked()
-                {
-                    self.dlg.event_props = self.sel_events.iter().next().cloned();
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("Pan/Crop do evento..."))
-                    .clicked()
-                {
-                    self.dlg.pan_crop = self.sel_events.iter().next().cloned();
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("Efeitos do evento..."))
-                    .clicked()
-                {
-                    self.dlg.fx_target = self.sel_events.iter().next().map(|i| FxTarget::Event(*i));
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("Inverter evento (reverse)"))
-                    .clicked()
-                {
-                    self.toggle_reverse();
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new("Congelar quadro no cursor"))
-                    .clicked()
-                {
-                    self.freeze_frame();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "tools.event_props");
+                self.cmd_menu_btn(ui, "tools.pan_crop");
+                self.cmd_menu_btn(ui, "tools.fx_event");
+                self.cmd_menu_btn(ui, "tools.reverse");
+                self.cmd_menu_btn(ui, "tools.freeze_frame");
             });
             ui.menu_button("Opções", |ui| {
-                ui.checkbox(&mut self.opts.snapping, "Ativar encaixe (snapping)   F8");
-                ui.checkbox(&mut self.opts.quantize, "Quantizar para quadros");
-                ui.checkbox(&mut self.opts.auto_ripple, "Ripple automático   Ctrl+L");
-                ui.checkbox(
-                    &mut self.opts.ignore_grouping,
-                    "Ignorar agrupamento de eventos",
-                );
-                ui.checkbox(&mut self.opts.loop_playback, "Reprodução em loop   Q");
+                self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
+                self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
+                self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
+                self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
+                self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
                 ui.separator();
                 ui.label(format!(
                     "Dispositivo de áudio: {} ({} Hz)",
@@ -1611,88 +1170,75 @@ impl App {
                 ));
             });
             ui.menu_button("Ajuda", |ui| {
-                if ui.button("Atalhos de teclado").clicked() {
-                    self.dlg.shortcuts = true;
-                    ui.close_menu();
-                }
-                if ui.button("Sobre o NVOV").clicked() {
-                    self.dlg.about = true;
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "help.shortcuts");
+                self.cmd_menu_btn(ui, "help.about");
             });
         });
     }
 
+    fn cmd_tool_btn(&mut self, ui: &mut egui::Ui, text: &str, id: &str) {
+        let hover = commands::find_command(id)
+            .map(|c| match resolved_shortcut(c, &self.prefs.shortcuts) {
+                Some(sc) => format!("{} ({})", c.label, sc.format()),
+                None => c.label.to_string(),
+            })
+            .unwrap_or_else(|| text.to_string());
+        if ui
+            .add_enabled(self.cmd_enabled(id), egui::Button::new(text))
+            .on_hover_text(hover)
+            .clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), id);
+        }
+    }
+
+    fn cmd_tool_toggle(&mut self, ui: &mut egui::Ui, active: bool, text: &str, id: &str) {
+        let hover = commands::find_command(id)
+            .map(|c| match resolved_shortcut(c, &self.prefs.shortcuts) {
+                Some(sc) => format!("{} ({})", c.label, sc.format()),
+                None => c.label.to_string(),
+            })
+            .unwrap_or_else(|| text.to_string());
+        let mut on = active;
+        if ui
+            .toggle_value(&mut on, text)
+            .on_hover_text(hover)
+            .clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), id);
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui
-                .button("🗋")
-                .on_hover_text("Novo projeto (Ctrl+N)")
-                .clicked()
-            {
-                self.new_project();
-            }
-            if ui.button("🗁").on_hover_text("Abrir (Ctrl+O)").clicked() {
-                self.open_project_dialog();
-            }
-            if ui.button("💾").on_hover_text("Salvar (Ctrl+S)").clicked() {
-                self.save_project(false);
-            }
-            if ui
-                .button("🎬 Renderizar")
-                .on_hover_text("Renderizar como (Ctrl+M)")
-                .clicked()
-            {
-                self.dlg.open_render(&self.project, self.path.as_deref());
-            }
-            if ui
-                .button("⚙")
-                .on_hover_text("Propriedades do projeto (Alt+Enter)")
-                .clicked()
-            {
-                self.dlg.project_props = true;
-            }
+            self.cmd_tool_btn(ui, "🗋", "file.new");
+            self.cmd_tool_btn(ui, "🗁", "file.open");
+            self.cmd_tool_btn(ui, "💾", "file.save");
+            self.cmd_tool_btn(ui, "🎬 Renderizar", "file.render");
+            self.cmd_tool_btn(ui, "⚙", "file.project_props");
             ui.separator();
-            if ui
-                .button("➕ Importar")
-                .on_hover_text("Importar mídia (Ctrl+I)")
-                .clicked()
-            {
-                self.import_dialog();
-            }
+            self.cmd_tool_btn(ui, "➕ Importar", "file.import_media");
             ui.separator();
-            if ui
-                .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
-                .on_hover_text("Desfazer (Ctrl+Z)")
-                .clicked()
-            {
-                self.undo();
-            }
-            if ui
-                .add_enabled(!self.redo.is_empty(), egui::Button::new("↷"))
-                .on_hover_text("Refazer (Ctrl+Y)")
-                .clicked()
-            {
-                self.redo();
-            }
+            self.cmd_tool_btn(ui, "↶", "edit.undo");
+            self.cmd_tool_btn(ui, "↷", "edit.redo");
             ui.separator();
-            if ui
-                .button("✂ Dividir")
-                .on_hover_text("Dividir no cursor (S)")
-                .clicked()
-            {
-                self.split_at_cursor();
-            }
-            if ui.button("🗑").on_hover_text("Excluir (Delete)").clicked() {
-                self.delete_selection();
-            }
+            self.cmd_tool_btn(ui, "✂ Dividir", "edit.split");
+            self.cmd_tool_btn(ui, "🗑", "edit.delete");
             ui.separator();
-            ui.toggle_value(&mut self.opts.snapping, "🧲 Encaixe")
-                .on_hover_text("Ativar encaixe (F8)");
-            ui.toggle_value(&mut self.opts.auto_ripple, "⇥ Ripple")
-                .on_hover_text("Ripple automático (Ctrl+L)");
-            ui.toggle_value(&mut self.opts.ignore_grouping, "⛓ Ignorar grupos");
-            ui.toggle_value(&mut self.opts.show_envelopes, "〰 Envelopes");
+            self.cmd_tool_toggle(ui, self.opts.snapping, "🧲 Encaixe", "options.snapping");
+            self.cmd_tool_toggle(ui, self.opts.auto_ripple, "⇥ Ripple", "options.auto_ripple");
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.ignore_grouping,
+                "⛓ Ignorar grupos",
+                "options.ignore_grouping",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.show_envelopes,
+                "〰 Envelopes",
+                "view.envelopes",
+            );
             if self.loading > 0 {
                 ui.separator();
                 ui.spinner();
@@ -1828,7 +1374,7 @@ impl App {
         });
     }
 
-    fn snapshot_dialog(&mut self) {
+    pub(crate) fn snapshot_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("PNG", &["png"])
             .set_file_name("quadro.png")
@@ -1870,7 +1416,7 @@ impl App {
         let t = self.cursor;
         let projects: Vec<PathBuf> = files
             .iter()
-            .filter(|p| p.extension().map(|e| e == "nvp").unwrap_or(false))
+            .filter(|p| is_project_file(p))
             .cloned()
             .collect();
         if let Some(p) = projects.into_iter().next() {
@@ -1887,7 +1433,7 @@ impl App {
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Sem título".into());
-        let title = format!("{}{} - NVOV", name, if self.dirty { "*" } else { "" });
+        let title = format!("{}{} - Neoveg", name, if self.dirty { "*" } else { "" });
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
@@ -1951,8 +1497,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // saída normal: a cópia de recuperação não é mais necessária
-        crate::util::clear_recovery();
-        crate::util::log_info("Neoveg encerrado normalmente");
+        recovery::clear_recovery();
+        util::log_info("Neoveg encerrado normalmente");
     }
 }
 
@@ -2049,4 +1595,129 @@ fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     ctx.set_style(style);
+}
+
+pub(crate) fn rgba_to_color_image(img: &image::RgbaImage) -> egui::ColorImage {
+    egui::ColorImage::from_rgba_unmultiplied(
+        [img.width() as usize, img.height() as usize],
+        img.as_raw(),
+    )
+}
+
+struct GuiQueryHost<'a> {
+    playing: bool,
+    shuttle: f64,
+    media: &'a MediaCache,
+}
+
+impl CommandHost for GuiQueryHost<'_> {
+    fn supports_ui(&self) -> bool {
+        true
+    }
+    fn is_playing(&self) -> bool {
+        self.playing
+    }
+    fn shuttle_speed(&self) -> f64 {
+        self.shuttle
+    }
+    fn media_cache(&self) -> Option<&MediaCache> {
+        Some(self.media)
+    }
+    fn dispatch_ui(&mut self, _action: UiAction) -> Result<(), String> {
+        Ok(())
+    }
+    fn insert_generated(&mut self, _s: &mut EditorSession, _spec: GenSpec) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct GuiHost<'a> {
+    playing: bool,
+    shuttle: f64,
+    media: &'a MediaCache,
+    actions: Vec<UiAction>,
+    removed_media: Vec<Id>,
+    pending_generated: Vec<GenSpec>,
+}
+
+impl CommandHost for GuiHost<'_> {
+    fn supports_ui(&self) -> bool {
+        true
+    }
+    fn is_playing(&self) -> bool {
+        self.playing
+    }
+    fn shuttle_speed(&self) -> f64 {
+        self.shuttle
+    }
+    fn media_cache(&self) -> Option<&MediaCache> {
+        Some(self.media)
+    }
+    fn dispatch_ui(&mut self, action: UiAction) -> Result<(), String> {
+        self.actions.push(action);
+        Ok(())
+    }
+    fn insert_generated(&mut self, _s: &mut EditorSession, spec: GenSpec) -> Result<(), String> {
+        self.pending_generated.push(spec);
+        Ok(())
+    }
+    fn on_media_removed(&mut self, ids: &[Id]) {
+        self.removed_media.extend_from_slice(ids);
+    }
+}
+
+fn to_egui_key(k: ShortcutKey) -> Key {
+    match k {
+        ShortcutKey::A => Key::A,
+        ShortcutKey::B => Key::B,
+        ShortcutKey::C => Key::C,
+        ShortcutKey::D => Key::D,
+        ShortcutKey::E => Key::E,
+        ShortcutKey::F => Key::F,
+        ShortcutKey::G => Key::G,
+        ShortcutKey::H => Key::H,
+        ShortcutKey::I => Key::I,
+        ShortcutKey::J => Key::J,
+        ShortcutKey::K => Key::K,
+        ShortcutKey::L => Key::L,
+        ShortcutKey::M => Key::M,
+        ShortcutKey::N => Key::N,
+        ShortcutKey::O => Key::O,
+        ShortcutKey::P => Key::P,
+        ShortcutKey::Q => Key::Q,
+        ShortcutKey::R => Key::R,
+        ShortcutKey::S => Key::S,
+        ShortcutKey::T => Key::T,
+        ShortcutKey::U => Key::U,
+        ShortcutKey::V => Key::V,
+        ShortcutKey::W => Key::W,
+        ShortcutKey::X => Key::X,
+        ShortcutKey::Y => Key::Y,
+        ShortcutKey::Z => Key::Z,
+        ShortcutKey::Num0 => Key::Num0,
+        ShortcutKey::Num1 => Key::Num1,
+        ShortcutKey::Num2 => Key::Num2,
+        ShortcutKey::Num3 => Key::Num3,
+        ShortcutKey::Num4 => Key::Num4,
+        ShortcutKey::Num5 => Key::Num5,
+        ShortcutKey::Num6 => Key::Num6,
+        ShortcutKey::Num7 => Key::Num7,
+        ShortcutKey::Num8 => Key::Num8,
+        ShortcutKey::Num9 => Key::Num9,
+        ShortcutKey::Space => Key::Space,
+        ShortcutKey::Enter => Key::Enter,
+        ShortcutKey::Escape => Key::Escape,
+        ShortcutKey::Delete => Key::Delete,
+        ShortcutKey::F2 => Key::F2,
+        ShortcutKey::F8 => Key::F8,
+        ShortcutKey::ArrowLeft => Key::ArrowLeft,
+        ShortcutKey::ArrowRight => Key::ArrowRight,
+        ShortcutKey::ArrowUp => Key::ArrowUp,
+        ShortcutKey::ArrowDown => Key::ArrowDown,
+        ShortcutKey::Home => Key::Home,
+        ShortcutKey::End => Key::End,
+        ShortcutKey::OpenBracket => Key::OpenBracket,
+        ShortcutKey::CloseBracket => Key::CloseBracket,
+        ShortcutKey::Backslash => Key::Backslash,
+    }
 }

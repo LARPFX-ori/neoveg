@@ -7,7 +7,6 @@ use crate::media::{AudioData, MediaCache};
 use crate::model::{Id, Project, Ticks};
 use crate::scopes;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use eframe::egui;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -248,7 +247,7 @@ pub struct PreviewRequest {
 }
 
 pub struct PreviewResult {
-    pub image: egui::ColorImage,
+    pub image: image::RgbaImage,
     pub scopes: Option<scopes::ScopeImages>,
     pub render_ms: f64,
     pub error: Option<String>,
@@ -260,8 +259,16 @@ pub struct Preview {
     pub error: Option<String>,
 }
 
+fn error_image(w: usize, h: usize) -> image::RgbaImage {
+    image::RgbaImage::from_pixel(
+        w.max(1) as u32,
+        h.max(1) as u32,
+        image::Rgba([90, 0, 0, 255]),
+    )
+}
+
 impl Preview {
-    pub fn new(media: Arc<MediaCache>, ctx: egui::Context) -> Self {
+    pub fn new(media: Arc<MediaCache>, notify: Box<dyn Fn() + Send + Sync>) -> Self {
         let (tx, rx_req) = channel::<PreviewRequest>();
         let (tx_res, rx) = channel::<PreviewResult>();
         let spawned = std::thread::Builder::new()
@@ -282,21 +289,13 @@ impl Preview {
                             None
                         };
                         let rgba = f.to_rgba8();
-                        (
-                            egui::ColorImage::from_rgba_unmultiplied([req.w, req.h], &rgba),
-                            sc,
-                        )
+                        let img = image::RgbaImage::from_raw(req.w as u32, req.h as u32, rgba)
+                            .unwrap_or_else(|| error_image(req.w, req.h));
+                        (img, sc)
                     });
                     let (image, sc, error) = match rendered {
                         Ok((img, sc)) => (img, sc, None),
-                        Err(e) => (
-                            egui::ColorImage::new(
-                                [req.w.max(1), req.h.max(1)],
-                                egui::Color32::from_rgb(90, 0, 0),
-                            ),
-                            None,
-                            Some(e),
-                        ),
+                        Err(e) => (error_image(req.w, req.h), None, Some(e)),
                     };
                     if tx_res
                         .send(PreviewResult {
@@ -309,7 +308,7 @@ impl Preview {
                     {
                         break;
                     }
-                    ctx.request_repaint();
+                    notify();
                 }
             });
         let error = spawned

@@ -2,6 +2,8 @@
 //! simulando mouse e teclado, e abre todos os diálogos.
 
 use super::*;
+use crate::model::*;
+use eframe::egui::Key;
 use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2};
 
 fn raw(events: Vec<Event>, modifiers: Modifiers, t: f64) -> egui::RawInput {
@@ -215,15 +217,15 @@ fn ui_smoke() {
     app.dlg.shortcuts = true;
     app.dlg.about = true;
     app.dlg.goto_open = true;
-    app.dlg.open_render(&app.project, None);
+    app.dlg.open_render(&app.session.project, None);
     for _ in 0..5 {
         frame(&mut app, vec![], Modifiers::NONE);
     }
     app.dlg.fx_target = Some(FxTarget::MasterAudio);
     frame(&mut app, vec![], Modifiers::NONE);
 
-    // salvar / abrir projeto
-    let pp = std::env::temp_dir().join("nvov_ui_smoke.nvp");
+    // salvar / abrir projeto (.neoveg e retrocompatibilidade .nvp)
+    let pp = std::env::temp_dir().join("neoveg_ui_smoke.neoveg");
     assert!(app.write_project(&pp));
     app.open_project_path(pp.clone());
     for _ in 0..100 {
@@ -235,4 +237,11 @@ fn ui_smoke() {
     }
     assert!(!app.project.media.is_empty());
     let _ = std::fs::remove_file(pp);
+
+    // despacho via Tabela Única de Comandos também funciona com histórico
+    let n_tracks_before = app.project.tracks.len();
+    app.exec_cmd(None, "insert.track_video");
+    assert_eq!(app.project.tracks.len(), n_tracks_before + 1);
+    app.exec_cmd(None, "edit.undo");
+    assert_eq!(app.project.tracks.len(), n_tracks_before);
 }

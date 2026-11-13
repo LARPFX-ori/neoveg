@@ -1,0 +1,27 @@
+//! Tipos fundamentais, representação exata de tempo (ticks/amostras), curvas
+//! de fade e keyframes, tipos de erro, preferências e utilitários de robustez.
+//!
+//! Este crate não possui dependências de interface gráfica, GPU ou áudio de SO
+//! (AGENTS.md §3.2).
+
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::todo,
+    clippy::unreachable
+)]
+
+pub mod curve;
+pub mod error;
+pub mod prefs;
+pub mod time;
+pub mod util;
+
+pub use curve::{bump_ids, new_id, Curve, Fade, Id, Keyframe, Keyframes, Lerp};
+pub use error::{NeovegError, Result};
+pub use prefs::{Preferences, PreviewQuality, PreviewResolution, PreviewTier};
+pub use time::{
+    format_ticks, parse_time, FrameRate, Rate, Ticks, TimeFormat, TICKS_PER_MS, TICKS_PER_SEC,
+};

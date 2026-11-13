@@ -8,7 +8,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 /// Trava um `Mutex` sem entrar em pânico se ele estiver envenenado: o dado
 /// continua acessível (§0.6).
@@ -136,41 +136,20 @@ pub fn log_error(msg: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Recuperação (autosave) e hook de pânico
+// Recuperação e hook de pânico
 // ---------------------------------------------------------------------------
 
-type Snapshot = Arc<crate::model::Project>;
+type RecoveryCallback = fn() -> Option<String>;
 
-static LAST_SNAPSHOT: Mutex<Option<Snapshot>> = Mutex::new(None);
+static RECOVERY_CB: Mutex<Option<RecoveryCallback>> = Mutex::new(None);
 
-/// Guarda o último estado do projeto para o hook de pânico salvar (§0.7).
-pub fn remember_snapshot(p: Snapshot) {
-    *lock(&LAST_SNAPSHOT) = Some(p);
-}
-
-pub fn recovery_path() -> PathBuf {
-    base_dir().join("autosave").join("recuperacao.nvp")
-}
-
-/// Grava o projeto no arquivo de recuperação.
-pub fn write_recovery(p: &crate::model::Project) -> Result<(), String> {
-    let path = recovery_path();
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_string(p).map_err(|e| e.to_string())?;
-    // escreve num temporário e renomeia para não deixar arquivo parcial
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
-}
-
-pub fn clear_recovery() {
-    let _ = std::fs::remove_file(recovery_path());
+/// Registra uma função chamada sem pânicos durante o tratamento de crash (§0.7).
+pub fn set_recovery_callback(cb: RecoveryCallback) {
+    *lock(&RECOVERY_CB) = Some(cb);
 }
 
 /// Instala o hook de pânico: registra stack trace em `logs/crash.log` e
-/// salva o último estado conhecido do projeto para recuperação.
+/// executa o callback de recuperação (ex.: salvar `autosave/recuperacao.neoveg`).
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let thread = std::thread::current();
@@ -185,15 +164,10 @@ pub fn install_panic_hook() {
             "crash.log",
             &format!("pânico na thread '{name}' em {loc}: {msg}\n{bt}\n"),
         );
-        // tenta preservar o trabalho do usuário (sem bloquear se o lock estiver ocupado)
-        if let Ok(guard) = LAST_SNAPSHOT.try_lock() {
-            if let Some(p) = guard.as_ref() {
-                match write_recovery(p) {
-                    Ok(()) => append(
-                        "crash.log",
-                        "projeto salvo para recuperação em autosave/recuperacao.nvp",
-                    ),
-                    Err(e) => append("crash.log", &format!("falha ao salvar recuperação: {e}")),
+        if let Ok(guard) = RECOVERY_CB.try_lock() {
+            if let Some(cb) = *guard {
+                if let Some(note) = cb() {
+                    append("crash.log", &note);
                 }
             }
         }
@@ -204,6 +178,7 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn clamp_cruzado_nao_entra_em_panico() {

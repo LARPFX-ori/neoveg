@@ -1,11 +1,277 @@
-//! Operações de edição da timeline (dividir, recortar, colar, ripple,
-//! agrupamento, marcadores, regiões, envelopes...).
+//! Estado editável de uma sessão de edição da timeline: projeto atual,
+//! histórico de Desfazer/Refazer, área de transferência, seleção, cursor,
+//! opções e regras de edição puras sem dependência de UI (AGENTS.md §3.2).
 
-use super::{App, ClipItem};
+use crate::media::MediaCache;
 use crate::model::*;
+use crate::prefs::PreviewQuality;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-impl App {
+pub const MAX_UNDO: usize = 200;
+
+/// Modos de edição suportados pelo motor (§3.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditMode {
+    #[default]
+    Normal,
+    Slip,
+    Slide,
+    Stretch,
+    Roll,
+    Shuffle,
+    Ripple,
+}
+
+impl EditMode {
+    pub const ALL: [EditMode; 7] = [
+        EditMode::Normal,
+        EditMode::Slip,
+        EditMode::Slide,
+        EditMode::Stretch,
+        EditMode::Roll,
+        EditMode::Shuffle,
+        EditMode::Ripple,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            EditMode::Normal => "Normal",
+            EditMode::Slip => "Slip (deslizar conteúdo)",
+            EditMode::Slide => "Slide (deslizar evento)",
+            EditMode::Stretch => "Stretch (esticamento)",
+            EditMode::Roll => "Roll (ajuste conjunto de corte)",
+            EditMode::Shuffle => "Shuffle (reordenar)",
+            EditMode::Ripple => "Ripple (ondulação)",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorOptions {
+    pub snapping: bool,
+    pub quantize: bool,
+    pub auto_ripple: bool,
+    pub ignore_grouping: bool,
+    pub show_envelopes: bool,
+    pub show_waveforms: bool,
+    pub show_thumbs: bool,
+    pub time_format: TimeFormat,
+    pub preview_quality: PreviewQuality,
+    pub safe_areas: bool,
+    pub loop_playback: bool,
+}
+
+impl Default for EditorOptions {
+    fn default() -> Self {
+        Self {
+            snapping: true,
+            quantize: true,
+            auto_ripple: false,
+            ignore_grouping: false,
+            show_envelopes: true,
+            show_waveforms: true,
+            show_thumbs: true,
+            time_format: TimeFormat::SmpteDrop,
+            preview_quality: PreviewQuality::Preview,
+            safe_areas: false,
+            loop_playback: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ClipItem {
+    pub track_rel: usize,
+    pub kind: TrackKind,
+    pub ev: Event,
+}
+
+/// Estado puro da timeline e do projeto compartilhado entre GUI, CLI e scripting.
+pub struct EditorSession {
+    pub project: Project,
+    pub snapshot: Arc<Project>,
+    pub generation: u64,
+    pub sent_generation: u64,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+    pub undo: Vec<Project>,
+    pub redo: Vec<Project>,
+    pub cursor: Ticks,
+    pub play_start: Ticks,
+    pub sel_events: HashSet<Id>,
+    pub sel_track: Option<usize>,
+    pub time_sel: Option<(Ticks, Ticks)>,
+    pub clipboard: Vec<ClipItem>,
+    pub clip_base: Ticks,
+    pub opts: EditorOptions,
+    pub edit_mode: EditMode,
+    pub status: String,
+    pub removed_media_ids: Vec<Id>,
+}
+
+impl EditorSession {
+    pub fn new(project: Project) -> Self {
+        let snapshot = Arc::new(project.clone());
+        crate::recovery::remember_snapshot(snapshot.clone());
+        let sel_track = if project.tracks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        Self {
+            project,
+            snapshot,
+            generation: 1,
+            sent_generation: 0,
+            path: None,
+            dirty: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            cursor: Ticks::ZERO,
+            play_start: Ticks::ZERO,
+            sel_events: HashSet::new(),
+            sel_track,
+            time_sel: None,
+            clipboard: Vec::new(),
+            clip_base: Ticks::ZERO,
+            opts: EditorOptions::default(),
+            edit_mode: EditMode::Normal,
+            status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
+            removed_media_ids: Vec::new(),
+        }
+    }
+
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+    }
+
+    /// Salva um ponto de desfazer antes de uma modificação.
+    pub fn checkpoint(&mut self) {
+        self.undo.push(self.project.clone());
+        if self.undo.len() > MAX_UNDO {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Marca o projeto como modificado (incrementa geração para prévia e áudio).
+    pub fn changed(&mut self) {
+        self.generation += 1;
+        self.dirty = true;
+    }
+
+    /// Atualiza o snapshot imutável quando `generation != sent_generation`.
+    pub fn refresh_snapshot(&mut self) -> bool {
+        if self.generation != self.sent_generation {
+            self.snapshot = Arc::new(self.project.clone());
+            self.sent_generation = self.generation;
+            crate::recovery::remember_snapshot(self.snapshot.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(p) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(std::mem::replace(&mut self.project, p));
+        self.after_history();
+        self.set_status("Desfazer");
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(p) = self.redo.pop() else {
+            return false;
+        };
+        self.undo.push(std::mem::replace(&mut self.project, p));
+        self.after_history();
+        self.set_status("Refazer");
+        true
+    }
+
+    fn after_history(&mut self) {
+        self.sel_events
+            .retain(|id| self.project.find_event(*id).is_some());
+        if let Some(t) = self.sel_track {
+            if t >= self.project.tracks.len() {
+                self.sel_track = if self.project.tracks.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
+            }
+        }
+        self.generation += 1;
+        self.dirty = true;
+    }
+
+    pub fn reset_project(&mut self, project: Project, path: Option<PathBuf>) {
+        self.project = project;
+        self.path = path;
+        self.dirty = false;
+        self.undo.clear();
+        self.redo.clear();
+        self.cursor = Ticks::ZERO;
+        self.play_start = Ticks::ZERO;
+        self.sel_events.clear();
+        self.time_sel = None;
+        self.sel_track = if self.project.tracks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.generation += 1;
+        self.sent_generation = 0;
+        self.refresh_snapshot();
+    }
+
+    pub fn insert_track(&mut self, kind: TrackKind) -> usize {
+        let n = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == kind)
+            .count()
+            + 1;
+        let name = match kind {
+            TrackKind::Video => format!("Vídeo {n}"),
+            TrackKind::Audio => format!("Áudio {n}"),
+        };
+        let t = Track::new(kind, &name);
+        // vídeo: insere acima das trilhas de áudio; áudio: no final
+        let idx = match kind {
+            TrackKind::Video => match self.sel_track {
+                Some(i) if self.project.tracks.get(i).map(|t| t.kind) == Some(TrackKind::Video) => {
+                    i
+                }
+                _ => self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|t| t.kind == TrackKind::Audio)
+                    .unwrap_or(self.project.tracks.len()),
+            },
+            TrackKind::Audio => self.project.tracks.len(),
+        };
+        self.project.tracks.insert(idx, t);
+        self.sel_track = Some(idx);
+        self.changed();
+        idx
+    }
+
     /// Ids dos eventos selecionados expandidos pelos grupos (a menos que o
     /// agrupamento esteja sendo ignorado).
     pub fn expand_groups(&self, ids: &HashSet<Id>) -> HashSet<Id> {
@@ -71,8 +337,7 @@ impl App {
         self.delete_selection();
     }
 
-    /// Cola no cursor, na trilha selecionada. `insert` = desloca eventos
-    /// posteriores (paste insert).
+    /// Cola no cursor, na trilha selecionada. `insert` = desloca eventos posteriores (paste insert).
     pub fn paste(&mut self, insert: bool) {
         if self.clipboard.is_empty() {
             return;
@@ -95,9 +360,11 @@ impl App {
                 .filter_map(|c| self.target_track(base_track + c.track_rel, c.kind))
                 .collect();
             for ti in tracks {
-                for e in &mut self.project.tracks[ti].events {
-                    if e.start >= t0 {
-                        e.start += span;
+                if let Some(track) = self.project.tracks.get_mut(ti) {
+                    for e in &mut track.events {
+                        if e.start >= t0 {
+                            e.start += span;
+                        }
                     }
                 }
             }
@@ -113,7 +380,9 @@ impl App {
             e.group = e.group.map(|g| *group_map.entry(g).or_insert_with(new_id));
             e.fx = e.fx.iter().map(|f| f.duplicate()).collect();
             new_sel.insert(e.id);
-            self.project.tracks[ti].events.push(e);
+            if let Some(track) = self.project.tracks.get_mut(ti) {
+                track.events.push(e);
+            }
         }
         self.sel_events = new_sel;
         self.cursor = t0 + span;
@@ -121,7 +390,13 @@ impl App {
     }
 
     fn target_track(&self, idx: usize, kind: TrackKind) -> Option<usize> {
-        (idx..self.project.tracks.len()).find(|&i| self.project.tracks[i].kind == kind)
+        (idx..self.project.tracks.len()).find(|&i| {
+            self.project
+                .tracks
+                .get(i)
+                .map(|t| t.kind == kind)
+                .unwrap_or(false)
+        })
     }
 
     pub fn delete_selection(&mut self) {
@@ -143,7 +418,6 @@ impl App {
                 .collect();
             t.events.retain(|e| !ids.contains(&e.id));
             if ripple {
-                // processa do último para o primeiro
                 let mut removed = removed;
                 removed.sort_by_key(|a| std::cmp::Reverse(a.0));
                 for (start, len) in removed {
@@ -160,8 +434,8 @@ impl App {
     }
 
     /// Divide eventos no cursor (selecionados, ou todos sob o cursor se nada
-    /// estiver selecionado).
-    pub fn split_at_cursor(&mut self) {
+    /// estiver selecionado). Retorna o número de eventos divididos.
+    pub fn split_at_cursor(&mut self) -> usize {
         let t = self.cursor;
         let targets: HashSet<Id> = if self.sel_events.is_empty() {
             self.project
@@ -184,16 +458,22 @@ impl App {
             })
             .collect();
         if targets.is_empty() {
-            return;
+            return 0;
         }
         self.checkpoint();
         let mut group_map: HashMap<Id, Id> = HashMap::new();
         let mut new_sel = HashSet::new();
+        let mut count = 0usize;
         for id in targets {
             let Some((ti, ei)) = self.project.find_event(id) else {
                 continue;
             };
-            let e = &mut self.project.tracks[ti].events[ei];
+            let Some(track) = self.project.tracks.get_mut(ti) else {
+                continue;
+            };
+            let Some(e) = track.events.get_mut(ei) else {
+                continue;
+            };
             let mut right = e.clone();
             let left_len = t - e.start;
             e.length = left_len;
@@ -209,7 +489,6 @@ impl App {
             if e.reverse {
                 e.offset += e.rate.scale_ticks(right.length);
             }
-            // pan/crop: desloca keyframes para o tempo local do novo evento
             for k in &mut right.pan_crop.keys {
                 k.t -= left_len;
             }
@@ -230,15 +509,17 @@ impl App {
                 })
                 .collect();
             new_sel.insert(right.id);
-            self.project.tracks[ti].events.push(right);
+            track.events.push(right);
+            count += 1;
         }
         self.sel_events = new_sel;
         self.changed();
+        count
     }
 
     pub fn trim_to_selection(&mut self) {
         let Some((a, b)) = self.time_sel else { return };
-        if self.sel_events.is_empty() {
+        if self.sel_events.is_empty() || b <= a {
             return;
         }
         self.checkpoint();
@@ -273,6 +554,9 @@ impl App {
     }
 
     pub fn trim_selected_start_to_cursor(&mut self) {
+        if self.sel_events.is_empty() {
+            return;
+        }
         let c = self.cursor;
         self.checkpoint();
         let ids = self.expand_groups(&self.sel_events.clone());
@@ -292,6 +576,9 @@ impl App {
     }
 
     pub fn trim_selected_end_to_cursor(&mut self) {
+        if self.sel_events.is_empty() {
+            return;
+        }
         let c = self.cursor;
         self.checkpoint();
         let ids = self.expand_groups(&self.sel_events.clone());
@@ -329,7 +616,6 @@ impl App {
                 } else if e.start >= a && e.end() <= b {
                     // removido
                 } else if e.start < a && e.end() > b {
-                    // divide: parte esquerda + parte direita deslocada
                     let mut right = e.clone();
                     right.id = new_id();
                     let cut = b - e.start;
@@ -355,7 +641,9 @@ impl App {
             t.events = keep;
         }
         for (ti, e) in new_events {
-            self.project.tracks[ti].events.push(e);
+            if let Some(track) = self.project.tracks.get_mut(ti) {
+                track.events.push(e);
+            }
         }
         self.project.markers.retain(|m| m.t < a || m.t >= b);
         for m in &mut self.project.markers {
@@ -374,6 +662,9 @@ impl App {
             self.set_status("Crie uma seleção de tempo para inserir tempo");
             return;
         };
+        if b <= a {
+            return;
+        }
         self.checkpoint();
         let len = b - a;
         for t in &mut self.project.tracks {
@@ -407,8 +698,13 @@ impl App {
     /// Fecha lacunas entre eventos da trilha selecionada.
     pub fn close_gaps(&mut self) {
         let Some(ti) = self.sel_track else { return };
+        if ti >= self.project.tracks.len() {
+            return;
+        }
         self.checkpoint();
-        let t = &mut self.project.tracks[ti];
+        let Some(t) = self.project.tracks.get_mut(ti) else {
+            return;
+        };
         t.events.sort_by_key(|e| e.start);
         let mut pos = t.events.first().map(|e| e.start).unwrap_or(Ticks::ZERO);
         for e in &mut t.events {
@@ -436,6 +732,9 @@ impl App {
     }
 
     pub fn ungroup_selected(&mut self) {
+        if self.sel_events.is_empty() {
+            return;
+        }
         self.checkpoint();
         for id in self.sel_events.clone() {
             if let Some(e) = self.project.event_mut(id) {
@@ -451,6 +750,47 @@ impl App {
         self.opts.ignore_grouping = false;
         self.sel_events = self.expand_groups(&self.sel_events.clone());
         self.opts.ignore_grouping = saved;
+    }
+
+    pub fn select_all(&mut self) {
+        self.sel_events = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter().map(|e| e.id))
+            .collect();
+    }
+
+    pub fn deselect_all(&mut self) {
+        self.sel_events.clear();
+    }
+
+    pub fn set_selection_in(&mut self) {
+        let c = self.cursor;
+        let end = self
+            .time_sel
+            .map(|s| s.1)
+            .filter(|e| *e > c)
+            .unwrap_or(c + Ticks::from_secs_i64(5));
+        self.time_sel = Some((c, end));
+        self.project.loop_region = Some((c, end));
+    }
+
+    pub fn set_selection_out(&mut self) {
+        let c = self.cursor;
+        let start = self
+            .time_sel
+            .map(|s| s.0)
+            .filter(|s| *s < c)
+            .unwrap_or(Ticks::ZERO);
+        self.time_sel = Some((start, c));
+        self.project.loop_region = Some((start, c));
+    }
+
+    pub fn select_loop_region(&mut self) {
+        if let Some(r) = self.project.loop_region {
+            self.time_sel = Some(r);
+        }
     }
 
     pub fn insert_marker(&mut self) {
@@ -487,7 +827,7 @@ impl App {
     /// depende da trilha ser de áudio ou vídeo.
     pub fn toggle_envelope_for_selected(&mut self, audio_kind: EnvKind, video_kind: EnvKind) {
         let Some(ti) = self.sel_track else { return };
-        let Some(track) = self.project.tracks.get_mut(ti) else {
+        let Some(track) = self.project.tracks.get(ti) else {
             return;
         };
         let kind = if track.kind == TrackKind::Audio {
@@ -495,21 +835,34 @@ impl App {
         } else {
             video_kind
         };
-        if let Some(e) = track.envelopes.iter_mut().find(|e| e.kind == kind) {
-            e.visible = !e.visible;
+        if track.envelopes.iter().any(|e| e.kind == kind) {
+            if let Some(e) = self
+                .project
+                .tracks
+                .get_mut(ti)
+                .and_then(|t| t.envelopes.iter_mut().find(|e| e.kind == kind))
+            {
+                e.visible = !e.visible;
+            }
         } else {
             self.checkpoint();
-            let track = &mut self.project.tracks[ti];
-            track.envelopes.push(Envelope::new(kind));
-            self.opts.show_envelopes = true;
+            if let Some(track) = self.project.tracks.get_mut(ti) {
+                track.envelopes.push(Envelope::new(kind));
+                self.opts.show_envelopes = true;
+            }
         }
         self.changed();
     }
 
     pub fn remove_envelope(&mut self, kind: EnvKind) {
         let Some(ti) = self.sel_track else { return };
+        if ti >= self.project.tracks.len() {
+            return;
+        }
         self.checkpoint();
-        let track = &mut self.project.tracks[ti];
+        let Some(track) = self.project.tracks.get_mut(ti) else {
+            return;
+        };
         let k = match (track.kind, kind) {
             (TrackKind::Video, EnvKind::Volume) => EnvKind::Opacity,
             (TrackKind::Video, EnvKind::Pan) => EnvKind::FadeToColor,
@@ -520,6 +873,9 @@ impl App {
     }
 
     pub fn toggle_reverse(&mut self) {
+        if self.sel_events.is_empty() {
+            return;
+        }
         self.checkpoint();
         for id in self.sel_events.clone() {
             if let Some(e) = self.project.event_mut(id) {
@@ -529,8 +885,7 @@ impl App {
         self.changed();
     }
 
-    /// Congela o quadro sob o cursor: divide e cria um evento de imagem
-    /// parada (velocidade 0) de 2 segundos.
+    /// Congela o quadro sob o cursor: divide e cria um evento de imagem parada de 2 segundos.
     pub fn freeze_frame(&mut self) {
         let Some(id) = self.sel_events.iter().next().cloned() else {
             return;
@@ -538,11 +893,16 @@ impl App {
         let Some((ti, ei)) = self.project.find_event(id) else {
             return;
         };
-        if self.project.tracks[ti].kind != TrackKind::Video {
+        let Some(track) = self.project.tracks.get(ti) else {
+            return;
+        };
+        if track.kind != TrackKind::Video {
             return;
         }
+        let Some(e) = track.events.get(ei).cloned() else {
+            return;
+        };
         let c = self.cursor;
-        let e = self.project.tracks[ti].events[ei].clone();
         if !e.contains(c) {
             self.set_status("Posicione o cursor sobre o evento");
             return;
@@ -565,28 +925,28 @@ impl App {
         fr.fade_in = Fade::default();
         fr.fade_out = Fade::default();
         fr.name = format!("{} (congelado)", e.name);
-        // empurra o restante da trilha
-        for ev in &mut self.project.tracks[ti].events {
-            if ev.start >= c {
-                ev.start += two_s;
-            } else if ev.end() > c && ev.id == e.id {
-                // divide o evento original no cursor
+        if let Some(track) = self.project.tracks.get_mut(ti) {
+            for ev in &mut track.events {
+                if ev.start >= c {
+                    ev.start += two_s;
+                }
             }
+            if let Some(original) = track.events.get_mut(ei) {
+                if original.start < c && original.end() > c {
+                    let left = c - original.start;
+                    let mut right = original.clone();
+                    right.id = new_id();
+                    right.start = c + two_s;
+                    right.length = original.length - left;
+                    right.offset += right.rate.scale_ticks(left);
+                    right.fade_in = Fade::default();
+                    original.length = left;
+                    original.fade_out = Fade::default();
+                    track.events.push(right);
+                }
+            }
+            track.events.push(fr);
         }
-        let original = &mut self.project.tracks[ti].events[ei];
-        if original.start < c && original.end() > c {
-            let left = c - original.start;
-            let mut right = original.clone();
-            right.id = new_id();
-            right.start = c + two_s;
-            right.length = original.length - left;
-            right.offset += right.rate.scale_ticks(left);
-            right.fade_in = Fade::default();
-            original.length = left;
-            original.fade_out = Fade::default();
-            self.project.tracks[ti].events.push(right);
-        }
-        self.project.tracks[ti].events.push(fr);
         self.changed();
     }
 
@@ -605,8 +965,11 @@ impl App {
     }
 
     pub fn duplicate_track(&mut self, ti: usize) {
+        let Some(orig) = self.project.tracks.get(ti).cloned() else {
+            return;
+        };
         self.checkpoint();
-        let mut t = self.project.tracks[ti].clone();
+        let mut t = orig;
         t.id = new_id();
         t.name = format!("{} (cópia)", t.name);
         let mut gm: HashMap<Id, Id> = HashMap::new();
@@ -622,6 +985,9 @@ impl App {
 
     pub fn move_track(&mut self, ti: usize, up: bool) {
         let n = self.project.tracks.len();
+        if ti >= n {
+            return;
+        }
         let to = if up {
             ti.checked_sub(1)
         } else {
@@ -635,8 +1001,59 @@ impl App {
         }
     }
 
+    pub fn toggle_selected_track_mute(&mut self) -> bool {
+        let Some(ti) = self.sel_track else {
+            return false;
+        };
+        if ti >= self.project.tracks.len() {
+            return false;
+        }
+        self.checkpoint();
+        if let Some(t) = self.project.tracks.get_mut(ti) {
+            t.mute = !t.mute;
+        }
+        self.changed();
+        true
+    }
+
+    pub fn toggle_selected_track_solo(&mut self) -> bool {
+        let Some(ti) = self.sel_track else {
+            return false;
+        };
+        if ti >= self.project.tracks.len() {
+            return false;
+        }
+        self.checkpoint();
+        if let Some(t) = self.project.tracks.get_mut(ti) {
+            t.solo = !t.solo;
+        }
+        self.changed();
+        true
+    }
+
+    pub fn jump_marker_time(&self, forward: bool) -> Option<Ticks> {
+        let mut pts: Vec<Ticks> = self.project.markers.iter().map(|m| m.t).collect();
+        pts.extend(self.project.regions.iter().flat_map(|r| [r.start, r.end]));
+        pts.push(Ticks::ZERO);
+        pts.push(self.project.duration());
+        pts.sort();
+        let c = self.cursor;
+        if forward {
+            pts.into_iter().find(|t| *t > c)
+        } else {
+            pts.into_iter().rev().find(|t| *t < c)
+        }
+    }
+
+    pub fn jump_to_marker_index(&self, zero_based: usize) -> Option<Ticks> {
+        let mut ms: Vec<Ticks> = self.project.markers.iter().map(|m| m.t).collect();
+        ms.sort();
+        ms.get(zero_based).copied()
+    }
+
     /// Remove mídias do projeto que não são usadas por nenhum evento.
-    pub fn remove_unused_media(&mut self) {
+    /// Retorna os IDs removidos para o chamador limpar caches visuais.
+    pub fn remove_unused_media(&mut self, media: Option<&MediaCache>) -> Vec<Id> {
         let used: HashSet<Id> = self
             .project
             .tracks
@@ -653,14 +1070,17 @@ impl App {
             .map(|m| m.id)
             .collect();
         self.project.media.retain(|m| used.contains(&m.id));
-        for id in removed {
-            self.media.remove(id);
-            self.thumbs.remove(&id);
+        if let Some(cache) = media {
+            for &id in &removed {
+                cache.remove(id);
+            }
         }
+        self.removed_media_ids.extend_from_slice(&removed);
         self.set_status(format!(
             "{} mídia(s) removida(s)",
             n0 - self.project.media.len()
         ));
         self.changed();
+        removed
     }
 }
