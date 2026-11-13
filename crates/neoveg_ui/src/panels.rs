@@ -498,7 +498,9 @@ impl App {
             );
         }
         if self.opts.safe_areas {
-            for k in [0.9, 0.8] {
+            let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
+            let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
+            for k in [action_k, title_k] {
                 let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
                 painter.rect_stroke(
                     r,

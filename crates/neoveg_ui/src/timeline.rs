@@ -154,7 +154,17 @@ impl TimelineState {
 
     /// Rolagem automática durante a reprodução (por páginas).
     pub fn follow(&mut self, t: Ticks) {
+        self.follow_with(t, false);
+    }
+
+    /// Rolagem automática durante a reprodução (por páginas ou contínua).
+    pub fn follow_with(&mut self, t: Ticks, continuous: bool) {
         let vis = self.dx_to_ticks(self.width);
+        if continuous {
+            let half = Ticks::from_secs_f64_clamped(vis.as_secs_f64() * 0.5);
+            self.scroll_x = (t - half).max(Ticks::ZERO);
+            return;
+        }
         let far = self.scroll_x + Ticks::from_secs_f64_clamped(vis.as_secs_f64() * 0.97);
         if t > far || t < self.scroll_x {
             let pad = Ticks::from_secs_f64_clamped(vis.as_secs_f64() * 0.03);
@@ -1478,13 +1488,25 @@ impl App {
             )
         });
 
-        // roda do mouse: zoom; Shift = rolar horizontal; Ctrl = rolar vertical
+        // roda do mouse (configurável em Preferências > Edição)
         if let Some(p) = pointer.filter(|p| lanes.contains(*p)) {
             if zoom_delta != 1.0 {
                 self.tl.scroll_y = (self.tl.scroll_y - (zoom_delta - 1.0) * 400.0).max(0.0);
             } else if scroll != egui::Vec2::ZERO {
                 let d = if scroll.y != 0.0 { scroll.y } else { scroll.x };
-                if mods.shift || scroll.x != 0.0 && scroll.y == 0.0 {
+                let horiz_mode = self.prefs.timeline_mouse_scroll
+                    == neoveg_common::prefs::TimelineMouseScroll::HorizontalScroll;
+                if horiz_mode {
+                    if mods.command {
+                        let t = self.tl.x2t(p.x, left);
+                        self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                    } else if mods.shift {
+                        self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
+                    } else {
+                        self.tl.scroll_x =
+                            (self.tl.scroll_x - self.tl.dx_to_ticks(d)).max(Ticks::ZERO);
+                    }
+                } else if mods.shift || (scroll.x != 0.0 && scroll.y == 0.0) {
                     self.tl.scroll_x = (self.tl.scroll_x - self.tl.dx_to_ticks(d)).max(Ticks::ZERO);
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
@@ -2974,16 +2996,18 @@ impl App {
     fn draw_cursors(&mut self, ui: &mut egui::Ui, area: Rect) {
         let painter = ui.painter_at(area);
         let left = area.left();
-        // marcadores (linhas pontilhadas)
-        for m in &self.project.markers {
-            let x = self.tl.t2x(m.t, left);
-            let mut y = area.top() + TOP_H;
-            while y < area.bottom() {
-                painter.line_segment(
-                    [pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))],
-                    Stroke::new(1.0_f32, self.theme.tl_region),
-                );
-                y += 8.0;
+        // marcadores (linhas pontilhadas conforme Preferências > Aparência)
+        if self.prefs.always_draw_marker_lines || self.opts.snapping {
+            for m in &self.project.markers {
+                let x = self.tl.t2x(m.t, left);
+                let mut y = area.top() + TOP_H;
+                while y < area.bottom() {
+                    painter.line_segment(
+                        [pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))],
+                        Stroke::new(1.0_f32, self.theme.tl_region),
+                    );
+                    y += 8.0;
+                }
             }
         }
         let x = self.tl.t2x(self.cursor, left);

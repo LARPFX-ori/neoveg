@@ -618,6 +618,73 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
         let _ = ctx.run(raw(vec![], Modifiers::NONE, 3.35), |c| app.frame_ui(c));
     }
 
+    // 4. Janela Preferências em 2 painéis (VEGAS) adaptável em monitor pequeno, compacto e temas claro/escuro
+    app.detached_tabs.clear();
+    app.preview_detached = false;
+    let prev_prefs_tab = app.dlg.prefs_tab;
+    app.exec_cmd(Some(&ctx), "options.prefs");
+    assert!(app.dlg.prefs_open);
+    for (idx, cat) in crate::dialogs::PrefsCategory::ALL.iter().enumerate() {
+        app.dlg.prefs_tab = *cat;
+        let t0 = 4.0 + idx as f64 * 0.1;
+        let _ = ctx.run(small_raw(t0), |c| app.frame_ui(c));
+        let out = ctx.run(small_raw(t0 + 0.05), |c| app.frame_ui(c));
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        assert!(
+            texts.iter().any(|(t, _, _, _)| t == cat.label()),
+            "categoria '{}' deve aparecer no painel esquerdo de Preferências",
+            cat.label()
+        );
+        for btn_label in ["Restaurar padrões", "OK", "Aplicar", "Cancelar"] {
+            assert!(
+                texts.iter().any(|(t, _, rect, clip)| {
+                    t == btn_label
+                        && rect.bottom() <= clip.bottom() + 2.0
+                        && rect.bottom() <= 520.0
+                        && rect.right() <= 760.0
+                }),
+                "botão '{btn_label}' deve estar visível no rodapé de Preferências (categoria '{}') em 760x520",
+                cat.label()
+            );
+        }
+    }
+    let compact_raw = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(420.0, 420.0))),
+        time: Some(t),
+        ..Default::default()
+    };
+    app.dlg.prefs_tab = crate::dialogs::PrefsCategory::General;
+    let _ = ctx.run(compact_raw(5.0), |c| app.frame_ui(c));
+    let compact_out = ctx.run(compact_raw(5.05), |c| app.frame_ui(c));
+    let mut compact_texts = Vec::new();
+    for clipped in &compact_out.shapes {
+        collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut compact_texts);
+    }
+    assert!(
+        compact_texts.iter().any(|(t, _, rect, clip)| {
+            t == "OK" && rect.bottom() <= clip.bottom() + 2.0 && rect.bottom() <= 420.0
+        }),
+        "botão 'OK' deve permanecer visível mesmo no modo compacto 420x420"
+    );
+    for (i, tid) in [
+        crate::theme::ThemeId::VegasClaro,
+        crate::theme::ThemeId::VegasEscuro,
+        crate::theme::ThemeId::AltoContrasteClaro,
+    ]
+    .iter()
+    .enumerate()
+    {
+        app.set_theme(&ctx, *tid, false);
+        let t0 = 5.2 + i as f64 * 0.1;
+        let _ = ctx.run(raw(vec![], Modifiers::NONE, t0), |c| app.frame_ui(c));
+        let _ = ctx.run(raw(vec![], Modifiers::NONE, t0 + 0.05), |c| app.frame_ui(c));
+    }
+    app.dlg.prefs_tab = prev_prefs_tab;
+    app.dlg.prefs_open = false;
+
     app.session.prerendered_ranges = prev_prerendered;
     app.detached_tabs = prev_detached;
     app.preview_detached = prev_preview_detached;

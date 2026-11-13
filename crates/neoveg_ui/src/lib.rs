@@ -26,10 +26,10 @@ mod welcome;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use app::rgba_to_color_image;
+pub(crate) use app::{apply_pref_defaults, rgba_to_color_image};
 pub use app::{
-    App, DndPayload, DockTab, EditLayoutPrefs, FxTarget, LayoutType, Preferences, PreviewQuality,
-    RenderJob, TimelineState,
+    App, DndPayload, DockTab, EditLayoutPrefs, FxTarget, LayoutType, PlaybackScrollMode,
+    Preferences, PreviewQuality, RenderJob, TimelineMouseScroll, TimelineState,
 };
 pub use neoveg_engine::{media, model, playback, recovery, render, session, util};
 

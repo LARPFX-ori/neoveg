@@ -1,5 +1,6 @@
 //! Preferências do usuário, matriz de prévia e limites de hardware (§3.2 / §3.6).
 
+use crate::time::TimeFormat;
 use crate::util;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -188,8 +189,8 @@ impl PreviewQuality {
 ///   abas na base do dock e estética clara clássica.
 /// - **Sony** (Sony Vegas Pro 8–13): área de acoplamento no topo (*Display timeline at
 ///   bottom*), timeline embaixo, transport no rodapé, abas na base e cinza médio Sony.
-/// - **MAGIX** (VEGAS Pro 14–21): timeline no topo, barra unificada de transporte/edição,
-///   abas no topo dos painéis acopláveis e interface escura moderna.
+/// - **MAGIX** (VEGAS Pro 14–21): área acoplável e Prévia no topo, abas no topo,
+///   timeline embaixo, barra de transporte/edição no rodapé e interface escura moderna.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LayoutType {
     #[serde(
@@ -349,6 +350,50 @@ impl Default for EditLayoutPrefs {
     }
 }
 
+/// Modo de rolagem automática da timeline durante a reprodução.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaybackScrollMode {
+    #[default]
+    Page,
+    Continuous,
+}
+
+impl PlaybackScrollMode {
+    pub const ALL: [PlaybackScrollMode; 2] =
+        [PlaybackScrollMode::Page, PlaybackScrollMode::Continuous];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlaybackScrollMode::Page => "Por página (Page Scroll)",
+            PlaybackScrollMode::Continuous => "Contínua (playhead centralizado)",
+        }
+    }
+}
+
+/// Comportamento padrão da roda do mouse sobre a área de faixas da timeline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineMouseScroll {
+    #[default]
+    ZoomDefault,
+    HorizontalScroll,
+}
+
+impl TimelineMouseScroll {
+    pub const ALL: [TimelineMouseScroll; 2] = [
+        TimelineMouseScroll::ZoomDefault,
+        TimelineMouseScroll::HorizontalScroll,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimelineMouseScroll::ZoomDefault => "Zoom (Shift = rolar horizontal • Ctrl = vertical)",
+            TimelineMouseScroll::HorizontalScroll => {
+                "Rolar horizontal (Ctrl = zoom • Shift = vertical)"
+            }
+        }
+    }
+}
+
 /// Preferências persistidas em JSON com proteção contra entradas hostis (§0.4 / §3.6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
@@ -383,9 +428,66 @@ pub struct Preferences {
     /// Identificadores de modelos favoritados na janela `Renderizar como...`.
     #[serde(default)]
     pub render_favorites: Vec<String>,
+    /// Quantidade máxima de projetos recentes mantidos no histórico (`1..=20`).
+    #[serde(default = "default_max_recent_projects")]
+    pub max_recent_projects: usize,
+    /// Ativa o salvamento automático periódico para recuperação após falhas.
+    #[serde(default = "default_true")]
+    pub autosave_enabled: bool,
+    /// Intervalo do salvamento automático em segundos (`15..=600`).
+    #[serde(default = "default_autosave_secs")]
+    pub autosave_secs: u64,
+    /// Duração padrão ao inserir imagem estática ou mídia gerada na timeline (`0.5..=60.0 s`).
+    #[serde(default = "default_still_image_secs")]
+    pub still_image_secs: f32,
+    /// Modo de rolagem automática da timeline durante a reprodução.
+    #[serde(default)]
+    pub playback_scroll: PlaybackScrollMode,
+    /// Ação padrão da roda do mouse sobre as faixas da timeline.
+    #[serde(default)]
+    pub timeline_mouse_scroll: TimelineMouseScroll,
+    /// Desenha sempre as linhas pontilhadas dos marcadores mesmo com Encaixe desativado.
+    #[serde(default = "default_true")]
+    pub always_draw_marker_lines: bool,
+    /// Exibe dicas flutuantes (tooltips) nos botões e controles da interface.
+    #[serde(default = "default_true")]
+    pub show_tooltips: bool,
+    /// Ativa o encaixe magnético (Snapping) ao iniciar ou criar novo projeto.
+    #[serde(default = "default_true")]
+    pub default_snapping: bool,
+    /// Quantiza edições nos limites exatos de quadros ao iniciar ou criar novo projeto.
+    #[serde(default = "default_true")]
+    pub default_quantize: bool,
+    /// Exibe formas de onda nos eventos de áudio por padrão.
+    #[serde(default = "default_true")]
+    pub default_show_waveforms: bool,
+    /// Exibe miniaturas de vídeo nos eventos por padrão.
+    #[serde(default = "default_true")]
+    pub default_show_thumbs: bool,
+    /// Exibe curvas de envelope nas trilhas por padrão.
+    #[serde(default = "default_true")]
+    pub default_show_envelopes: bool,
+    /// Ativa reprodução contínua em loop por padrão ao iniciar.
+    #[serde(default)]
+    pub default_loop_playback: bool,
+    /// Qualidade inicial da Prévia de Vídeo (matriz 4×3 do VEGAS Pro).
+    #[serde(default)]
+    pub default_preview_quality: PreviewQuality,
+    /// Formato inicial padrão da régua e do Visor de Tempo.
+    #[serde(default = "default_time_format")]
+    pub default_time_format: TimeFormat,
+    /// Taxa de amostragem padrão (Hz) ao criar um novo projeto (`44100`, `48000` ou `96000`).
+    #[serde(default = "default_sample_rate")]
+    pub default_sample_rate: u32,
+    /// Percentual da borda de área segura de ação (`70..=98`).
+    #[serde(default = "default_action_safe_pct")]
+    pub action_safe_pct: u8,
+    /// Percentual da borda de área segura de títulos (`50..=95`, <= `action_safe_pct`).
+    #[serde(default = "default_title_safe_pct")]
+    pub title_safe_pct: u8,
 }
 
-const MAX_RECENT_PROJECTS: usize = 10;
+const MAX_RECENT_PROJECTS: usize = 20;
 const MAX_RENDER_FAVORITES: usize = 64;
 
 fn default_lang() -> String {
@@ -410,6 +512,38 @@ fn default_show_splash() -> bool {
 
 fn default_show_welcome() -> bool {
     true
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_recent_projects() -> usize {
+    10
+}
+
+fn default_autosave_secs() -> u64 {
+    60
+}
+
+fn default_still_image_secs() -> f32 {
+    5.0
+}
+
+fn default_time_format() -> TimeFormat {
+    TimeFormat::SmpteDrop
+}
+
+fn default_sample_rate() -> u32 {
+    48000
+}
+
+fn default_action_safe_pct() -> u8 {
+    90
+}
+
+fn default_title_safe_pct() -> u8 {
+    80
 }
 
 fn sanitize_string_list(
@@ -469,6 +603,25 @@ impl Default for Preferences {
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
+            max_recent_projects: default_max_recent_projects(),
+            autosave_enabled: true,
+            autosave_secs: default_autosave_secs(),
+            still_image_secs: default_still_image_secs(),
+            playback_scroll: PlaybackScrollMode::Page,
+            timeline_mouse_scroll: TimelineMouseScroll::ZoomDefault,
+            always_draw_marker_lines: true,
+            show_tooltips: true,
+            default_snapping: true,
+            default_quantize: true,
+            default_show_waveforms: true,
+            default_show_thumbs: true,
+            default_show_envelopes: true,
+            default_loop_playback: false,
+            default_preview_quality: PreviewQuality::PreviewHalf,
+            default_time_format: default_time_format(),
+            default_sample_rate: default_sample_rate(),
+            action_safe_pct: default_action_safe_pct(),
+            title_safe_pct: default_title_safe_pct(),
         }
     }
 }
@@ -490,17 +643,18 @@ impl Preferences {
         }
     }
 
-    /// Registra um projeto recente no topo da lista (deduplicado, máx. 10).
+    /// Registra um projeto recente no topo da lista (deduplicado, máx. configurável).
     pub fn record_recent_project(&mut self, path: &std::path::Path) {
         let raw = path.to_string_lossy();
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.contains('\0') {
             return;
         }
+        let cap = self.max_recent_projects.clamp(1, MAX_RECENT_PROJECTS);
         self.recent_projects
             .retain(|p| !p.eq_ignore_ascii_case(trimmed));
         self.recent_projects.insert(0, trimmed.to_string());
-        self.recent_projects.truncate(MAX_RECENT_PROJECTS);
+        self.recent_projects.truncate(cap);
     }
 
     pub fn remove_recent_project(&mut self, raw: &str) {
@@ -522,6 +676,17 @@ impl Preferences {
         self.ram_preview_mb = self.ram_preview_mb.clamp(32, 8192);
         self.frame_cache_cap = self.frame_cache_cap.clamp(4, 512);
         self.worker_threads = self.worker_threads.min(16);
+        self.max_recent_projects = self.max_recent_projects.clamp(1, MAX_RECENT_PROJECTS);
+        self.autosave_secs = self.autosave_secs.clamp(15, 600);
+        if !self.still_image_secs.is_finite() {
+            self.still_image_secs = default_still_image_secs();
+        }
+        self.still_image_secs = self.still_image_secs.clamp(0.5, 60.0);
+        if !matches!(self.default_sample_rate, 44100 | 48000 | 96000) {
+            self.default_sample_rate = default_sample_rate();
+        }
+        self.action_safe_pct = self.action_safe_pct.clamp(70, 98);
+        self.title_safe_pct = self.title_safe_pct.clamp(50, self.action_safe_pct);
         self.shortcuts.retain(|k, _| !k.is_empty() && k.len() <= 80);
         if self
             .window_layout
@@ -532,7 +697,7 @@ impl Preferences {
         }
         sanitize_string_list(
             &mut self.recent_projects,
-            MAX_RECENT_PROJECTS,
+            self.max_recent_projects,
             1024,
             cfg!(windows),
         );
@@ -600,10 +765,27 @@ mod tests {
         for i in 0..15 {
             p_rec.record_recent_project(std::path::Path::new(&format!("p{i}.neoveg")));
         }
-        assert_eq!(p_rec.recent_projects.len(), MAX_RECENT_PROJECTS);
+        assert_eq!(p_rec.recent_projects.len(), 10);
         assert_eq!(p_rec.recent_projects[0], "p14.neoveg");
         p_rec.remove_recent_project("p14.neoveg");
         assert_eq!(p_rec.recent_projects[0], "p13.neoveg");
+
+        let mut p_ext = Preferences {
+            max_recent_projects: 999,
+            autosave_secs: 1,
+            still_image_secs: f32::NAN,
+            default_sample_rate: 12345,
+            action_safe_pct: 72,
+            title_safe_pct: 95,
+            ..Default::default()
+        };
+        p_ext.sanitize();
+        assert_eq!(p_ext.max_recent_projects, MAX_RECENT_PROJECTS);
+        assert_eq!(p_ext.autosave_secs, 15);
+        assert!((p_ext.still_image_secs - 5.0).abs() < f32::EPSILON);
+        assert_eq!(p_ext.default_sample_rate, 48000);
+        assert_eq!(p_ext.action_safe_pct, 72);
+        assert_eq!(p_ext.title_safe_pct, 72);
     }
 
     #[test]

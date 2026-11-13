@@ -2,7 +2,10 @@
 //! Motion, cadeias de efeitos, editor de mídia gerada, Renderizar Como,
 //! atalhos e "sobre".
 
-use super::{App, EditLayoutPrefs, FxTarget, LayoutType, Preferences, RenderJob};
+use super::{
+    apply_pref_defaults, App, EditLayoutPrefs, FxTarget, LayoutType, PlaybackScrollMode,
+    Preferences, PreviewQuality, RenderJob, TimelineMouseScroll,
+};
 use crate::icons::{self, Icon};
 use crate::model::*;
 use crate::render::{RenderFormat, RenderSettings, WavBits};
@@ -175,6 +178,46 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
     },
 ];
 
+/// Categorias exibidas na lista lateral de `Preferências...`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PrefsCategory {
+    #[default]
+    General,
+    Appearance,
+    Editing,
+    VideoPreview,
+    Audio,
+    Memory,
+    AutoSave,
+    Shortcuts,
+}
+
+impl PrefsCategory {
+    pub const ALL: [PrefsCategory; 8] = [
+        PrefsCategory::General,
+        PrefsCategory::Appearance,
+        PrefsCategory::Editing,
+        PrefsCategory::VideoPreview,
+        PrefsCategory::Audio,
+        PrefsCategory::Memory,
+        PrefsCategory::AutoSave,
+        PrefsCategory::Shortcuts,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PrefsCategory::General => "Geral",
+            PrefsCategory::Appearance => "Aparência e Layout",
+            PrefsCategory::Editing => "Edição e Timeline",
+            PrefsCategory::VideoPreview => "Vídeo e Prévia",
+            PrefsCategory::Audio => "Áudio",
+            PrefsCategory::Memory => "Memória e Desempenho",
+            PrefsCategory::AutoSave => "Salvamento Automático",
+            PrefsCategory::Shortcuts => "Atalhos e Controles",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Dialogs {
     pub project_props: bool,
@@ -185,8 +228,10 @@ pub struct Dialogs {
     pub gen_editor: Option<Id>,
     pub shortcuts: bool,
     pub prefs_open: bool,
+    pub prefs_tab: PrefsCategory,
     prefs_draft: Option<Preferences>,
-    prefs_orig_theme: Option<String>,
+    prefs_orig: Option<(String, EditLayoutPrefs)>,
+    prefs_orig_metrics: Option<(f32, f32)>,
     pub edit_layout_open: bool,
     edit_layout_draft: Option<EditLayoutPrefs>,
     edit_layout_orig: Option<(EditLayoutPrefs, String, f32, f32)>,
@@ -225,7 +270,8 @@ const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
 impl Dialogs {
     pub fn open_prefs(&mut self, current: &Preferences) {
         self.prefs_draft = Some(current.clone());
-        self.prefs_orig_theme = Some(current.theme.clone());
+        self.prefs_orig = Some((current.theme.clone(), current.edit_layout.clone()));
+        self.prefs_orig_metrics = None;
         self.prefs_open = true;
     }
 
@@ -2341,142 +2387,361 @@ impl App {
         let mut apply_and_keep = false;
         let mut save_and_close = false;
         let mut cancel_close = false;
+        let mut reset_defaults = false;
         let mut clear_cache_now = false;
+        let mut clear_recents_now = false;
+        let mut open_edit_layout = false;
+        let mut open_shortcuts = false;
+        let mut apply_defaults_to_session = false;
+        let mut live_layout_preview = false;
+
+        let screen = ctx.screen_rect().size();
+        let max_w = if screen.x.is_finite() {
+            (screen.x - 36.0).clamp(300.0, 860.0)
+        } else {
+            720.0
+        };
+        let max_h = if screen.y.is_finite() {
+            (screen.y - 40.0).clamp(240.0, 660.0)
+        } else {
+            540.0
+        };
+        let def_w = 690.0_f32.min(max_w);
+        let def_h = 500.0_f32.min(max_h);
+        let extra_wrap = if def_w < 460.0 { 26.0 } else { 0.0 };
+        let body_h = (def_h - 108.0 - extra_wrap).max(110.0);
+        let nav_inner_h = (body_h - 10.0).max(90.0);
+
+        self.dlg
+            .prefs_orig_metrics
+            .get_or_insert((self.dock_height, self.preview_ratio));
         let rec_workers = recommended_worker_threads();
+        let active_sr = self.project.settings.sample_rate;
+        let audio_device = self.audio.device_name.clone();
+        let audio_sr = self.audio.sr;
+        let audio_error = self.audio.error.clone();
+        let render_favs_count = self.prefs.render_favorites.len();
+        let pref_path_text = Preferences::file_path().display().to_string();
+        let layout_dir_text = Preferences::layouts_dir().display().to_string();
+        let theme = self.theme.clone();
+        let sel_bg = theme.selection_bg;
+        let sel_fg = crate::theme::contrast_on(sel_bg);
+        let mut live_theme: Option<ThemeId> = None;
 
         egui::Window::new("Preferências...")
             .open(&mut open)
             .collapsible(false)
-            .default_width(480.0)
+            .resizable(true)
+            .constrain_to(ctx.screen_rect())
+            .default_size([def_w, def_h])
+            .max_size([max_w, max_h])
             .show(ctx, |ui| {
-                ui.heading("Aparência e Acessibilidade");
-                let mut cur_theme = ThemeId::from_pref(&draft.theme);
-                egui::ComboBox::from_label("Tema visual (inclui Alto Contraste AAA)")
-                    .selected_text(cur_theme.label())
-                    .show_ui(ui, |ui| {
-                        for t in ThemeId::ALL {
-                            if ui.selectable_value(&mut cur_theme, t, t.label()).clicked() {
-                                draft.theme = t.id().to_string();
-                                self.set_theme(ctx, t, false);
-                            }
+                let avail_w = ui.available_width().max(260.0);
+                let side_by_side = avail_w >= 480.0;
+
+                if side_by_side {
+                    let side_w = (avail_w * 0.25).clamp(140.0, 185.0);
+                    let right_w = (avail_w - side_w - 14.0).max(260.0);
+                    ui.horizontal_top(|ui| {
+                        // Painel esquerdo: lista de categorias em moldura escura/contrastada
+                        egui::Frame::NONE
+                            .fill(theme.extreme_bg)
+                            .stroke(Stroke::new(1.0_f32, theme.border))
+                            .corner_radius(3.0)
+                            .inner_margin(egui::Margin::same(4))
+                            .show(ui, |ui| {
+                                ui.set_width(side_w);
+                                ui.set_min_height(nav_inner_h);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("prefs_nav_scroll")
+                                    .max_height(nav_inner_h)
+                                    .show(ui, |ui| {
+                                        ui.with_layout(
+                                            egui::Layout::top_down_justified(egui::Align::LEFT),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.y = 1.0;
+                                                let visuals = ui.visuals_mut();
+                                                visuals.selection.bg_fill = sel_bg;
+                                                visuals.selection.stroke = Stroke::NONE;
+                                                visuals.widgets.hovered.bg_fill =
+                                                    theme.widget_hover_bg;
+                                                visuals.widgets.hovered.weak_bg_fill =
+                                                    theme.widget_hover_bg;
+                                                for cat in PrefsCategory::ALL {
+                                                    let selected = self.dlg.prefs_tab == cat;
+                                                    let fg = if selected {
+                                                        sel_fg
+                                                    } else {
+                                                        theme.text_primary
+                                                    };
+                                                    let resp = ui.selectable_label(
+                                                        selected,
+                                                        egui::RichText::new(cat.label()).color(fg),
+                                                    );
+                                                    if resp.clicked() {
+                                                        self.dlg.prefs_tab = cat;
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                            });
+
+                        ui.add_space(6.0);
+
+                        // Painel direito: opções da categoria selecionada
+                        let inner_right_w = (right_w - 14.0).max(200.0);
+                        ui.vertical(|ui| {
+                            ui.set_width(right_w);
+                            ui.set_max_width(right_w);
+                            egui::ScrollArea::vertical()
+                                .id_salt(("prefs_body_scroll", self.dlg.prefs_tab as u8))
+                                .max_height(body_h)
+                                .show(ui, |ui| {
+                                    ui.set_min_width(inner_right_w);
+                                    ui.set_max_width(inner_right_w);
+                                    let ctx_refs = PrefsFormContext {
+                                        theme: &theme,
+                                        tab: self.dlg.prefs_tab,
+                                        rec_workers,
+                                        active_sr,
+                                        audio_device: &audio_device,
+                                        audio_sr,
+                                        audio_error: audio_error.as_deref(),
+                                        render_favs_count,
+                                        pref_path: &pref_path_text,
+                                        layout_dir: &layout_dir_text,
+                                        label_w: (right_w * 0.42).clamp(150.0, 225.0),
+                                    };
+                                    render_prefs_category(
+                                        ui,
+                                        &ctx_refs,
+                                        &mut draft,
+                                        &mut PrefsActions {
+                                            live_theme: &mut live_theme,
+                                            live_layout_preview: &mut live_layout_preview,
+                                            clear_cache_now: &mut clear_cache_now,
+                                            clear_recents_now: &mut clear_recents_now,
+                                            open_edit_layout: &mut open_edit_layout,
+                                            open_shortcuts: &mut open_shortcuts,
+                                            apply_defaults_to_session:
+                                                &mut apply_defaults_to_session,
+                                        },
+                                    );
+                                });
+                        });
+                    });
+                } else {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("prefs_nav_compact")
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for cat in PrefsCategory::ALL {
+                                    let selected = self.dlg.prefs_tab == cat;
+                                    if ui.selectable_label(selected, cat.label()).clicked() {
+                                        self.dlg.prefs_tab = cat;
+                                    }
+                                }
+                            });
+                        });
+                    ui.separator();
+                    let compact_h = (body_h - 34.0).max(80.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("prefs_body_scroll_compact", self.dlg.prefs_tab as u8))
+                        .max_height(compact_h)
+                        .show(ui, |ui| {
+                            let ctx_refs = PrefsFormContext {
+                                theme: &theme,
+                                tab: self.dlg.prefs_tab,
+                                rec_workers,
+                                active_sr,
+                                audio_device: &audio_device,
+                                audio_sr,
+                                audio_error: audio_error.as_deref(),
+                                render_favs_count,
+                                pref_path: &pref_path_text,
+                                layout_dir: &layout_dir_text,
+                                label_w: 0.0,
+                            };
+                            render_prefs_category(
+                                ui,
+                                &ctx_refs,
+                                &mut draft,
+                                &mut PrefsActions {
+                                    live_theme: &mut live_theme,
+                                    live_layout_preview: &mut live_layout_preview,
+                                    clear_cache_now: &mut clear_cache_now,
+                                    clear_recents_now: &mut clear_recents_now,
+                                    open_edit_layout: &mut open_edit_layout,
+                                    open_shortcuts: &mut open_shortcuts,
+                                    apply_defaults_to_session: &mut apply_defaults_to_session,
+                                },
+                            );
+                        });
+                }
+
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("Restaurar padrões")
+                        .on_hover_text(
+                            "Repõe as preferências padrão (preserva projetos recentes e favoritos)",
+                        )
+                        .clicked()
+                    {
+                        reset_defaults = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Cancelar").clicked() {
+                            cancel_close = true;
+                        }
+                        if ui.button("Aplicar").clicked() {
+                            apply_and_keep = true;
+                        }
+                        if ui.button("OK").clicked() {
+                            save_and_close = true;
                         }
                     });
-                ui.horizontal(|ui| {
-                    ui.label("Idioma da interface:");
-                    ui.label(egui::RichText::new(&draft.language).strong());
-                });
-                ui.checkbox(
-                    &mut draft.show_splash,
-                    "Mostrar tela de abertura (Splash Screen) ao iniciar",
-                );
-                ui.checkbox(
-                    &mut draft.show_welcome,
-                    "Mostrar tela de boas-vindas (Projetos recentes) ao iniciar",
-                );
-                if ui
-                    .button("Editar > Propriedades > Layout (Sonic Foundry / Sony / MAGIX)...")
-                    .clicked()
-                {
-                    self.dlg
-                        .open_edit_layout(&self.prefs, self.dock_height, self.preview_ratio);
-                }
-
-                ui.separator();
-                ui.heading("Desempenho e Hardware Limitado (§3.6)");
-                egui::Grid::new("prefs_hw").num_columns(2).show(ui, |ui| {
-                    ui.label("Orçamento de RAM para prévia (MB):");
-                    let mut ram = draft.ram_preview_mb;
-                    if ui
-                        .add(egui::DragValue::new(&mut ram).range(32..=4096).speed(16))
-                        .changed()
-                    {
-                        draft.ram_preview_mb = ram;
-                    }
-                    ui.end_row();
-
-                    ui.label("Máximo de quadros por mídia em cache:");
-                    let mut cap = draft.frame_cache_cap;
-                    if ui
-                        .add(egui::DragValue::new(&mut cap).range(8..=256))
-                        .changed()
-                    {
-                        draft.frame_cache_cap = cap;
-                    }
-                    ui.end_row();
-
-                    ui.label("Threads de processamento (0 = automático):");
-                    let mut wt = draft.worker_threads;
-                    if ui.add(egui::DragValue::new(&mut wt).range(0..=32)).changed() {
-                        draft.worker_threads = wt;
-                    }
-                    ui.end_row();
-                });
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Recomendado para esta CPU: {rec_workers} worker(s). Alteração do pool de threads passa a valer totalmente ao reiniciar."
-                    ))
-                    .small()
-                    .weak(),
-                );
-                if ui.button("Limpar cache de quadros em memória agora").clicked() {
-                    clear_cache_now = true;
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        save_and_close = true;
-                    }
-                    if ui.button("Aplicar").clicked() {
-                        apply_and_keep = true;
-                    }
-                    if ui.button("Cancelar").clicked() {
-                        cancel_close = true;
-                    }
                 });
             });
+
+        if let Some(tid) = live_theme {
+            self.set_theme(ctx, tid, false);
+        }
+        if live_layout_preview {
+            self.apply_edit_layout(Some(ctx), draft.edit_layout.clone(), true, false);
+        }
+
+        if reset_defaults {
+            let keep_recents = draft.recent_projects.clone();
+            let keep_favs = draft.render_favorites.clone();
+            draft = Preferences {
+                recent_projects: keep_recents,
+                render_favorites: keep_favs,
+                ..Default::default()
+            };
+            let tid = ThemeId::from_pref(&draft.theme);
+            self.set_theme(ctx, tid, false);
+            self.apply_edit_layout(Some(ctx), draft.edit_layout.clone(), true, false);
+            self.set_status("Rascunho restaurado para as preferências padrão.");
+        }
 
         if clear_cache_now {
             self.media.clear_frame_caches();
             self.thumbs.clear();
-            self.set_status("Cache de quadros liberado.");
+            self.set_status("Cache de quadros e miniaturas liberado.");
+        }
+
+        if clear_recents_now {
+            draft.clear_recent_projects();
+            self.prefs.clear_recent_projects();
+            if let Err(e) = self.prefs.save() {
+                self.set_status(format!("Aviso ao limpar projetos recentes: {e}"));
+            } else {
+                self.set_status("Histórico de projetos recentes limpo.");
+            }
+        }
+
+        if open_edit_layout {
+            self.dlg
+                .open_edit_layout(&self.prefs, self.dock_height, self.preview_ratio);
+        }
+        if open_shortcuts {
+            self.dlg.shortcuts = true;
         }
 
         if cancel_close || (!open && !save_and_close) {
-            if let Some(orig) = self.dlg.prefs_orig_theme.take() {
-                let tid = ThemeId::from_pref(&orig);
+            if let Some((orig_theme, orig_layout)) = self.dlg.prefs_orig.take() {
+                let tid = ThemeId::from_pref(&orig_theme);
                 self.set_theme(ctx, tid, false);
+                self.apply_edit_layout(Some(ctx), orig_layout, false, false);
+            }
+            if let Some((orig_dock_h, orig_prev_r)) = self.dlg.prefs_orig_metrics.take() {
+                self.dock_height = orig_dock_h;
+                self.preview_ratio = orig_prev_r;
             }
             self.dlg.prefs_open = false;
             self.dlg.prefs_draft = None;
             return;
         }
 
+        if apply_defaults_to_session {
+            apply_pref_defaults(&mut self.session.opts, &draft);
+            self.set_status("Opções padrão aplicadas à sessão aberta.");
+        }
+
         if apply_and_keep || save_and_close {
             draft.sanitize();
-            let tid = ThemeId::from_pref(&draft.theme);
-            self.media
-                .configure_limits(draft.frame_cache_cap, draft.ram_preview_mb);
-            self.prefs.theme = draft.theme.clone();
-            self.prefs.ram_preview_mb = draft.ram_preview_mb;
-            self.prefs.frame_cache_cap = draft.frame_cache_cap;
-            self.prefs.worker_threads = draft.worker_threads;
-            self.prefs.language = draft.language.clone();
-            self.prefs.show_splash = draft.show_splash;
-            self.prefs.show_welcome = draft.show_welcome;
-            self.set_theme(ctx, tid, true);
+            self.apply_saved_prefs(ctx, &draft);
             if save_and_close {
-                self.dlg.prefs_orig_theme = None;
+                self.dlg.prefs_orig = None;
+                self.dlg.prefs_orig_metrics = None;
                 self.dlg.prefs_open = false;
                 self.dlg.prefs_draft = None;
                 self.set_status("Preferências salvas.");
             } else {
-                self.dlg.prefs_orig_theme = Some(draft.theme.clone());
+                self.dlg.prefs_orig = Some((draft.theme.clone(), draft.edit_layout.clone()));
+                self.dlg.prefs_orig_metrics = Some((self.dock_height, self.preview_ratio));
                 self.dlg.prefs_draft = Some(draft);
                 self.set_status("Preferências aplicadas.");
             }
         } else {
             self.dlg.prefs_draft = Some(draft);
+        }
+    }
+
+    fn apply_saved_prefs(&mut self, ctx: &egui::Context, draft: &Preferences) {
+        let prev = self.prefs.clone();
+        self.media
+            .configure_limits(draft.frame_cache_cap, draft.ram_preview_mb);
+
+        let opts = &mut self.session.opts;
+        if draft.default_snapping != prev.default_snapping {
+            opts.snapping = draft.default_snapping;
+        }
+        if draft.default_quantize != prev.default_quantize {
+            opts.quantize = draft.default_quantize;
+        }
+        if draft.default_show_waveforms != prev.default_show_waveforms {
+            opts.show_waveforms = draft.default_show_waveforms;
+        }
+        if draft.default_show_thumbs != prev.default_show_thumbs {
+            opts.show_thumbs = draft.default_show_thumbs;
+        }
+        if draft.default_show_envelopes != prev.default_show_envelopes {
+            opts.show_envelopes = draft.default_show_envelopes;
+        }
+        if draft.default_loop_playback != prev.default_loop_playback {
+            opts.loop_playback = draft.default_loop_playback;
+        }
+        if draft.default_preview_quality != prev.default_preview_quality {
+            opts.preview_quality = draft.default_preview_quality;
+        }
+        if draft.default_time_format != prev.default_time_format {
+            opts.time_format = draft.default_time_format;
+        }
+
+        let next_theme = ThemeId::from_pref(&draft.theme);
+        if draft.edit_layout != prev.edit_layout {
+            let layout_type_changed = draft.edit_layout.layout_type != prev.edit_layout.layout_type;
+            self.apply_edit_layout(
+                Some(ctx),
+                draft.edit_layout.clone(),
+                layout_type_changed,
+                false,
+            );
+        }
+        if next_theme != self.theme_id {
+            self.set_theme(ctx, next_theme, false);
+        }
+
+        let mut next = draft.clone();
+        next.recent_projects = prev.recent_projects;
+        next.render_favorites = prev.render_favorites;
+        next.sanitize();
+        self.prefs = next;
+        if let Err(e) = self.prefs.save() {
+            self.set_status(format!("Aviso ao salvar preferências: {e}"));
         }
     }
 
@@ -2964,4 +3229,744 @@ fn draw_layout_schematic(
         Rect::from_min_max(pos2(tabs_sub.left(), tabs_sub.bottom() - 6.0), tabs_sub.max)
     };
     p.rect_filled(strip_r, 1.0, theme.accent);
+}
+
+struct PrefsFormContext<'a> {
+    theme: &'a crate::theme::ThemeColors,
+    tab: PrefsCategory,
+    rec_workers: usize,
+    active_sr: u32,
+    audio_device: &'a str,
+    audio_sr: u32,
+    audio_error: Option<&'a str>,
+    render_favs_count: usize,
+    pref_path: &'a str,
+    layout_dir: &'a str,
+    label_w: f32,
+}
+
+struct PrefsActions<'a> {
+    live_theme: &'a mut Option<ThemeId>,
+    live_layout_preview: &'a mut bool,
+    clear_cache_now: &'a mut bool,
+    clear_recents_now: &'a mut bool,
+    open_edit_layout: &'a mut bool,
+    open_shortcuts: &'a mut bool,
+    apply_defaults_to_session: &'a mut bool,
+}
+
+fn inner_label_w(label_w: f32) -> f32 {
+    if label_w > 1.0 {
+        (label_w - 11.0).max(110.0)
+    } else {
+        0.0
+    }
+}
+
+fn prefs_row(
+    ui: &mut egui::Ui,
+    label_w: f32,
+    label: &str,
+    add_control: impl FnOnce(&mut egui::Ui),
+) {
+    if label_w > 1.0 {
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                vec2(label_w, 20.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.add(egui::Label::new(label).wrap());
+                },
+            );
+            add_control(ui);
+        });
+    } else {
+        ui.vertical(|ui| {
+            ui.add(egui::Label::new(label).wrap());
+            ui.horizontal(|ui| {
+                add_control(ui);
+            });
+        });
+    }
+}
+
+fn prefs_ro_row(
+    ui: &mut egui::Ui,
+    theme: &crate::theme::ThemeColors,
+    label_w: f32,
+    label: &str,
+    value: &str,
+    monospace: bool,
+) {
+    prefs_row(ui, label_w, label, |ui| {
+        let mut rt = egui::RichText::new(value).color(theme.text_muted);
+        if monospace {
+            rt = rt.monospace().size(11.5);
+            ui.add(egui::Label::new(rt).truncate()).on_hover_text(value);
+        } else {
+            ui.add(egui::Label::new(rt).wrap());
+        }
+    });
+}
+
+fn prefs_indented(ui: &mut egui::Ui, label_w: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+    if label_w > 1.0 {
+        let indent = label_w + ui.spacing().item_spacing.x;
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.vertical(|ui| add_contents(ui));
+        });
+    } else {
+        add_contents(ui);
+    }
+}
+
+fn prefs_group_box(
+    ui: &mut egui::Ui,
+    theme: &crate::theme::ThemeColors,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add_space(4.0);
+    egui::Frame::NONE
+        .fill(theme.panel_fill)
+        .stroke(Stroke::new(1.0_f32, theme.border))
+        .corner_radius(2.0)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(title)
+                    .strong()
+                    .color(theme.text_primary),
+            );
+            ui.add_space(4.0);
+            add_contents(ui);
+        });
+    ui.add_space(3.0);
+}
+
+fn render_prefs_category(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    ui.spacing_mut().item_spacing.y = 4.0;
+    match cx.tab {
+        PrefsCategory::General => prefs_general(ui, cx, draft, act),
+        PrefsCategory::Appearance => prefs_appearance(ui, cx, draft, act),
+        PrefsCategory::Editing => prefs_editing(ui, cx, draft, act),
+        PrefsCategory::VideoPreview => prefs_video_preview(ui, cx, draft, act),
+        PrefsCategory::Audio => prefs_audio(ui, cx, draft, act),
+        PrefsCategory::Memory => prefs_memory(ui, cx, draft, act),
+        PrefsCategory::AutoSave => prefs_autosave(ui, cx, draft),
+        PrefsCategory::Shortcuts => prefs_shortcuts(ui, cx, draft, act),
+    }
+}
+
+fn prefs_general(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    prefs_row(
+        ui,
+        cx.label_w,
+        "Duração padrão de imagem estática:",
+        |ui| {
+            ui.add_sized(
+                [74.0, 20.0],
+                egui::DragValue::new(&mut draft.still_image_secs)
+                    .range(0.5..=60.0)
+                    .speed(0.1)
+                    .max_decimals(2),
+            );
+            ui.label("segundos");
+        },
+    );
+
+    prefs_row(
+        ui,
+        cx.label_w,
+        "Rolagem automática na reprodução:",
+        |ui| {
+            egui::ComboBox::from_id_salt("prefs_playback_scroll")
+                .selected_text(draft.playback_scroll.label())
+                .show_ui(ui, |ui| {
+                    for mode in PlaybackScrollMode::ALL {
+                        ui.selectable_value(&mut draft.playback_scroll, mode, mode.label());
+                    }
+                });
+        },
+    );
+
+    prefs_row(ui, cx.label_w, "Roda do mouse na timeline:", |ui| {
+        egui::ComboBox::from_id_salt("prefs_mouse_scroll")
+            .selected_text(draft.timeline_mouse_scroll.label())
+            .show_ui(ui, |ui| {
+                for mode in TimelineMouseScroll::ALL {
+                    ui.selectable_value(&mut draft.timeline_mouse_scroll, mode, mode.label());
+                }
+            });
+    });
+
+    ui.add_space(2.0);
+    prefs_indented(ui, cx.label_w, |ui| {
+        ui.checkbox(
+            &mut draft.show_splash,
+            "Exibir tela de abertura (Splash) ao iniciar",
+        );
+        ui.checkbox(
+            &mut draft.show_welcome,
+            "Exibir tela de boas-vindas com projetos recentes ao iniciar",
+        );
+        ui.checkbox(
+            &mut draft.always_draw_marker_lines,
+            "Desenhar sempre as linhas de marcadores na timeline",
+        );
+        ui.checkbox(
+            &mut draft.show_tooltips,
+            "Exibir dicas flutuantes (Tool Tips) nos controles",
+        );
+    });
+
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(ui, cx.theme, "Histórico e Projetos Recentes", |ui| {
+        prefs_row(ui, inner_lw, "Máximo de projetos recentes:", |ui| {
+            ui.add_sized(
+                [64.0, 20.0],
+                egui::DragValue::new(&mut draft.max_recent_projects).range(1..=20),
+            );
+            ui.label("itens  (1–20)");
+        });
+        prefs_indented(ui, inner_lw, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Limpar projetos recentes").clicked() {
+                    *act.clear_recents_now = true;
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} projeto(s) no histórico • {} modelo(s) favorito(s)",
+                        draft.recent_projects.len(),
+                        cx.render_favs_count
+                    ))
+                    .color(cx.theme.text_muted),
+                );
+            });
+        });
+    });
+
+    prefs_group_box(ui, cx.theme, "Idioma e Arquivos de Configuração", |ui| {
+        let lang_label = format!("Português (Brasil) [{}]", draft.language);
+        prefs_ro_row(ui, cx.theme, inner_lw, "Idioma ativo:", &lang_label, false);
+        prefs_ro_row(
+            ui,
+            cx.theme,
+            inner_lw,
+            "Arquivo de preferências:",
+            cx.pref_path,
+            true,
+        );
+        prefs_ro_row(
+            ui,
+            cx.theme,
+            inner_lw,
+            "Pasta de layouts (.neoveglayout):",
+            cx.layout_dir,
+            true,
+        );
+    });
+}
+
+fn prefs_appearance(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    let mut active_theme = ThemeId::from_pref(&draft.theme);
+    prefs_row(ui, cx.label_w, "Tema visual:", |ui| {
+        egui::ComboBox::from_id_salt("prefs_theme_combo")
+            .selected_text(active_theme.label())
+            .show_ui(ui, |ui| {
+                for t in ThemeId::ALL {
+                    if ui
+                        .selectable_value(&mut active_theme, t, t.label())
+                        .changed()
+                    {
+                        draft.theme = t.id().to_string();
+                        *act.live_theme = Some(t);
+                    }
+                }
+            });
+    });
+
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Disposição Clássica da Área de Trabalho (Layout)",
+        |ui| {
+            let cur_lt = draft.edit_layout.layout_type;
+            prefs_row(ui, inner_lw, "Tipo de layout:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_layout_type_combo")
+                    .selected_text(format!("{} ({})", cur_lt.label(), cur_lt.era()))
+                    .show_ui(ui, |ui| {
+                        for lt in LayoutType::ALL {
+                            if ui
+                                .selectable_label(
+                                    cur_lt == lt,
+                                    format!("{} — {}", lt.label(), lt.era()),
+                                )
+                                .clicked()
+                            {
+                                draft.edit_layout.apply_type(lt);
+                                if draft.edit_layout.sync_theme_with_layout
+                                    && !ThemeId::from_pref(&draft.theme).is_high_contrast()
+                                {
+                                    draft.theme = lt.default_theme_id().to_string();
+                                }
+                                *act.live_layout_preview = true;
+                            }
+                        }
+                    });
+            });
+
+            prefs_indented(ui, inner_lw, |ui| {
+                let mut layout_changed = false;
+                layout_changed |= ui
+                    .checkbox(
+                        &mut draft.edit_layout.timeline_at_bottom,
+                        "Timeline na parte inferior (estilo Sony / MAGIX)",
+                    )
+                    .changed();
+                layout_changed |= ui
+                    .checkbox(
+                        &mut draft.edit_layout.tabs_at_top,
+                        "Abas das janelas acopladas na borda superior",
+                    )
+                    .changed();
+                layout_changed |= ui
+                    .checkbox(
+                        &mut draft.edit_layout.transport_at_bottom,
+                        "Fixar barra de transporte no rodapé principal",
+                    )
+                    .changed();
+                layout_changed |= ui
+                    .checkbox(
+                        &mut draft.edit_layout.preview_on_left,
+                        "Exibir Prévia de Vídeo à esquerda na área acoplável",
+                    )
+                    .changed();
+                if ui
+                    .checkbox(
+                        &mut draft.edit_layout.sync_theme_with_layout,
+                        "Sincronizar tema da era ao trocar o tipo de layout",
+                    )
+                    .changed()
+                {
+                    if draft.edit_layout.sync_theme_with_layout
+                        && !ThemeId::from_pref(&draft.theme).is_high_contrast()
+                    {
+                        draft.theme = draft.edit_layout.layout_type.default_theme_id().to_string();
+                    }
+                    layout_changed = true;
+                }
+                if layout_changed {
+                    *act.live_layout_preview = true;
+                }
+
+                ui.add_space(2.0);
+                if ui
+                    .button("Abrir diálogo Editar > Propriedades > Layout...")
+                    .clicked()
+                {
+                    *act.open_edit_layout = true;
+                }
+            });
+        },
+    );
+}
+
+fn prefs_editing(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Opções Padrão da Timeline (Novos Projetos)",
+        |ui| {
+            prefs_row(ui, inner_lw, "Formato padrão de tempo:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_default_time_format")
+                    .selected_text(draft.default_time_format.name())
+                    .show_ui(ui, |ui| {
+                        for tf in TimeFormat::ALL {
+                            ui.selectable_value(&mut draft.default_time_format, tf, tf.name());
+                        }
+                    });
+            });
+
+            ui.add_space(2.0);
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.default_snapping,
+                    "Ativar encaixe magnético (Snapping) por padrão",
+                );
+                ui.checkbox(
+                    &mut draft.default_quantize,
+                    "Quantizar edições nos limites exatos de quadros",
+                );
+                ui.checkbox(
+                    &mut draft.default_show_waveforms,
+                    "Exibir formas de onda (waveforms) nos eventos de áudio",
+                );
+                ui.checkbox(
+                    &mut draft.default_show_thumbs,
+                    "Exibir miniaturas nos eventos de vídeo",
+                );
+                ui.checkbox(
+                    &mut draft.default_show_envelopes,
+                    "Exibir curvas de envelope nas faixas",
+                );
+                ui.checkbox(
+                    &mut draft.default_loop_playback,
+                    "Ativar reprodução contínua em loop por padrão",
+                );
+                ui.add_space(3.0);
+                if ui
+                    .button("Aplicar padrões à sessão aberta")
+                    .on_hover_text("Atualiza imediatamente a timeline atual com os padrões acima")
+                    .clicked()
+                {
+                    *act.apply_defaults_to_session = true;
+                }
+            });
+        },
+    );
+
+    prefs_group_box(ui, cx.theme, "Comportamento de Edição e Mídia", |ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "Ao importar o primeiro arquivo de mídia, o formato do projeto é ajustado \
+                     automaticamente somente se as propriedades do projeto ainda não foram \
+                     personalizadas.",
+                )
+                .color(cx.theme.text_muted),
+            )
+            .wrap(),
+        );
+    });
+}
+
+fn prefs_video_preview(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Prévia de Vídeo Escalonável (Matriz 4×3)",
+        |ui| {
+            prefs_row(ui, inner_lw, "Qualidade inicial da Prévia:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_default_preview_quality")
+                    .selected_text(draft.default_preview_quality.name())
+                    .show_ui(ui, |ui| {
+                        for pq in PreviewQuality::ALL {
+                            ui.selectable_value(&mut draft.default_preview_quality, pq, pq.name());
+                        }
+                    });
+            });
+            prefs_indented(ui, inner_lw, |ui| {
+                if ui.button("Aplicar qualidade à sessão aberta").clicked() {
+                    *act.apply_defaults_to_session = true;
+                }
+            });
+        },
+    );
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Guias de Área Segura na Prévia (Safe Areas)",
+        |ui| {
+            prefs_row(ui, inner_lw, "Área segura de ação (Action Safe):", |ui| {
+                if ui
+                    .add_sized(
+                        [64.0, 20.0],
+                        egui::DragValue::new(&mut draft.action_safe_pct).range(70..=98),
+                    )
+                    .changed()
+                    && draft.title_safe_pct > draft.action_safe_pct
+                {
+                    draft.title_safe_pct = draft.action_safe_pct;
+                }
+                ui.label("%  (70–98%)");
+            });
+            prefs_row(ui, inner_lw, "Área segura de título (Title Safe):", |ui| {
+                let max_title = draft.action_safe_pct.max(60);
+                ui.add_sized(
+                    [64.0, 20.0],
+                    egui::DragValue::new(&mut draft.title_safe_pct).range(60..=max_title),
+                );
+                ui.label(format!("%  (60–{max_title}%)"));
+            });
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "As guias são desenhadas na Prévia de Vídeo quando o botão \
+                         \"Áreas seguras\" está ativado.",
+                        )
+                        .color(cx.theme.text_muted),
+                    )
+                    .wrap(),
+                );
+            });
+        },
+    );
+}
+
+fn prefs_audio(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    _act: &mut PrefsActions<'_>,
+) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Configurações de Áudio de Novos Projetos",
+        |ui| {
+            let sr_label = match draft.default_sample_rate {
+                44100 => "44100 Hz (44,1 kHz — CD)",
+                96000 => "96000 Hz (96 kHz — Estúdio)",
+                _ => "48000 Hz (48 kHz — Vídeo)",
+            };
+            prefs_row(ui, inner_lw, "Taxa de amostragem padrão:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_default_sr")
+                    .selected_text(sr_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.default_sample_rate,
+                            44100,
+                            "44100 Hz (44,1 kHz — CD)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.default_sample_rate,
+                            48000,
+                            "48000 Hz (48 kHz — Vídeo)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.default_sample_rate,
+                            96000,
+                            "96000 Hz (96 kHz — Estúdio)",
+                        );
+                    });
+            });
+            prefs_ro_row(
+                ui,
+                cx.theme,
+                inner_lw,
+                "Taxa do projeto aberto:",
+                &format!("{} Hz  (Arquivo > Propriedades)", cx.active_sr),
+                false,
+            );
+        },
+    );
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Dispositivo de Saída e Motor (cpal / Symphonia)",
+        |ui| {
+            prefs_ro_row(
+                ui,
+                cx.theme,
+                inner_lw,
+                "Dispositivo ativo:",
+                cx.audio_device,
+                false,
+            );
+            prefs_ro_row(
+                ui,
+                cx.theme,
+                inner_lw,
+                "Taxa do hardware de saída:",
+                &format!("{} Hz", cx.audio_sr),
+                false,
+            );
+            if let Some(err) = cx.audio_error {
+                prefs_ro_row(ui, cx.theme, inner_lw, "Estado da saída:", err, false);
+            }
+        },
+    );
+}
+
+fn prefs_memory(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(ui, cx.theme, "Limites de RAM, Cache e Threads", |ui| {
+        prefs_row(ui, inner_lw, "Prévia dinâmica em RAM máx.:", |ui| {
+            ui.add_sized(
+                [72.0, 20.0],
+                egui::DragValue::new(&mut draft.ram_preview_mb)
+                    .range(32..=8192)
+                    .speed(16),
+            );
+            ui.label("MB  (32–8192 MB)");
+        });
+
+        prefs_row(ui, inner_lw, "Máximo de quadros em cache:", |ui| {
+            ui.add_sized(
+                [72.0, 20.0],
+                egui::DragValue::new(&mut draft.frame_cache_cap).range(4..=512),
+            );
+            ui.label("quadros  (4–512)");
+        });
+
+        prefs_row(ui, inner_lw, "Threads de trabalho:", |ui| {
+            ui.add_sized(
+                [64.0, 20.0],
+                egui::DragValue::new(&mut draft.worker_threads).range(0..=32),
+            );
+            let desc = if draft.worker_threads == 0 {
+                format!("automático ({} rec. nesta CPU)", cx.rec_workers)
+            } else {
+                "manuais (0 = auto)".to_string()
+            };
+            ui.add(egui::Label::new(desc).wrap());
+        });
+
+        prefs_indented(ui, inner_lw, |ui| {
+            if ui.button("Limpar cache e miniaturas agora").clicked() {
+                *act.clear_cache_now = true;
+            }
+        });
+    });
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Adaptabilidade a Hardware Limitado (§3.6)",
+        |ui| {
+            ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "Em máquinas com 2 núcleos ou 4 GB de RAM, manter threads em 0 e Prévia RAM \
+                     moderada evita pressão de memória; mídia é lida em streaming.",
+                )
+                .color(cx.theme.text_muted),
+            )
+            .wrap(),
+        );
+        },
+    );
+}
+
+fn prefs_autosave(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Salvamento Automático e Recuperação",
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.autosave_enabled,
+                    "Ativar salvamento automático periódico do projeto",
+                );
+            });
+
+            ui.add_enabled_ui(draft.autosave_enabled, |ui| {
+                prefs_row(ui, inner_lw, "Intervalo de gravação:", |ui| {
+                    ui.add_sized(
+                        [72.0, 20.0],
+                        egui::DragValue::new(&mut draft.autosave_secs)
+                            .range(15..=600)
+                            .speed(5),
+                    );
+                    ui.label("segundos  (15–600 s)");
+                });
+            });
+
+            let summary = if draft.autosave_enabled {
+                let mins = draft.autosave_secs / 60;
+                let secs = draft.autosave_secs % 60;
+                if mins > 0 && secs > 0 {
+                    format!("ativo — a cada {mins} min {secs} s")
+                } else if mins > 0 {
+                    format!("ativo — a cada {mins} min")
+                } else {
+                    format!("ativo — a cada {secs} s")
+                }
+            } else {
+                "desativado".to_string()
+            };
+            prefs_ro_row(ui, cx.theme, inner_lw, "Estado atual:", &summary, false);
+            prefs_ro_row(
+                ui,
+                cx.theme,
+                inner_lw,
+                "Arquivo de configuração:",
+                cx.pref_path,
+                true,
+            );
+        },
+    );
+}
+
+fn prefs_shortcuts(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &Preferences,
+    act: &mut PrefsActions<'_>,
+) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(ui, cx.theme, "Atalhos de Teclado e Comandos", |ui| {
+        let stats = format!(
+            "{} comando(s) na Tabela Única • {} atalho(s) personalizado(s)",
+            COMMANDS.len(),
+            draft.shortcuts.len()
+        );
+        prefs_ro_row(ui, cx.theme, inner_lw, "Resumo de atalhos:", &stats, false);
+        prefs_indented(ui, inner_lw, |ui| {
+            if ui.button("Configurar atalhos de teclado...").clicked() {
+                *act.open_shortcuts = true;
+            }
+        });
+    });
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Mapeamento Clássico do VEGAS Pro Preservado",
+        |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "S = Dividir • M = Marcador • R = Região • J/K/L = Scrub • \
+                     G/U = Agrupar/Desagrupar • Z/X = Mudo/Solo • Ctrl+L = Auto Ripple • \
+                     Alt+[ / Alt+] = Aparo • Ctrl+T = Aparar à seleção",
+                    )
+                    .color(cx.theme.text_muted),
+                )
+                .wrap(),
+            );
+        },
+    );
 }

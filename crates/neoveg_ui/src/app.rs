@@ -6,7 +6,10 @@ use crate::layout::{self, WindowLayout};
 use crate::theme::{self, ThemeColors, ThemeId};
 use eframe::egui;
 use egui::{Key, TextureHandle};
-pub use neoveg_common::prefs::{EditLayoutPrefs, LayoutType, Preferences, PreviewQuality};
+pub use neoveg_common::prefs::{
+    EditLayoutPrefs, LayoutType, PlaybackScrollMode, Preferences, PreviewQuality,
+    TimelineMouseScroll,
+};
 use neoveg_engine::commands::{
     self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
     ShortcutKey, UiAction, COMMANDS,
@@ -130,8 +133,17 @@ impl DerefMut for App {
     }
 }
 
-/// Intervalo do salvamento automático de recuperação.
-const AUTOSAVE_SECS: u64 = 60;
+/// Aplica os padrões globais de edição/prévia das Preferências às opções da sessão.
+pub(crate) fn apply_pref_defaults(opts: &mut Options, prefs: &Preferences) {
+    opts.snapping = prefs.default_snapping;
+    opts.quantize = prefs.default_quantize;
+    opts.show_waveforms = prefs.default_show_waveforms;
+    opts.show_thumbs = prefs.default_show_thumbs;
+    opts.show_envelopes = prefs.default_show_envelopes;
+    opts.loop_playback = prefs.default_loop_playback;
+    opts.preview_quality = prefs.default_preview_quality;
+    opts.time_format = prefs.default_time_format;
+}
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
@@ -155,7 +167,10 @@ impl App {
             ..Default::default()
         });
         let saved_layouts = layout::list_saved_layouts();
-        let session = EditorSession::new(Project::new_default());
+        let mut initial_project = Project::new_default();
+        initial_project.settings.sample_rate = prefs.default_sample_rate;
+        let mut session = EditorSession::new(initial_project);
+        apply_pref_defaults(&mut session.opts, &prefs);
         let media = Arc::new(MediaCache::default());
         media.configure_limits(prefs.frame_cache_cap, prefs.ram_preview_mb);
         let audio = AudioOut::new(session.snapshot.clone());
@@ -289,7 +304,10 @@ impl App {
 
     /// Salvamento automático para recuperação após falha (§0.7).
     fn autosave(&mut self) {
-        if !self.dirty || self.last_autosave.elapsed().as_secs() < AUTOSAVE_SECS {
+        if !self.prefs.autosave_enabled
+            || !self.dirty
+            || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
+        {
             return;
         }
         self.last_autosave = Instant::now();
@@ -520,7 +538,10 @@ impl App {
 
     pub fn new_project(&mut self) {
         self.stop(false);
-        self.session.reset_project(Project::new_default(), None);
+        let mut proj = Project::new_default();
+        proj.settings.sample_rate = self.prefs.default_sample_rate;
+        self.session.reset_project(proj, None);
+        apply_pref_defaults(&mut self.session.opts, &self.prefs);
         self.thumbs.clear();
         self.set_status("Novo projeto");
     }
@@ -799,9 +820,10 @@ impl App {
         let Some(m) = self.project.media(media_id).cloned() else {
             return vec![];
         };
+        let still_len = Ticks::from_secs_f64_clamped(self.prefs.still_image_secs as f64);
         let len = m
             .duration
-            .unwrap_or(Ticks::from_secs_i64(5))
+            .unwrap_or(still_len)
             .max(self.project.settings.frame_dur());
         let mut created = vec![];
         let group = if m.has_video && m.has_audio {
@@ -1863,6 +1885,14 @@ impl eframe::App for App {
 impl App {
     /// Um quadro completo da interface (separado de `eframe::App` para testes).
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
+        let want_delay = if self.prefs.show_tooltips {
+            0.5
+        } else {
+            3600.0
+        };
+        if (ctx.style().interaction.tooltip_delay - want_delay).abs() > 0.01 {
+            ctx.style_mut(|s| s.interaction.tooltip_delay = want_delay);
+        }
         let dt = self.last_frame.elapsed().as_secs_f64();
         self.last_frame = Instant::now();
         self.audio.tick_without_device(dt);
@@ -1875,7 +1905,8 @@ impl App {
         let playing = self.is_playing();
         if playing {
             let t = self.play_pos();
-            self.tl.follow(t);
+            let continuous = self.prefs.playback_scroll == PlaybackScrollMode::Continuous;
+            self.tl.follow_with(t, continuous);
             // fim do projeto: para
             if !self.opts.loop_playback
                 && t > self.project.duration() + Ticks::from_millis_i64(500)
