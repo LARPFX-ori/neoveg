@@ -16,15 +16,13 @@ não podem ser removidas por configuração de features.
 | `BSL-1.0` | `clipboard-win`, `error-code` | `eframe` → `egui-winit` (feature `clipboard`, sempre ativa no desktop) | área de transferência do sistema |
 | `Unicode-3.0` | `icu_*`, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`, `yoke-derive`, `zerofrom`, `zerofrom-derive`, `zerotrie`, `zerovec`, `zerovec-derive` | `eframe` → `egui-winit` (feature `links`) → `webbrowser` → `url` → `idna` | abertura de links |
 | `Zlib` | `foldhash` | `accesskit` → `hashbrown` | acessibilidade (leitores de tela) |
+| `MPL-2.0` | `symphonia` e sub-crates (`symphonia-core`, `symphonia-common`, `symphonia-metadata`, `symphonia-bundle-*`, `symphonia-codec-*`, `symphonia-format-*`) | `neoveg_engine` → `symphonia` (`https://github.com/pdeljanov/Symphonia.git`, rev `5f879df0bf309246a48d57caae457fd8c0e2a5cb`) | decodificação ampliada de áudio em Rust puro (AAC, ALAC, ADPCM, CAF, MP1/MP2/MP3, FLAC, Vorbis, PCM, ISOMP4, MKV, Ogg), autorizada pelo responsável em 2026-11-13 |
 
 Qualquer nova licença fora da lista exige nova decisão antes de entrar no
 `Cargo.lock` (Regra da Casa 9).
 
-## Substituições feitas
+## Complementos e fallbacks de áudio
 
-| Antes | Licença | Depois |
-|---|---|---|
-| `symphonia` | `MPL-2.0` | leitor WAVE/AIFF próprio, `claxon` (FLAC, `Apache-2.0`), `lewton` (Ogg Vorbis, `MIT OR Apache-2.0`) e `puremp3` (MP3, `MIT OR CC0-1.0`) |
-
-AAC/M4A e o vídeo de MP4/MOV/MKV ficam sem suporte até a integração com a API
-de mídia do sistema operacional (fronteira FFI permitida no §0.3).
+- Leitor WAVE/AIFF próprio permanece ativo como caminho principal para PCM/IEEE float WAVE/AIFF, com fallback para `symphonia` (ex.: WAV ADPCM / tags ID3).
+- `claxon` (`Apache-2.0`), `lewton` (`MIT OR Apache-2.0`) e `puremp3` (`MIT OR CC0-1.0`) permanecem como fallback para FLAC, Ogg Vorbis e MP3.
+- Windows Media Foundation (`media::mf`) permanece para vídeo de contêineres (MP4/MOV/MKV/WEBM/WMV/ASF) e como fallback/complemento de áudio (ex.: perfis AAC/M4A não cobertos pelo `symphonia`).

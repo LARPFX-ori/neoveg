@@ -40,6 +40,24 @@ AUTHORIZED = {
         "zerotrie", "zerovec", "zerovec-derive",
     },
     "Zlib": {"foldhash"},
+    "MPL-2.0": {
+        "symphonia",
+        "symphonia-bundle-flac",
+        "symphonia-bundle-mp3",
+        "symphonia-codec-aac",
+        "symphonia-codec-adpcm",
+        "symphonia-codec-alac",
+        "symphonia-codec-pcm",
+        "symphonia-codec-vorbis",
+        "symphonia-common",
+        "symphonia-core",
+        "symphonia-format-caf",
+        "symphonia-format-isomp4",
+        "symphonia-format-mkv",
+        "symphonia-format-ogg",
+        "symphonia-format-riff",
+        "symphonia-metadata",
+    },
 }
 
 

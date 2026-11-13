@@ -1,11 +1,19 @@
-//! Decodificação de áudio em Rust puro com licenças permissivas (lista SPDX
-//! do AGENTS.md): WAVE/AIFF (leitor próprio), FLAC (`claxon`, Apache-2.0),
-//! Ogg Vorbis (`lewton`, MIT OR Apache-2.0) e MP3 (`puremp3`, MIT OR CC0-1.0).
+//! Decodificação de áudio em Rust puro: Symphonia (AAC, ALAC, ADPCM, CAF,
+//! FLAC, MP1/MP2/MP3, PCM, Vorbis em ISOMP4/MKV/Ogg/RIFF — exceção `MPL-2.0`
+//! documentada em `docs/licencas-de-dependencias.md`), leitor WAVE/AIFF próprio,
+//! fallbacks `claxon`/`lewton`/`puremp3` e Windows Media Foundation (`media::mf`).
 
 use anyhow::{anyhow, bail, Result};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::errors::Error as SymError;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
 
 /// Áudio decodificado em memória: estéreo intercalado f32.
 pub struct AudioData {
@@ -23,8 +31,19 @@ pub const PEAK_BLOCK: usize = 256;
 pub const MAX_SAMPLES: usize = 2 * 48_000 * 60 * 120;
 
 impl AudioData {
-    pub fn from_interleaved(sample_rate: u32, channels: usize, samples: &[f32]) -> Self {
+    pub fn from_stereo(sample_rate: u32, mut data: Vec<f32>) -> Self {
         let sample_rate = sample_rate.max(1);
+        data.truncate(data.len() & !1);
+        let mut a = AudioData {
+            sample_rate,
+            data,
+            peaks: vec![],
+        };
+        a.compute_peaks();
+        a
+    }
+
+    pub fn from_interleaved(sample_rate: u32, channels: usize, samples: &[f32]) -> Self {
         let ch = channels.max(1);
         let frames = samples.len() / ch;
         let mut data = Vec::with_capacity(frames * 2);
@@ -34,13 +53,7 @@ impl AudioData {
             data.push(l);
             data.push(r);
         }
-        let mut a = AudioData {
-            sample_rate,
-            data,
-            peaks: vec![],
-        };
-        a.compute_peaks();
-        a
+        Self::from_stereo(sample_rate, data)
     }
 
     fn compute_peaks(&mut self) {
@@ -101,27 +114,7 @@ impl AudioData {
     }
 }
 
-pub fn decode_file(path: &Path) -> Result<AudioData> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let (sr, ch, samples) = match ext.as_str() {
-        "wav" | "wave" | "aif" | "aiff" | "aifc" => {
-            let len = std::fs::metadata(path)?.len();
-            if len > MAX_FILE_BYTES {
-                bail!("arquivo de áudio grande demais ({len} bytes)");
-            }
-            let bytes = std::fs::read(path)?;
-            let pcm = super::wav::decode(&bytes, MAX_SAMPLES)?;
-            (pcm.sample_rate, pcm.channels as usize, pcm.samples)
-        }
-        "flac" => decode_flac(path)?,
-        "ogg" | "oga" => decode_vorbis(path)?,
-        "mp3" => decode_mp3(path)?,
-        _ => bail!("formato de áudio não suportado: .{ext}"),
-    };
+fn finalize_audio(sr: u32, ch: usize, samples: Vec<f32>) -> Result<AudioData> {
     if samples.is_empty() {
         return Err(anyhow!("nenhuma amostra de áudio decodificada"));
     }
@@ -131,13 +124,246 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
     if samples.len() >= MAX_SAMPLES {
         crate::util::log_warn("áudio truncado: arquivo excede o limite de duração em memória");
     }
-    Ok(AudioData::from_interleaved(sr, ch, &samples))
+    if ch == 2 {
+        Ok(AudioData::from_stereo(sr, samples))
+    } else {
+        Ok(AudioData::from_interleaved(sr, ch, &samples))
+    }
+}
+
+pub fn decode_file(path: &Path) -> Result<AudioData> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "wav" | "wave" | "aif" | "aiff" | "aifc" => {
+            decode_wav_aiff(path).or_else(|_| decode_symphonia(path))
+        }
+        "flac" => decode_symphonia(path).or_else(|_| decode_flac_raw(path)),
+        "ogg" | "oga" => decode_symphonia(path).or_else(|_| decode_vorbis_raw(path)),
+        "mp3" => decode_symphonia(path).or_else(|_| decode_mp3_raw(path)),
+        "mp1" | "mp2" | "caf" | "mka" => decode_symphonia(path),
+        "aac" | "m4a" => decode_aac_or_m4a(path),
+        _ => bail!("formato de áudio não suportado: .{ext}"),
+    }
+}
+
+fn decode_aac_or_m4a(path: &Path) -> Result<AudioData> {
+    #[cfg(windows)]
+    {
+        decode_symphonia(path).or_else(|_| decode_via_mf(path))
+    }
+    #[cfg(not(windows))]
+    {
+        decode_symphonia(path)
+    }
+}
+
+#[cfg(windows)]
+fn decode_via_mf(path: &Path) -> Result<AudioData> {
+    let loaded = super::mf::open_media(path)?;
+    loaded
+        .audio
+        .ok_or_else(|| anyhow!("Media Foundation: nenhuma faixa de áudio encontrada"))
+}
+
+fn decode_wav_aiff(path: &Path) -> Result<AudioData> {
+    let len = std::fs::metadata(path)?.len();
+    if len > MAX_FILE_BYTES {
+        bail!("arquivo de áudio grande demais ({len} bytes)");
+    }
+    let bytes = std::fs::read(path)?;
+    let pcm = super::wav::decode(&bytes, MAX_SAMPLES)?;
+    finalize_audio(pcm.sample_rate, pcm.channels as usize, pcm.samples)
+}
+
+pub(crate) fn decode_symphonia(path: &Path) -> Result<AudioData> {
+    let (sr, stereo) =
+        crate::util::guard("decodificação Symphonia", || decode_symphonia_inner(path))
+            .map_err(|e| anyhow!("{e}"))??;
+    finalize_audio(sr, 2, stereo)
+}
+
+fn sanitize_sample(v: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
+}
+
+fn push_stereo_chunk(stereo_out: &mut Vec<f32>, interleaved: &[f32], channels: usize) -> bool {
+    let ch = channels.max(1);
+    for frame in interleaved.chunks_exact(ch) {
+        if stereo_out.len() + 2 > MAX_SAMPLES {
+            return true;
+        }
+        let l = sanitize_sample(frame[0]);
+        let r = if ch >= 2 {
+            sanitize_sample(frame[1])
+        } else {
+            l
+        };
+        stereo_out.push(l);
+        stereo_out.push(r);
+    }
+    false
+}
+
+fn select_audio_track(reader: &dyn FormatReader) -> Option<(u32, AudioCodecParameters)> {
+    let track = reader.default_track(TrackType::Audio).or_else(|| {
+        reader
+            .tracks()
+            .iter()
+            .find(|t| matches!(t.codec_params, Some(CodecParameters::Audio(_))))
+    })?;
+    let Some(CodecParameters::Audio(audio)) = track.codec_params.as_ref() else {
+        return None;
+    };
+    Some((track.id, audio.clone()))
+}
+
+fn decode_symphonia_inner(path: &Path) -> Result<(u32, Vec<f32>)> {
+    const MAX_RESET_LOOPS: usize = 8;
+    const MAX_DECODE_ERRORS: usize = 64;
+    const MAX_CONSECUTIVE_ERRORS: usize = 16;
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if !ext.is_empty() {
+            hint.with_extension(ext);
+        }
+    }
+
+    let file = File::open(path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut reader = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| anyhow!("Symphonia: formato não reconhecido: {e}"))?;
+
+    let dec_opts = AudioDecoderOptions::default().gapless(true);
+    let (mut track_id, initial_params) = select_audio_track(reader.as_ref())
+        .ok_or_else(|| anyhow!("Symphonia: nenhuma faixa de áudio encontrada"))?;
+    let mut sample_rate = initial_params.sample_rate;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&initial_params, &dec_opts)
+        .map_err(|e| anyhow!("Symphonia: decodificador indisponível: {e}"))?;
+
+    let mut stereo_out = Vec::new();
+    let mut scratch = Vec::new();
+    let mut resets = 0usize;
+    let mut decode_errs = 0usize;
+    let mut consec_errs = 0usize;
+
+    loop {
+        let packet = match reader.next_packet() {
+            Ok(Some(pkt)) => pkt,
+            Ok(None) => break,
+            Err(SymError::ResetRequired) => {
+                resets += 1;
+                if resets > MAX_RESET_LOOPS {
+                    break;
+                }
+                let Some((id, params)) = select_audio_track(reader.as_ref()) else {
+                    break;
+                };
+                track_id = id;
+                if sample_rate.unwrap_or(0) == 0 {
+                    sample_rate = params.sample_rate;
+                }
+                decoder = symphonia::default::get_codecs()
+                    .make_audio_decoder(&params, &dec_opts)
+                    .map_err(|e| anyhow!("Symphonia: falha ao reiniciar decodificador: {e}"))?;
+                continue;
+            }
+            Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if stereo_out.is_empty() {
+                    return Err(anyhow!("Symphonia: fim inesperado de arquivo"));
+                }
+                break;
+            }
+            Err(e) => {
+                if stereo_out.is_empty() {
+                    return Err(anyhow!("Symphonia: erro ao ler pacote: {e}"));
+                }
+                break;
+            }
+        };
+
+        if packet.track_id != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                consec_errs = 0;
+                let spec = decoded.spec();
+                if spec.rate() > 0 && sample_rate.unwrap_or(0) == 0 {
+                    sample_rate = Some(spec.rate());
+                }
+                let ch = spec.channels().count();
+                let frames = decoded.frames();
+                if ch == 0 || frames == 0 {
+                    continue;
+                }
+                if frames.saturating_mul(ch) > MAX_SAMPLES.saturating_mul(4) {
+                    bail!("Symphonia: quadro de áudio grande demais ({frames} quadros)");
+                }
+                decoded.copy_to_vec_interleaved(&mut scratch);
+                if push_stereo_chunk(&mut stereo_out, &scratch, ch) {
+                    break;
+                }
+            }
+            Err(SymError::DecodeError(_)) => {
+                decode_errs += 1;
+                consec_errs += 1;
+                if decode_errs > MAX_DECODE_ERRORS || consec_errs >= MAX_CONSECUTIVE_ERRORS {
+                    if stereo_out.is_empty() {
+                        bail!("Symphonia: excesso de erros de decodificação");
+                    }
+                    break;
+                }
+            }
+            Err(SymError::ResetRequired) => {
+                resets += 1;
+                if resets > MAX_RESET_LOOPS {
+                    break;
+                }
+                let Some((id, params)) = select_audio_track(reader.as_ref()) else {
+                    break;
+                };
+                track_id = id;
+                if sample_rate.unwrap_or(0) == 0 {
+                    sample_rate = params.sample_rate;
+                }
+                decoder = symphonia::default::get_codecs()
+                    .make_audio_decoder(&params, &dec_opts)
+                    .map_err(|e| anyhow!("Symphonia: falha ao reiniciar decodificador: {e}"))?;
+            }
+            Err(e) => {
+                if stereo_out.is_empty() {
+                    return Err(anyhow!("Symphonia: erro na decodificação: {e}"));
+                }
+                break;
+            }
+        }
+    }
+
+    let _ = decoder.finalize();
+    Ok((sample_rate.unwrap_or(0), stereo_out))
 }
 
 /// Maior arquivo WAVE/AIFF lido inteiro para a memória.
 const MAX_FILE_BYTES: u64 = 4 << 30;
 
-fn decode_flac(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
+fn decode_flac_raw(path: &Path) -> Result<AudioData> {
     let mut r = claxon::FlacReader::open(path).map_err(|e| anyhow!("FLAC inválido: {e}"))?;
     let info = r.streaminfo();
     if info.bits_per_sample == 0 || info.bits_per_sample > 32 || info.channels == 0 {
@@ -152,10 +378,10 @@ fn decode_flac(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
             break;
         }
     }
-    Ok((info.sample_rate, info.channels as usize, out))
+    finalize_audio(info.sample_rate, info.channels as usize, out)
 }
 
-fn decode_vorbis(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
+fn decode_vorbis_raw(path: &Path) -> Result<AudioData> {
     let f = BufReader::new(File::open(path)?);
     let mut r = lewton::inside_ogg::OggStreamReader::new(f)
         .map_err(|e| anyhow!("Ogg Vorbis inválido: {e}"))?;
@@ -168,21 +394,75 @@ fn decode_vorbis(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
             break;
         }
     }
-    Ok((sr, ch.max(1), out))
+    finalize_audio(sr, ch.max(1), out)
 }
 
-fn decode_mp3(path: &Path) -> Result<(u32, usize, Vec<f32>)> {
+fn decode_mp3_raw(path: &Path) -> Result<AudioData> {
     let f = BufReader::new(File::open(path)?);
     let (header, samples) = puremp3::read_mp3(f).map_err(|e| anyhow!("MP3 inválido: {e:?}"))?;
     let sr = header.sample_rate.hz();
     // o decodificador sempre entrega pares (esquerdo, direito)
     let mut out = Vec::new();
     for (l, r) in samples {
-        out.push(if l.is_finite() { l } else { 0.0 });
-        out.push(if r.is_finite() { r } else { 0.0 });
+        out.push(sanitize_sample(l));
+        out.push(sanitize_sample(r));
         if out.len() >= MAX_SAMPLES {
             break;
         }
     }
-    Ok((sr, 2, out))
+    finalize_audio(sr, 2, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn symphonia_decodifica_wav_e_rejeita_vazio() {
+        let p = std::env::temp_dir().join(format!("neoveg_sym_{}.wav", std::process::id()));
+        let mut w =
+            crate::render::WavWriter::create(&p, 8000, crate::render::WavBits::Pcm16).unwrap();
+        let samples: Vec<f32> = (0..1600).map(|i| (i as f32 * 0.1).sin() * 0.4).collect();
+        w.write(&samples).unwrap();
+        w.finish().unwrap();
+
+        let audio = decode_symphonia(&p).expect("Symphonia deveria decodificar WAV PCM");
+        assert_eq!(audio.sample_rate, 8000);
+        assert_eq!(audio.frames(), 800);
+        assert!(!audio.peaks.is_empty());
+
+        std::fs::write(&p, b"").unwrap();
+        assert!(decode_symphonia(&p).is_err());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn symphonia_fixtures_opcionais_reais() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("fixtures");
+        for name in [
+            "sym_aac.aac",
+            "sym_aac.m4a",
+            "sym_alac.m4a",
+            "sym_adpcm.wav",
+            "sym_caf.caf",
+            "sym_flac.flac",
+            "sym_ogg.ogg",
+            "sym_mp3.mp3",
+            "sym_mka.mka",
+        ] {
+            let p = dir.join(name);
+            if p.exists() {
+                let a = decode_file(&p)
+                    .unwrap_or_else(|e| panic!("falha ao decodificar fixture {name}: {e}"));
+                assert!(a.sample_rate >= 8000, "{name}: taxa inválida");
+                assert!(a.frames() > 1000, "{name}: poucos quadros");
+                assert!(!a.peaks.is_empty(), "{name}: picos ausentes");
+            }
+        }
+    }
 }

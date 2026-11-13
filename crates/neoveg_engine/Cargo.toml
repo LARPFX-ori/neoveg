@@ -17,6 +17,7 @@ cpal.workspace = true
 claxon.workspace = true
 lewton.workspace = true
 puremp3.workspace = true
+symphonia.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

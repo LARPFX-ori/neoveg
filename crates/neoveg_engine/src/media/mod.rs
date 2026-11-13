@@ -22,14 +22,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"];
-pub const AUDIO_EXTS: [&str; 8] = ["wav", "wave", "aif", "aiff", "aifc", "flac", "ogg", "mp3"];
-pub const VIDEO_EXTS: [&str; 2] = ["avi", "y4m"];
-/// Contêineres decodificados pela API de mídia do sistema operacional
-/// (Windows Media Foundation via módulo FFI isolado `media::mf`).
-pub const SYSTEM_CONTAINER_EXTS: [&str; 9] = [
-    "mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac", "wmv", "asf",
+pub const AUDIO_EXTS: [&str; 15] = [
+    "wav", "wave", "aif", "aiff", "aifc", "flac", "ogg", "oga", "mp1", "mp2", "mp3", "aac", "m4a",
+    "caf", "mka",
 ];
-pub const UNSUPPORTED_CONTAINERS: [&str; 7] = ["mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac"];
+pub const VIDEO_EXTS: [&str; 2] = ["avi", "y4m"];
+/// Contêineres de vídeo/sistema decodificados via API do sistema operacional
+/// (Windows Media Foundation em `media::mf`), com complemento/fallback de áudio
+/// via Symphonia quando aplicável.
+pub const SYSTEM_CONTAINER_EXTS: [&str; 7] = ["mp4", "mov", "mkv", "webm", "m4v", "wmv", "asf"];
+pub const UNSUPPORTED_CONTAINERS: [&str; 5] = ["mp4", "mov", "mkv", "webm", "m4v"];
 
 /// Memória máxima para os quadros de um GIF animado.
 const MAX_GIF_BYTES: u64 = 512 << 20;
@@ -962,8 +964,30 @@ pub fn import_sequence(first: &Path, fps: FrameRate) -> Result<Imported> {
 
 #[cfg(windows)]
 fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
-    let loaded = mf::open_media(p)?;
-    let audio = loaded.audio.map(Arc::new);
+    let loaded = match mf::open_media(p) {
+        Ok(loaded) => loaded,
+        Err(mf_err) => {
+            if let Ok(a) = audio::decode_symphonia(p) {
+                let dur = a.duration();
+                item.has_audio = true;
+                item.duration = Some(dur);
+                item.info = format!(
+                    "Áudio (Symphonia) {} Hz, {:.2} s",
+                    a.sample_rate,
+                    dur.as_secs_f64()
+                );
+                return Ok(MediaEntry {
+                    video: VideoSource::None,
+                    audio: Some(Arc::new(a)),
+                });
+            }
+            return Err(mf_err);
+        }
+    };
+    let audio = loaded
+        .audio
+        .or_else(|| audio::decode_symphonia(p).ok())
+        .map(Arc::new);
     item.has_audio = audio.is_some();
     if let Some(vr) = loaded.video {
         let vr = Arc::new(vr);
@@ -1010,9 +1034,23 @@ fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
 }
 
 #[cfg(not(windows))]
-fn load_system_container(_p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
+fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
+    if let Ok(a) = audio::decode_symphonia(p) {
+        let dur = a.duration();
+        item.has_audio = true;
+        item.duration = Some(dur);
+        item.info = format!(
+            "Áudio (Symphonia) {} Hz, {:.2} s",
+            a.sample_rate,
+            dur.as_secs_f64()
+        );
+        return Ok(MediaEntry {
+            video: VideoSource::None,
+            audio: Some(Arc::new(a)),
+        });
+    }
     bail!(
-        "{}: contêineres MP4/MOV/MKV/AAC usam Media Foundation (disponível no Windows); \
+        "{}: vídeo em MP4/MOV/MKV usa Media Foundation (disponível no Windows); \
          converta para AVI MJPEG + PCM (ex.: ffmpeg -i entrada.mp4 -c:v mjpeg -q:v 3 -c:a pcm_s16le saida.avi)",
         item.name
     )

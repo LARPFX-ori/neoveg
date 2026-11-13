@@ -210,9 +210,11 @@ fn fuzz_aiff_e_audio_corrompido() {
         });
     }
 
-    // Bytes hostis nos decodificadores MP3, FLAC e OGG via load_entry (com guard)
+    // Bytes hostis nos decodificadores MP1/2/3, FLAC, OGG, AAC, M4A, CAF e MKA via load_entry (com guard)
     let mut rng = Rng(0xF6);
-    for ext in ["mp3", "flac", "ogg"] {
+    for ext in [
+        "mp3", "mp2", "mp1", "flac", "ogg", "oga", "aac", "m4a", "caf", "mka",
+    ] {
         let p = tmp(&format!("corrompido.{ext}"));
         for i in 0..40usize {
             let len = (i * 17).min(512);
@@ -224,6 +226,38 @@ fn fuzz_aiff_e_audio_corrompido() {
             });
         }
         let _ = std::fs::remove_file(p);
+    }
+}
+
+#[test]
+fn fuzz_symphonia_hostil() {
+    let base = valid_wav();
+    let path = tmp("sym_mut.wav");
+    for (i, m) in mutations(&base, 80, 0x594D).iter().enumerate() {
+        assert_no_panic("Symphonia WAV", i, || {
+            let _ = std::fs::write(&path, m);
+            let _ = media::audio::decode_symphonia(&path);
+        });
+    }
+    let _ = std::fs::remove_file(&path);
+
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+        .join("fixtures")
+        .join("sym_aac.m4a");
+    if fixture.exists() {
+        let bytes = std::fs::read(&fixture).unwrap();
+        let m4a_path = tmp("sym_mut.m4a");
+        for (i, m) in mutations(&bytes, 60, 0x4D34).iter().enumerate() {
+            assert_no_panic("Symphonia M4A", i, || {
+                let _ = std::fs::write(&m4a_path, m);
+                let mut item = media_item(&m4a_path);
+                let _ = media::load_entry(&mut item);
+            });
+        }
+        let _ = std::fs::remove_file(m4a_path);
     }
 }
 

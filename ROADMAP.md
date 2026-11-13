@@ -6,7 +6,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 
 - **Política Zero Pânico (`AGENTS.md` §0):** proibição de `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!` e `unreachable!` fora de testes; entrada externa tratada como hostil com parsers limitados e testes de fuzzing por mutação.
 - **Tempo Exato (§Regras Rust 5):** ticks inteiros (`Ticks`, `FrameRate`, `Rate`) e contagem SMPTE *Drop-Frame* sem aritmética `f64` para edições de quadros/amostras.
-- **Licenças Permissivas:** substituição integral de dependências por crates com licenças na lista SPDX permitida, auditados por `python tools/check_licenses.py`.
+- **Licenças e Exceções (`docs/licencas-de-dependencias.md`):** dependências na lista SPDX permitida, com exceção autorizada de `MPL-2.0` para o `symphonia`, auditadas por `python tools/check_licenses.py`.
 
 ## Fase 2 — Arquitetura de 5 Crates, Tabela Única de Comandos e GPU com Fallback *(Concluída)*
 
@@ -23,7 +23,8 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Limite configurável de RAM para prévia e cache de quadros em bytes;
   - Geração assíncrona de proxies `.avi` em baixa resolução e pré-renderização seletiva de região;
   - Pool global do `rayon` dimensionado pelos núcleos da máquina (`Preferences.effective_worker_threads()`).
-- **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de MP4, MOV, MKV, WEBM, M4V, M4A, AAC, WMV e ASF.
+- **Áudio em Rust puro com `symphonia` (`media/audio.rs`):** integração via `https://github.com/pdeljanov/Symphonia.git` (AAC, ALAC, ADPCM, CAF, FLAC, MP1/MP2/MP3, PCM, Vorbis, ISOMP4, MKV, Ogg, RIFF), mantendo leitor WAVE/AIFF próprio, `claxon`/`lewton`/`puremp3` e Windows Media Foundation como fallbacks/complemento.
+- **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de vídeo/áudio em MP4, MOV, MKV, WEBM, M4V, WMV e ASF (com complemento de áudio via `symphonia`).
 - **Experiência VEGAS Pro em `neoveg_ui`:**
   - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **54 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
   - Playhead físico de **1 px**, alça de ganho em dB na borda superior de eventos de áudio, controle contínuo de taxa (*Playback Rate*);

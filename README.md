@@ -5,7 +5,7 @@ Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativ
 ## Arquitetura do Workspace (5 Crates)
 
 - **`neoveg_common`** (`crates/neoveg_common`): tipos fundamentais, representação exata de tempo (`Ticks`, `FrameRate`, `Rate`, *SMPTE Drop-Frame*), curvas, preferências e utilitários base.
-- **`neoveg_engine`** (`crates/neoveg_engine`): estado da timeline, invariantes de edição atômica, mixer de áudio multifaixa, compositor de vídeo, efeitos/transições, escopos, persistência `.neoveg`/`.nvp`, decodificação streaming via Windows Media Foundation (`media/mf.rs`) e **Tabela Única de Comandos**.
+- **`neoveg_engine`** (`crates/neoveg_engine`): estado da timeline, invariantes de edição atômica, mixer de áudio multifaixa, compositor de vídeo, efeitos/transições, escopos, persistência `.neoveg`/`.nvp`, decodificação de áudio em Rust puro via `symphonia` (com leitor WAVE/AIFF próprio e fallbacks), decodificação streaming via Windows Media Foundation (`media/mf.rs`) e **Tabela Única de Comandos**.
 - **`neoveg_scripting`** (`crates/neoveg_scripting`): camada de automação headless e ponte prevista para scripts `.NET`/`C#` (`ScriptPortal.Vegas`).
 - **`neoveg_ui`** (`crates/neoveg_ui`): interface desktop nativa em `eframe` + `wgpu`, timeline interativa, 7 temas visuais (incluindo 2 temas de Alto Contraste WCAG AAA), gerenciador de layouts `.neoveglayout` com painéis destacáveis e editores de atalhos e preferências.
 - **`neoveg`** (`crates/neoveg`): binário principal e interface CLI com inicialização do pool `rayon` proporcional ao hardware.
@@ -16,8 +16,8 @@ Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativ
 - **Tabela Única de Comandos e Atalhos Regraváveis:** menus, barra de ferramentas, atalhos e comandos CLI despacham pelo mesmo `id`; atalhos personalizados podem ser gravados/limpos em *Ajuda → Atalhos de teclado*.
 - **Personalização e Acessibilidade:** 7 temas selecionáveis em *Exibir → Tema* ou *Opções → Preferências...* (incluindo *Alto Contraste AAA Escuro* e *Claro* com contraste >= 7:1), **Editar → Propriedades → Layout** com os três tipos clássicos de disposição (*Sonic Foundry*, *Sony* e *MAGIX*), 54 ícones vetoriais nativos coloridos com adaptação automática ao tema (`crates/neoveg_ui/src/icons.rs`), abas acopláveis/destacáveis em janelas flutuantes e 4 presets + arquivos `.neoveglayout` salvos pelo usuário.
 - **Formatos Suportados:**
-  - **Rust puro (multiplataforma):** projetos `.neoveg` (e legado `.nvp`), `AVI (MJPEG/PCM)`, `Y4M`, `GIF`, sequências de imagens (`PNG`, `JPEG`, `BMP`, `TIFF`, `WebP`), áudio `WAV`, `AIFF`, `FLAC`, `OGG` e `MP3`.
-  - **Windows nativo (Media Foundation):** importação e decodificação em streaming de `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `M4A`, `AAC`, `WMV` e `ASF`.
+  - **Rust puro (multiplataforma):** projetos `.neoveg` (e legado `.nvp`), `AVI (MJPEG/PCM)`, `Y4M`, `GIF`, sequências de imagens (`PNG`, `JPEG`, `BMP`, `TIFF`, `WebP`), áudio `WAV`/`AIFF`/`ADPCM`, `FLAC`, `Ogg Vorbis` (`.ogg`, `.oga`), `MP1`/`MP2`/`MP3`, `AAC`/`ALAC` (`.aac`, `.m4a`), `CAF` e `MKA` via `symphonia` + leitor WAVE/AIFF próprio e fallbacks (`claxon`, `lewton`, `puremp3`).
+  - **Windows nativo (Media Foundation):** importação e decodificação em streaming de vídeo e fallback de áudio em `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `WMV` e `ASF`.
 - **Hardware Limitado:** matriz de prévia 4×3 (*Rascunho / Prévia / Boa / Melhor* × *1/4 / 1/2 / Completa*), geração de proxies `.avi`, pré-renderização seletiva de região, limite configurável de RAM/quadros em cache e compilação portátil sem `-C target-cpu=native`.
 
 ## Como Executar
