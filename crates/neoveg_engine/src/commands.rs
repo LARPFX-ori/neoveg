@@ -272,7 +272,7 @@ impl Shortcut {
 }
 
 /// Abas acopláveis da área inferior (espelhadas na UI).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DockPanel {
     ProjectMedia,
     Explorer,

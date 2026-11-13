@@ -1,0 +1,914 @@
+//! Motor de acoplamento e divisórias interativas baseado em `egui_tiles`.
+//!
+//! Mantém a identidade e a semântica de 3 colunas do VEGAS Pro 21
+//! (`Grupo de Abas | Prévia de Vídeo | Master Bus`), abas no rodapé por padrão
+//! (ou no topo quando configurado), arraste para dividir/reorganizar painéis,
+//! destaque para janelas nativas do sistema operacional e persistência segura em
+//! `.neoveglayout` (`AGENTS.md §0`, `§2.2`).
+
+use super::{App, DockTab};
+use crate::icons::{self, Icon};
+use eframe::egui;
+use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, WidgetText};
+use egui_tiles::{
+    Behavior, Container, Linear, LinearDir, ResizeState, SimplificationOptions, TabState, Tabs,
+    Tile, TileId, Tiles, Tree, UiResponse,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+
+const TREE_SALT: &str = "neoveg_dock_tree";
+const MAX_TREE_DEPTH: usize = 64;
+const DEFAULT_MASTER_SHARE: f32 = 0.11;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DockPane {
+    Tab(DockTab),
+    Preview,
+    MasterBus,
+}
+
+impl DockPane {
+    pub fn title(self) -> &'static str {
+        match self {
+            DockPane::Tab(t) => t.name(),
+            DockPane::Preview => "Prévia de Vídeo",
+            DockPane::MasterBus => "Master",
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            DockPane::Tab(t) => dock_tab_icon(t),
+            DockPane::Preview => Icon::VideoTrack,
+            DockPane::MasterBus => Icon::MasterBus,
+        }
+    }
+
+    fn all_canonical() -> Vec<DockPane> {
+        let mut out: Vec<DockPane> = DockTab::ALL.into_iter().map(DockPane::Tab).collect();
+        out.push(DockPane::Preview);
+        out.push(DockPane::MasterBus);
+        out
+    }
+}
+
+pub fn dock_tab_icon(tab: DockTab) -> Icon {
+    match tab {
+        DockTab::ProjectMedia => Icon::MediaItem,
+        DockTab::Explorer => Icon::FolderItem,
+        DockTab::Transitions => Icon::TransitionSplit,
+        DockTab::VideoFx => Icon::FxSparkle,
+        DockTab::ColorGrading => Icon::ColorWheels,
+        DockTab::AudioFx => Icon::FxAudio,
+        DockTab::Generators => Icon::GeneratorFrame,
+        DockTab::Mixer => Icon::MixerFaders,
+        DockTab::Scopes => Icon::ScopesWave,
+        DockTab::Notes => Icon::NotesPad,
+    }
+}
+
+pub fn split_pane_chrome(rect: Rect, strip_h: f32, tabs_at_top: bool) -> (Rect, Rect) {
+    let clamped_strip = strip_h.min((rect.height() * 0.52).max(24.0));
+    if tabs_at_top {
+        let strip = Rect::from_min_max(
+            rect.min,
+            pos2(
+                rect.right(),
+                (rect.top() + clamped_strip).min(rect.bottom()),
+            ),
+        );
+        let content = Rect::from_min_max(
+            pos2(rect.left(), (strip.bottom() + 2.0).min(rect.bottom())),
+            rect.max,
+        );
+        (content, strip)
+    } else {
+        let content = Rect::from_min_max(
+            rect.min,
+            pos2(
+                rect.right(),
+                (rect.bottom() - clamped_strip - 2.0).max(rect.top() + 16.0),
+            ),
+        );
+        let strip = Rect::from_min_max(
+            pos2(rect.left(), (rect.bottom() - clamped_strip).max(rect.top())),
+            rect.max,
+        );
+        (content, strip)
+    }
+}
+
+/// Constrói a árvore padrão de 3 colunas do VEGAS Pro (`Tabs | Prévia | Master`).
+pub fn build_dock_tree(
+    preview_ratio: f32,
+    active_tab: DockTab,
+    preview_on_left: bool,
+) -> Tree<DockPane> {
+    let mut tiles = Tiles::default();
+    let mut tab_ids = Vec::with_capacity(DockTab::ALL.len());
+    let mut active_id = None;
+    for tab in DockTab::ALL {
+        let id = tiles.insert_pane(DockPane::Tab(tab));
+        if tab == active_tab {
+            active_id = Some(id);
+        }
+        tab_ids.push(id);
+    }
+    let mut tabs = Tabs::new(tab_ids);
+    if let Some(id) = active_id {
+        tabs.set_active(id);
+    }
+    let tabs_group = tiles.insert_container(Container::Tabs(tabs));
+
+    let pv_pane = tiles.insert_pane(DockPane::Preview);
+    let pv_group = tiles.insert_tab_tile(vec![pv_pane]);
+
+    let mb_pane = tiles.insert_pane(DockPane::MasterBus);
+    let mb_group = tiles.insert_tab_tile(vec![mb_pane]);
+
+    let order = if preview_on_left {
+        vec![pv_group, tabs_group, mb_group]
+    } else {
+        vec![tabs_group, pv_group, mb_group]
+    };
+    let mut linear = Linear::new(LinearDir::Horizontal, order);
+
+    let pv_frac = preview_ratio.clamp(0.20, 0.72) * (1.0 - DEFAULT_MASTER_SHARE);
+    let tabs_frac = (1.0 - DEFAULT_MASTER_SHARE - pv_frac).max(0.18);
+    linear.shares.set_share(tabs_group, tabs_frac * 3.0);
+    linear.shares.set_share(pv_group, pv_frac * 3.0);
+    linear
+        .shares
+        .set_share(mb_group, DEFAULT_MASTER_SHARE * 3.0);
+
+    let root = tiles.insert_container(Container::Linear(linear));
+    Tree::new(TREE_SALT, root, tiles)
+}
+
+/// Valida uma árvore vinda de arquivo `.neoveglayout` contra ciclos, IDs inválidos,
+/// panes faltantes ou duplicados e pesos inválidos (`AGENTS.md §0.4`).
+pub fn sanitize_tile_tree(
+    tree: &mut Tree<DockPane>,
+    preview_ratio: f32,
+    active_tab: DockTab,
+    preview_on_left: bool,
+) {
+    let Some(root) = tree.root else {
+        *tree = build_dock_tree(preview_ratio, active_tab, preview_on_left);
+        return;
+    };
+
+    let mut visited = HashSet::new();
+    let mut found_panes = HashSet::new();
+    if !validate_subtree(&tree.tiles, root, 0, &mut visited, &mut found_panes) {
+        *tree = build_dock_tree(preview_ratio, active_tab, preview_on_left);
+        return;
+    }
+
+    let expected = DockPane::all_canonical();
+    if found_panes.len() != expected.len() || expected.iter().any(|p| !found_panes.contains(p)) {
+        *tree = build_dock_tree(preview_ratio, active_tab, preview_on_left);
+        return;
+    }
+
+    // Corrige eventuais shares não finitas ou não positivas em containers lineares.
+    let container_ids: Vec<TileId> = visited.iter().copied().collect();
+    for id in container_ids {
+        if let Some(Tile::Container(Container::Linear(lin))) = tree.tiles.get_mut(id) {
+            let children = lin.children.clone();
+            for child in children {
+                let s = lin.shares[child];
+                let clean = if s.is_finite() && s > 0.0 {
+                    s.clamp(0.05, 20.0)
+                } else {
+                    1.0
+                };
+                lin.shares.set_share(child, clean);
+            }
+        }
+    }
+}
+
+fn validate_subtree(
+    tiles: &Tiles<DockPane>,
+    id: TileId,
+    depth: usize,
+    visited: &mut HashSet<TileId>,
+    found_panes: &mut HashSet<DockPane>,
+) -> bool {
+    if depth > MAX_TREE_DEPTH || !visited.insert(id) {
+        return false;
+    }
+    let Some(tile) = tiles.get(id) else {
+        return false;
+    };
+    match tile {
+        Tile::Pane(pane) => found_panes.insert(*pane),
+        Tile::Container(container_ref) => {
+            let children: Vec<TileId> = container_ref.children().copied().collect();
+            if children.is_empty() {
+                return false;
+            }
+            children
+                .into_iter()
+                .all(|child| validate_subtree(tiles, child, depth + 1, visited, found_panes))
+        }
+    }
+}
+
+pub(crate) fn find_pane_tile(tree: &Tree<DockPane>, target: DockPane) -> Option<TileId> {
+    tree.tiles.iter().find_map(|(&id, tile)| match tile {
+        Tile::Pane(p) if *p == target => Some(id),
+        _ => None,
+    })
+}
+
+fn sync_subtree_visibility(
+    app: &App,
+    tiles: &mut Tiles<DockPane>,
+    id: TileId,
+    show_preview: bool,
+    show_master: bool,
+    depth: usize,
+    visited: &mut HashSet<TileId>,
+) -> bool {
+    if depth > MAX_TREE_DEPTH || !visited.insert(id) {
+        return false;
+    }
+    enum NodeKind {
+        Pane(DockPane),
+        Container(Vec<TileId>),
+    }
+    let kind = match tiles.get(id) {
+        Some(Tile::Pane(p)) => NodeKind::Pane(*p),
+        Some(Tile::Container(c)) => NodeKind::Container(c.children().copied().collect()),
+        None => return false,
+    };
+    let visible = match kind {
+        NodeKind::Pane(DockPane::Tab(t)) => !app.detached_tabs.contains(&t),
+        NodeKind::Pane(DockPane::Preview) => show_preview,
+        NodeKind::Pane(DockPane::MasterBus) => show_master,
+        NodeKind::Container(children) => {
+            let mut any = false;
+            for child in children {
+                if sync_subtree_visibility(
+                    app,
+                    tiles,
+                    child,
+                    show_preview,
+                    show_master,
+                    depth + 1,
+                    visited,
+                ) {
+                    any = true;
+                }
+            }
+            any
+        }
+    };
+    tiles.set_visible(id, visible);
+    visible
+}
+
+#[derive(Clone)]
+struct TabsGroupSnapshot {
+    container_id: TileId,
+    siblings: Vec<(TileId, DockPane, bool)>,
+}
+
+fn collect_tabs_groups(tree: &Tree<DockPane>) -> HashMap<TileId, TabsGroupSnapshot> {
+    let mut map = HashMap::new();
+    for (&container_id, tile) in tree.tiles.iter() {
+        let Tile::Container(Container::Tabs(tabs)) = tile else {
+            continue;
+        };
+        let mut siblings = Vec::new();
+        for &child_id in &tabs.children {
+            if !tree.is_visible(child_id) {
+                continue;
+            }
+            if let Some(Tile::Pane(pane)) = tree.tiles.get(child_id) {
+                siblings.push((child_id, *pane, tabs.active == Some(child_id)));
+            }
+        }
+        if siblings.is_empty() {
+            continue;
+        }
+        for &(child_id, _, _) in &siblings {
+            map.insert(
+                child_id,
+                TabsGroupSnapshot {
+                    container_id,
+                    siblings: siblings.clone(),
+                },
+            );
+        }
+    }
+    map
+}
+
+struct NeovegTileBehavior<'a> {
+    app: &'a mut App,
+    tabs_at_top: bool,
+    tabs_info: HashMap<TileId, TabsGroupSnapshot>,
+    pending_activate: Option<(TileId, TileId, DockPane)>,
+    pending_drag_tile: Option<TileId>,
+    pending_detach: Vec<DockPane>,
+    pending_detach_all: bool,
+    pending_close: Vec<DockPane>,
+    pending_toggle_preview: bool,
+    pending_toggle_master: bool,
+}
+
+impl NeovegTileBehavior<'_> {
+    fn queue_pane_context_menu(&mut self, ui: &mut Ui, pane: DockPane) {
+        let detach_label = match pane {
+            DockPane::Preview => "Destacar Prévia em janela do Windows",
+            DockPane::MasterBus => "Destacar Master Bus em janela do Windows",
+            DockPane::Tab(_) => "Destacar em janela do Windows",
+        };
+        if ui.button(detach_label).clicked() {
+            self.pending_detach.push(pane);
+            ui.close_menu();
+        }
+        match pane {
+            DockPane::Tab(_) => {
+                if ui.button("Destacar todas as abas").clicked() {
+                    self.pending_detach_all = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                let pv_label = if self.app.preview_detached {
+                    "Acoplar Prévia de Vídeo"
+                } else {
+                    "Destacar Prévia de Vídeo em janela do Windows"
+                };
+                if ui.button(pv_label).clicked() {
+                    self.pending_toggle_preview = true;
+                    ui.close_menu();
+                }
+                let mb_label = if self.app.master_bus_detached {
+                    "Acoplar Master Bus"
+                } else {
+                    "Destacar Master Bus em janela do Windows"
+                };
+                if ui.button(mb_label).clicked() {
+                    self.pending_toggle_master = true;
+                    ui.close_menu();
+                }
+            }
+            DockPane::Preview | DockPane::MasterBus => {
+                if ui.button("Fechar painel").clicked() {
+                    self.pending_close.push(pane);
+                    ui.close_menu();
+                }
+            }
+        }
+    }
+
+    fn draw_bottom_tab_strip(&mut self, ui: &mut Ui, tile_id: TileId, pane: DockPane) {
+        let snapshot = self
+            .tabs_info
+            .get(&tile_id)
+            .cloned()
+            .unwrap_or_else(|| TabsGroupSnapshot {
+                container_id: tile_id,
+                siblings: vec![(tile_id, pane, true)],
+            });
+
+        let avail = ui.available_rect_before_wrap();
+        let max_w = (avail.width() - 6.0).max(120.0);
+        let mut rows = 1usize;
+        let mut cur_x = 0.0_f32;
+        for (_, sib_pane, _) in &snapshot.siblings {
+            let item_w = 32.0 + sib_pane.title().chars().count() as f32 * 7.0;
+            if cur_x > 0.0 && cur_x + item_w + 4.0 > max_w {
+                rows += 1;
+                cur_x = item_w;
+            } else {
+                cur_x += item_w + 4.0;
+            }
+        }
+        let has_close = matches!(pane, DockPane::Preview | DockPane::MasterBus);
+        let action_w = if has_close { 60.0 } else { 32.0 + 8.0 * 7.0 };
+        if cur_x > 0.0 && cur_x + action_w + 4.0 > max_w {
+            rows += 1;
+        }
+        let strip_h = (rows.min(5) as f32) * 24.0 + 4.0;
+        let (content_rect, strip_rect) = split_pane_chrome(avail, strip_h, false);
+
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content_rect)
+                .id_salt(("tile_content_bot", tile_id)),
+        );
+        content_ui.set_clip_rect(content_rect);
+        self.render_pane_body(&mut content_ui, pane);
+
+        let mut strip_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(strip_rect)
+                .id_salt(("tile_strip_bot", snapshot.container_id)),
+        );
+        strip_ui.set_clip_rect(strip_rect);
+        strip_ui.separator();
+        strip_ui.horizontal_wrapped(|ui| {
+            let active_sib = snapshot
+                .siblings
+                .iter()
+                .find(|(_, _, active)| *active)
+                .map(|&(id, p, _)| (id, p))
+                .unwrap_or((tile_id, pane));
+
+            for &(sib_id, sib_pane, active) in &snapshot.siblings {
+                let resp = icons::small_icon_drag_button(
+                    ui,
+                    sib_pane.icon(),
+                    Some(sib_pane.title()),
+                    active,
+                    &self.app.theme,
+                )
+                .on_hover_text(
+                    "Clique para selecionar; arraste para dividir ou reorganizar painéis",
+                );
+                if resp.clicked() {
+                    self.pending_activate = Some((snapshot.container_id, sib_id, sib_pane));
+                }
+                if resp.drag_started() {
+                    self.pending_drag_tile = Some(sib_id);
+                }
+                resp.context_menu(|ui| self.queue_pane_context_menu(ui, sib_pane));
+            }
+
+            if icons::small_icon_button(
+                ui,
+                Icon::PopOut,
+                (!has_close).then_some("Destacar"),
+                false,
+                &self.app.theme,
+            )
+            .on_hover_text("Destacar em janela normal do Windows")
+            .clicked()
+            {
+                self.pending_detach.push(active_sib.1);
+            }
+            if has_close
+                && icons::small_icon_button(ui, Icon::CloseX, None, false, &self.app.theme)
+                    .on_hover_text("Fechar painel")
+                    .clicked()
+            {
+                self.pending_close.push(active_sib.1);
+            }
+        });
+    }
+
+    fn render_pane_body(&mut self, ui: &mut Ui, pane: DockPane) {
+        match pane {
+            DockPane::Tab(tab) => {
+                egui::ScrollArea::both()
+                    .id_salt(("dock_tab_scroll", tab.command_id()))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.app.show_dock_tab_contents(ui, tab));
+            }
+            DockPane::Preview => self.app.preview_panel(ui, false),
+            DockPane::MasterBus => self.app.master_bus_panel(ui, false),
+        }
+    }
+}
+
+impl Behavior<DockPane> for NeovegTileBehavior<'_> {
+    fn pane_ui(&mut self, ui: &mut Ui, tile_id: TileId, pane: &mut DockPane) -> UiResponse {
+        if self.tabs_at_top {
+            let rect = ui.available_rect_before_wrap();
+            let inner = rect.shrink(2.0);
+            let mut body_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(inner)
+                    .id_salt(("tile_content_top", tile_id)),
+            );
+            body_ui.set_clip_rect(inner);
+            self.render_pane_body(&mut body_ui, *pane);
+        } else {
+            self.draw_bottom_tab_strip(ui, tile_id, *pane);
+        }
+        UiResponse::None
+    }
+
+    fn tab_title_for_pane(&mut self, pane: &DockPane) -> WidgetText {
+        pane.title().into()
+    }
+
+    fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
+        if self.tabs_at_top {
+            26.0
+        } else {
+            0.0
+        }
+    }
+
+    fn gap_width(&self, _style: &egui::Style) -> f32 {
+        3.0
+    }
+
+    fn min_size(&self) -> f32 {
+        96.0
+    }
+
+    fn simplification_options(&self) -> SimplificationOptions {
+        SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            prune_empty_tabs: true,
+            prune_empty_containers: true,
+            prune_single_child_tabs: false,
+            prune_single_child_containers: true,
+            join_nested_linear_containers: true,
+        }
+    }
+
+    fn retain_pane(&mut self, _pane: &DockPane) -> bool {
+        true
+    }
+
+    fn is_tab_closable(&self, _tiles: &Tiles<DockPane>, _tile_id: TileId) -> bool {
+        false
+    }
+
+    fn tab_bar_color(&self, _visuals: &egui::Visuals) -> Color32 {
+        self.app.theme.panel_fill
+    }
+
+    fn tab_bg_color(
+        &self,
+        _visuals: &egui::Visuals,
+        _tiles: &Tiles<DockPane>,
+        _tile_id: TileId,
+        state: &TabState,
+    ) -> Color32 {
+        if state.active {
+            self.app.theme.selection_bg
+        } else {
+            self.app.theme.widget_bg
+        }
+    }
+
+    fn tab_outline_stroke(
+        &self,
+        _visuals: &egui::Visuals,
+        _tiles: &Tiles<DockPane>,
+        _tile_id: TileId,
+        state: &TabState,
+    ) -> Stroke {
+        Stroke::new(
+            1.0_f32,
+            if state.active {
+                self.app.theme.accent
+            } else {
+                self.app.theme.border
+            },
+        )
+    }
+
+    fn tab_text_color(
+        &self,
+        _visuals: &egui::Visuals,
+        _tiles: &Tiles<DockPane>,
+        _tile_id: TileId,
+        state: &TabState,
+    ) -> Color32 {
+        if state.active {
+            crate::theme::contrast_on(self.app.theme.selection_bg)
+        } else {
+            self.app.theme.text_primary
+        }
+    }
+
+    fn resize_stroke(&self, _style: &egui::Style, resize_state: ResizeState) -> Stroke {
+        match resize_state {
+            ResizeState::Idle => Stroke::new(1.5_f32, self.app.theme.border),
+            ResizeState::Hovering | ResizeState::Dragging => {
+                Stroke::new(3.0_f32, self.app.theme.accent)
+            }
+        }
+    }
+
+    fn drag_preview_stroke(&self, _visuals: &egui::Visuals) -> Stroke {
+        Stroke::new(2.0_f32, self.app.theme.accent)
+    }
+
+    fn drag_preview_color(&self, _visuals: &egui::Visuals) -> Color32 {
+        self.app.theme.selection_bg.gamma_multiply(0.35)
+    }
+
+    fn paint_on_top_of_tile(
+        &self,
+        painter: &egui::Painter,
+        _style: &egui::Style,
+        tile_id: TileId,
+        rect: Rect,
+    ) {
+        if self.tabs_info.values().any(|s| s.container_id == tile_id) {
+            painter.rect_stroke(
+                rect,
+                2.0,
+                Stroke::new(1.0_f32, self.app.theme.border),
+                StrokeKind::Inside,
+            );
+        }
+    }
+
+    fn tab_ui(
+        &mut self,
+        tiles: &mut Tiles<DockPane>,
+        ui: &mut Ui,
+        id: egui::Id,
+        tile_id: TileId,
+        state: &TabState,
+    ) -> egui::Response {
+        if !self.tabs_at_top {
+            let (_, rect) = ui.allocate_space(egui::Vec2::ZERO);
+            return ui.interact(rect, id, Sense::hover());
+        }
+        let Some(&Tile::Pane(pane)) = tiles.get(tile_id) else {
+            let (_, rect) = ui.allocate_space(vec2(64.0, ui.available_height()));
+            return ui.interact(rect, id, Sense::click_and_drag());
+        };
+        let label = pane.title();
+        let font_id = egui::TextStyle::Button.resolve(ui.style());
+        let text_color = self.tab_text_color(ui.visuals(), tiles, tile_id, state);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label.to_string(), font_id, text_color);
+        let icon_sz = 13.0;
+        let x_pad = 7.0;
+        let w = x_pad * 2.0 + icon_sz + 5.0 + galley.size().x;
+        let (_, tab_rect) = ui.allocate_space(vec2(w, ui.available_height()));
+
+        let resp = ui
+            .interact(tab_rect, id, Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+
+        if ui.is_rect_visible(tab_rect) && !state.is_being_dragged {
+            let bg = if state.active {
+                self.app.theme.selection_bg
+            } else if resp.hovered() {
+                self.app.theme.widget_hover_bg
+            } else {
+                self.app.theme.widget_bg
+            };
+            let stroke = self.tab_outline_stroke(ui.visuals(), tiles, tile_id, state);
+            ui.painter()
+                .rect(tab_rect.shrink(0.5), 2.0, bg, stroke, StrokeKind::Inside);
+
+            let iy = tab_rect.center().y - icon_sz * 0.5;
+            let icon_rect =
+                Rect::from_min_size(pos2(tab_rect.left() + x_pad, iy), vec2(icon_sz, icon_sz));
+            let mut icon_theme = self.app.theme.clone();
+            if state.active && crate::theme::relative_luminance(bg) < 0.35 {
+                icon_theme.dark_mode = true;
+                if icon_theme.high_contrast {
+                    icon_theme.text_primary = text_color;
+                    icon_theme.accent = text_color;
+                }
+            }
+            icons::paint(ui.painter(), icon_rect, pane.icon(), &icon_theme, true);
+            ui.painter().galley(
+                pos2(
+                    icon_rect.right() + 5.0,
+                    tab_rect.center().y - galley.size().y * 0.5,
+                ),
+                galley,
+                text_color,
+            );
+        }
+
+        if resp.clicked() {
+            if let DockPane::Tab(t) = pane {
+                self.app.dock_tab = t;
+            }
+        }
+        resp.context_menu(|ui| self.queue_pane_context_menu(ui, pane));
+        resp
+    }
+
+    fn top_bar_right_ui(
+        &mut self,
+        tiles: &Tiles<DockPane>,
+        ui: &mut Ui,
+        _tile_id: TileId,
+        tabs: &Tabs,
+        _scroll_offset: &mut f32,
+    ) {
+        if !self.tabs_at_top {
+            return;
+        }
+        let Some(active_id) = tabs.active else {
+            return;
+        };
+        let Some(&Tile::Pane(pane)) = tiles.get(active_id) else {
+            return;
+        };
+        if matches!(pane, DockPane::Preview | DockPane::MasterBus)
+            && icons::small_icon_button(ui, Icon::CloseX, None, false, &self.app.theme)
+                .on_hover_text("Fechar painel")
+                .clicked()
+        {
+            self.pending_close.push(pane);
+        }
+        if icons::small_icon_button(ui, Icon::PopOut, None, false, &self.app.theme)
+            .on_hover_text("Destacar em janela normal do Windows")
+            .clicked()
+        {
+            self.pending_detach.push(pane);
+        }
+    }
+}
+
+pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
+    let avail = ui.available_rect_before_wrap();
+    ui.allocate_rect(avail, Sense::hover());
+    if avail.width() < 8.0 || avail.height() < 8.0 {
+        return;
+    }
+
+    let show_preview = app.preview_visible && !app.preview_detached;
+    let min_w_for_master = if show_preview { 640.0 } else { 420.0 };
+    let show_master =
+        app.master_bus_visible && !app.master_bus_detached && avail.width() >= min_w_for_master;
+
+    let mut tree = std::mem::replace(&mut app.dock_tree, Tree::empty(TREE_SALT));
+
+    if let Some(root) = tree.root {
+        let mut visited = HashSet::new();
+        let any_visible = sync_subtree_visibility(
+            app,
+            &mut tree.tiles,
+            root,
+            show_preview,
+            show_master,
+            0,
+            &mut visited,
+        );
+        if !any_visible {
+            app.dock_tree = tree;
+            ui.label(
+                egui::RichText::new(
+                    "Todas as abas estão destacadas em janelas flutuantes (clique em Acoplar ou use Exibir/Layouts).",
+                )
+                .weak(),
+            );
+            return;
+        }
+    }
+
+    if let Some(focus_tab) = app.pending_dock_focus.take() {
+        tree.make_active(|_, tile| matches!(tile, Tile::Pane(DockPane::Tab(t)) if *t == focus_tab));
+    }
+
+    let tabs_info = collect_tabs_groups(&tree);
+    let tree_id = tree.id();
+    let tabs_at_top = app.prefs.edit_layout.tabs_at_top;
+
+    let mut ui_child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(avail)
+            .id_salt("dock_tree_area"),
+    );
+    let (
+        pending_activate,
+        pending_drag_tile,
+        pending_detach,
+        pending_detach_all,
+        pending_close,
+        pending_toggle_preview,
+        pending_toggle_master,
+    ) = {
+        let mut behavior = NeovegTileBehavior {
+            app,
+            tabs_at_top,
+            tabs_info,
+            pending_activate: None,
+            pending_drag_tile: None,
+            pending_detach: Vec::new(),
+            pending_detach_all: false,
+            pending_close: Vec::new(),
+            pending_toggle_preview: false,
+            pending_toggle_master: false,
+        };
+        tree.ui(&mut behavior, &mut ui_child);
+        (
+            behavior.pending_activate,
+            behavior.pending_drag_tile,
+            behavior.pending_detach,
+            behavior.pending_detach_all,
+            behavior.pending_close,
+            behavior.pending_toggle_preview,
+            behavior.pending_toggle_master,
+        )
+    };
+
+    if let Some((container_id, tab_id, pane)) = pending_activate {
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(container_id) {
+            tabs.set_active(tab_id);
+        }
+        if let DockPane::Tab(t) = pane {
+            app.dock_tab = t;
+        }
+    } else if !app.detached_tabs.contains(&app.dock_tab) {
+        // Garante que `app.dock_tab` acompanhe caso o usuário troque de aba pela barra superior.
+        if let Some(active_id) = tree.active_tiles().into_iter().find(|&id| {
+            matches!(
+                tree.tiles.get(id),
+                Some(Tile::Pane(DockPane::Tab(t))) if *t != app.dock_tab
+            )
+        }) {
+            if let Some(&Tile::Pane(DockPane::Tab(t))) = tree.tiles.get(active_id) {
+                if tree.active_tiles().into_iter().all(|id| {
+                    !matches!(tree.tiles.get(id), Some(Tile::Pane(DockPane::Tab(cur))) if *cur == app.dock_tab)
+                }) {
+                    app.dock_tab = t;
+                }
+            }
+        }
+    }
+
+    if let Some(drag_id) = pending_drag_tile {
+        ui.ctx().set_dragged_id(drag_id.egui_id(tree_id));
+    }
+
+    if let Some(pv_id) = find_pane_tile(&tree, DockPane::Preview) {
+        if let Some(pv_rect) = tree.tiles.rect(pv_id) {
+            let denom = (avail.width() * (1.0 - DEFAULT_MASTER_SHARE)).max(120.0);
+            let measured = (pv_rect.width() / denom).clamp(0.20, 0.72);
+            if (measured - app.preview_ratio).abs() > 0.01 {
+                app.preview_ratio = measured;
+            }
+        }
+    }
+
+    app.dock_tree = tree;
+
+    if pending_detach_all {
+        for tab in DockTab::ALL {
+            app.detached_tabs.insert(tab);
+        }
+    } else {
+        for pane in pending_detach {
+            match pane {
+                DockPane::Tab(t) => app.detach_dock_tab(t),
+                DockPane::Preview => app.preview_detached = true,
+                DockPane::MasterBus => app.master_bus_detached = true,
+            }
+        }
+    }
+    for pane in pending_close {
+        match pane {
+            DockPane::Tab(t) => app.detach_dock_tab(t),
+            DockPane::Preview => app.preview_visible = false,
+            DockPane::MasterBus => app.master_bus_visible = false,
+        }
+    }
+    if pending_toggle_preview {
+        app.preview_detached = !app.preview_detached;
+        if !app.preview_detached {
+            app.preview_visible = true;
+        }
+    }
+    if pending_toggle_master {
+        app.master_bus_detached = !app.master_bus_detached;
+        if !app.master_bus_detached {
+            app.master_bus_visible = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arvore_hostil_com_ciclo_e_corrupcao_recupera_limpamente() {
+        let mut tree = build_dock_tree(0.40, DockTab::ProjectMedia, false);
+        let root = tree.root.unwrap();
+        // Injeta ciclo e remove uma aba para simular JSON adulterado.
+        if let Some(Tile::Container(Container::Linear(lin))) = tree.tiles.get_mut(root) {
+            lin.children.push(root);
+        }
+        sanitize_tile_tree(&mut tree, 0.40, DockTab::ProjectMedia, false);
+
+        assert!(tree.root.is_some());
+        let mut visited = HashSet::new();
+        let mut found = HashSet::new();
+        assert!(validate_subtree(
+            &tree.tiles,
+            tree.root.unwrap(),
+            0,
+            &mut visited,
+            &mut found
+        ));
+        assert_eq!(found.len(), DockPane::all_canonical().len());
+    }
+}

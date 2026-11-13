@@ -951,6 +951,7 @@ struct BtnOpts<'a> {
     pad: egui::Vec2,
     active: bool,
     enabled: bool,
+    draggable: bool,
 }
 
 fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egui::Response {
@@ -961,6 +962,7 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
         pad,
         active,
         enabled,
+        draggable,
     } = opts;
     let sel_fg = crate::theme::contrast_on(theme.selection_bg);
     let label_fg = if !enabled {
@@ -981,12 +983,21 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
     let text_h = galley.as_ref().map(|g| g.size().y).unwrap_or(0.0);
     let w = (pad.x * 2.0 + icon_size + text_w).max(icon_size + 8.0);
     let h = (pad.y * 2.0 + icon_size.max(text_h)).max(icon_size + 6.0);
-    let sense = if enabled {
-        Sense::click()
-    } else {
+    let sense = if !enabled {
         Sense::hover()
+    } else if draggable {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
     };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), sense);
+    resp.widget_info(|| {
+        if let Some(lbl) = label {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, lbl)
+        } else {
+            egui::WidgetInfo::new(egui::WidgetType::Button)
+        }
+    });
 
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -1055,6 +1066,7 @@ pub fn icon_button(
             pad: vec2(5.0, 3.0),
             active,
             enabled,
+            draggable: false,
         },
         theme,
     )
@@ -1076,6 +1088,29 @@ pub fn small_icon_button(
             pad: vec2(3.0, 2.0),
             active,
             enabled: ui.is_enabled(),
+            draggable: false,
+        },
+        theme,
+    )
+}
+
+pub fn small_icon_drag_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: Option<&str>,
+    active: bool,
+    theme: &ThemeColors,
+) -> egui::Response {
+    draw_button(
+        ui,
+        BtnOpts {
+            icon,
+            label,
+            icon_size: 13.0,
+            pad: vec2(3.0, 2.0),
+            active,
+            enabled: ui.is_enabled(),
+            draggable: true,
         },
         theme,
     )

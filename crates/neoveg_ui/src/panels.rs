@@ -8,115 +8,6 @@ use eframe::egui;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind};
 use std::path::PathBuf;
 
-fn dock_tab_icon(tab: DockTab) -> Icon {
-    match tab {
-        DockTab::ProjectMedia => Icon::MediaItem,
-        DockTab::Explorer => Icon::FolderItem,
-        DockTab::Transitions => Icon::TransitionSplit,
-        DockTab::VideoFx => Icon::FxSparkle,
-        DockTab::ColorGrading => Icon::ColorWheels,
-        DockTab::AudioFx => Icon::FxAudio,
-        DockTab::Generators => Icon::GeneratorFrame,
-        DockTab::Mixer => Icon::MixerFaders,
-        DockTab::Scopes => Icon::ScopesWave,
-        DockTab::Notes => Icon::NotesPad,
-    }
-}
-
-#[derive(Default)]
-struct SingleTabAction {
-    detach: bool,
-    close: bool,
-}
-
-fn split_pane_chrome(rect: Rect, strip_h: f32, tabs_at_top: bool) -> (Rect, Rect) {
-    let clamped_strip = strip_h.min((rect.height() * 0.52).max(24.0));
-    if tabs_at_top {
-        let strip = Rect::from_min_max(
-            rect.min,
-            pos2(
-                rect.right(),
-                (rect.top() + clamped_strip).min(rect.bottom()),
-            ),
-        );
-        let content = Rect::from_min_max(
-            pos2(rect.left(), (strip.bottom() + 2.0).min(rect.bottom())),
-            rect.max,
-        );
-        (content, strip)
-    } else {
-        let content = Rect::from_min_max(
-            rect.min,
-            pos2(
-                rect.right(),
-                (rect.bottom() - clamped_strip - 2.0).max(rect.top() + 16.0),
-            ),
-        );
-        let strip = Rect::from_min_max(
-            pos2(rect.left(), (rect.bottom() - clamped_strip).max(rect.top())),
-            rect.max,
-        );
-        (content, strip)
-    }
-}
-
-struct PaneTabSpec<'a> {
-    icon: Icon,
-    title: &'a str,
-    popout_tip: &'a str,
-    close_tip: &'a str,
-}
-
-fn draw_single_pane_tab_bar(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    tabs_at_top: bool,
-    spec: &PaneTabSpec<'_>,
-    theme: &crate::theme::ThemeColors,
-) -> SingleTabAction {
-    let mut act = SingleTabAction::default();
-    let mut strip_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .id_salt(("single_tab_strip", spec.title)),
-    );
-    strip_ui.set_clip_rect(rect);
-    if !tabs_at_top {
-        strip_ui.separator();
-    }
-    strip_ui.horizontal(|ui| {
-        let tab_resp = icons::small_icon_button(ui, spec.icon, Some(spec.title), true, theme);
-        tab_resp.context_menu(|ui| {
-            if ui.button("Destacar em janela do Windows").clicked() {
-                act.detach = true;
-                ui.close_menu();
-            }
-            if ui.button("Fechar janela").clicked() {
-                act.close = true;
-                ui.close_menu();
-            }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icons::small_icon_button(ui, Icon::CloseX, None, false, theme)
-                .on_hover_text(spec.close_tip)
-                .clicked()
-            {
-                act.close = true;
-            }
-            if icons::small_icon_button(ui, Icon::PopOut, None, false, theme)
-                .on_hover_text(spec.popout_tip)
-                .clicked()
-            {
-                act.detach = true;
-            }
-        });
-    });
-    if tabs_at_top {
-        strip_ui.separator();
-    }
-    act
-}
-
 struct FloatingViewportSpec<'a> {
     title: &'a str,
     inner_size: [f32; 2],
@@ -219,297 +110,8 @@ impl App {
         }
     }
 
-    fn dock_tab_strip(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
-        let mut detach_req: Option<DockTab> = None;
-        let mut detach_all = false;
-        let mut toggle_preview = false;
-        let mut toggle_master = false;
-        ui.horizontal_wrapped(|ui| {
-            for &tab in docked {
-                let resp = icons::small_icon_button(
-                    ui,
-                    dock_tab_icon(tab),
-                    Some(tab.name()),
-                    self.dock_tab == tab,
-                    &self.theme,
-                );
-                if resp.clicked() {
-                    self.dock_tab = tab;
-                }
-                resp.context_menu(|ui| {
-                    if ui.button("Destacar em janela do Windows").clicked() {
-                        detach_req = Some(tab);
-                        ui.close_menu();
-                    }
-                    if ui.button("Destacar todas as abas").clicked() {
-                        detach_all = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    let pv_label = if self.preview_detached {
-                        "Acoplar Prévia de Vídeo"
-                    } else {
-                        "Destacar Prévia de Vídeo em janela do Windows"
-                    };
-                    if ui.button(pv_label).clicked() {
-                        toggle_preview = true;
-                        ui.close_menu();
-                    }
-                    let mb_label = if self.master_bus_detached {
-                        "Acoplar Master Bus"
-                    } else {
-                        "Destacar Master Bus em janela do Windows"
-                    };
-                    if ui.button(mb_label).clicked() {
-                        toggle_master = true;
-                        ui.close_menu();
-                    }
-                });
-            }
-            if docked.contains(&self.dock_tab)
-                && icons::small_icon_button(ui, Icon::PopOut, Some("Destacar"), false, &self.theme)
-                    .on_hover_text(
-                        "Abrir a aba ativa em janela normal do Windows (clique direito em qualquer aba para mais opções)",
-                    )
-                    .clicked()
-            {
-                detach_req = Some(self.dock_tab);
-            }
-        });
-        if detach_all {
-            for tab in DockTab::ALL {
-                self.detached_tabs.insert(tab);
-            }
-        } else if let Some(tab) = detach_req {
-            self.detach_dock_tab(tab);
-        }
-        if toggle_preview {
-            self.preview_detached = !self.preview_detached;
-            if !self.preview_detached {
-                self.preview_visible = true;
-            }
-        }
-        if toggle_master {
-            self.master_bus_detached = !self.master_bus_detached;
-            if !self.master_bus_detached {
-                self.master_bus_visible = true;
-            }
-        }
-    }
-
-    fn dock_tab_contents(&mut self, ui: &mut egui::Ui, docked: &[DockTab]) {
-        if docked.is_empty() {
-            ui.label(
-                egui::RichText::new(
-                    "Todas as abas estão destacadas em janelas flutuantes (clique em Acoplar ou use Exibir/Layouts).",
-                )
-                .weak(),
-            );
-        } else {
-            let tab = self.dock_tab;
-            egui::ScrollArea::both()
-                .id_salt("dock_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
-        }
-    }
-
     pub fn dock_area(&mut self, ui: &mut egui::Ui) {
-        let avail = ui.available_rect_before_wrap();
-        ui.allocate_rect(avail, Sense::hover());
-
-        let show_preview = self.preview_visible && !self.preview_detached;
-        let min_w_for_master = if show_preview { 640.0 } else { 420.0 };
-        let show_master = self.master_bus_visible
-            && !self.master_bus_detached
-            && avail.width() >= min_w_for_master;
-
-        let (main_avail, master_rect_opt) = if show_master {
-            let master_w = (avail.width() * 0.105).clamp(110.0, 126.0);
-            (
-                Rect::from_min_max(
-                    avail.min,
-                    pos2(avail.right() - master_w - 6.0, avail.bottom()),
-                ),
-                Some(Rect::from_min_max(
-                    pos2(avail.right() - master_w, avail.top()),
-                    avail.max,
-                )),
-            )
-        } else {
-            (avail, None)
-        };
-
-        let (tabs_rect, preview_rect_opt) = if !show_preview {
-            (main_avail, None)
-        } else {
-            let min_pv = 220.0_f32.min((main_avail.width() * 0.45).max(120.0));
-            let max_pv = (main_avail.width() * 0.68).max(min_pv);
-            let preview_w = (main_avail.width() * self.preview_ratio).clamp(min_pv, max_pv);
-            if self.prefs.edit_layout.preview_on_left {
-                (
-                    Rect::from_min_max(
-                        pos2(main_avail.left() + preview_w + 6.0, main_avail.top()),
-                        main_avail.max,
-                    ),
-                    Some(Rect::from_min_max(
-                        main_avail.min,
-                        pos2(main_avail.left() + preview_w, main_avail.bottom()),
-                    )),
-                )
-            } else {
-                (
-                    Rect::from_min_max(
-                        main_avail.min,
-                        pos2(main_avail.right() - preview_w - 6.0, main_avail.bottom()),
-                    ),
-                    Some(Rect::from_min_max(
-                        pos2(main_avail.right() - preview_w, main_avail.top()),
-                        main_avail.max,
-                    )),
-                )
-            }
-        };
-
-        let docked: Vec<DockTab> = DockTab::ALL
-            .into_iter()
-            .filter(|t| !self.detached_tabs.contains(t))
-            .collect();
-        if !docked.contains(&self.dock_tab) {
-            if let Some(&first) = docked.first() {
-                self.dock_tab = first;
-            }
-        }
-
-        let painter = ui.painter();
-        painter.rect_stroke(
-            tabs_rect,
-            2.0,
-            Stroke::new(1.0_f32, self.theme.border),
-            StrokeKind::Inside,
-        );
-        let tabs_inner = tabs_rect.shrink(3.0);
-
-        let tabs_at_top = self.prefs.edit_layout.tabs_at_top;
-        if tabs_at_top {
-            let mut left = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(tabs_inner)
-                    .id_salt("dock_tabs_pane_top"),
-            );
-            left.set_clip_rect(tabs_inner);
-            self.dock_tab_strip(&mut left, &docked);
-            left.separator();
-            self.dock_tab_contents(&mut left, &docked);
-        } else {
-            // Calcula quantas linhas serão usadas em `dock_tab_strip` para não cortar abas
-            // como `Color Grading`, `Notas` ou `Destacar` em janelas médias/estreitas.
-            let max_w = (tabs_inner.width() - 6.0).max(120.0);
-            let mut rows = 1usize;
-            let mut cur_x = 0.0_f32;
-            for item_w in docked
-                .iter()
-                .map(|t| 32.0 + t.name().chars().count() as f32 * 7.0)
-                .chain(std::iter::once(
-                    32.0 + "Destacar".chars().count() as f32 * 7.0,
-                ))
-            {
-                if cur_x > 0.0 && cur_x + item_w + 4.0 > max_w {
-                    rows += 1;
-                    cur_x = item_w;
-                } else {
-                    cur_x += item_w + 4.0;
-                }
-            }
-            let base_h: f32 = (rows.min(5) as f32) * 24.0 + 4.0;
-            let (content_rect, strip_rect) = split_pane_chrome(tabs_inner, base_h, false);
-            let mut content_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(content_rect)
-                    .id_salt("dock_content_pane_bot"),
-            );
-            content_ui.set_clip_rect(content_rect);
-            self.dock_tab_contents(&mut content_ui, &docked);
-
-            let mut strip_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(strip_rect)
-                    .id_salt("dock_strip_pane_bot"),
-            );
-            strip_ui.set_clip_rect(strip_rect);
-            strip_ui.separator();
-            self.dock_tab_strip(&mut strip_ui, &docked);
-        }
-
-        if let Some(preview_rect) = preview_rect_opt {
-            ui.painter().rect_stroke(
-                preview_rect,
-                2.0,
-                Stroke::new(1.0_f32, self.theme.border),
-                StrokeKind::Inside,
-            );
-            let (content_rect, tab_rect) =
-                split_pane_chrome(preview_rect.shrink(3.0), 24.0, tabs_at_top);
-            let act = draw_single_pane_tab_bar(
-                ui,
-                tab_rect,
-                tabs_at_top,
-                &PaneTabSpec {
-                    icon: Icon::VideoTrack,
-                    title: "Prévia de Vídeo",
-                    popout_tip: "Destacar Prévia de Vídeo em janela normal do Windows",
-                    close_tip: "Fechar Prévia de Vídeo",
-                },
-                &self.theme,
-            );
-            if act.detach {
-                self.preview_detached = true;
-            } else if act.close {
-                self.preview_visible = false;
-            }
-            let mut center = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(content_rect)
-                    .id_salt("dock_preview"),
-            );
-            center.set_clip_rect(content_rect);
-            self.preview_panel(&mut center, false);
-        }
-
-        if let Some(master_rect) = master_rect_opt {
-            ui.painter().rect_stroke(
-                master_rect,
-                2.0,
-                Stroke::new(1.0_f32, self.theme.border),
-                StrokeKind::Inside,
-            );
-            let (content_rect, tab_rect) =
-                split_pane_chrome(master_rect.shrink(3.0), 24.0, tabs_at_top);
-            let act = draw_single_pane_tab_bar(
-                ui,
-                tab_rect,
-                tabs_at_top,
-                &PaneTabSpec {
-                    icon: Icon::MasterBus,
-                    title: "Master",
-                    popout_tip: "Destacar Master Bus em janela normal do Windows",
-                    close_tip: "Fechar Master Bus",
-                },
-                &self.theme,
-            );
-            if act.detach {
-                self.master_bus_detached = true;
-            } else if act.close {
-                self.master_bus_visible = false;
-            }
-            let mut right = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(content_rect)
-                    .id_salt("dock_master_bus"),
-            );
-            right.set_clip_rect(content_rect);
-            self.master_bus_panel(&mut right, false);
-        }
+        crate::dock::draw_dock_tree(self, ui);
     }
 
     pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
@@ -598,12 +200,13 @@ impl App {
                 if out.reattach {
                     self.dock_visible = true;
                     self.dock_tab = tab;
+                    self.pending_dock_focus = Some(tab);
                 }
             }
         }
     }
 
-    fn show_dock_tab_contents(&mut self, ui: &mut egui::Ui, tab: DockTab) {
+    pub(crate) fn show_dock_tab_contents(&mut self, ui: &mut egui::Ui, tab: DockTab) {
         match tab {
             DockTab::ProjectMedia => self.media_tab(ui),
             DockTab::Explorer => self.explorer_tab(ui),
@@ -630,7 +233,7 @@ impl App {
         }
     }
 
-    fn preview_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+    pub(crate) fn preview_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
         ui.horizontal_wrapped(|ui| {
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             egui::ComboBox::from_id_salt(("pq", is_floating))
@@ -925,7 +528,7 @@ impl App {
         }
     }
 
-    fn master_bus_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+    pub(crate) fn master_bus_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
         ui.vertical(|ui| {
             if !is_floating {
                 ui.label(egui::RichText::new("Master").strong().small());

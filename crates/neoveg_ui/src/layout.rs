@@ -54,6 +54,8 @@ pub struct WindowLayout {
     pub px_per_sec: Option<f32>,
     #[serde(default)]
     pub edit_layout: Option<EditLayoutPrefs>,
+    #[serde(default)]
+    pub tile_tree: Option<egui_tiles::Tree<crate::dock::DockPane>>,
 }
 
 fn default_dock_height() -> f32 {
@@ -87,6 +89,7 @@ impl Default for WindowLayout {
             master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
+            tile_tree: None,
         }
     }
 }
@@ -128,6 +131,15 @@ impl WindowLayout {
             .px_per_sec
             .filter(|v| v.is_finite() && *v > 0.0)
             .map(|v| v.clamp(2.0, 2000.0));
+        let pv_on_left = self
+            .edit_layout
+            .as_ref()
+            .map(|e| e.preview_on_left)
+            .unwrap_or(false);
+        let active = self.active_panel();
+        if let Some(ref mut tree) = self.tile_tree {
+            crate::dock::sanitize_tile_tree(tree, self.preview_ratio, active, pv_on_left);
+        }
     }
 
     pub fn active_panel(&self) -> DockTab {
@@ -158,6 +170,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
+            tile_tree: None,
         },
         WindowLayout {
             name: "Mixagem de Áudio".into(),
@@ -172,6 +185,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
+            tile_tree: None,
         },
         WindowLayout {
             name: "Timeline Ampla".into(),
@@ -186,6 +200,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
+            tile_tree: None,
         },
     ]
 }
@@ -287,6 +302,7 @@ mod tests {
             master_bus_detached: true,
             px_per_sec: Some(-10.0),
             edit_layout: Some(EditLayoutPrefs::for_type(neoveg_common::LayoutType::Sony)),
+            tile_tree: None,
         };
         bad.sanitize();
         assert_eq!(bad.dock_height, 320.0);

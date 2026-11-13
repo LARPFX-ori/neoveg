@@ -563,6 +563,7 @@ fn draw_aspect_tile(
         FontId::proportional(if rect.width() < 110.0 { 9.5 } else { 10.8 }),
         fg,
     );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, aspect.label()));
     resp.clicked()
 }
 

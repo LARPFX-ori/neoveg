@@ -2881,6 +2881,11 @@ impl App {
                 self.prefs.edit_layout = orig_el;
                 self.dock_height = orig_dock_h;
                 self.preview_ratio = orig_prev_r;
+                self.dock_tree = crate::dock::build_dock_tree(
+                    self.preview_ratio,
+                    self.dock_tab,
+                    self.prefs.edit_layout.preview_on_left,
+                );
                 let tid = ThemeId::from_pref(&orig_theme);
                 self.set_theme(ctx, tid, false);
             }

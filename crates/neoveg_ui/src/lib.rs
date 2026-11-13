@@ -14,6 +14,7 @@
 pub mod app;
 mod color_grading;
 mod dialogs;
+mod dock;
 mod edit;
 mod icons;
 pub mod layout;
@@ -23,6 +24,8 @@ pub mod theme;
 mod timeline;
 mod welcome;
 
+#[cfg(test)]
+mod kittest_tests;
 #[cfg(test)]
 mod tests;
 

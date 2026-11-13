@@ -96,6 +96,8 @@ pub struct App {
     pub dock_visible: bool,
     pub dock_height: f32,
     pub preview_ratio: f32,
+    pub dock_tree: egui_tiles::Tree<crate::dock::DockPane>,
+    pub(crate) pending_dock_focus: Option<DockTab>,
     pub saved_layouts: Vec<(String, PathBuf)>,
     pub theme_id: ThemeId,
     pub theme: ThemeColors,
@@ -177,6 +179,9 @@ impl App {
             master_bus_visible,
             ..Default::default()
         });
+        let initial_tree = initial_layout.tile_tree.clone();
+        let initial_tab = initial_layout.active_panel();
+        let initial_pv_left = prefs.edit_layout.preview_on_left;
         let saved_layouts = layout::list_saved_layouts();
         let mut initial_project = Project::new_default();
         initial_project.settings.sample_rate = prefs.default_sample_rate;
@@ -217,6 +222,14 @@ impl App {
             dock_visible: initial_layout.dock_visible,
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
+            dock_tree: initial_tree.unwrap_or_else(|| {
+                crate::dock::build_dock_tree(
+                    initial_layout.preview_ratio,
+                    initial_tab,
+                    initial_pv_left,
+                )
+            }),
+            pending_dock_focus: None,
             saved_layouts,
             theme_id,
             theme,
@@ -1085,6 +1098,7 @@ impl App {
                 self.dock_visible = true;
                 self.detached_tabs.remove(&panel);
                 self.dock_tab = panel;
+                self.pending_dock_focus = Some(panel);
             }
             UiAction::TogglePreview => {
                 if self.preview_detached {
@@ -2254,11 +2268,19 @@ impl App {
         apply_metrics: bool,
         save_prefs: bool,
     ) {
+        let prev_pv_left = self.prefs.edit_layout.preview_on_left;
         let lt = next.layout_type;
         self.prefs.edit_layout = next;
         if apply_metrics {
             self.dock_height = lt.default_dock_height();
             self.preview_ratio = lt.default_preview_ratio();
+        }
+        if apply_metrics || prev_pv_left != self.prefs.edit_layout.preview_on_left {
+            self.dock_tree = crate::dock::build_dock_tree(
+                self.preview_ratio,
+                self.dock_tab,
+                self.prefs.edit_layout.preview_on_left,
+            );
         }
         self.master_bus_visible = self.prefs.edit_layout.master_bus_docked;
         if !self.master_bus_visible {
@@ -2328,6 +2350,7 @@ impl App {
             master_bus_detached: self.master_bus_detached,
             px_per_sec: Some(self.tl.px_per_sec),
             edit_layout: Some(self.prefs.edit_layout.clone()),
+            tile_tree: Some(self.dock_tree.clone()),
         };
         l.sanitize();
         l
@@ -2358,6 +2381,14 @@ impl App {
         if let Some(el) = l.edit_layout {
             self.prefs.edit_layout = el;
         }
+        self.dock_tree = l.tile_tree.unwrap_or_else(|| {
+            crate::dock::build_dock_tree(
+                self.preview_ratio,
+                self.dock_tab,
+                self.prefs.edit_layout.preview_on_left,
+            )
+        });
+        self.pending_dock_focus = Some(self.dock_tab);
         self.set_status(format!("Layout aplicado: {}", l.name));
     }
 
