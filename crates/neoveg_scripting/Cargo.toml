@@ -8,6 +8,10 @@ description = "Ponte de scripting (.NET Host / ScriptPortal.Vegas) e automação
 [dependencies]
 neoveg_common.workspace = true
 neoveg_engine.workspace = true
+netcorehost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+# AGENTS.md §0.3: fronteira FFI .NET Host isolada em dotnet_host.rs.
+unsafe_code = "deny"

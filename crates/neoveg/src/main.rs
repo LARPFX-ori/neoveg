@@ -110,7 +110,7 @@ fn render_cli(proj_path: &std::path::Path, out_path: &std::path::Path) -> anyhow
 const HELP: &str = "Uso:
   neoveg [--open] [projeto.neoveg | mídia]  abre a interface gráfica
   neoveg --render projeto.neoveg saida.avi  renderiza sem interface (.avi, .png, .y4m ou .wav)
-  neoveg --run-script script.cs             executa script .NET/C# (em implementação)
+  neoveg --run-script script.<cs|dll>       executa script C#/.NET (ScriptPortal.Vegas) via netcorehost
   neoveg --command <id> [projeto [saida]]   executa comando da Tabela Única sem interface
   neoveg --list-commands                    lista os comandos e atalhos disponíveis";
 
@@ -157,6 +157,16 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Neoveg: {e}");
                 std::process::exit(2);
             }
+            for msg in &ctx.messages {
+                println!("{msg}");
+            }
+            println!(
+                "Script executado ({}): trilhas={}, marcadores={}, barramentos={}",
+                s.display(),
+                ctx.session.project.tracks.len(),
+                ctx.session.project.markers.len(),
+                ctx.session.project.audio_buses.len(),
+            );
             return Ok(());
         }
         Ok(Cli::RunCommand { id, proj, out }) => {

@@ -360,6 +360,7 @@ pub enum UiAction {
     OpenAbout,
     BuildProxySelected,
     PrerenderRegion,
+    RunScriptDialog,
     ExitApp,
     SelectDock(DockPanel),
     TogglePreview,
@@ -1381,6 +1382,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
+    },
+    CommandDef {
+        id: "tools.run_script",
+        label: "Executar script (.cs/.dll)...",
+        menu_path: "Ferramentas/Executar script (.cs/.dll)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::RunScriptDialog, h),
     },
     CommandDef {
         id: "tools.remove_unused_media",

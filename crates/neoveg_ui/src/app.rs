@@ -1159,6 +1159,7 @@ impl App {
             UiAction::OpenAbout => self.dlg.about = true,
             UiAction::BuildProxySelected => self.build_proxy_selected(),
             UiAction::PrerenderRegion => self.prerender_region(),
+            UiAction::RunScriptDialog => self.run_script_dialog(),
             UiAction::ExitApp => {
                 if let Some(c) = ctx {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1596,6 +1597,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                ui.separator();
+                self.cmd_menu_btn(ui, "tools.run_script");
             });
             ui.menu_button("Opções", |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
@@ -2036,6 +2039,33 @@ impl App {
             match crate::render::save_snapshot(&self.project, &self.media, self.cursor, &p) {
                 Ok(_) => self.set_status(format!("Quadro salvo em {}", p.display())),
                 Err(e) => self.set_status(format!("Erro: {e:#}")),
+            }
+        }
+    }
+
+    pub(crate) fn run_script_dialog(&mut self) {
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Scripts VEGAS / .NET", &["cs", "dll"])
+            .pick_file()
+        else {
+            return;
+        };
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
+        }));
+        self.sync_after_session();
+        match res {
+            Ok(Ok(msgs)) => {
+                if let Some(last) = msgs.last() {
+                    self.set_status(format!("Script executado: {last}"));
+                } else {
+                    self.set_status(format!("Script executado: {}", p.display()));
+                }
+            }
+            Ok(Err(e)) => self.set_status(format!("Erro no script: {e}")),
+            Err(_) => {
+                let _ = self.session.project.sanitize();
+                self.set_status("Erro interno isolado ao executar script .NET/C#.");
             }
         }
     }

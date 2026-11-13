@@ -39,7 +39,7 @@ AUTHORIZED = {
         "tinystr", "writeable", "yoke", "yoke-derive", "zerofrom", "zerofrom-derive",
         "zerotrie", "zerovec", "zerovec-derive",
     },
-    "Zlib": {"foldhash"},
+    "Zlib": {"foldhash", "const_panic", "konst", "typewit"},
     "MPL-2.0": {
         "symphonia",
         "symphonia-bundle-flac",

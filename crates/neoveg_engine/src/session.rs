@@ -90,6 +90,7 @@ pub struct ClipItem {
 }
 
 /// Estado puro da timeline e do projeto compartilhado entre GUI, CLI e scripting.
+#[derive(Clone)]
 pub struct EditorSession {
     pub project: Project,
     pub snapshot: Arc<Project>,
