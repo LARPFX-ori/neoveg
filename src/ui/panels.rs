@@ -11,41 +11,63 @@ impl App {
     pub fn dock_area(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_rect_before_wrap();
         let preview_w = (avail.width() * 0.42).clamp(260.0, 900.0);
-        let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - preview_w - 6.0, avail.bottom()));
-        let right_rect = Rect::from_min_max(pos2(avail.right() - preview_w, avail.top()), avail.max);
+        let left_rect = Rect::from_min_max(
+            avail.min,
+            pos2(avail.right() - preview_w - 6.0, avail.bottom()),
+        );
+        let right_rect =
+            Rect::from_min_max(pos2(avail.right() - preview_w, avail.top()), avail.max);
         ui.allocate_rect(avail, Sense::hover());
 
-        let mut left = ui.new_child(egui::UiBuilder::new().max_rect(left_rect).id_salt("dock_left"));
+        let mut left = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(left_rect)
+                .id_salt("dock_left"),
+        );
         left.set_clip_rect(left_rect);
         left.horizontal_wrapped(|ui| {
             for tab in DockTab::ALL {
-                if ui.selectable_label(self.dock_tab == tab, tab.name()).clicked() {
+                if ui
+                    .selectable_label(self.dock_tab == tab, tab.name())
+                    .clicked()
+                {
                     self.dock_tab = tab;
                 }
             }
         });
         left.separator();
-        egui::ScrollArea::both().id_salt("dock_scroll").auto_shrink([false, false]).show(&mut left, |ui| match self.dock_tab {
-            DockTab::ProjectMedia => self.media_tab(ui),
-            DockTab::Explorer => self.explorer_tab(ui),
-            DockTab::Transitions => self.transitions_tab(ui),
-            DockTab::VideoFx => self.fx_tab(ui, false),
-            DockTab::AudioFx => self.fx_tab(ui, true),
-            DockTab::Generators => self.generators_tab(ui),
-            DockTab::Mixer => self.mixer_tab(ui),
-            DockTab::Scopes => self.scopes_tab(ui),
-            DockTab::Notes => {
-                ui.label("Notas do projeto:");
-                if ui
-                    .add(egui::TextEdit::multiline(&mut self.project.notes).desired_rows(12).desired_width(f32::INFINITY))
-                    .changed()
-                {
-                    self.dirty = true;
+        egui::ScrollArea::both()
+            .id_salt("dock_scroll")
+            .auto_shrink([false, false])
+            .show(&mut left, |ui| match self.dock_tab {
+                DockTab::ProjectMedia => self.media_tab(ui),
+                DockTab::Explorer => self.explorer_tab(ui),
+                DockTab::Transitions => self.transitions_tab(ui),
+                DockTab::VideoFx => self.fx_tab(ui, false),
+                DockTab::AudioFx => self.fx_tab(ui, true),
+                DockTab::Generators => self.generators_tab(ui),
+                DockTab::Mixer => self.mixer_tab(ui),
+                DockTab::Scopes => self.scopes_tab(ui),
+                DockTab::Notes => {
+                    ui.label("Notas do projeto:");
+                    if ui
+                        .add(
+                            egui::TextEdit::multiline(&mut self.project.notes)
+                                .desired_rows(12)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .changed()
+                    {
+                        self.dirty = true;
+                    }
                 }
-            }
-        });
+            });
 
-        let mut right = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).id_salt("dock_right"));
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(right_rect)
+                .id_salt("dock_right"),
+        );
         right.set_clip_rect(right_rect);
         self.preview_panel(&mut right);
     }
@@ -56,15 +78,28 @@ impl App {
             egui::ComboBox::from_id_salt("pq")
                 .selected_text(self.opts.preview_quality.name())
                 .show_ui(ui, |ui| {
-                    for q in [PreviewQuality::Draft, PreviewQuality::Preview, PreviewQuality::Good] {
+                    for q in [
+                        PreviewQuality::Draft,
+                        PreviewQuality::Preview,
+                        PreviewQuality::Good,
+                    ] {
                         ui.selectable_value(&mut self.opts.preview_quality, q, q.name());
                     }
                 });
-            ui.toggle_value(&mut self.opts.safe_areas, "▣").on_hover_text("Áreas de segurança");
-            if ui.button("📷").on_hover_text("Salvar quadro em PNG").clicked() {
+            ui.toggle_value(&mut self.opts.safe_areas, "▣")
+                .on_hover_text("Áreas de segurança");
+            if ui
+                .button("📷")
+                .on_hover_text("Salvar quadro em PNG")
+                .clicked()
+            {
                 self.snapshot_dialog();
             }
-            if ui.button("fx").on_hover_text("Efeitos de saída de vídeo").clicked() {
+            if ui
+                .button("fx")
+                .on_hover_text("Efeitos de saída de vídeo")
+                .clicked()
+            {
                 self.dlg.fx_target = Some(FxTarget::MasterVideo);
             }
         });
@@ -83,16 +118,32 @@ impl App {
         }
         let img_rect = Rect::from_center_size(area.center(), vec2(w, h));
         if let Some(tex) = &self.preview_tex {
-            painter.image(tex.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            painter.image(
+                tex.id(),
+                img_rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
         if self.opts.safe_areas {
             for k in [0.9, 0.8] {
                 let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
-                painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)), StrokeKind::Inside);
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
+                    StrokeKind::Inside,
+                );
             }
             let c = img_rect.center();
-            painter.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0_f32, Color32::from_white_alpha(120)));
-            painter.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0_f32, Color32::from_white_alpha(120)));
+            painter.line_segment(
+                [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+            );
+            painter.line_segment(
+                [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+            );
         }
         let pq = self.opts.preview_quality.scale();
         painter.text(
@@ -135,61 +186,73 @@ impl App {
         let mut remove = None;
         let mut add = None;
         let mut edit_gen = None;
-        egui::Grid::new("media_grid").striped(true).num_columns(3).show(ui, |ui| {
-            for m in &items {
-                let thumb = self.thumb(&ctx, m.id);
-                let id = egui::Id::new(("media_drag", m.id));
-                let resp = ui
-                    .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(t) = &thumb {
-                                let s = t.size_vec2();
-                                let h = 36.0;
-                                ui.image((t.id(), vec2(h * s.x / s.y.max(1.0), h)));
-                            } else {
-                                ui.label(if m.has_audio { "🔊" } else { "❔" });
-                            }
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(&m.name).strong());
-                                let dur = m.duration.map(|d| self.fmt_time(d)).unwrap_or_else(|| "estática".into());
-                                ui.label(egui::RichText::new(format!("{}  •  {}", dur, m.info)).small());
+        egui::Grid::new("media_grid")
+            .striped(true)
+            .num_columns(3)
+            .show(ui, |ui| {
+                for m in &items {
+                    let thumb = self.thumb(&ctx, m.id);
+                    let id = egui::Id::new(("media_drag", m.id));
+                    let resp = ui
+                        .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
+                            ui.horizontal(|ui| {
+                                if let Some(t) = &thumb {
+                                    let s = t.size_vec2();
+                                    let h = 36.0;
+                                    ui.image((t.id(), vec2(h * s.x / s.y.max(1.0), h)));
+                                } else {
+                                    ui.label(if m.has_audio { "🔊" } else { "❔" });
+                                }
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(&m.name).strong());
+                                    let dur = m
+                                        .duration
+                                        .map(|d| self.fmt_time(d))
+                                        .unwrap_or_else(|| "estática".into());
+                                    ui.label(
+                                        egui::RichText::new(format!("{}  •  {}", dur, m.info))
+                                            .small(),
+                                    );
+                                });
                             });
-                        });
-                    })
-                    .response;
-                let resp = ui.interact(resp.rect, id.with("click"), Sense::click());
-                if resp.double_clicked() {
-                    add = Some(m.id);
-                }
-                resp.context_menu(|ui| {
-                    if ui.button("Adicionar no cursor").clicked() {
+                        })
+                        .response;
+                    let resp = ui.interact(resp.rect, id.with("click"), Sense::click());
+                    if resp.double_clicked() {
                         add = Some(m.id);
-                        ui.close_menu();
                     }
-                    if matches!(m.source, MediaSource::Generated(_)) && ui.button("Editar mídia gerada...").clicked() {
-                        edit_gen = Some(m.id);
-                        ui.close_menu();
+                    resp.context_menu(|ui| {
+                        if ui.button("Adicionar no cursor").clicked() {
+                            add = Some(m.id);
+                            ui.close_menu();
+                        }
+                        if matches!(m.source, MediaSource::Generated(_))
+                            && ui.button("Editar mídia gerada...").clicked()
+                        {
+                            edit_gen = Some(m.id);
+                            ui.close_menu();
+                        }
+                        if ui.button("Remover do projeto").clicked() {
+                            remove = Some(m.id);
+                            ui.close_menu();
+                        }
+                    });
+                    ui.label(if m.has_video && m.has_audio {
+                        "A/V"
+                    } else if m.has_video {
+                        "V"
+                    } else {
+                        "A"
+                    });
+                    if !self.media.contains(m.id) && !matches!(m.source, MediaSource::Generated(_))
+                    {
+                        ui.colored_label(Color32::from_rgb(240, 120, 80), "offline");
+                    } else {
+                        ui.label("");
                     }
-                    if ui.button("Remover do projeto").clicked() {
-                        remove = Some(m.id);
-                        ui.close_menu();
-                    }
-                });
-                ui.label(if m.has_video && m.has_audio {
-                    "A/V"
-                } else if m.has_video {
-                    "V"
-                } else {
-                    "A"
-                });
-                if !self.media.contains(m.id) && !matches!(m.source, MediaSource::Generated(_)) {
-                    ui.colored_label(Color32::from_rgb(240, 120, 80), "offline");
-                } else {
-                    ui.label("");
+                    ui.end_row();
                 }
-                ui.end_row();
-            }
-        });
+            });
         if let Some(id) = add {
             self.checkpoint();
             let hint = self.sel_track;
@@ -199,7 +262,11 @@ impl App {
             self.dlg.gen_editor = Some(id);
         }
         if let Some(id) = remove {
-            let used = self.project.tracks.iter().any(|t| t.events.iter().any(|e| e.media_id == id));
+            let used = self
+                .project
+                .tracks
+                .iter()
+                .any(|t| t.events.iter().any(|e| e.media_id == id));
             self.checkpoint();
             if used {
                 for t in &mut self.project.tracks {
@@ -225,7 +292,10 @@ impl App {
                 }
             }
             let mut s = self.explorer_dir.to_string_lossy().to_string();
-            if ui.add(egui::TextEdit::singleline(&mut s).desired_width(320.0)).lost_focus() {
+            if ui
+                .add(egui::TextEdit::singleline(&mut s).desired_width(320.0))
+                .lost_focus()
+            {
                 let p = PathBuf::from(&s);
                 if p.is_dir() {
                     self.explorer_dir = p;
@@ -245,14 +315,24 @@ impl App {
         });
         ui.separator();
         let mut entries: Vec<(bool, PathBuf)> = std::fs::read_dir(&self.explorer_dir)
-            .map(|rd| rd.flatten().map(|e| (e.path().is_dir(), e.path())).collect())
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| (e.path().is_dir(), e.path()))
+                    .collect()
+            })
             .unwrap_or_default();
-        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.file_name().cmp(&b.1.file_name())));
+        entries.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.file_name().cmp(&b.1.file_name()))
+        });
         let filter = self.explorer_filter.to_lowercase();
         let mut go = None;
         let mut import = vec![];
         for (is_dir, p) in entries {
-            let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             if name.starts_with('.') {
                 continue;
             }
@@ -262,7 +342,11 @@ impl App {
             if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
                 continue;
             }
-            let label = if is_dir { format!("📁 {name}") } else { format!("🎞 {name}") };
+            let label = if is_dir {
+                format!("📁 {name}")
+            } else {
+                format!("🎞 {name}")
+            };
             let r = ui.selectable_label(false, label);
             if r.double_clicked() {
                 if is_dir {
@@ -294,20 +378,26 @@ impl App {
         ui.label(egui::RichText::new("Arraste uma transição até um evento de vídeo (ela é usada no crossfade/fade de entrada), ou selecione o evento e clique em Aplicar.").small().weak());
         ui.separator();
         let sel: Vec<Id> = self.sel_events.iter().cloned().collect();
-        egui::Grid::new("tr_grid").num_columns(2).striped(true).show(ui, |ui| {
-            for k in TransitionKind::ALL {
-                let id = egui::Id::new(("tr", k as u32));
-                ui.dnd_drag_source(id, DndPayload::Transition(k), |ui| {
-                    ui.label(format!("◪ {}", k.name()));
-                });
-                if ui.add_enabled(!sel.is_empty(), egui::Button::new("Aplicar")).clicked() {
-                    for e in &sel {
-                        self.apply_transition(*e, k);
+        egui::Grid::new("tr_grid")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                for k in TransitionKind::ALL {
+                    let id = egui::Id::new(("tr", k as u32));
+                    ui.dnd_drag_source(id, DndPayload::Transition(k), |ui| {
+                        ui.label(format!("◪ {}", k.name()));
+                    });
+                    if ui
+                        .add_enabled(!sel.is_empty(), egui::Button::new("Aplicar"))
+                        .clicked()
+                    {
+                        for e in &sel {
+                            self.apply_transition(*e, k);
+                        }
                     }
+                    ui.end_row();
                 }
-                ui.end_row();
-            }
-        });
+            });
     }
 
     fn fx_tab(&mut self, ui: &mut egui::Ui, audio: bool) {
@@ -317,54 +407,86 @@ impl App {
                 .weak(),
         );
         ui.separator();
-        let list: Vec<FxKind> = if audio { FxKind::AUDIO.to_vec() } else { FxKind::VIDEO.to_vec() };
-        let want_kind = if audio { TrackKind::Audio } else { TrackKind::Video };
-        egui::Grid::new(("fx_grid", audio)).num_columns(4).striped(true).show(ui, |ui| {
-            for k in list {
-                let id = egui::Id::new(("fx", k as u32));
-                ui.dnd_drag_source(id, DndPayload::Fx(k), |ui| {
-                    ui.label(format!("✨ {}", k.name()));
-                });
-                let sel_ev: Vec<Id> = self
-                    .sel_events
-                    .iter()
-                    .filter(|id| self.project.find_event(**id).map(|(t, _)| self.project.tracks[t].kind == want_kind).unwrap_or(false))
-                    .cloned()
-                    .collect();
-                if ui.add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos")).clicked() {
-                    self.checkpoint();
-                    for id in &sel_ev {
-                        self.project.event_mut(*id).unwrap().fx.push(FxInstance::new(k));
+        let list: Vec<FxKind> = if audio {
+            FxKind::AUDIO.to_vec()
+        } else {
+            FxKind::VIDEO.to_vec()
+        };
+        let want_kind = if audio {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        };
+        egui::Grid::new(("fx_grid", audio))
+            .num_columns(4)
+            .striped(true)
+            .show(ui, |ui| {
+                for k in list {
+                    let id = egui::Id::new(("fx", k as u32));
+                    ui.dnd_drag_source(id, DndPayload::Fx(k), |ui| {
+                        ui.label(format!("✨ {}", k.name()));
+                    });
+                    let sel_ev: Vec<Id> = self
+                        .sel_events
+                        .iter()
+                        .filter(|id| {
+                            self.project
+                                .find_event(**id)
+                                .map(|(t, _)| self.project.tracks[t].kind == want_kind)
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+                    if ui
+                        .add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos"))
+                        .clicked()
+                    {
+                        self.checkpoint();
+                        for id in &sel_ev {
+                            if let Some(ev) = self.project.event_mut(*id) {
+                                ev.fx.push(FxInstance::new(k));
+                            }
+                        }
+                        self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
+                        self.changed();
                     }
-                    self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
-                    self.changed();
-                }
-                let tr = self.sel_track.filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
-                if ui.add_enabled(tr.is_some(), egui::Button::new("Trilha")).clicked() {
-                    let t = tr.unwrap();
-                    self.checkpoint();
-                    self.project.tracks[t].fx.push(FxInstance::new(k));
-                    self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
-                    self.changed();
-                }
-                if ui.button("Master").clicked() {
-                    self.checkpoint();
-                    if audio {
-                        self.project.master.fx.push(FxInstance::new(k));
-                        self.dlg.fx_target = Some(FxTarget::MasterAudio);
-                    } else {
-                        self.project.master.video_fx.push(FxInstance::new(k));
-                        self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                    let tr = self
+                        .sel_track
+                        .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
+                    if let (true, Some(t)) = (
+                        ui.add_enabled(tr.is_some(), egui::Button::new("Trilha"))
+                            .clicked(),
+                        tr,
+                    ) {
+                        self.checkpoint();
+                        self.project.tracks[t].fx.push(FxInstance::new(k));
+                        self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
+                        self.changed();
                     }
-                    self.changed();
+                    if ui.button("Master").clicked() {
+                        self.checkpoint();
+                        if audio {
+                            self.project.master.fx.push(FxInstance::new(k));
+                            self.dlg.fx_target = Some(FxTarget::MasterAudio);
+                        } else {
+                            self.project.master.video_fx.push(FxInstance::new(k));
+                            self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                        }
+                        self.changed();
+                    }
+                    ui.end_row();
                 }
-                ui.end_row();
-            }
-        });
+            });
     }
 
     fn generators_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Arraste um gerador para a timeline ou clique para inserir no cursor.").small().weak());
+        ui.label(
+            egui::RichText::new(
+                "Arraste um gerador para a timeline ou clique para inserir no cursor.",
+            )
+            .small()
+            .weak(),
+        );
         ui.separator();
         let presets: Vec<(&str, GenSpec)> = vec![
             ("Texto simples", GenSpec::Text(TextSpec::default())),
@@ -422,8 +544,18 @@ impl App {
                     ..TextSpec::default()
                 }),
             ),
-            ("Cor sólida (preto)", GenSpec::SolidColor { color: [0.0, 0.0, 0.0, 1.0] }),
-            ("Cor sólida (branco)", GenSpec::SolidColor { color: [1.0, 1.0, 1.0, 1.0] }),
+            (
+                "Cor sólida (preto)",
+                GenSpec::SolidColor {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                },
+            ),
+            (
+                "Cor sólida (branco)",
+                GenSpec::SolidColor {
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ),
             (
                 "Gradiente linear",
                 GenSpec::Gradient {
@@ -451,19 +583,32 @@ impl App {
                 },
             ),
             ("Barras de cor", GenSpec::ColorBars),
-            ("Ruído (estático)", GenSpec::Noise { mono: true, animated: true }),
+            (
+                "Ruído (estático)",
+                GenSpec::Noise {
+                    mono: true,
+                    animated: true,
+                },
+            ),
         ];
-        egui::Grid::new("gen_grid").num_columns(2).striped(true).show(ui, |ui| {
-            for (i, (name, spec)) in presets.into_iter().enumerate() {
-                ui.dnd_drag_source(egui::Id::new(("gen", i)), DndPayload::Generator(spec.clone()), |ui| {
-                    ui.label(format!("🖼 {name}"));
-                });
-                if ui.button("Inserir no cursor").clicked() {
-                    self.insert_generated(spec);
+        egui::Grid::new("gen_grid")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                for (i, (name, spec)) in presets.into_iter().enumerate() {
+                    ui.dnd_drag_source(
+                        egui::Id::new(("gen", i)),
+                        DndPayload::Generator(spec.clone()),
+                        |ui| {
+                            ui.label(format!("🖼 {name}"));
+                        },
+                    );
+                    if ui.button("Inserir no cursor").clicked() {
+                        self.insert_generated(spec);
+                    }
+                    ui.end_row();
                 }
-                ui.end_row();
-            }
-        });
+            });
     }
 
     // -----------------------------------------------------------------
@@ -494,13 +639,19 @@ impl App {
                         });
                         let t = &mut self.project.tracks[ti];
                         ui.horizontal(|ui| {
-                            let r = ui.add(egui::Slider::new(&mut t.volume_db, -60.0..=12.0).vertical().show_value(false));
+                            let r = ui.add(
+                                egui::Slider::new(&mut t.volume_db, -60.0..=12.0)
+                                    .vertical()
+                                    .show_value(false),
+                            );
                             changed |= r.changed();
                             let (mr, _) = ui.allocate_exact_size(vec2(12.0, 110.0), Sense::hover());
                             draw_meter(ui.painter(), mr, lv);
                         });
                         ui.label(egui::RichText::new(format!("{:+.1} dB", t.volume_db)).small());
-                        changed |= ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false)).changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false))
+                            .changed();
                         ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
                         if changed {
                             self.changed();
@@ -519,14 +670,28 @@ impl App {
                     let mut changed = false;
                     ui.horizontal(|ui| {
                         changed |= ui
-                            .add(egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0).vertical().show_value(false))
+                            .add(
+                                egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
+                                    .vertical()
+                                    .show_value(false),
+                            )
                             .changed();
                         let (mr, _) = ui.allocate_exact_size(vec2(16.0, 110.0), Sense::hover());
                         draw_meter(ui.painter(), mr, self.master_hold);
                     });
-                    ui.label(egui::RichText::new(format!("{:+.1} dB", self.project.master.volume_db)).small());
+                    ui.label(
+                        egui::RichText::new(format!("{:+.1} dB", self.project.master.volume_db))
+                            .small(),
+                    );
                     let pk = lin_to_db(self.master_hold[0].max(self.master_hold[1]));
-                    ui.label(egui::RichText::new(if pk < -100.0 { "pico: -inf".into() } else { format!("pico: {pk:.1} dB") }).small());
+                    ui.label(
+                        egui::RichText::new(if pk < -100.0 {
+                            "pico: -inf".into()
+                        } else {
+                            format!("pico: {pk:.1} dB")
+                        })
+                        .small(),
+                    );
                     if changed {
                         self.changed();
                     }
@@ -544,7 +709,12 @@ impl App {
             ui.label("Os escopos são calculados a partir do quadro da prévia...");
             return;
         };
-        let names = ["Histograma (RGB + luma)", "Forma de onda (luma)", "Vectorscope", "RGB Parade"];
+        let names = [
+            "Histograma (RGB + luma)",
+            "Forma de onda (luma)",
+            "Vectorscope",
+            "RGB Parade",
+        ];
         let avail = ui.available_width();
         let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
         egui::Grid::new("scopes").num_columns(2).show(ui, |ui| {

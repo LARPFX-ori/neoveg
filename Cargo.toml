@@ -1,8 +1,8 @@
-﻿[package]
+[package]
 name = "nvov"
 version = "0.1.0"
 edition = "2021"
-description = "NVOV - editor de vÃ­deo nÃ£o-linear em Rust puro, inspirado no fluxo de trabalho do VEGAS Pro"
+description = "Neoveg - editor de vídeo não-linear em Rust puro, com a semântica de edição do VEGAS Pro"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -20,9 +20,16 @@ serde_json = "1"
 ab_glyph = "0.2"
 rayon = "1"
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[lints.rust]
+# AGENTS.md §0.3: unsafe proibido fora de módulos de fronteira FFI nomeados.
+unsafe_code = "forbid"
 
 [profile.dev]
 opt-level = 1
+# AGENTS.md §0.7: o hook de pânico e o isolamento por catch_unwind exigem unwind.
+panic = "unwind"
 
 [profile.dev.package."*"]
 opt-level = 3
@@ -31,3 +38,4 @@ opt-level = 3
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+panic = "unwind"

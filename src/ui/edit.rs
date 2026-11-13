@@ -12,7 +12,10 @@ impl App {
         if self.opts.ignore_grouping {
             return ids.clone();
         }
-        let groups: HashSet<Id> = ids.iter().filter_map(|id| self.project.event(*id).and_then(|e| e.group)).collect();
+        let groups: HashSet<Id> = ids
+            .iter()
+            .filter_map(|id| self.project.event(*id).and_then(|e| e.group))
+            .collect();
         let mut out = ids.clone();
         if groups.is_empty() {
             return out;
@@ -72,7 +75,12 @@ impl App {
         self.checkpoint();
         let base_track = self.sel_track.unwrap_or(0);
         let t0 = self.cursor;
-        let span = self.clipboard.iter().map(|c| c.ev.end()).fold(0.0, f64::max) - self.clip_base;
+        let span = self
+            .clipboard
+            .iter()
+            .map(|c| c.ev.end())
+            .fold(0.0, f64::max)
+            - self.clip_base;
         let mut group_map: HashMap<Id, Id> = HashMap::new();
         let mut new_sel = HashSet::new();
         let items = self.clipboard.clone();
@@ -122,12 +130,17 @@ impl App {
         let ids = self.expand_groups(&self.sel_events.clone());
         let ripple = self.opts.auto_ripple;
         for t in &mut self.project.tracks {
-            let removed: Vec<(f64, f64)> = t.events.iter().filter(|e| ids.contains(&e.id)).map(|e| (e.start, e.length)).collect();
+            let removed: Vec<(f64, f64)> = t
+                .events
+                .iter()
+                .filter(|e| ids.contains(&e.id))
+                .map(|e| (e.start, e.length))
+                .collect();
             t.events.retain(|e| !ids.contains(&e.id));
             if ripple {
                 // processa do último para o primeiro
                 let mut removed = removed;
-                removed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                removed.sort_by(|a, b| b.0.total_cmp(&a.0));
                 for (start, len) in removed {
                     for e in &mut t.events {
                         if e.start >= start + len - 1e-9 {
@@ -158,7 +171,12 @@ impl App {
         };
         let targets: Vec<Id> = targets
             .into_iter()
-            .filter(|id| self.project.event(*id).map(|e| e.start + 1e-6 < t && e.end() - 1e-6 > t && !e.locked).unwrap_or(false))
+            .filter(|id| {
+                self.project
+                    .event(*id)
+                    .map(|e| e.start + 1e-6 < t && e.end() - 1e-6 > t && !e.locked)
+                    .unwrap_or(false)
+            })
             .collect();
         if targets.is_empty() {
             return;
@@ -167,7 +185,9 @@ impl App {
         let mut group_map: HashMap<Id, Id> = HashMap::new();
         let mut new_sel = HashSet::new();
         for id in targets {
-            let (ti, ei) = self.project.find_event(id).unwrap();
+            let Some((ti, ei)) = self.project.find_event(id) else {
+                continue;
+            };
             let e = &mut self.project.tracks[ti].events[ei];
             let mut right = e.clone();
             let left_len = t - e.start;
@@ -193,7 +213,9 @@ impl App {
                 k.t -= left_len;
             }
             right.pan_crop.keys.retain(|k| k.t >= -1e-9 || true);
-            right.group = right.group.map(|g| *group_map.entry(g).or_insert_with(new_id));
+            right.group = right
+                .group
+                .map(|g| *group_map.entry(g).or_insert_with(new_id));
             right.fx = right
                 .fx
                 .iter()
@@ -387,7 +409,7 @@ impl App {
         let Some(ti) = self.sel_track else { return };
         self.checkpoint();
         let t = &mut self.project.tracks[ti];
-        t.events.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        t.events.sort_by(|a, b| a.start.total_cmp(&b.start));
         let mut pos = t.events.first().map(|e| e.start).unwrap_or(0.0);
         for e in &mut t.events {
             if e.start > pos {
@@ -465,8 +487,14 @@ impl App {
     /// depende da trilha ser de áudio ou vídeo.
     pub fn toggle_envelope_for_selected(&mut self, audio_kind: EnvKind, video_kind: EnvKind) {
         let Some(ti) = self.sel_track else { return };
-        let Some(track) = self.project.tracks.get_mut(ti) else { return };
-        let kind = if track.kind == TrackKind::Audio { audio_kind } else { video_kind };
+        let Some(track) = self.project.tracks.get_mut(ti) else {
+            return;
+        };
+        let kind = if track.kind == TrackKind::Audio {
+            audio_kind
+        } else {
+            video_kind
+        };
         if let Some(e) = track.envelopes.iter_mut().find(|e| e.kind == kind) {
             e.visible = !e.visible;
         } else {
@@ -504,8 +532,12 @@ impl App {
     /// Congela o quadro sob o cursor: divide e cria um evento de imagem
     /// parada (velocidade 0) de 2 segundos.
     pub fn freeze_frame(&mut self) {
-        let Some(id) = self.sel_events.iter().next().cloned() else { return };
-        let Some((ti, ei)) = self.project.find_event(id) else { return };
+        let Some(id) = self.sel_events.iter().next().cloned() else {
+            return;
+        };
+        let Some((ti, ei)) = self.project.find_event(id) else {
+            return;
+        };
         if self.project.tracks[ti].kind != TrackKind::Video {
             return;
         }
@@ -561,7 +593,11 @@ impl App {
         }
         self.checkpoint();
         self.project.tracks.remove(ti);
-        self.sel_track = if self.project.tracks.is_empty() { None } else { Some(ti.min(self.project.tracks.len() - 1)) };
+        self.sel_track = if self.project.tracks.is_empty() {
+            None
+        } else {
+            Some(ti.min(self.project.tracks.len() - 1))
+        };
         self.changed();
     }
 
@@ -583,7 +619,11 @@ impl App {
 
     pub fn move_track(&mut self, ti: usize, up: bool) {
         let n = self.project.tracks.len();
-        let to = if up { ti.checked_sub(1) } else { (ti + 1 < n).then_some(ti + 1) };
+        let to = if up {
+            ti.checked_sub(1)
+        } else {
+            (ti + 1 < n).then_some(ti + 1)
+        };
         if let Some(to) = to {
             self.checkpoint();
             self.project.tracks.swap(ti, to);
@@ -594,16 +634,30 @@ impl App {
 
     /// Remove mídias do projeto que não são usadas por nenhum evento.
     pub fn remove_unused_media(&mut self) {
-        let used: HashSet<Id> = self.project.tracks.iter().flat_map(|t| t.events.iter().map(|e| e.media_id)).collect();
+        let used: HashSet<Id> = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter().map(|e| e.media_id))
+            .collect();
         let n0 = self.project.media.len();
         self.checkpoint();
-        let removed: Vec<Id> = self.project.media.iter().filter(|m| !used.contains(&m.id)).map(|m| m.id).collect();
+        let removed: Vec<Id> = self
+            .project
+            .media
+            .iter()
+            .filter(|m| !used.contains(&m.id))
+            .map(|m| m.id)
+            .collect();
         self.project.media.retain(|m| used.contains(&m.id));
         for id in removed {
             self.media.remove(id);
             self.thumbs.remove(&id);
         }
-        self.set_status(format!("{} mídia(s) removida(s)", n0 - self.project.media.len()));
+        self.set_status(format!(
+            "{} mídia(s) removida(s)",
+            n0 - self.project.media.len()
+        ));
         self.changed();
     }
 }

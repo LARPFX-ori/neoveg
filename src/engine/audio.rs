@@ -82,12 +82,21 @@ impl Mixer {
 
     fn run_fx(&mut self, fx: &FxInstance, buf: &mut [f32], t: f64) {
         let sr = self.sr;
-        let st = self.states.entry(fx.id).or_insert_with(|| FxState::new(fx.kind, sr));
+        let st = self
+            .states
+            .entry(fx.id)
+            .or_insert_with(|| FxState::new(fx.kind, sr));
         afx::process(fx, st, sr, buf, t);
     }
 
     /// Mixa `out.len()/2` quadros a partir da amostra `start` (na taxa `sr`).
-    pub fn process(&mut self, p: &Project, audio: &HashMap<Id, Arc<AudioData>>, start: i64, out: &mut [f32]) {
+    pub fn process(
+        &mut self,
+        p: &Project,
+        audio: &HashMap<Id, Arc<AudioData>>,
+        start: i64,
+        out: &mut [f32],
+    ) {
         let n = out.len() / 2;
         let sr = self.sr as f64;
         let t0 = start as f64 / sr;
@@ -115,8 +124,12 @@ impl Mixer {
                 if e.mute || e.end() <= t0 || e.start >= t1 {
                     continue;
                 }
-                let Some(m) = p.media(e.media_id) else { continue };
-                let Some(a) = audio.get(&e.media_id) else { continue };
+                let Some(m) = p.media(e.media_id) else {
+                    continue;
+                };
+                let Some(a) = audio.get(&e.media_id) else {
+                    continue;
+                };
                 let dur = m.duration.or(Some(a.duration()));
                 let (fi, fo) = effective_fades(track, ei);
                 let g = db_to_lin(e.gain_db);
@@ -126,7 +139,9 @@ impl Mixer {
                     if !e.contains(t) {
                         continue;
                     }
-                    let Some(mt) = e.media_time(t, dur) else { continue };
+                    let Some(mt) = e.media_time(t, dur) else {
+                        continue;
+                    };
                     let (l, r) = a.sample(mt);
                     let k = g * fade_gain(e, &fi, &fo, t);
                     ev_buf[i * 2] = l * k;

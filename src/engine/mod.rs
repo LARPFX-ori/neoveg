@@ -40,14 +40,20 @@ impl Frame {
         if x < 0 || y < 0 || x >= self.w as isize || y >= self.h as isize {
             return [0.0; 4];
         }
-        self.px[y as usize * self.w + x as usize]
+        self.px
+            .get(y as usize * self.w + x as usize)
+            .copied()
+            .unwrap_or([0.0; 4])
     }
 
     #[inline]
     pub fn get_clamped(&self, x: isize, y: isize) -> [f32; 4] {
-        let x = x.clamp(0, self.w as isize - 1) as usize;
-        let y = y.clamp(0, self.h as isize - 1) as usize;
-        self.px[y * self.w + x]
+        if self.w == 0 || self.h == 0 {
+            return [0.0; 4];
+        }
+        let x = x.max(0).min(self.w as isize - 1) as usize;
+        let y = y.max(0).min(self.h as isize - 1) as usize;
+        self.px.get(y * self.w + x).copied().unwrap_or([0.0; 4])
     }
 
     /// Amostragem bilinear (coordenadas em pixels, centro do pixel em +0.5).
@@ -86,41 +92,48 @@ impl Frame {
 
     /// Composição "over" (alfa da origem).
     pub fn over(&mut self, top: &Frame) {
-        self.px.par_iter_mut().zip(top.px.par_iter()).for_each(|(d, s)| {
-            let ia = 1.0 - s[3];
-            for k in 0..4 {
-                d[k] = s[k] + d[k] * ia;
-            }
-        });
+        self.px
+            .par_iter_mut()
+            .zip(top.px.par_iter())
+            .for_each(|(d, s)| {
+                let ia = 1.0 - s[3];
+                for k in 0..4 {
+                    d[k] = s[k] + d[k] * ia;
+                }
+            });
     }
 
     /// Converte para RGBA 8 bits (não pré-multiplicado).
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.w * self.h * 4];
-        out.par_chunks_mut(4).zip(self.px.par_iter()).for_each(|(o, p)| {
-            let a = p[3].clamp(0.0, 1.0);
-            let inv = if a > 1e-6 { 1.0 / a } else { 0.0 };
-            o[0] = to8(p[0] * inv);
-            o[1] = to8(p[1] * inv);
-            o[2] = to8(p[2] * inv);
-            o[3] = to8(a);
-        });
+        out.par_chunks_mut(4)
+            .zip(self.px.par_iter())
+            .for_each(|(o, p)| {
+                let a = p[3].clamp(0.0, 1.0);
+                let inv = if a > 1e-6 { 1.0 / a } else { 0.0 };
+                o[0] = to8(p[0] * inv);
+                o[1] = to8(p[1] * inv);
+                o[2] = to8(p[2] * inv);
+                o[3] = to8(a);
+            });
         out
     }
 
     /// Converte para RGB 8 bits composto sobre preto (saída final).
     pub fn to_rgb8_opaque(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.w * self.h * 3];
-        out.par_chunks_mut(3).zip(self.px.par_iter()).for_each(|(o, p)| {
-            o[0] = to8(p[0]);
-            o[1] = to8(p[1]);
-            o[2] = to8(p[2]);
-        });
+        out.par_chunks_mut(3)
+            .zip(self.px.par_iter())
+            .for_each(|(o, p)| {
+                o[0] = to8(p[0]);
+                o[1] = to8(p[1]);
+                o[2] = to8(p[2]);
+            });
         out
     }
 
-    pub fn to_image(&self) -> RgbaImage {
-        RgbaImage::from_raw(self.w as u32, self.h as u32, self.to_rgba8()).unwrap()
+    pub fn to_image(&self) -> Option<RgbaImage> {
+        RgbaImage::from_raw(self.w as u32, self.h as u32, self.to_rgba8())
     }
 }
 

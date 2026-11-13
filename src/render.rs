@@ -6,6 +6,7 @@ use crate::media::avi::AviWriter;
 use crate::media::y4m::Y4mWriter;
 use crate::media::MediaCache;
 use crate::model::Project;
+use crate::util::lock;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::fs::File;
@@ -24,7 +25,12 @@ pub enum RenderFormat {
 }
 
 impl RenderFormat {
-    pub const ALL: [RenderFormat; 4] = [RenderFormat::AviMjpeg, RenderFormat::PngSequence, RenderFormat::Y4m, RenderFormat::Wav];
+    pub const ALL: [RenderFormat; 4] = [
+        RenderFormat::AviMjpeg,
+        RenderFormat::PngSequence,
+        RenderFormat::Y4m,
+        RenderFormat::Wav,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             RenderFormat::AviMjpeg => "AVI (Motion-JPEG + PCM)",
@@ -83,20 +89,31 @@ impl RenderProgress {
 
 pub fn spawn(project: Project, media: Arc<MediaCache>, s: RenderSettings) -> Arc<RenderProgress> {
     let prog = Arc::new(RenderProgress::default());
-    *prog.started.lock().unwrap() = Some(Instant::now());
+    *prog
+        .started
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
     let pr = prog.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("render".into())
         .spawn(move || {
             let t0 = Instant::now();
-            let r = run(&project, &media, &s, &pr);
-            *pr.elapsed.lock().unwrap() = t0.elapsed().as_secs_f64();
+            // §0.6: um pânico no render vira erro e o job termina (nunca fica "em execução")
+            let r = match crate::util::guard("renderização", || run(&project, &media, &s, &pr)) {
+                Ok(r) => r.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e),
+            };
+            *lock(&pr.elapsed) = t0.elapsed().as_secs_f64();
             if let Err(e) = r {
-                *pr.error.lock().unwrap() = Some(format!("{e:#}"));
+                crate::util::log_error(&format!("renderização falhou: {e}"));
+                *lock(&pr.error) = Some(e);
             }
             pr.finished.store(true, Ordering::SeqCst);
-        })
-        .expect("thread de render");
+        });
+    if let Err(e) = spawned {
+        *lock(&prog.error) = Some(format!("não foi possível iniciar a renderização: {e}"));
+        prog.finished.store(true, Ordering::SeqCst);
+    }
     prog
 }
 
@@ -109,7 +126,9 @@ pub struct WavWriter {
 
 impl WavWriter {
     pub fn create(path: &Path, sr: u32, bits: WavBits) -> Result<Self> {
-        let mut out = BufWriter::new(File::create(path).with_context(|| format!("criando {}", path.display()))?);
+        let mut out = BufWriter::new(
+            File::create(path).with_context(|| format!("criando {}", path.display()))?,
+        );
         let (fmt, bps): (u16, u16) = match bits {
             WavBits::Pcm16 => (1, 16),
             WavBits::Pcm24 => (1, 24),
@@ -128,7 +147,11 @@ impl WavWriter {
         out.write_all(&bps.to_le_bytes())?;
         out.write_all(b"data")?;
         out.write_all(&0u32.to_le_bytes())?;
-        Ok(WavWriter { out, bits, data_bytes: 0 })
+        Ok(WavWriter {
+            out,
+            bits,
+            data_bytes: 0,
+        })
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<()> {
@@ -166,7 +189,9 @@ impl WavWriter {
 }
 
 fn to_i16(s: &[f32]) -> Vec<i16> {
-    s.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16).collect()
+    s.iter()
+        .map(|v| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16)
+        .collect()
 }
 
 fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgress) -> Result<()> {
@@ -196,7 +221,8 @@ fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgres
             mixer.process(p, &am, pos, &mut buf[..n * 2]);
             wav.write(&buf[..n * 2])?;
             pos += n as i64;
-            prog.done.store((pos - sample_at(0)) as u64, Ordering::Relaxed);
+            prog.done
+                .store((pos - sample_at(0)) as u64, Ordering::Relaxed);
         }
         return wav.finish();
     }
@@ -211,18 +237,36 @@ fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgres
         Y4m(Y4mWriter),
     }
     let mut sink = match s.format {
-        RenderFormat::AviMjpeg => Sink::Avi(AviWriter::create(&s.path, w as u32, h as u32, fps, if has_audio { Some(sr) } else { None })?),
+        RenderFormat::AviMjpeg => Sink::Avi(AviWriter::create(
+            &s.path,
+            w as u32,
+            h as u32,
+            fps,
+            if has_audio { Some(sr) } else { None },
+        )?),
         RenderFormat::PngSequence => {
-            let dir = s.path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-            let stem = s.path.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "quadro".into());
+            let dir = s
+                .path
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let stem = s
+                .path
+                .file_stem()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_else(|| "quadro".into());
             Sink::Png(dir, stem)
         }
         RenderFormat::Y4m => Sink::Y4m(Y4mWriter::create(&s.path, w as u32, h as u32, fps)?),
-        RenderFormat::Wav => unreachable!(),
+        RenderFormat::Wav => bail!("formato de vídeo esperado"),
     };
     // WAV separado para formatos sem áudio embutido
     let mut side_wav = if has_audio && s.format != RenderFormat::AviMjpeg {
-        Some(WavWriter::create(&s.path.with_extension("wav"), sr, s.wav_bits)?)
+        Some(WavWriter::create(
+            &s.path.with_extension("wav"),
+            sr,
+            s.wav_bits,
+        )?)
     } else {
         None
     };
@@ -245,18 +289,15 @@ fn run(p: &Project, media: &MediaCache, s: &RenderSettings, prog: &RenderProgres
                     RenderFormat::AviMjpeg => {
                         let rgb = f.to_rgb8_opaque();
                         let mut jpg = Vec::with_capacity(w * h / 4);
-                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, quality).encode(
-                            &rgb,
-                            w as u32,
-                            h as u32,
-                            image::ExtendedColorType::Rgb8,
-                        )?;
+                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, quality)
+                            .encode(&rgb, w as u32, h as u32, image::ExtendedColorType::Rgb8)?;
                         Ok(jpg)
                     }
                     RenderFormat::PngSequence => {
                         let rgb = f.to_rgb8_opaque();
                         let mut png = Vec::new();
-                        image::codecs::png::PngEncoder::new(&mut png).write_image_compat(&rgb, w as u32, h as u32)?;
+                        image::codecs::png::PngEncoder::new(&mut png)
+                            .write_image_compat(&rgb, w as u32, h as u32)?;
                         Ok(png)
                     }
                     _ => {
@@ -318,7 +359,16 @@ impl<W: Write> PngCompat for image::codecs::png::PngEncoder<W> {
 
 /// Salva o quadro atual em PNG na resolução do projeto (Save Snapshot).
 pub fn save_snapshot(p: &Project, media: &MediaCache, t: f64, path: &Path) -> Result<()> {
-    let f = render_frame(p, media, t, p.settings.width as usize, p.settings.height as usize);
-    f.to_image().save(path)?;
+    let f = render_frame(
+        p,
+        media,
+        t,
+        p.settings.width as usize,
+        p.settings.height as usize,
+    );
+    let Some(img) = f.to_image() else {
+        bail!("quadro com tamanho inválido")
+    };
+    img.save(path)?;
     Ok(())
 }

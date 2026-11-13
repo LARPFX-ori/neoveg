@@ -1,6 +1,10 @@
 //! Escopos de vídeo (Video Scopes): histograma, forma de onda (waveform),
 //! vectorscope e RGB parade.
 
+// Laços indexam vários buffers paralelos (canais/amostras) ao mesmo tempo;
+// iteradores encadeados deixariam o DSP menos legível.
+#![allow(clippy::needless_range_loop)]
+
 use crate::engine::Frame;
 use eframe::egui::{Color32, ColorImage};
 
@@ -20,7 +24,11 @@ fn add(img: &mut ColorImage, x: usize, y: usize, c: [u8; 3], k: u8) {
     let p = &mut img.pixels[y * w + x];
     let [r, g, b, _] = p.to_array();
     let s = |c: u8| ((c as u16 * k as u16) / 255) as u8;
-    *p = Color32::from_rgb(r.saturating_add(s(c[0])), g.saturating_add(s(c[1])), b.saturating_add(s(c[2])));
+    *p = Color32::from_rgb(
+        r.saturating_add(s(c[0])),
+        g.saturating_add(s(c[1])),
+        b.saturating_add(s(c[2])),
+    );
 }
 
 pub fn compute(f: &Frame) -> ScopeImages {
@@ -36,7 +44,11 @@ pub fn compute(f: &Frame) -> ScopeImages {
     for y in (0..f.h).step_by(step) {
         for x in (0..f.w).step_by(step) {
             let p = f.px[y * f.w + x];
-            let (r, g, b) = (p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0));
+            let (r, g, b) = (
+                p[0].clamp(0.0, 1.0),
+                p[1].clamp(0.0, 1.0),
+                p[2].clamp(0.0, 1.0),
+            );
             let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             hist[0][(r * 255.0) as usize] += 1;
             hist[1][(g * 255.0) as usize] += 1;
@@ -59,13 +71,25 @@ pub fn compute(f: &Frame) -> ScopeImages {
     // histograma
     let (hw, hh) = (256usize, 120usize);
     let mut histogram = img(hw, hh);
-    let maxv = hist.iter().flat_map(|h| h.iter()).cloned().max().unwrap_or(1).max(1) as f32;
+    let maxv = hist
+        .iter()
+        .flat_map(|h| h.iter())
+        .cloned()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
     let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
     for (ci, h) in hist.iter().enumerate() {
         for x in 0..256 {
             let v = ((h[x] as f32 / maxv).sqrt() * (hh - 1) as f32) as usize;
             for y in (hh - 1 - v)..hh {
-                add(&mut histogram, x, y, colors[ci], if ci == 3 { 50 } else { 90 });
+                add(
+                    &mut histogram,
+                    x,
+                    y,
+                    colors[ci],
+                    if ci == 3 { 50 } else { 90 },
+                );
             }
         }
     }
@@ -104,18 +128,42 @@ pub fn compute(f: &Frame) -> ScopeImages {
         let r = a as f32 * std::f32::consts::PI / 180.0;
         let x = (c + r.cos() * (c - 2.0)) as usize;
         let y = (c + r.sin() * (c - 2.0)) as usize;
-        add(&mut vectorscope, x.min(vs - 1), y.min(vs - 1), [255, 255, 255], 60);
+        add(
+            &mut vectorscope,
+            x.min(vs - 1),
+            y.min(vs - 1),
+            [255, 255, 255],
+            60,
+        );
     }
-    for col in [[0.75, 0.0, 0.0], [0.0, 0.75, 0.0], [0.0, 0.0, 0.75], [0.75, 0.75, 0.0], [0.0, 0.75, 0.75], [0.75, 0.0, 0.75]] {
+    for col in [
+        [0.75, 0.0, 0.0],
+        [0.0, 0.75, 0.0],
+        [0.0, 0.0, 0.75],
+        [0.75, 0.75, 0.0],
+        [0.0, 0.75, 0.75],
+        [0.75, 0.0, 0.75],
+    ] {
         let l = 0.2126 * col[0] + 0.7152 * col[1] + 0.0722 * col[2];
         let cb = (col[2] - l) * 0.5389;
         let cr = (col[0] - l) * 0.6350;
         let vx = ((cb + 0.5) * (vs - 1) as f32) as i32;
         let vy = ((0.5 - cr) * (vs - 1) as f32) as i32;
         for d in -3..=3 {
-            for (xx, yy) in [(vx + d, vy - 3), (vx + d, vy + 3), (vx - 3, vy + d), (vx + 3, vy + d)] {
+            for (xx, yy) in [
+                (vx + d, vy - 3),
+                (vx + d, vy + 3),
+                (vx - 3, vy + d),
+                (vx + 3, vy + d),
+            ] {
                 if xx >= 0 && yy >= 0 && (xx as usize) < vs && (yy as usize) < vs {
-                    add(&mut vectorscope, xx as usize, yy as usize, [255, 200, 80], 120);
+                    add(
+                        &mut vectorscope,
+                        xx as usize,
+                        yy as usize,
+                        [255, 200, 80],
+                        120,
+                    );
                 }
             }
         }

@@ -1,5 +1,9 @@
 //! Efeitos de vídeo (Video FX).
 
+// Laços indexam vários buffers paralelos (canais/amostras) ao mesmo tempo;
+// iteradores encadeados deixariam o DSP menos legível.
+#![allow(clippy::needless_range_loop)]
+
 use super::{luma, smoothstep, Frame};
 use crate::model::{FxInstance, FxKind};
 use rayon::prelude::*;
@@ -20,7 +24,11 @@ fn map_color<F: Fn([f32; 3]) -> [f32; 3] + Sync>(f: &mut Frame, func: F) {
 }
 
 fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 fn saturate(c: [f32; 3], s: f32) -> [f32; 3] {
@@ -231,11 +239,13 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: f64) {
             let amt = v[0];
             let mut blur = f.clone();
             gaussian(&mut blur, (hpx * 0.0015).max(1.0), (hpx * 0.0015).max(1.0));
-            f.px.par_iter_mut().zip(blur.px.par_iter()).for_each(|(p, b)| {
-                for k in 0..3 {
-                    p[k] = (p[k] + amt * (p[k] - b[k])).clamp(0.0, p[3]);
-                }
-            });
+            f.px.par_iter_mut()
+                .zip(blur.px.par_iter())
+                .for_each(|(p, b)| {
+                    for k in 0..3 {
+                        p[k] = crate::util::clampf(p[k] + amt * (p[k] - b[k]), 0.0, p[3]);
+                    }
+                });
         }
         FxKind::Vignette => {
             let (amt, rad, soft) = (v[0], v[1], v[2]);
@@ -245,7 +255,8 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: f64) {
                 let ny = (y as f32 + 0.5) / h as f32 - 0.5;
                 for (x, p) in row.iter_mut().enumerate() {
                     let nx = ((x as f32 + 0.5) / w as f32 - 0.5) * aspect;
-                    let d = (nx * nx + ny * ny).sqrt() / (0.5 * (aspect * aspect + 1.0).sqrt()) * 1.0;
+                    let d =
+                        (nx * nx + ny * ny).sqrt() / (0.5 * (aspect * aspect + 1.0).sqrt()) * 1.0;
                     let k = 1.0 - amt * smoothstep(rad * 0.7, rad * 0.7 + soft, d);
                     for c in p.iter_mut().take(3) {
                         *c *= k;
@@ -348,12 +359,14 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: f64) {
             });
             let r = rad / 100.0 * hpx;
             gaussian(&mut bright, r, r);
-            f.px.par_iter_mut().zip(bright.px.par_iter()).for_each(|(p, b)| {
-                for k in 0..3 {
-                    p[k] = (p[k] + b[k] * inten).min(1.0);
-                }
-                p[3] = p[3].max(p[0]).max(p[1]).max(p[2]);
-            });
+            f.px.par_iter_mut()
+                .zip(bright.px.par_iter())
+                .for_each(|(p, b)| {
+                    for k in 0..3 {
+                        p[k] = (p[k] + b[k] * inten).min(1.0);
+                    }
+                    p[3] = p[3].max(p[0]).max(p[1]).max(p[2]);
+                });
         }
         FxKind::FilmGrain => {
             let (amt, mono) = (v[0], v[1] > 0.5);
@@ -361,12 +374,20 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: f64) {
             let w = f.w;
             f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
                 for (x, p) in row.iter_mut().enumerate() {
-                    let hsh = hash((x as u32).wrapping_mul(7919) ^ (y as u32).wrapping_mul(104_729) ^ seed.wrapping_mul(1_299_709));
+                    let hsh = hash(
+                        (x as u32).wrapping_mul(7919)
+                            ^ (y as u32).wrapping_mul(104_729)
+                            ^ seed.wrapping_mul(1_299_709),
+                    );
                     let n = |s: u32| ((hsh >> s) & 0xff) as f32 / 255.0 - 0.5;
-                    let (a, b, c) = if mono { (n(0), n(0), n(0)) } else { (n(0), n(8), n(16)) };
-                    p[0] = (p[0] + a * amt * p[3]).clamp(0.0, p[3]);
-                    p[1] = (p[1] + b * amt * p[3]).clamp(0.0, p[3]);
-                    p[2] = (p[2] + c * amt * p[3]).clamp(0.0, p[3]);
+                    let (a, b, c) = if mono {
+                        (n(0), n(0), n(0))
+                    } else {
+                        (n(0), n(8), n(16))
+                    };
+                    p[0] = crate::util::clampf(p[0] + a * amt * p[3], 0.0, p[3]);
+                    p[1] = crate::util::clampf(p[1] + b * amt * p[3], 0.0, p[3]);
+                    p[2] = crate::util::clampf(p[2] + c * amt * p[3], 0.0, p[3]);
                 }
             });
         }

@@ -181,9 +181,13 @@ pub struct App {
     allow_close: bool,
     pub shuttle: f64,
     pub gen_fonts: Vec<String>,
+    last_autosave: Instant,
+    recovery_offer: bool,
 }
 
 const MAX_UNDO: usize = 200;
+/// Intervalo do salvamento automático de recuperação.
+const AUTOSAVE_SECS: u64 = 60;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
@@ -256,12 +260,20 @@ impl App {
             allow_close: false,
             shuttle: 0.0,
             gen_fonts: vec![],
+            last_autosave: Instant::now(),
+            recovery_offer: crate::util::recovery_path().exists(),
         };
+        if let Some(e) = app.preview.error.clone() {
+            app.set_status(e);
+        }
         if let Some(e) = &app.audio.error {
             app.set_status(format!("Áudio: {e} (reprodução sem som)"));
         }
         if let Some(p) = open {
-            if p.extension().map(|e| e.eq_ignore_ascii_case("nvp")).unwrap_or(false) {
+            if p.extension()
+                .map(|e| e.eq_ignore_ascii_case("nvp"))
+                .unwrap_or(false)
+            {
                 app.open_project_path(p);
             } else {
                 app.import_paths(vec![p], Some(0.0));
@@ -277,6 +289,57 @@ impl App {
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.status = s.into();
         self.status_at = Instant::now();
+        if self.status.starts_with("Erro") || self.status.contains("falh") {
+            crate::util::log_error(&self.status);
+        }
+    }
+
+    /// Salvamento automático para recuperação após falha (§0.7).
+    fn autosave(&mut self) {
+        if !self.dirty || self.last_autosave.elapsed().as_secs() < AUTOSAVE_SECS {
+            return;
+        }
+        self.last_autosave = Instant::now();
+        if let Err(e) = crate::util::write_recovery(&self.project) {
+            self.set_status(format!("Falha no salvamento automático: {e}"));
+        }
+    }
+
+    fn recovery_window(&mut self, ctx: &egui::Context) {
+        if !self.recovery_offer {
+            return;
+        }
+        let mut choice = None;
+        egui::Window::new("Recuperar projeto")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Foi encontrado um projeto salvo automaticamente de uma sessão anterior que não terminou normalmente.");
+                ui.horizontal(|ui| {
+                    if ui.button("Recuperar").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Descartar").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                self.recovery_offer = false;
+                let p = crate::util::recovery_path();
+                self.open_project_path(p);
+                self.path = None;
+                self.dirty = true;
+                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
+            }
+            Some(false) => {
+                self.recovery_offer = false;
+                crate::util::clear_recovery();
+            }
+            None => {}
+        }
     }
 
     /// Salva um ponto de desfazer antes de uma modificação.
@@ -311,10 +374,15 @@ impl App {
     }
 
     fn after_history(&mut self) {
-        self.sel_events.retain(|id| self.project.find_event(*id).is_some());
+        self.sel_events
+            .retain(|id| self.project.find_event(*id).is_some());
         if let Some(t) = self.sel_track {
             if t >= self.project.tracks.len() {
-                self.sel_track = if self.project.tracks.is_empty() { None } else { Some(0) };
+                self.sel_track = if self.project.tracks.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
             }
         }
         for m in &self.project.media {
@@ -332,8 +400,13 @@ impl App {
         }
         self.project.sort_events();
         self.snapshot = Arc::new(self.project.clone());
+        crate::util::remember_snapshot(self.snapshot.clone());
         let audio_map = self.media.audio_map();
-        let mut s = self.audio.shared.lock().unwrap();
+        let mut s = self
+            .audio
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         s.project = self.snapshot.clone();
         s.audio = audio_map;
         drop(s);
@@ -345,14 +418,20 @@ impl App {
     // -----------------------------------------------------------------
 
     pub fn is_playing(&self) -> bool {
-        self.audio.shared.lock().unwrap().playing
+        self.audio
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .playing
     }
 
     pub fn play(&mut self) {
         self.sync_snapshot();
         let sr = self.audio.sr as f64;
         let lr = if self.opts.loop_playback {
-            self.project.loop_region.map(|(a, b)| ((a * sr) as i64, (b * sr) as i64))
+            self.project
+                .loop_region
+                .map(|(a, b)| ((a * sr) as i64, (b * sr) as i64))
         } else {
             None
         };
@@ -363,7 +442,11 @@ impl App {
             }
         }
         self.play_start = self.cursor;
-        let mut s = self.audio.shared.lock().unwrap();
+        let mut s = self
+            .audio
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         s.loop_range = lr.filter(|(a, b)| b > a);
         s.pos = (start * sr) as i64;
         s.speed = 1.0;
@@ -376,7 +459,11 @@ impl App {
         self.sync_snapshot();
         let sr = self.audio.sr as f64;
         let playing = self.is_playing();
-        let mut s = self.audio.shared.lock().unwrap();
+        let mut s = self
+            .audio
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !playing {
             s.pos = (self.cursor * sr) as i64;
         }
@@ -390,7 +477,11 @@ impl App {
     /// Para a reprodução. `keep` = manter o cursor onde parou (pausa).
     pub fn stop(&mut self, keep: bool) {
         let pos = {
-            let mut s = self.audio.shared.lock().unwrap();
+            let mut s = self
+                .audio
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.playing = false;
             s.speed = 1.0;
             s.pos
@@ -412,7 +503,11 @@ impl App {
     }
 
     pub fn play_pos(&self) -> f64 {
-        let s = self.audio.shared.lock().unwrap();
+        let s = self
+            .audio
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (s.pos as f64 / self.audio.sr as f64).max(0.0)
     }
 
@@ -421,7 +516,11 @@ impl App {
         self.cursor = t;
         if self.is_playing() {
             let sr = self.audio.sr as f64;
-            let mut s = self.audio.shared.lock().unwrap();
+            let mut s = self
+                .audio
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.pos = (t * sr) as i64;
             s.mixer.reset();
             self.play_start = t;
@@ -472,19 +571,26 @@ impl App {
     }
 
     pub fn open_project_path(&mut self, path: PathBuf) {
+        // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
         let res = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
-            .and_then(|s| serde_json::from_str::<Project>(&s).map_err(|e| e.to_string()));
+            .and_then(|s| Project::from_json(&s));
         match res {
-            Ok(p) => {
+            Ok((p, fixes)) => {
                 self.stop(false);
-                bump_ids(p.max_id());
+                for f in &fixes {
+                    crate::util::log_warn(&format!("projeto corrigido ao abrir: {f}"));
+                }
                 self.project = p;
                 self.path = Some(path.clone());
                 self.undo.clear();
                 self.redo.clear();
                 self.sel_events.clear();
-                self.sel_track = if self.project.tracks.is_empty() { None } else { Some(0) };
+                self.sel_track = if self.project.tracks.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
                 self.cursor = 0.0;
                 self.thumbs.clear();
                 // recarrega as mídias em segundo plano
@@ -493,15 +599,23 @@ impl App {
                     self.media.remove(m.id);
                     let tx = self.loader_tx.clone();
                     self.loading += 1;
-                    std::thread::spawn(move || {
+                    let spawned = crate::util::spawn("recarregar-midia", move || {
                         let mut m = m;
                         let r = media::load_entry(&mut m).map_err(|e| format!("{e:#}"));
                         let _ = tx.send(LoadMsg::Reloaded(m.id, r));
                     });
+                    if let Err(e) = spawned {
+                        self.loading = self.loading.saturating_sub(1);
+                        self.set_status(e);
+                    }
                 }
                 self.changed();
                 self.dirty = false;
-                self.set_status(format!("Projeto aberto: {}", path.display()));
+                if fixes.is_empty() {
+                    self.set_status(format!("Projeto aberto: {}", path.display()));
+                } else {
+                    self.set_status(format!("Projeto aberto com {} correção(ões) de dados inválidos (veja logs/neoveg.log)", fixes.len()));
+                }
             }
             Err(e) => self.set_status(format!("Erro ao abrir projeto: {e}")),
         }
@@ -518,7 +632,10 @@ impl App {
                 None => return false,
             }
         } else {
-            self.path.clone().unwrap()
+            match self.path.clone() {
+                Some(p) => p,
+                None => return false,
+            }
         };
         self.write_project(&path)
     }
@@ -530,6 +647,7 @@ impl App {
                 Ok(_) => {
                     self.path = Some(path.to_path_buf());
                     self.dirty = false;
+                    crate::util::clear_recovery();
                     self.set_status(format!("Projeto salvo: {}", path.display()));
                     true
                 }
@@ -551,7 +669,11 @@ impl App {
             self.save_project(true);
             return;
         };
-        let stem = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let stem = p
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let base = match stem.rsplit_once('_') {
             Some((b, n)) if n.chars().all(|c| c.is_ascii_digit()) => b.to_string(),
             _ => stem.clone(),
@@ -571,8 +693,9 @@ impl App {
             .add_filter(
                 "Mídia suportada",
                 &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "wav", "mp3", "flac", "ogg", "m4a", "aac",
-                    "aif", "aiff", "caf", "mp4", "mov", "mkv", "webm",
+                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "wav",
+                    "mp3", "flac", "ogg", "m4a", "aac", "aif", "aiff", "caf", "mp4", "mov", "mkv",
+                    "webm",
                 ],
             )
             .add_filter("Todos os arquivos", &["*"])
@@ -590,14 +713,20 @@ impl App {
             let fps = self.project.settings.fps;
             let tx = self.loader_tx.clone();
             self.loading += 1;
-            std::thread::spawn(move || match media::import_sequence(&f, fps) {
-                Ok(i) => {
-                    let _ = tx.send(LoadMsg::Imported(i, None));
-                }
-                Err(e) => {
-                    let _ = tx.send(LoadMsg::Error(format!("{}: {e:#}", f.display())));
+            let spawned = crate::util::spawn("importar-sequencia", move || {
+                match media::import_sequence(&f, fps) {
+                    Ok(i) => {
+                        let _ = tx.send(LoadMsg::Imported(i, None));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(LoadMsg::Error(format!("{}: {e:#}", f.display())));
+                    }
                 }
             });
+            if let Err(e) = spawned {
+                self.loading = self.loading.saturating_sub(1);
+                self.set_status(e);
+            }
         }
     }
 
@@ -612,7 +741,7 @@ impl App {
             let tx = self.loader_tx.clone();
             self.loading += 1;
             let place = t;
-            std::thread::spawn(move || match media::import_file(&p) {
+            let spawned = crate::util::spawn("importar", move || match media::import_file(&p) {
                 Ok(i) => {
                     let _ = tx.send(LoadMsg::Imported(i, place));
                 }
@@ -620,6 +749,10 @@ impl App {
                     let _ = tx.send(LoadMsg::Error(format!("{}: {e:#}", p.display())));
                 }
             });
+            if let Err(e) = spawned {
+                self.loading = self.loading.saturating_sub(1);
+                self.set_status(e);
+            }
             // arquivos múltiplos são colocados em sequência quando chegarem
             if t.is_some() {
                 t = Some(f64::NAN);
@@ -642,7 +775,11 @@ impl App {
                     self.checkpoint();
                     self.project.media.push(imp.item);
                     if let Some(t) = place {
-                        let t = if t.is_nan() { self.end_of_selected_track() } else { t };
+                        let t = if t.is_nan() {
+                            self.end_of_selected_track()
+                        } else {
+                            t
+                        };
                         self.add_media_to_timeline(id, t, self.sel_track);
                     }
                     self.changed();
@@ -676,11 +813,25 @@ impl App {
     }
 
     /// Adiciona uma mídia à timeline no tempo `t` (vídeo e áudio agrupados).
-    pub fn add_media_to_timeline(&mut self, media_id: Id, t: f64, track_hint: Option<usize>) -> Vec<Id> {
-        let Some(m) = self.project.media(media_id).cloned() else { return vec![] };
-        let len = m.duration.unwrap_or(5.0).max(self.project.settings.frame_dur());
+    pub fn add_media_to_timeline(
+        &mut self,
+        media_id: Id,
+        t: f64,
+        track_hint: Option<usize>,
+    ) -> Vec<Id> {
+        let Some(m) = self.project.media(media_id).cloned() else {
+            return vec![];
+        };
+        let len = m
+            .duration
+            .unwrap_or(5.0)
+            .max(self.project.settings.frame_dur());
         let mut created = vec![];
-        let group = if m.has_video && m.has_audio { Some(new_id()) } else { None };
+        let group = if m.has_video && m.has_audio {
+            Some(new_id())
+        } else {
+            None
+        };
         let mut video_track_idx = None;
         if m.has_video {
             let ti = self.find_or_create_track(TrackKind::Video, track_hint);
@@ -717,7 +868,9 @@ impl App {
                     return h;
                 }
             }
-            if let Some(i) = (h..self.project.tracks.len()).find(|&i| self.project.tracks[i].kind == kind) {
+            if let Some(i) =
+                (h..self.project.tracks.len()).find(|&i| self.project.tracks[i].kind == kind)
+            {
                 return i;
             }
         }
@@ -728,7 +881,13 @@ impl App {
     }
 
     pub fn insert_track(&mut self, kind: TrackKind) -> usize {
-        let n = self.project.tracks.iter().filter(|t| t.kind == kind).count() + 1;
+        let n = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == kind)
+            .count()
+            + 1;
         let name = match kind {
             TrackKind::Video => format!("Vídeo {n}"),
             TrackKind::Audio => format!("Áudio {n}"),
@@ -737,8 +896,15 @@ impl App {
         // vídeo: insere acima das trilhas de áudio; áudio: no final
         let idx = match kind {
             TrackKind::Video => match self.sel_track {
-                Some(i) if self.project.tracks.get(i).map(|t| t.kind) == Some(TrackKind::Video) => i,
-                _ => self.project.tracks.iter().position(|t| t.kind == TrackKind::Audio).unwrap_or(self.project.tracks.len()),
+                Some(i) if self.project.tracks.get(i).map(|t| t.kind) == Some(TrackKind::Video) => {
+                    i
+                }
+                _ => self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|t| t.kind == TrackKind::Audio)
+                    .unwrap_or(self.project.tracks.len()),
             },
             TrackKind::Audio => self.project.tracks.len(),
         };
@@ -753,11 +919,16 @@ impl App {
             return Some(t.clone());
         }
         let m = self.project.media(id)?.clone();
-        if !m.has_video || !self.media.contains(id) && !matches!(m.source, MediaSource::Generated(_)) {
+        if !m.has_video
+            || !self.media.contains(id) && !matches!(m.source, MediaSource::Generated(_))
+        {
             return None;
         }
         let img = self.media.thumbnail(&m, 160)?;
-        let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+        let ci = egui::ColorImage::from_rgba_unmultiplied(
+            [img.width() as usize, img.height() as usize],
+            img.as_raw(),
+        );
         let tex = ctx.load_texture(format!("thumb{id}"), ci, egui::TextureOptions::LINEAR);
         self.thumbs.insert(id, tex.clone());
         Some(tex)
@@ -772,9 +943,15 @@ impl App {
         while let Ok(res) = self.preview.rx.try_recv() {
             got = true;
             self.preview_ms = res.render_ms;
+            if let Some(e) = res.error {
+                self.set_status(format!("Prévia: {e}"));
+            }
             match &mut self.preview_tex {
                 Some(t) => t.set(res.image, egui::TextureOptions::LINEAR),
-                None => self.preview_tex = Some(ctx.load_texture("preview", res.image, egui::TextureOptions::LINEAR)),
+                None => {
+                    self.preview_tex =
+                        Some(ctx.load_texture("preview", res.image, egui::TextureOptions::LINEAR))
+                }
             }
             if let Some(sc) = res.scopes {
                 let opts = egui::TextureOptions::NEAREST;
@@ -816,7 +993,6 @@ impl App {
                 w,
                 h,
                 scopes,
-                overlay_safe: self.opts.safe_areas,
             });
             self.last_req = key;
             self.preview_inflight = true;
@@ -901,12 +1077,21 @@ impl App {
             if shift {
                 self.sel_events.clear();
             } else {
-                self.sel_events = self.project.tracks.iter().flat_map(|t| t.events.iter().map(|e| e.id)).collect();
+                self.sel_events = self
+                    .project
+                    .tracks
+                    .iter()
+                    .flat_map(|t| t.events.iter().map(|e| e.id))
+                    .collect();
             }
         }
         if ctrl && pressed(Key::Q) {
             self.checkpoint();
-            self.insert_track(if shift { TrackKind::Video } else { TrackKind::Audio });
+            self.insert_track(if shift {
+                TrackKind::Video
+            } else {
+                TrackKind::Audio
+            });
         }
         if ctrl && pressed(Key::T) {
             self.trim_to_selection();
@@ -916,7 +1101,11 @@ impl App {
         }
         if ctrl && pressed(Key::L) {
             self.opts.auto_ripple = !self.opts.auto_ripple;
-            self.set_status(if self.opts.auto_ripple { "Ripple automático ligado" } else { "Ripple automático desligado" });
+            self.set_status(if self.opts.auto_ripple {
+                "Ripple automático ligado"
+            } else {
+                "Ripple automático desligado"
+            });
         }
         if ctrl {
             if pressed(Key::Home) {
@@ -963,7 +1152,11 @@ impl App {
         }
         if pressed(Key::I) {
             let c = self.cursor;
-            let end = self.time_sel.map(|s| s.1).filter(|e| *e > c).unwrap_or(c + 5.0);
+            let end = self
+                .time_sel
+                .map(|s| s.1)
+                .filter(|e| *e > c)
+                .unwrap_or(c + 5.0);
             self.time_sel = Some((c, end));
             self.project.loop_region = Some((c, end));
         }
@@ -978,7 +1171,10 @@ impl App {
             self.set_cursor(t);
         }
         if pressed(Key::End) {
-            let t = self.time_sel.map(|s| s.1).unwrap_or(self.project.duration());
+            let t = self
+                .time_sel
+                .map(|s| s.1)
+                .unwrap_or(self.project.duration());
             self.set_cursor(t);
         }
         if alt && pressed(Key::ArrowLeft) {
@@ -1002,16 +1198,22 @@ impl App {
             self.tl.zoom_by(0.8, None);
         }
         if pressed(Key::J) {
-            let s = if self.shuttle < 0.0 { (self.shuttle * 2.0).max(-8.0) } else { -1.0 };
+            let s = if self.shuttle < 0.0 {
+                (self.shuttle * 2.0).max(-8.0)
+            } else {
+                -1.0
+            };
             self.shuttle_play(s);
         }
-        if pressed(Key::K) {
-            if self.is_playing() {
-                self.stop(true);
-            }
+        if pressed(Key::K) && self.is_playing() {
+            self.stop(true);
         }
         if pressed(Key::L) {
-            let s = if self.shuttle > 0.0 && self.is_playing() { (self.shuttle * 2.0).min(8.0) } else { 1.0 };
+            let s = if self.shuttle > 0.0 && self.is_playing() {
+                (self.shuttle * 2.0).min(8.0)
+            } else {
+                1.0
+            };
             if s == 1.0 {
                 self.play();
             } else {
@@ -1059,15 +1261,11 @@ impl App {
                 self.toggle_envelope_for_selected(EnvKind::Pan, EnvKind::FadeToColor);
             }
         }
-        if pressed(Key::OpenBracket) {
-            if alt {
-                self.trim_selected_start_to_cursor();
-            }
+        if alt && pressed(Key::OpenBracket) {
+            self.trim_selected_start_to_cursor();
         }
-        if pressed(Key::CloseBracket) {
-            if alt {
-                self.trim_selected_end_to_cursor();
-            }
+        if alt && pressed(Key::CloseBracket) {
+            self.trim_selected_end_to_cursor();
         }
         if pressed(Key::F2) {
             if let Some(id) = self.sel_events.iter().next().cloned() {
@@ -1077,11 +1275,22 @@ impl App {
         if pressed(Key::Backslash) {
             self.tl.center_on(self.cursor);
         }
-        let nums = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        let nums = [
+            Key::Num0,
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ];
         for (i, k) in nums.iter().enumerate() {
             if pressed(*k) {
                 let mut ms: Vec<f64> = self.project.markers.iter().map(|m| m.t).collect();
-                ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                ms.sort_by(|a, b| a.total_cmp(b));
                 let idx = if i == 0 { 9 } else { i - 1 };
                 if let Some(t) = ms.get(idx) {
                     self.set_cursor(*t);
@@ -1095,7 +1304,7 @@ impl App {
         pts.extend(self.project.regions.iter().flat_map(|r| [r.start, r.end]));
         pts.push(0.0);
         pts.push(self.project.duration());
-        pts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        pts.sort_by(|a, b| a.total_cmp(b));
         let c = self.cursor;
         let t = if forward {
             pts.into_iter().find(|t| *t > c + 1e-6)
@@ -1164,11 +1373,23 @@ impl App {
                 }
             });
             ui.menu_button("Editar", |ui| {
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Desfazer   Ctrl+Z")).clicked() {
+                if ui
+                    .add_enabled(
+                        !self.undo.is_empty(),
+                        egui::Button::new("Desfazer   Ctrl+Z"),
+                    )
+                    .clicked()
+                {
                     self.undo();
                     ui.close_menu();
                 }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Refazer    Ctrl+Y")).clicked() {
+                if ui
+                    .add_enabled(
+                        !self.redo.is_empty(),
+                        egui::Button::new("Refazer    Ctrl+Y"),
+                    )
+                    .clicked()
+                {
                     self.redo();
                     ui.close_menu();
                 }
@@ -1185,7 +1406,10 @@ impl App {
                     self.paste(false);
                     ui.close_menu();
                 }
-                if ui.button("Colar inserindo (ripple)  Ctrl+Shift+V").clicked() {
+                if ui
+                    .button("Colar inserindo (ripple)  Ctrl+Shift+V")
+                    .clicked()
+                {
                     self.paste(true);
                     ui.close_menu();
                 }
@@ -1202,7 +1426,10 @@ impl App {
                     self.trim_to_selection();
                     ui.close_menu();
                 }
-                if ui.button("Excluir intervalo selecionado (ripple)").clicked() {
+                if ui
+                    .button("Excluir intervalo selecionado (ripple)")
+                    .clicked()
+                {
                     self.delete_time_range();
                     ui.close_menu();
                 }
@@ -1224,7 +1451,12 @@ impl App {
                     ui.close_menu();
                 }
                 if ui.button("Selecionar todos   Ctrl+A").clicked() {
-                    self.sel_events = self.project.tracks.iter().flat_map(|t| t.events.iter().map(|e| e.id)).collect();
+                    self.sel_events = self
+                        .project
+                        .tracks
+                        .iter()
+                        .flat_map(|t| t.events.iter().map(|e| e.id))
+                        .collect();
                     ui.close_menu();
                 }
                 ui.separator();
@@ -1235,7 +1467,10 @@ impl App {
             });
             ui.menu_button("Exibir", |ui| {
                 for tab in DockTab::ALL {
-                    if ui.selectable_label(self.dock_tab == tab, tab.name()).clicked() {
+                    if ui
+                        .selectable_label(self.dock_tab == tab, tab.name())
+                        .clicked()
+                    {
                         self.dock_tab = tab;
                         ui.close_menu();
                     }
@@ -1247,8 +1482,16 @@ impl App {
                 ui.checkbox(&mut self.opts.safe_areas, "Áreas de segurança na prévia");
                 ui.separator();
                 ui.label("Formato de tempo:");
-                ui.radio_value(&mut self.opts.time_format, TimeFormat::Timecode, "Timecode SMPTE");
-                ui.radio_value(&mut self.opts.time_format, TimeFormat::Seconds, "Tempo (hh:mm:ss.mmm)");
+                ui.radio_value(
+                    &mut self.opts.time_format,
+                    TimeFormat::Timecode,
+                    "Timecode SMPTE",
+                );
+                ui.radio_value(
+                    &mut self.opts.time_format,
+                    TimeFormat::Seconds,
+                    "Tempo (hh:mm:ss.mmm)",
+                );
                 ui.radio_value(&mut self.opts.time_format, TimeFormat::Frames, "Quadros");
             });
             ui.menu_button("Inserir", |ui| {
@@ -1277,7 +1520,9 @@ impl App {
                     ui.close_menu();
                 }
                 if ui.button("Cor sólida").clicked() {
-                    self.insert_generated(GenSpec::SolidColor { color: [0.1, 0.2, 0.5, 1.0] });
+                    self.insert_generated(GenSpec::SolidColor {
+                        color: [0.1, 0.2, 0.5, 1.0],
+                    });
                     ui.close_menu();
                 }
                 ui.separator();
@@ -1302,23 +1547,38 @@ impl App {
                 }
                 ui.separator();
                 let has_sel = !self.sel_events.is_empty();
-                if ui.add_enabled(has_sel, egui::Button::new("Propriedades do evento...")).clicked() {
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Propriedades do evento..."))
+                    .clicked()
+                {
                     self.dlg.event_props = self.sel_events.iter().next().cloned();
                     ui.close_menu();
                 }
-                if ui.add_enabled(has_sel, egui::Button::new("Pan/Crop do evento...")).clicked() {
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Pan/Crop do evento..."))
+                    .clicked()
+                {
                     self.dlg.pan_crop = self.sel_events.iter().next().cloned();
                     ui.close_menu();
                 }
-                if ui.add_enabled(has_sel, egui::Button::new("Efeitos do evento...")).clicked() {
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Efeitos do evento..."))
+                    .clicked()
+                {
                     self.dlg.fx_target = self.sel_events.iter().next().map(|i| FxTarget::Event(*i));
                     ui.close_menu();
                 }
-                if ui.add_enabled(has_sel, egui::Button::new("Inverter evento (reverse)")).clicked() {
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Inverter evento (reverse)"))
+                    .clicked()
+                {
                     self.toggle_reverse();
                     ui.close_menu();
                 }
-                if ui.add_enabled(has_sel, egui::Button::new("Congelar quadro no cursor")).clicked() {
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Congelar quadro no cursor"))
+                    .clicked()
+                {
                     self.freeze_frame();
                     ui.close_menu();
                 }
@@ -1327,10 +1587,16 @@ impl App {
                 ui.checkbox(&mut self.opts.snapping, "Ativar encaixe (snapping)   F8");
                 ui.checkbox(&mut self.opts.quantize, "Quantizar para quadros");
                 ui.checkbox(&mut self.opts.auto_ripple, "Ripple automático   Ctrl+L");
-                ui.checkbox(&mut self.opts.ignore_grouping, "Ignorar agrupamento de eventos");
+                ui.checkbox(
+                    &mut self.opts.ignore_grouping,
+                    "Ignorar agrupamento de eventos",
+                );
                 ui.checkbox(&mut self.opts.loop_playback, "Reprodução em loop   Q");
                 ui.separator();
-                ui.label(format!("Dispositivo de áudio: {} ({} Hz)", self.audio.device_name, self.audio.sr));
+                ui.label(format!(
+                    "Dispositivo de áudio: {} ({} Hz)",
+                    self.audio.device_name, self.audio.sr
+                ));
             });
             ui.menu_button("Ajuda", |ui| {
                 if ui.button("Atalhos de teclado").clicked() {
@@ -1347,7 +1613,11 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("🗋").on_hover_text("Novo projeto (Ctrl+N)").clicked() {
+            if ui
+                .button("🗋")
+                .on_hover_text("Novo projeto (Ctrl+N)")
+                .clicked()
+            {
                 self.new_project();
             }
             if ui.button("🗁").on_hover_text("Abrir (Ctrl+O)").clicked() {
@@ -1356,33 +1626,59 @@ impl App {
             if ui.button("💾").on_hover_text("Salvar (Ctrl+S)").clicked() {
                 self.save_project(false);
             }
-            if ui.button("🎬 Renderizar").on_hover_text("Renderizar como (Ctrl+M)").clicked() {
+            if ui
+                .button("🎬 Renderizar")
+                .on_hover_text("Renderizar como (Ctrl+M)")
+                .clicked()
+            {
                 self.dlg.open_render(&self.project, self.path.as_deref());
             }
-            if ui.button("⚙").on_hover_text("Propriedades do projeto (Alt+Enter)").clicked() {
+            if ui
+                .button("⚙")
+                .on_hover_text("Propriedades do projeto (Alt+Enter)")
+                .clicked()
+            {
                 self.dlg.project_props = true;
             }
             ui.separator();
-            if ui.button("➕ Importar").on_hover_text("Importar mídia (Ctrl+I)").clicked() {
+            if ui
+                .button("➕ Importar")
+                .on_hover_text("Importar mídia (Ctrl+I)")
+                .clicked()
+            {
                 self.import_dialog();
             }
             ui.separator();
-            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("↶")).on_hover_text("Desfazer (Ctrl+Z)").clicked() {
+            if ui
+                .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
+                .on_hover_text("Desfazer (Ctrl+Z)")
+                .clicked()
+            {
                 self.undo();
             }
-            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("↷")).on_hover_text("Refazer (Ctrl+Y)").clicked() {
+            if ui
+                .add_enabled(!self.redo.is_empty(), egui::Button::new("↷"))
+                .on_hover_text("Refazer (Ctrl+Y)")
+                .clicked()
+            {
                 self.redo();
             }
             ui.separator();
-            if ui.button("✂ Dividir").on_hover_text("Dividir no cursor (S)").clicked() {
+            if ui
+                .button("✂ Dividir")
+                .on_hover_text("Dividir no cursor (S)")
+                .clicked()
+            {
                 self.split_at_cursor();
             }
             if ui.button("🗑").on_hover_text("Excluir (Delete)").clicked() {
                 self.delete_selection();
             }
             ui.separator();
-            ui.toggle_value(&mut self.opts.snapping, "🧲 Encaixe").on_hover_text("Ativar encaixe (F8)");
-            ui.toggle_value(&mut self.opts.auto_ripple, "⇥ Ripple").on_hover_text("Ripple automático (Ctrl+L)");
+            ui.toggle_value(&mut self.opts.snapping, "🧲 Encaixe")
+                .on_hover_text("Ativar encaixe (F8)");
+            ui.toggle_value(&mut self.opts.auto_ripple, "⇥ Ripple")
+                .on_hover_text("Ripple automático (Ctrl+L)");
             ui.toggle_value(&mut self.opts.ignore_grouping, "⛓ Ignorar grupos");
             ui.toggle_value(&mut self.opts.show_envelopes, "〰 Envelopes");
             if self.loading > 0 {
@@ -1396,14 +1692,29 @@ impl App {
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let playing = self.is_playing();
-            if ui.button("⏮").on_hover_text("Início do projeto (Ctrl+Home)").clicked() {
+            if ui
+                .button("⏮")
+                .on_hover_text("Início do projeto (Ctrl+Home)")
+                .clicked()
+            {
                 self.set_cursor(0.0);
             }
-            if ui.button("⏪").on_hover_text("Quadro anterior (Alt+←)").clicked() {
-                let t = self.project.settings.quantize(self.cursor - self.project.settings.frame_dur());
+            if ui
+                .button("⏪")
+                .on_hover_text("Quadro anterior (Alt+←)")
+                .clicked()
+            {
+                let t = self
+                    .project
+                    .settings
+                    .quantize(self.cursor - self.project.settings.frame_dur());
                 self.set_cursor(t);
             }
-            if ui.button(if playing { "⏸" } else { "▶" }).on_hover_text("Reproduzir/Pausar (Enter)").clicked() {
+            if ui
+                .button(if playing { "⏸" } else { "▶" })
+                .on_hover_text("Reproduzir/Pausar (Enter)")
+                .clicked()
+            {
                 if playing {
                     self.stop(true);
                 } else {
@@ -1413,29 +1724,54 @@ impl App {
             if ui.button("⏹").on_hover_text("Parar (Espaço/Esc)").clicked() {
                 self.stop(false);
             }
-            if ui.button("⏩").on_hover_text("Próximo quadro (Alt+→)").clicked() {
-                let t = self.project.settings.quantize(self.cursor + self.project.settings.frame_dur());
+            if ui
+                .button("⏩")
+                .on_hover_text("Próximo quadro (Alt+→)")
+                .clicked()
+            {
+                let t = self
+                    .project
+                    .settings
+                    .quantize(self.cursor + self.project.settings.frame_dur());
                 self.set_cursor(t);
             }
-            if ui.button("⏭").on_hover_text("Fim do projeto (Ctrl+End)").clicked() {
+            if ui
+                .button("⏭")
+                .on_hover_text("Fim do projeto (Ctrl+End)")
+                .clicked()
+            {
                 let d = self.project.duration();
                 self.set_cursor(d);
             }
-            ui.toggle_value(&mut self.opts.loop_playback, "🔁").on_hover_text("Reprodução em loop (Q)");
+            ui.toggle_value(&mut self.opts.loop_playback, "🔁")
+                .on_hover_text("Reprodução em loop (Q)");
             ui.separator();
             let t = self.view_time();
-            ui.label(egui::RichText::new(self.fmt_time(t)).monospace().size(20.0).color(Color32::from_rgb(120, 230, 140)));
+            ui.label(
+                egui::RichText::new(self.fmt_time(t))
+                    .monospace()
+                    .size(20.0)
+                    .color(Color32::from_rgb(120, 230, 140)),
+            );
             if let Some((a, b)) = self.time_sel {
                 ui.label(
-                    egui::RichText::new(format!("Seleção: {} → {} ({})", self.fmt_time(a), self.fmt_time(b), self.fmt_time(b - a)))
-                        .monospace()
-                        .small(),
+                    egui::RichText::new(format!(
+                        "Seleção: {} → {} ({})",
+                        self.fmt_time(a),
+                        self.fmt_time(b),
+                        self.fmt_time(b - a)
+                    ))
+                    .monospace()
+                    .small(),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mut z = self.tl.px_per_sec.ln();
                 if ui
-                    .add(egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln()).show_value(false))
+                    .add(
+                        egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln())
+                            .show_value(false),
+                    )
                     .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
                     .changed()
                 {
@@ -1463,10 +1799,17 @@ impl App {
                     s.fps,
                     s.sample_rate,
                     self.preview_ms,
-                    self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(sem título)".into())
+                    self.path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(sem título)".into())
                 ));
                 if let Some(job) = &self.render_job {
-                    ui.add(egui::ProgressBar::new(job.progress.fraction()).desired_width(140.0).show_percentage());
+                    ui.add(
+                        egui::ProgressBar::new(job.progress.fraction())
+                            .desired_width(140.0)
+                            .show_percentage(),
+                    );
                     ui.label("Renderizando:");
                 }
             });
@@ -1474,7 +1817,11 @@ impl App {
     }
 
     fn snapshot_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name("quadro.png").save_file() {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .set_file_name("quadro.png")
+            .save_file()
+        {
             match crate::render::save_snapshot(&self.project, &self.media, self.cursor, &p) {
                 Ok(_) => self.set_status(format!("Quadro salvo em {}", p.display())),
                 Err(e) => self.set_status(format!("Erro: {e:#}")),
@@ -1498,12 +1845,22 @@ impl App {
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let files: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        let files: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
         if files.is_empty() {
             return;
         }
         let t = self.cursor;
-        let projects: Vec<PathBuf> = files.iter().filter(|p| p.extension().map(|e| e == "nvp").unwrap_or(false)).cloned().collect();
+        let projects: Vec<PathBuf> = files
+            .iter()
+            .filter(|p| p.extension().map(|e| e == "nvp").unwrap_or(false))
+            .cloned()
+            .collect();
         if let Some(p) = projects.into_iter().next() {
             self.open_project_path(p);
             return;
@@ -1523,7 +1880,13 @@ impl App {
     }
 
     fn update_meters(&mut self, dt: f32) {
-        let m = self.audio.shared.lock().unwrap().meters.clone();
+        let m = self
+            .audio
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .meters
+            .clone();
         let decay = (-dt * 3.0).exp();
         for (id, v) in m.tracks {
             let h = self.meters_hold.entry(id).or_insert([0.0; 2]);
@@ -1538,9 +1901,22 @@ impl App {
 
     fn poll_render(&mut self) {
         if let Some(job) = &self.render_job {
-            if job.progress.finished.load(std::sync::atomic::Ordering::SeqCst) {
-                let err = job.progress.error.lock().unwrap().clone();
-                let secs = *job.progress.elapsed.lock().unwrap();
+            if job
+                .progress
+                .finished
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let err = job
+                    .progress
+                    .error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let secs = *job
+                    .progress
+                    .elapsed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match err {
                     Some(e) => self.set_status(format!("Renderização falhou: {e}")),
                     None => self.set_status(format!(
@@ -1559,6 +1935,12 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_ui(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // saída normal: a cópia de recuperação não é mais necessária
+        crate::util::clear_recovery();
+        crate::util::log_info("Neoveg encerrado normalmente");
     }
 }
 
@@ -1579,7 +1961,8 @@ impl App {
             let t = self.play_pos();
             self.tl.follow(t);
             // fim do projeto: para
-            if !self.opts.loop_playback && t > self.project.duration() + 0.5 && self.shuttle >= 0.0 {
+            if !self.opts.loop_playback && t > self.project.duration() + 0.5 && self.shuttle >= 0.0
+            {
                 self.stop(true);
             }
             ctx.request_repaint();
@@ -1602,6 +1985,12 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| self.timeline_ui(ui));
 
         self.show_dialogs(ctx);
+        self.recovery_window(ctx);
+        self.autosave();
+        let audio_err = crate::util::lock(&self.audio.shared).error.take();
+        if let Some(e) = audio_err {
+            self.set_status(e);
+        }
         self.update_preview(ctx);
         self.sync_snapshot();
         self.update_title(ctx);

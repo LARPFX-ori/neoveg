@@ -25,7 +25,6 @@ pub struct AviAudioInfo {
     pub channels: u16,
     pub sample_rate: u32,
     pub bits: u16,
-    pub block_align: u16,
 }
 
 pub struct AviReader {
@@ -41,14 +40,29 @@ pub struct AviReader {
     pub video_fourcc: String,
 }
 
+/// Maior lista `hdrl` aceita.
+const MAX_HDRL: u64 = 16 << 20;
+/// Maior chunk (quadro ou bloco de áudio) aceito.
+const MAX_CHUNK: u32 = 256 << 20;
+/// Maior dimensão de vídeo aceita na leitura.
+const MAX_DIM: u32 = 16384;
+/// Profundidade máxima de listas aninhadas em `movi` (§0.5).
+const MAX_DEPTH: u32 = 4;
+
 fn rd_u32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+    match b.get(o..o + 4) {
+        Some(x) => u32::from_le_bytes([x[0], x[1], x[2], x[3]]),
+        None => 0,
+    }
 }
 fn rd_i32(b: &[u8], o: usize) -> i32 {
     rd_u32(b, o) as i32
 }
 fn rd_u16(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
+    match b.get(o..o + 2) {
+        Some(x) => u16::from_le_bytes([x[0], x[1]]),
+        None => 0,
+    }
 }
 
 #[derive(Default)]
@@ -97,7 +111,14 @@ impl AviReader {
                     file.read_exact(&mut ch[8..12])?;
                     let list_type = [ch[8], ch[9], ch[10], ch[11]];
                     if &list_type == b"hdrl" {
-                        let mut buf = vec![0u8; (size.saturating_sub(4)) as usize];
+                        // limite: o cabeçalho vem do arquivo (entrada hostil, §0.4)
+                        let hdrl_len = size
+                            .saturating_sub(4)
+                            .min(file_len.saturating_sub(pos + 12));
+                        if hdrl_len > MAX_HDRL {
+                            bail!("cabeçalho AVI grande demais ({hdrl_len} bytes)");
+                        }
+                        let mut buf = vec![0u8; hdrl_len as usize];
                         file.read_exact(&mut buf)?;
                         parse_hdrl(&buf, &mut streams);
                     } else if &list_type == b"movi" {
@@ -130,17 +151,37 @@ impl AviReader {
                 let w = rd_i32(&s.strf, 4);
                 let h = rd_i32(&s.strf, 8);
                 let bits = rd_u16(&s.strf, 14);
-                let comp = [s.strf[16], s.strf[17], s.strf[18], s.strf[19]];
+                let comp = [
+                    rd_u8(&s.strf, 16),
+                    rd_u8(&s.strf, 17),
+                    rd_u8(&s.strf, 18),
+                    rd_u8(&s.strf, 19),
+                ];
                 r.width = w.unsigned_abs();
                 r.height = h.unsigned_abs();
+                if r.width == 0 || r.height == 0 || r.width > MAX_DIM || r.height > MAX_DIM {
+                    bail!("dimensões de vídeo inválidas: {}x{}", r.width, r.height);
+                }
                 if s.scale > 0 && s.rate > 0 {
-                    r.fps = s.rate as f64 / s.scale as f64;
+                    let fps = s.rate as f64 / s.scale as f64;
+                    if (0.1..=1000.0).contains(&fps) {
+                        r.fps = fps;
+                    }
                 }
                 let handler = String::from_utf8_lossy(&s.handler).to_string();
                 let comps = String::from_utf8_lossy(&comp).to_string();
-                r.video_fourcc = if comp == [0, 0, 0, 0] { "RGB".into() } else { comps.clone() };
+                r.video_fourcc = if comp == [0, 0, 0, 0] {
+                    "RGB".into()
+                } else {
+                    comps.clone()
+                };
                 let up = comps.to_ascii_uppercase();
-                r.codec = if up == "MJPG" || up == "AVRN" || up == "LJPG" || up == "JPEG" || handler.eq_ignore_ascii_case("mjpg") && comp != [0, 0, 0, 0] {
+                r.codec = if up == "MJPG"
+                    || up == "AVRN"
+                    || up == "LJPG"
+                    || up == "JPEG"
+                    || handler.eq_ignore_ascii_case("mjpg") && comp != [0, 0, 0, 0]
+                {
                     Some(VideoCodec::Mjpeg)
                 } else if comp == [0, 0, 0, 0] && bits == 24 {
                     Some(VideoCodec::Rgb24)
@@ -150,9 +191,7 @@ impl AviReader {
                     None
                 };
                 // altura positiva = imagem de baixo para cima (só importa em RGB)
-                if h > 0 && r.codec != Some(VideoCodec::Mjpeg) {
-                    r.height = h as u32;
-                }
+
                 video_idx = Some(i);
             } else if &s.kind == b"auds" && audio_idx.is_none() && s.strf.len() >= 16 {
                 let mut tag = rd_u16(&s.strf, 0);
@@ -165,7 +204,6 @@ impl AviReader {
                     format_tag: tag,
                     channels: rd_u16(&s.strf, 2),
                     sample_rate: rd_u32(&s.strf, 4),
-                    block_align: rd_u16(&s.strf, 12),
                     bits,
                 });
                 audio_idx = Some(i);
@@ -173,10 +211,19 @@ impl AviReader {
         }
 
         // varre as listas movi
-        let vtag = video_idx.map(|i| format!("{:02}", i));
-        let atag = audio_idx.map(|i| format!("{:02}", i));
+        let vtag = video_idx.and_then(stream_tag);
+        let atag = audio_idx.and_then(stream_tag);
         for (start, end) in movi_lists {
-            scan_movi(&mut r.file, start, end, &vtag, &atag, &mut r.frames, &mut r.audio_chunks)?;
+            scan_movi(
+                &mut r.file,
+                start,
+                end,
+                &vtag,
+                &atag,
+                &mut r.frames,
+                &mut r.audio_chunks,
+                0,
+            )?;
         }
         Ok(r)
     }
@@ -205,6 +252,10 @@ impl AviReader {
     }
 
     fn read_chunk(&mut self, off: u64, size: u32) -> Result<Vec<u8>> {
+        let len = self.file.metadata()?.len();
+        if size > MAX_CHUNK || off.saturating_add(size as u64) > len {
+            bail!("chunk AVI inválido (offset {off}, tamanho {size})");
+        }
         let mut buf = vec![0u8; size as usize];
         self.file.seek(SeekFrom::Start(off))?;
         self.file.read_exact(&mut buf)?;
@@ -231,18 +282,26 @@ impl AviReader {
                 Ok(img.to_rgba8())
             }
             Some(VideoCodec::Rgb24) | Some(VideoCodec::Rgb32) => {
-                let bpp = if self.codec == Some(VideoCodec::Rgb24) { 3 } else { 4 };
+                let bpp = if self.codec == Some(VideoCodec::Rgb24) {
+                    3
+                } else {
+                    4
+                };
                 let (w, h) = (self.width as usize, self.height as usize);
                 let stride = (w * bpp + 3) & !3;
+                if data.len() < stride.saturating_mul(h) {
+                    bail!("quadro RGB truncado no quadro {i}");
+                }
                 let mut img = RgbaImage::new(w as u32, h as u32);
                 for y in 0..h {
                     let src_row = h - 1 - y; // baixo para cima
-                    let row = &data.get(src_row * stride..src_row * stride + w * bpp).unwrap_or(&[]);
+                    let row = &data
+                        .get(src_row * stride..src_row * stride + w * bpp)
+                        .unwrap_or(&[]);
                     if row.len() < w * bpp {
                         continue;
                     }
-                    for x in 0..w {
-                        let p = &row[x * bpp..x * bpp + 3];
+                    for (x, p) in row.chunks_exact(bpp).enumerate().take(w) {
                         img.put_pixel(x as u32, y as u32, image::Rgba([p[2], p[1], p[0], 255]));
                     }
                 }
@@ -254,7 +313,9 @@ impl AviReader {
 
     /// Lê todo o áudio PCM, convertido para f32 intercalado (canais originais).
     pub fn read_audio(&mut self) -> Result<Option<(u32, u16, Vec<f32>)>> {
-        let Some(info) = self.audio.clone() else { return Ok(None) };
+        let Some(info) = self.audio.clone() else {
+            return Ok(None);
+        };
         if info.format_tag != 1 && info.format_tag != 3 {
             return Ok(None);
         }
@@ -264,13 +325,28 @@ impl AviReader {
             let data = self.read_chunk(off, size)?;
             match (info.format_tag, info.bits) {
                 (1, 8) => out.extend(data.iter().map(|&b| (b as f32 - 128.0) / 128.0)),
-                (1, 16) => out.extend(data.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)),
-                (1, 24) => out.extend(data.chunks_exact(3).map(|c| {
+                (1, 16) => out.extend(
+                    data.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| i16::from_le_bytes(*c) as f32 / 32768.0),
+                ),
+                (1, 24) => out.extend(data.as_chunks::<3>().0.iter().map(|c| {
                     let v = ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8;
                     v as f32 / 8_388_608.0
                 })),
-                (1, 32) => out.extend(data.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32 / 2_147_483_648.0)),
-                (3, 32) => out.extend(data.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+                (1, 32) => out.extend(
+                    data.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| i32::from_le_bytes(*c) as f32 / 2_147_483_648.0),
+                ),
+                (3, 32) => out.extend(
+                    data.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c)),
+                ),
                 _ => return Ok(None),
             }
         }
@@ -285,7 +361,10 @@ fn parse_hdrl(buf: &[u8], streams: &mut Vec<StreamHdr>) {
         let size = rd_u32(buf, pos + 4) as usize;
         let body_start = pos + 8;
         let body_end = (body_start + size).min(buf.len());
-        if id == b"LIST" && body_end >= body_start + 4 && &buf[body_start..body_start + 4] == b"strl" {
+        if id == b"LIST"
+            && body_end >= body_start + 4
+            && &buf[body_start..body_start + 4] == b"strl"
+        {
             let mut s = StreamHdr::default();
             let sub = &buf[body_start + 4..body_end];
             let mut p = 0usize;
@@ -309,15 +388,32 @@ fn parse_hdrl(buf: &[u8], streams: &mut Vec<StreamHdr>) {
     }
 }
 
+/// Prefixo de dois dígitos ASCII do chunk de um fluxo (ex.: `00`, `01`).
+fn stream_tag(i: usize) -> Option<[u8; 2]> {
+    if i > 99 {
+        return None;
+    }
+    Some([b'0' + (i / 10) as u8, b'0' + (i % 10) as u8])
+}
+
+fn rd_u8(b: &[u8], o: usize) -> u8 {
+    b.get(o).copied().unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn scan_movi(
     f: &mut File,
     start: u64,
     end: u64,
-    vtag: &Option<String>,
-    atag: &Option<String>,
+    vtag: &Option<[u8; 2]>,
+    atag: &Option<[u8; 2]>,
     frames: &mut Vec<(u64, u32)>,
     audio: &mut Vec<(u64, u32)>,
+    depth: u32,
 ) -> Result<()> {
+    if depth > MAX_DEPTH {
+        return Ok(());
+    }
     let mut pos = start;
     let mut h = [0u8; 12];
     while pos + 8 <= end {
@@ -328,13 +424,22 @@ fn scan_movi(
         let size = rd_u32(&h, 4) as u64;
         if &h[0..4] == b"LIST" {
             // LIST 'rec ' contém chunks intercalados
-            scan_movi(f, pos + 12, (pos + 8 + size).min(end), vtag, atag, frames, audio)?;
+            scan_movi(
+                f,
+                pos + 12,
+                (pos + 8 + size).min(end),
+                vtag,
+                atag,
+                frames,
+                audio,
+                depth + 1,
+            )?;
         } else {
-            let id = String::from_utf8_lossy(&h[0..4]).to_string();
-            let (num, kind) = id.split_at(2);
-            if Some(num) == vtag.as_deref() && (kind == "dc" || kind == "db") {
+            let num = [h[0], h[1]];
+            let kind = [h[2], h[3]];
+            if Some(num) == *vtag && (&kind == b"dc" || &kind == b"db") {
                 frames.push((pos + 8, size as u32));
-            } else if Some(num) == atag.as_deref() && kind == "wb" {
+            } else if Some(num) == *atag && &kind == b"wb" {
                 audio.push((pos + 8, size as u32));
             }
         }
@@ -380,7 +485,13 @@ fn fps_rational(fps: f64) -> (u32, u32) {
 }
 
 impl AviWriter {
-    pub fn create(path: &Path, width: u32, height: u32, fps: f64, audio_sr: Option<u32>) -> Result<Self> {
+    pub fn create(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: f64,
+        audio_sr: Option<u32>,
+    ) -> Result<Self> {
         let file = File::create(path).with_context(|| format!("criando {}", path.display()))?;
         let (rate, scale) = fps_rational(fps);
         let has_audio = audio_sr.is_some();

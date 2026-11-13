@@ -14,6 +14,9 @@ enum Chroma {
     Mono,
 }
 
+/// Maior dimensão aceita na leitura.
+const MAX_DIM: u32 = 16384;
+
 pub struct Y4mReader {
     file: File,
     pub width: u32,
@@ -31,26 +34,32 @@ impl Y4mReader {
         let file = File::open(path).with_context(|| format!("abrindo {}", path.display()))?;
         let len = file.metadata()?.len();
         let mut br = BufReader::new(file);
+        // o cabeçalho tem poucos bytes: limita a leitura (entrada hostil, §0.4)
         let mut header = String::new();
-        br.read_line(&mut header)?;
+        (&mut br).take(4096).read_line(&mut header)?;
+        if !header.ends_with('\n') {
+            bail!("cabeçalho Y4M ausente ou grande demais");
+        }
         if !header.starts_with("YUV4MPEG2") {
             bail!("não é um arquivo YUV4MPEG2");
         }
         let (mut w, mut h, mut fps, mut chroma) = (0u32, 0u32, 25.0f64, Chroma::C420);
         for tok in header.split_whitespace().skip(1) {
-            let (k, v) = tok.split_at(1);
+            let mut chars = tok.chars();
+            let Some(k) = chars.next() else { continue };
+            let v = chars.as_str();
             match k {
-                "W" => w = v.parse()?,
-                "H" => h = v.parse()?,
-                "F" => {
+                'W' => w = v.parse()?,
+                'H' => h = v.parse()?,
+                'F' => {
                     if let Some((a, b)) = v.split_once(':') {
                         let (a, b): (f64, f64) = (a.parse()?, b.parse()?);
-                        if b > 0.0 {
+                        if b > 0.0 && (0.1..=1000.0).contains(&(a / b)) {
                             fps = a / b;
                         }
                     }
                 }
-                "C" => {
+                'C' => {
                     chroma = if v.starts_with("420") {
                         Chroma::C420
                     } else if v.starts_with("422") {
@@ -66,20 +75,23 @@ impl Y4mReader {
                 _ => {}
             }
         }
-        if w == 0 || h == 0 {
-            bail!("cabeçalho Y4M sem dimensões");
+        if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
+            bail!("dimensões Y4M inválidas: {w}x{h}");
         }
         let data_start = header.len() as u64;
         // tamanho do cabeçalho de quadro
         let mut fh = String::new();
-        br.read_line(&mut fh)?;
+        (&mut br).take(4096).read_line(&mut fh)?;
         if !fh.starts_with("FRAME") {
             bail!("Y4M sem quadros");
         }
         let (cw, ch) = chroma_dims(chroma, w, h);
-        let frame_size = (w * h) as u64 + 2 * (cw * ch) as u64;
+        let frame_size = w as u64 * h as u64 + 2 * (cw as u64 * ch as u64);
         let frame_header_len = fh.len() as u64;
-        let frames = ((len - data_start) / (frame_header_len + frame_size)) as usize;
+        let frames = (len.saturating_sub(data_start) / (frame_header_len + frame_size)) as usize;
+        if frames == 0 {
+            bail!("Y4M sem nenhum quadro completo");
+        }
         let file = br.into_inner();
         Ok(Y4mReader {
             file,
@@ -100,7 +112,9 @@ impl Y4mReader {
 
     pub fn decode_frame(&mut self, idx: usize) -> Result<RgbaImage> {
         let idx = idx.min(self.frames.saturating_sub(1));
-        let off = self.data_start + idx as u64 * (self.frame_header_len + self.frame_size) + self.frame_header_len;
+        let off = self.data_start
+            + idx as u64 * (self.frame_header_len + self.frame_size)
+            + self.frame_header_len;
         self.file.seek(SeekFrom::Start(off))?;
         let mut buf = vec![0u8; self.frame_size as usize];
         self.file.read_exact(&mut buf)?;
@@ -146,7 +160,11 @@ pub fn yuv_to_rgb(y: u8, u: u8, v: u8, hd: bool) -> (u8, u8, u8) {
     let (r, g, b) = if hd {
         (y + 1.5748 * v, y - 0.1873 * u - 0.4681 * v, y + 1.8556 * u)
     } else {
-        (y + 1.402 * v, y - 0.344136 * u - 0.714136 * v, y + 1.772 * u)
+        (
+            y + 1.402 * v,
+            y - 0.344136 * u - 0.714136 * v,
+            y + 1.772 * u,
+        )
     };
     (clamp8(r), clamp8(g), clamp8(b))
 }
@@ -158,7 +176,11 @@ pub fn rgb_to_yuv(r: f32, g: f32, b: f32, hd: bool) -> (f32, f32, f32) {
     let y = kr * r + kg * g + kb * b;
     let u = (b - y) / (2.0 * (1.0 - kb));
     let v = (r - y) / (2.0 * (1.0 - kr));
-    (16.0 + y * 219.0 / 255.0, 128.0 + u * 224.0 / 255.0, 128.0 + v * 224.0 / 255.0)
+    (
+        16.0 + y * 219.0 / 255.0,
+        128.0 + u * 224.0 / 255.0,
+        128.0 + v * 224.0 / 255.0,
+    )
 }
 
 fn clamp8(x: f32) -> u8 {
@@ -191,6 +213,9 @@ impl Y4mWriter {
     /// Recebe RGBA 8 bits.
     pub fn write_frame(&mut self, rgba: &[u8]) -> Result<()> {
         let (w, h) = (self.w as usize, self.h as usize);
+        if rgba.len() < w * h * 4 {
+            bail!("quadro com tamanho incorreto para o Y4M");
+        }
         let hd = h >= 720;
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let mut yp = vec![0u8; w * h];
@@ -200,7 +225,8 @@ impl Y4mWriter {
         for y in 0..h {
             for x in 0..w {
                 let i = (y * w + x) * 4;
-                let (yy, u, v) = rgb_to_yuv(rgba[i] as f32, rgba[i + 1] as f32, rgba[i + 2] as f32, hd);
+                let (yy, u, v) =
+                    rgb_to_yuv(rgba[i] as f32, rgba[i + 1] as f32, rgba[i + 2] as f32, hd);
                 yp[y * w + x] = clamp8(yy);
                 let c = (y / 2) * cw + x / 2;
                 up[c] += u;

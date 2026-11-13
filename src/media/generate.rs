@@ -21,14 +21,20 @@ const SYSTEM_FONTS: [&str; 4] = [
 
 impl Fonts {
     pub fn get(&self, path: &str) -> Option<FontArc> {
-        let mut c = self.cache.lock().unwrap();
+        let mut c = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(f) = c.get(path) {
             return f.clone();
         }
         let f = if path.is_empty() {
             default_font()
         } else {
-            std::fs::read(path).ok().and_then(|b| FontArc::try_from_vec(b).ok()).or_else(default_font)
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| FontArc::try_from_vec(b).ok())
+                .or_else(default_font)
         };
         c.insert(path.to_string(), f.clone());
         f
@@ -52,11 +58,19 @@ fn default_font() -> Option<FontArc> {
 /// Lista fontes TTF/OTF instaladas no sistema (para o seletor de fonte).
 pub fn list_system_fonts() -> Vec<String> {
     let mut out = vec![];
-    for dir in ["C:\\Windows\\Fonts", "/usr/share/fonts/truetype", "/Library/Fonts"] {
+    for dir in [
+        "C:\\Windows\\Fonts",
+        "/usr/share/fonts/truetype",
+        "/Library/Fonts",
+    ] {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
                 if ext == "ttf" || ext == "otf" {
                     out.push(p.to_string_lossy().to_string());
                 }
@@ -89,14 +103,19 @@ pub fn render(spec: &GenSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
     let (w, h) = (w.max(1), h.max(1));
     match spec {
         GenSpec::SolidColor { color } => RgbaImage::from_pixel(w, h, image::Rgba(rgba8(*color))),
-        GenSpec::Gradient { a, b, angle, radial } => {
+        GenSpec::Gradient {
+            a,
+            b,
+            angle,
+            radial,
+        } => {
             let mut img = RgbaImage::new(w, h);
             let (ca, sa) = (angle.to_radians().cos(), angle.to_radians().sin());
             for (x, y, p) in img.enumerate_pixels_mut() {
                 let u = x as f32 / w as f32 - 0.5;
                 let v = y as f32 / h as f32 - 0.5;
                 let k = if *radial {
-                    ((u * u + v * v).sqrt() / 0.7071).clamp(0.0, 1.0)
+                    ((u * u + v * v).sqrt() / std::f32::consts::FRAC_1_SQRT_2).clamp(0.0, 1.0)
                 } else {
                     (u * ca + v * sa + 0.5).clamp(0.0, 1.0)
                 };
@@ -117,7 +136,7 @@ pub fn render(spec: &GenSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
             RgbaImage::from_fn(w, h, |x, y| {
                 let cx = (x as f32 / cs) as u32;
                 let cy = (y as f32 / cs) as u32;
-                image::Rgba(if (cx + cy) % 2 == 0 { pa } else { pb })
+                image::Rgba(if (cx + cy).is_multiple_of(2) { pa } else { pb })
             })
         }
         GenSpec::ColorBars => {
@@ -161,12 +180,21 @@ pub fn render(spec: &GenSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
         GenSpec::Noise { mono, animated } => {
             let seed = if *animated { (t * 30.0) as u32 } else { 7 };
             RgbaImage::from_fn(w, h, |x, y| {
-                let base = hash32(x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791));
+                let base = hash32(
+                    x.wrapping_mul(73_856_093)
+                        ^ y.wrapping_mul(19_349_663)
+                        ^ seed.wrapping_mul(83_492_791),
+                );
                 if *mono {
                     let v = (base & 0xff) as u8;
                     image::Rgba([v, v, v, 255])
                 } else {
-                    image::Rgba([(base & 0xff) as u8, (base >> 8) as u8, (base >> 16) as u8, 255])
+                    image::Rgba([
+                        (base & 0xff) as u8,
+                        (base >> 8) as u8,
+                        (base >> 16) as u8,
+                        255,
+                    ])
                 }
             })
         }
@@ -181,7 +209,14 @@ struct Laid {
 }
 
 /// Rasteriza linhas de texto numa máscara de cobertura do tamanho do quadro.
-fn layout_mask(ts: &TextSpec, text: &str, font: &FontArc, w: u32, h: u32, offset: (f32, f32)) -> Laid {
+fn layout_mask(
+    ts: &TextSpec,
+    text: &str,
+    font: &FontArc,
+    w: u32,
+    h: u32,
+    offset: (f32, f32),
+) -> Laid {
     let (wu, hu) = (w as usize, h as usize);
     let mut mask = vec![0f32; wu * hu];
     let px = (ts.size / 100.0 * h as f32).max(4.0);
@@ -288,9 +323,7 @@ pub fn box_blur_mask(m: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     for y in 0..h {
         let row = &m[y * w..(y + 1) * w];
         let mut acc = 0f32;
-        for i in 0..=r.min(w - 1) {
-            acc += row[i];
-        }
+        acc += row.iter().take(r.min(w - 1) + 1).sum::<f32>();
         acc += row[0] * r as f32;
         for x in 0..w {
             tmp[y * w + x] = acc * norm;
@@ -318,7 +351,9 @@ pub fn box_blur_mask(m: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
 
 fn render_text(ts: &TextSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(w, h, image::Rgba(rgba8(ts.background)));
-    let Some(font) = fonts.get(&ts.font_path) else { return img };
+    let Some(font) = fonts.get(&ts.font_path) else {
+        return img;
+    };
     let dur = ts.anim_duration.max(0.1) as f64;
     let prog = (t / dur).clamp(0.0, 1.0) as f32;
     let mut text = ts.text.clone();
@@ -359,7 +394,12 @@ fn render_text(ts: &TextSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
     let (wu, hu) = (laid.w, laid.h);
     let outline_px = (ts.outline / 100.0 * h as f32).round() as usize;
     let outline = if outline_px > 0 {
-        Some(box_blur_mask(&dilate(&laid.mask, wu, hu, outline_px), wu, hu, 1))
+        Some(box_blur_mask(
+            &dilate(&laid.mask, wu, hu, outline_px),
+            wu,
+            hu,
+            1,
+        ))
     } else {
         None
     };
@@ -380,7 +420,7 @@ fn render_text(ts: &TextSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
     };
     let fill = ts.color;
     let oc = ts.outline_color;
-    for (i, px) in img.as_mut().chunks_exact_mut(4).enumerate() {
+    for (i, px) in img.as_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let mut c = [
             px[0] as f32 / 255.0,
             px[1] as f32 / 255.0,
@@ -394,7 +434,11 @@ fn render_text(ts: &TextSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
             }
             let out_a = a + c[3] * (1.0 - a);
             for k in 0..3 {
-                c[k] = if out_a > 0.0 { (col[k] * a + c[k] * c[3] * (1.0 - a)) / out_a } else { 0.0 };
+                c[k] = if out_a > 0.0 {
+                    (col[k] * a + c[k] * c[3] * (1.0 - a)) / out_a
+                } else {
+                    0.0
+                };
             }
             c[3] = out_a;
         };

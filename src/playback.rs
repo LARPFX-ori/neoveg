@@ -25,6 +25,8 @@ pub struct Shared {
     pub speed: f64,
     pub frac: f64,
     pub dim: bool,
+    /// Erro ocorrido na thread de áudio, exibido pela interface.
+    pub error: Option<String>,
 }
 
 pub struct AudioOut {
@@ -57,6 +59,7 @@ impl AudioOut {
             speed: 1.0,
             frac: 0.0,
             dim: false,
+            error: None,
         }));
         let mut stream = None;
         if let (Some(dev), Some(cfg)) = (device, config) {
@@ -91,7 +94,7 @@ impl AudioOut {
         if self.has_device() {
             return;
         }
-        let mut s = self.shared.lock().unwrap();
+        let mut s = crate::util::lock(&self.shared);
         if s.playing {
             let adv = dt * self.sr as f64 * s.speed + s.frac;
             s.pos += adv.trunc() as i64;
@@ -109,7 +112,11 @@ impl AudioOut {
     }
 }
 
-fn build_stream(dev: &cpal::Device, cfg: cpal::SupportedStreamConfig, shared: Arc<Mutex<Shared>>) -> anyhow::Result<cpal::Stream> {
+fn build_stream(
+    dev: &cpal::Device,
+    cfg: cpal::SupportedStreamConfig,
+    shared: Arc<Mutex<Shared>>,
+) -> anyhow::Result<cpal::Stream> {
     let fmt = cfg.sample_format();
     let config: cpal::StreamConfig = cfg.into();
     let channels = config.channels as usize;
@@ -123,13 +130,21 @@ fn build_stream(dev: &cpal::Device, cfg: cpal::SupportedStreamConfig, shared: Ar
         )?,
         cpal::SampleFormat::I16 => dev.build_output_stream(
             &config,
-            move |data: &mut [i16], _| fill(data, channels, &shared, |v| (v.clamp(-1.0, 1.0) * 32767.0) as i16),
+            move |data: &mut [i16], _| {
+                fill(data, channels, &shared, |v| {
+                    (v.clamp(-1.0, 1.0) * 32767.0) as i16
+                })
+            },
             err_fn,
             None,
         )?,
         cpal::SampleFormat::U16 => dev.build_output_stream(
             &config,
-            move |data: &mut [u16], _| fill(data, channels, &shared, |v| ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 65535.0) as u16),
+            move |data: &mut [u16], _| {
+                fill(data, channels, &shared, |v| {
+                    ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 65535.0) as u16
+                })
+            },
             err_fn,
             None,
         )?,
@@ -138,10 +153,43 @@ fn build_stream(dev: &cpal::Device, cfg: cpal::SupportedStreamConfig, shared: Ar
     Ok(stream)
 }
 
-fn fill<T: Copy>(data: &mut [T], channels: usize, shared: &Arc<Mutex<Shared>>, conv: impl Fn(f32) -> T) {
+fn fill<T: Copy>(
+    data: &mut [T],
+    channels: usize,
+    shared: &Arc<Mutex<Shared>>,
+    conv: impl Fn(f32) -> T,
+) {
     let frames = data.len() / channels.max(1);
     let mut buf = vec![0f32; frames * 2];
-    if let Ok(mut s) = shared.lock() {
+    // §0.6: um pânico na mixagem não pode derrubar a thread de áudio;
+    // em caso de falha, toca silêncio e interrompe a reprodução.
+    let ok = crate::util::guard("mixagem de áudio", || mix_into(&mut buf, frames, shared));
+    if ok.is_err() {
+        buf.iter_mut().for_each(|v| *v = 0.0);
+        let mut s = crate::util::lock(shared);
+        s.playing = false;
+        s.mixer.reset();
+        s.error = Some("falha interna na mixagem de áudio; reprodução interrompida".into());
+    }
+    for f in 0..frames {
+        let l = buf.get(f * 2).copied().unwrap_or(0.0);
+        let r = buf.get(f * 2 + 1).copied().unwrap_or(0.0);
+        for c in 0..channels {
+            if let Some(d) = data.get_mut(f * channels + c) {
+                *d = conv(match (channels, c) {
+                    (1, _) => (l + r) * 0.5,
+                    (_, 0) => l,
+                    (_, 1) => r,
+                    _ => 0.0,
+                });
+            }
+        }
+    }
+}
+
+fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
+    {
+        let mut s = crate::util::lock(shared);
         if s.playing {
             let sr = s.mixer.sr as f64;
             if (s.speed - 1.0).abs() < 1e-9 {
@@ -159,7 +207,8 @@ fn fill<T: Copy>(data: &mut [T], channels: usize, shared: &Arc<Mutex<Shared>>, c
                     let project = s.project.clone();
                     let pos = s.pos;
                     let sh = &mut *s;
-                    sh.mixer.process(&project, &sh.audio, pos, &mut buf[done * 2..(done + n) * 2]);
+                    sh.mixer
+                        .process(&project, &sh.audio, pos, &mut buf[done * 2..(done + n) * 2]);
                     s.pos += n as i64;
                     done += n;
                 }
@@ -184,17 +233,6 @@ fn fill<T: Copy>(data: &mut [T], channels: usize, shared: &Arc<Mutex<Shared>>, c
             }
         }
     }
-    for f in 0..frames {
-        let (l, r) = (buf[f * 2], buf[f * 2 + 1]);
-        for c in 0..channels {
-            data[f * channels + c] = conv(match (channels, c) {
-                (1, _) => (l + r) * 0.5,
-                (_, 0) => l,
-                (_, 1) => r,
-                _ => 0.0,
-            });
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,26 +245,26 @@ pub struct PreviewRequest {
     pub w: usize,
     pub h: usize,
     pub scopes: bool,
-    pub overlay_safe: bool,
 }
 
 pub struct PreviewResult {
     pub image: egui::ColorImage,
-    pub t: f64,
     pub scopes: Option<scopes::ScopeImages>,
     pub render_ms: f64,
+    pub error: Option<String>,
 }
 
 pub struct Preview {
     tx: Sender<PreviewRequest>,
     pub rx: Receiver<PreviewResult>,
+    pub error: Option<String>,
 }
 
 impl Preview {
     pub fn new(media: Arc<MediaCache>, ctx: egui::Context) -> Self {
         let (tx, rx_req) = channel::<PreviewRequest>();
         let (tx_res, rx) = channel::<PreviewResult>();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("preview".into())
             .spawn(move || {
                 while let Ok(mut req) = rx_req.recv() {
@@ -234,17 +272,38 @@ impl Preview {
                         req = r;
                     }
                     let t0 = std::time::Instant::now();
-                    let f = render_frame(&req.project, &media, req.t, req.w, req.h);
-                    let sc = if req.scopes { Some(scopes::compute(&f)) } else { None };
-                    let rgba = f.to_rgba8();
-                    let image = egui::ColorImage::from_rgba_unmultiplied([req.w, req.h], &rgba);
-                    let _ = req.overlay_safe;
+                    // §0.6: uma falha ao renderizar um quadro vira um quadro de erro,
+                    // e o worker continua vivo para os próximos pedidos.
+                    let rendered = crate::util::guard("prévia de vídeo", || {
+                        let f = render_frame(&req.project, &media, req.t, req.w, req.h);
+                        let sc = if req.scopes {
+                            Some(scopes::compute(&f))
+                        } else {
+                            None
+                        };
+                        let rgba = f.to_rgba8();
+                        (
+                            egui::ColorImage::from_rgba_unmultiplied([req.w, req.h], &rgba),
+                            sc,
+                        )
+                    });
+                    let (image, sc, error) = match rendered {
+                        Ok((img, sc)) => (img, sc, None),
+                        Err(e) => (
+                            egui::ColorImage::new(
+                                [req.w.max(1), req.h.max(1)],
+                                egui::Color32::from_rgb(90, 0, 0),
+                            ),
+                            None,
+                            Some(e),
+                        ),
+                    };
                     if tx_res
                         .send(PreviewResult {
                             image,
-                            t: req.t,
                             scopes: sc,
                             render_ms: t0.elapsed().as_secs_f64() * 1000.0,
+                            error,
                         })
                         .is_err()
                     {
@@ -252,9 +311,11 @@ impl Preview {
                     }
                     ctx.request_repaint();
                 }
-            })
-            .expect("thread de prévia");
-        Preview { tx, rx }
+            });
+        let error = spawned
+            .err()
+            .map(|e| format!("não foi possível iniciar a prévia: {e}"));
+        Preview { tx, rx, error }
     }
 
     pub fn request(&self, r: PreviewRequest) {

@@ -16,24 +16,47 @@ fn raw(events: Vec<Event>, modifiers: Modifiers, t: f64) -> egui::RawInput {
 
 fn key(k: Key, mods: Modifiers) -> Vec<Event> {
     vec![
-        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: mods },
-        Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: mods },
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        },
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: mods,
+        },
     ]
 }
 
 fn press(p: Pos2, down: bool) -> Event {
-    Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE }
+    Event::PointerButton {
+        pos: p,
+        button: PointerButton::Primary,
+        pressed: down,
+        modifiers: Modifiers::NONE,
+    }
 }
 
 fn make_avi() -> PathBuf {
     let path = std::env::temp_dir().join("nvov_ui_smoke.avi");
     let mut w = crate::media::avi::AviWriter::create(&path, 160, 90, 25.0, Some(48000)).unwrap();
     for i in 0..50u32 {
-        let img = image::RgbImage::from_fn(160, 90, |x, y| image::Rgb([(x * 2) as u8, (y * 3) as u8, (i * 5) as u8]));
+        let img = image::RgbImage::from_fn(160, 90, |x, y| {
+            image::Rgb([(x * 2) as u8, (y * 3) as u8, (i * 5) as u8])
+        });
         let mut jpg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 80).encode_image(&img).unwrap();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 80)
+            .encode_image(&img)
+            .unwrap();
         w.write_video_jpeg(&jpg).unwrap();
-        let pcm: Vec<i16> = (0..1920 * 2).map(|s| ((s as f32 * 0.05).sin() * 8000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..1920 * 2)
+            .map(|s| ((s as f32 * 0.05).sin() * 8000.0) as i16)
+            .collect();
         w.write_audio(&pcm).unwrap();
     }
     w.finish().unwrap();
@@ -78,36 +101,82 @@ fn ui_smoke() {
     // mouse: passa sobre a timeline, clica, arrasta, roda
     let mut y = 90.0;
     while y < 500.0 {
-        frame(&mut app, vec![Event::PointerMoved(pos2(400.0, y))], Modifiers::NONE);
+        frame(
+            &mut app,
+            vec![Event::PointerMoved(pos2(400.0, y))],
+            Modifiers::NONE,
+        );
         y += 15.0;
     }
-    for (x, yy) in [(300.0, 150.0), (420.0, 220.0), (600.0, 300.0), (330.0, 70.0), (500.0, 40.0)] {
+    for (x, yy) in [
+        (300.0, 150.0),
+        (420.0, 220.0),
+        (600.0, 300.0),
+        (330.0, 70.0),
+        (500.0, 40.0),
+    ] {
         let p = pos2(x, yy);
-        frame(&mut app, vec![Event::PointerMoved(p), press(p, true)], Modifiers::NONE);
+        frame(
+            &mut app,
+            vec![Event::PointerMoved(p), press(p, true)],
+            Modifiers::NONE,
+        );
         for k in 1..8 {
-            frame(&mut app, vec![Event::PointerMoved(p + vec2(k as f32 * 6.0, 0.0))], Modifiers::NONE);
+            frame(
+                &mut app,
+                vec![Event::PointerMoved(p + vec2(k as f32 * 6.0, 0.0))],
+                Modifiers::NONE,
+            );
         }
-        frame(&mut app, vec![press(p + vec2(42.0, 0.0), false)], Modifiers::NONE);
+        frame(
+            &mut app,
+            vec![press(p + vec2(42.0, 0.0), false)],
+            Modifiers::NONE,
+        );
     }
     frame(
         &mut app,
-        vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, 2.0), modifiers: Modifiers::NONE }],
+        vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: vec2(0.0, 2.0),
+            modifiers: Modifiers::NONE,
+        }],
         Modifiers::NONE,
     );
 
     // teclado
-    app.sel_events = app.project.tracks.iter().flat_map(|t| t.events.iter().map(|e| e.id)).collect();
+    app.sel_events = app
+        .project
+        .tracks
+        .iter()
+        .flat_map(|t| t.events.iter().map(|e| e.id))
+        .collect();
     app.cursor = 0.8;
     frame(&mut app, key(Key::S, Modifiers::NONE), Modifiers::NONE);
     let after_split: usize = app.project.tracks.iter().map(|t| t.events.len()).sum();
-    assert!(after_split > 3, "divisão deveria criar eventos ({after_split})");
-    frame(&mut app, key(Key::Z, Modifiers::COMMAND), Modifiers::COMMAND);
-    frame(&mut app, key(Key::Y, Modifiers::COMMAND), Modifiers::COMMAND);
+    assert!(
+        after_split > 3,
+        "divisão deveria criar eventos ({after_split})"
+    );
+    frame(
+        &mut app,
+        key(Key::Z, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
+    frame(
+        &mut app,
+        key(Key::Y, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
     frame(&mut app, key(Key::M, Modifiers::NONE), Modifiers::NONE);
     frame(&mut app, key(Key::V, Modifiers::NONE), Modifiers::NONE);
     frame(&mut app, vec![Event::Copy], Modifiers::COMMAND);
     app.cursor = 10.0;
-    frame(&mut app, vec![Event::Paste(String::new())], Modifiers::COMMAND);
+    frame(
+        &mut app,
+        vec![Event::Paste(String::new())],
+        Modifiers::COMMAND,
+    );
     frame(&mut app, key(Key::Delete, Modifiers::NONE), Modifiers::NONE);
     frame(&mut app, key(Key::Space, Modifiers::NONE), Modifiers::NONE);
     for _ in 0..10 {
@@ -116,10 +185,25 @@ fn ui_smoke() {
     frame(&mut app, key(Key::Space, Modifiers::NONE), Modifiers::NONE);
 
     // abre todos os diálogos
-    let eid = app.project.tracks.iter().find(|t| t.kind == TrackKind::Video).and_then(|t| t.events.first()).map(|e| e.id).unwrap();
+    let eid = app
+        .project
+        .tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Video)
+        .and_then(|t| t.events.first())
+        .map(|e| e.id)
+        .unwrap();
     let tid = app.project.tracks[0].id;
-    let gid = app.project.media.iter().find(|m| matches!(m.source, MediaSource::Generated(_))).map(|m| m.id).unwrap();
-    app.project.tracks[0].fx.push(FxInstance::new(FxKind::GaussianBlur));
+    let gid = app
+        .project
+        .media
+        .iter()
+        .find(|m| matches!(m.source, MediaSource::Generated(_)))
+        .map(|m| m.id)
+        .unwrap();
+    app.project.tracks[0]
+        .fx
+        .push(FxInstance::new(FxKind::GaussianBlur));
     app.dlg.project_props = true;
     app.dlg.event_props = Some(eid);
     app.dlg.pan_crop = Some(eid);

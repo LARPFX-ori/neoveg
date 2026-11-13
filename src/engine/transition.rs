@@ -1,5 +1,9 @@
 //! Transições entre eventos sobrepostos na mesma trilha.
 
+// Laços indexam vários buffers paralelos (canais/amostras) ao mesmo tempo;
+// iteradores encadeados deixariam o DSP menos legível.
+#![allow(clippy::needless_range_loop)]
+
 use super::{smoothstep, Frame};
 use crate::model::TransitionKind;
 use rayon::prelude::*;
@@ -28,7 +32,12 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
                     let k = p * 2.0 - 1.0;
                     let s = b.px[i];
                     // mantém fundo preto opaco onde não há imagem
-                    *o = [s[0] * k, s[1] * k, s[2] * k, s[3].max(a.px[i][3] * (1.0 - k))];
+                    *o = [
+                        s[0] * k,
+                        s[1] * k,
+                        s[2] * k,
+                        s[3].max(a.px[i][3] * (1.0 - k)),
+                    ];
                 }
             });
         }
@@ -61,7 +70,12 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
                                 let s = b.get(bx, y as isize);
                                 let d = a.get(xi, y as isize);
                                 let ia = 1.0 - s[3];
-                                [s[0] + d[0] * ia, s[1] + d[1] * ia, s[2] + d[2] * ia, s[3] + d[3] * ia]
+                                [
+                                    s[0] + d[0] * ia,
+                                    s[1] + d[1] * ia,
+                                    s[2] + d[2] * ia,
+                                    s[3] + d[3] * ia,
+                                ]
                             } else {
                                 a.get(xi, y as isize)
                             }
@@ -84,7 +98,12 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
                     };
                     let d = a.px[y * w + x];
                     let ia = 1.0 - sb[3];
-                    *o = [sb[0] + d[0] * ia, sb[1] + d[1] * ia, sb[2] + d[2] * ia, sb[3] + d[3] * ia];
+                    *o = [
+                        sb[0] + d[0] * ia,
+                        sb[1] + d[1] * ia,
+                        sb[2] + d[2] * ia,
+                        sb[3] + d[3] * ia,
+                    ];
                 }
             });
         }
@@ -104,7 +123,8 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
                         TransitionKind::IrisOpen | TransitionKind::IrisClose => {
                             let dx = (nx - 0.5) * aspect;
                             let dy = ny - 0.5;
-                            let d = (dx * dx + dy * dy).sqrt() / (0.5 * (aspect * aspect + 1.0).sqrt());
+                            let d =
+                                (dx * dx + dy * dy).sqrt() / (0.5 * (aspect * aspect + 1.0).sqrt());
                             if kind == TransitionKind::IrisOpen {
                                 d
                             } else {

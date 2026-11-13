@@ -1,5 +1,9 @@
 //! Efeitos de áudio (Audio FX) com estado por instância.
 
+// Laços indexam vários buffers paralelos (canais/amostras) ao mesmo tempo;
+// iteradores encadeados deixariam o DSP menos legível.
+#![allow(clippy::needless_range_loop)]
+
 use crate::model::{db_to_lin, FxInstance, FxKind};
 
 #[derive(Clone, Copy, Default)]
@@ -25,16 +29,37 @@ pub enum BqType {
 impl Biquad {
     /// Fórmulas do "Audio EQ Cookbook" (RBJ).
     pub fn set(&mut self, ty: BqType, sr: f32, freq: f32, q: f32, gain_db: f32) {
-        let f = freq.clamp(10.0, sr * 0.49);
+        let f = crate::util::clampf(freq, 10.0, sr * 0.49);
         let w0 = 2.0 * std::f32::consts::PI * f / sr;
         let (sn, cs) = w0.sin_cos();
         let q = q.max(0.05);
         let alpha = sn / (2.0 * q);
         let a = 10f32.powf(gain_db / 40.0);
         let (b0, b1, b2, a0, a1, a2) = match ty {
-            BqType::LowPass => ((1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0, 1.0 + alpha, -2.0 * cs, 1.0 - alpha),
-            BqType::HighPass => ((1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0, 1.0 + alpha, -2.0 * cs, 1.0 - alpha),
-            BqType::Peak => (1.0 + alpha * a, -2.0 * cs, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * cs, 1.0 - alpha / a),
+            BqType::LowPass => (
+                (1.0 - cs) / 2.0,
+                1.0 - cs,
+                (1.0 - cs) / 2.0,
+                1.0 + alpha,
+                -2.0 * cs,
+                1.0 - alpha,
+            ),
+            BqType::HighPass => (
+                (1.0 + cs) / 2.0,
+                -(1.0 + cs),
+                (1.0 + cs) / 2.0,
+                1.0 + alpha,
+                -2.0 * cs,
+                1.0 - alpha,
+            ),
+            BqType::Peak => (
+                1.0 + alpha * a,
+                -2.0 * cs,
+                1.0 - alpha * a,
+                1.0 + alpha / a,
+                -2.0 * cs,
+                1.0 - alpha / a,
+            ),
             BqType::LowShelf => {
                 let sq = 2.0 * a.sqrt() * alpha;
                 (
@@ -135,8 +160,13 @@ impl Freeverb {
         let spread = 23;
         let mk = |off: usize| {
             (
-                combs_t.iter().map(|&n| Comb::new(((n + off) as f32 * k) as usize)).collect::<Vec<_>>(),
-                ap_t.iter().map(|&n| AllPass::new(((n + off) as f32 * k) as usize)).collect::<Vec<_>>(),
+                combs_t
+                    .iter()
+                    .map(|&n| Comb::new(((n + off) as f32 * k) as usize))
+                    .collect::<Vec<_>>(),
+                ap_t.iter()
+                    .map(|&n| AllPass::new(((n + off) as f32 * k) as usize))
+                    .collect::<Vec<_>>(),
             )
         };
         let (cl, al) = mk(0);
@@ -151,10 +181,20 @@ impl Freeverb {
 pub enum FxState {
     None,
     Filters(Vec<[Biquad; 2]>),
-    Dynamics { env: f32, gain: f32 },
-    Delay { buf: Vec<f32>, pos: usize },
+    Dynamics {
+        env: f32,
+        gain: f32,
+    },
+    Delay {
+        buf: Vec<f32>,
+        pos: usize,
+    },
     Reverb(Box<Freeverb>),
-    Chorus { buf: Vec<f32>, pos: usize, phase: f32 },
+    Chorus {
+        buf: Vec<f32>,
+        pos: usize,
+        phase: f32,
+    },
 }
 
 impl FxState {
@@ -162,7 +202,10 @@ impl FxState {
         match kind {
             FxKind::ParametricEq => FxState::Filters(vec![[Biquad::default(); 2]; 3]),
             FxKind::HighPass | FxKind::LowPass => FxState::Filters(vec![[Biquad::default(); 2]; 1]),
-            FxKind::Compressor | FxKind::NoiseGate => FxState::Dynamics { env: 0.0, gain: 1.0 },
+            FxKind::Compressor | FxKind::NoiseGate => FxState::Dynamics {
+                env: 0.0,
+                gain: 1.0,
+            },
             FxKind::Delay => FxState::Delay {
                 buf: vec![0.0; (sr as usize * 2 + 16) * 2],
                 pos: 0,
@@ -208,7 +251,11 @@ pub fn process(fx: &FxInstance, st: &mut FxState, sr: u32, buf: &mut [f32], t: f
             }
         }
         (FxKind::HighPass | FxKind::LowPass, FxState::Filters(f)) => {
-            let ty = if fx.kind == FxKind::HighPass { BqType::HighPass } else { BqType::LowPass };
+            let ty = if fx.kind == FxKind::HighPass {
+                BqType::HighPass
+            } else {
+                BqType::LowPass
+            };
             for ch in 0..2 {
                 f[0][ch].set(ty, srf, v[0], v[1], 0.0);
             }
@@ -227,7 +274,11 @@ pub fn process(fx: &FxInstance, st: &mut FxState, sr: u32, buf: &mut [f32], t: f
                 let c = if x > *env { ca } else { cr };
                 *env = x + (*env - x) * c;
                 let lvl = crate::model::lin_to_db(*env);
-                let gr = if lvl > thr { (thr - lvl) * (1.0 - 1.0 / ratio) } else { 0.0 };
+                let gr = if lvl > thr {
+                    (thr - lvl) * (1.0 - 1.0 / ratio)
+                } else {
+                    0.0
+                };
                 let g = db_to_lin(gr) * makeup;
                 buf[i * 2] *= g;
                 buf[i * 2 + 1] *= g;

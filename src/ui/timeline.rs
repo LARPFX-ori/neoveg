@@ -5,7 +5,9 @@
 use super::{App, DndPayload, FxTarget};
 use crate::model::*;
 use eframe::egui;
-use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
+use egui::{
+    pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
+};
 use std::collections::HashSet;
 
 const HEADER_W: f32 = 250.0;
@@ -180,7 +182,13 @@ fn nice_step(pps: f32, fps: f64) -> (f64, f64) {
     ];
     for s in steps {
         if s * pps as f64 >= 90.0 {
-            let minor = if s < 1.0 { s / 5.0 } else if s <= 2.0 { s / 4.0 } else { s / 5.0 };
+            let minor = if s < 1.0 {
+                s / 5.0
+            } else if s <= 2.0 {
+                s / 4.0
+            } else {
+                s / 5.0
+            };
             return (s, minor.max(1.0 / fps));
         }
     }
@@ -210,7 +218,10 @@ impl App {
     }
 
     fn event_rect(&self, e: &Event, left: f32, y0: f32, h: f32) -> Rect {
-        Rect::from_min_max(pos2(self.tl.t2x(e.start, left), y0 + 1.0), pos2(self.tl.t2x(e.end(), left), y0 + h - 1.0))
+        Rect::from_min_max(
+            pos2(self.tl.t2x(e.start, left), y0 + 1.0),
+            pos2(self.tl.t2x(e.end(), left), y0 + h - 1.0),
+        )
     }
 
     fn event_buttons(r: &Rect, is_video: bool) -> (Option<Rect>, Option<Rect>) {
@@ -219,14 +230,22 @@ impl App {
         }
         let fx = Rect::from_min_size(pos2(r.right() - 20.0, r.top() + 2.0), vec2(16.0, 13.0));
         let pc = if is_video {
-            Some(Rect::from_min_size(pos2(r.right() - 38.0, r.top() + 2.0), vec2(16.0, 13.0)))
+            Some(Rect::from_min_size(
+                pos2(r.right() - 38.0, r.top() + 2.0),
+                vec2(16.0, 13.0),
+            ))
         } else {
             None
         };
         (Some(fx), pc)
     }
 
-    fn hit_event(&self, pos: Pos2, left: f32, layout: &[(f32, f32)]) -> Option<(usize, usize, Zone)> {
+    fn hit_event(
+        &self,
+        pos: Pos2,
+        left: f32,
+        layout: &[(f32, f32)],
+    ) -> Option<(usize, usize, Zone)> {
         let ti = self.track_at(pos.y, layout)?;
         let (y0, h) = layout[ti];
         let track = &self.project.tracks[ti];
@@ -265,14 +284,23 @@ impl App {
         None
     }
 
-    fn hit_envelope(&self, pos: Pos2, left: f32, layout: &[(f32, f32)]) -> Option<(usize, EnvKind, Option<usize>, f64)> {
+    fn hit_envelope(
+        &self,
+        pos: Pos2,
+        left: f32,
+        layout: &[(f32, f32)],
+    ) -> Option<(usize, EnvKind, Option<usize>, f64)> {
         if !self.opts.show_envelopes {
             return None;
         }
         let ti = self.track_at(pos.y, layout)?;
         let (y0, h) = layout[ti];
         let t = self.tl.x2t(pos.x, left);
-        for env in self.project.tracks[ti].envelopes.iter().filter(|e| e.visible) {
+        for env in self.project.tracks[ti]
+            .envelopes
+            .iter()
+            .filter(|e| e.visible)
+        {
             for (i, p) in env.points.iter().enumerate() {
                 let px = self.tl.t2x(p.t, left);
                 let py = Self::env_y(env.kind, p.v, y0, h);
@@ -339,14 +367,23 @@ impl App {
         ui.allocate_rect(full, Sense::hover());
         let left = full.left() + HEADER_W;
         let corner = Rect::from_min_max(full.min, pos2(left, full.top() + TOP_H));
-        let top = Rect::from_min_max(pos2(left, full.top()), pos2(full.right(), full.top() + TOP_H));
-        let headers = Rect::from_min_max(pos2(full.left(), full.top() + TOP_H), pos2(left, full.bottom()));
+        let top = Rect::from_min_max(
+            pos2(left, full.top()),
+            pos2(full.right(), full.top() + TOP_H),
+        );
+        let headers = Rect::from_min_max(
+            pos2(full.left(), full.top() + TOP_H),
+            pos2(left, full.bottom()),
+        );
         let lanes = Rect::from_min_max(pos2(left, full.top() + TOP_H), full.max);
         self.tl.width = lanes.width().max(10.0);
 
         // limite de rolagem vertical
         let total_h: f32 = self.project.tracks.iter().map(|t| t.height).sum();
-        self.tl.scroll_y = self.tl.scroll_y.clamp(0.0, (total_h - lanes.height() + 40.0).max(0.0));
+        self.tl.scroll_y = self
+            .tl
+            .scroll_y
+            .clamp(0.0, (total_h - lanes.height() + 40.0).max(0.0));
 
         self.corner_ui(ui, corner);
         self.top_strip(ui, top);
@@ -360,19 +397,35 @@ impl App {
     }
 
     fn corner_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
-        ui.painter().rect_filled(r, 0.0, Color32::from_rgb(30, 30, 33));
+        ui.painter()
+            .rect_filled(r, 0.0, Color32::from_rgb(30, 30, 33));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(4.0)));
         child.horizontal(|ui| {
-            if ui.small_button("+ Vídeo").on_hover_text("Inserir trilha de vídeo (Ctrl+Shift+Q)").clicked() {
+            if ui
+                .small_button("+ Vídeo")
+                .on_hover_text("Inserir trilha de vídeo (Ctrl+Shift+Q)")
+                .clicked()
+            {
                 self.checkpoint();
                 self.insert_track(TrackKind::Video);
             }
-            if ui.small_button("+ Áudio").on_hover_text("Inserir trilha de áudio (Ctrl+Q)").clicked() {
+            if ui
+                .small_button("+ Áudio")
+                .on_hover_text("Inserir trilha de áudio (Ctrl+Q)")
+                .clicked()
+            {
                 self.checkpoint();
                 self.insert_track(TrackKind::Audio);
             }
         });
-        child.label(egui::RichText::new(format!("{} trilhas  •  duração {}", self.project.tracks.len(), self.fmt_time(self.project.duration()))).small());
+        child.label(
+            egui::RichText::new(format!(
+                "{} trilhas  •  duração {}",
+                self.project.tracks.len(),
+                self.fmt_time(self.project.duration())
+            ))
+            .small(),
+        );
     }
 
     // -----------------------------------------------------------------
@@ -382,7 +435,10 @@ impl App {
     fn top_strip(&mut self, ui: &mut egui::Ui, r: Rect) {
         let painter = ui.painter_at(r);
         let loop_r = Rect::from_min_max(r.min, pos2(r.right(), r.top() + LOOP_H));
-        let marker_r = Rect::from_min_max(pos2(r.left(), loop_r.bottom()), pos2(r.right(), loop_r.bottom() + MARKER_H));
+        let marker_r = Rect::from_min_max(
+            pos2(r.left(), loop_r.bottom()),
+            pos2(r.right(), loop_r.bottom() + MARKER_H),
+        );
         let ruler_r = Rect::from_min_max(pos2(r.left(), marker_r.bottom()), r.max);
         painter.rect_filled(loop_r, 0.0, Color32::from_rgb(28, 28, 30));
         painter.rect_filled(marker_r, 0.0, Color32::from_rgb(34, 34, 38));
@@ -392,8 +448,15 @@ impl App {
 
         // região de loop
         if let Some((a, b)) = self.project.loop_region {
-            let lr = Rect::from_min_max(pos2(self.tl.t2x(a, left), loop_r.top() + 2.0), pos2(self.tl.t2x(b, left), loop_r.bottom() - 2.0));
-            let col = if self.opts.loop_playback { Color32::from_rgb(90, 140, 220) } else { Color32::from_rgb(80, 80, 95) };
+            let lr = Rect::from_min_max(
+                pos2(self.tl.t2x(a, left), loop_r.top() + 2.0),
+                pos2(self.tl.t2x(b, left), loop_r.bottom() - 2.0),
+            );
+            let col = if self.opts.loop_playback {
+                Color32::from_rgb(90, 140, 220)
+            } else {
+                Color32::from_rgb(80, 80, 95)
+            };
             painter.rect_filled(lr, 2.0, col);
         }
         // régua
@@ -405,9 +468,18 @@ impl App {
             let x = self.tl.t2x(t, left);
             let is_major = ((t / major).round() * major - t).abs() < minor * 0.25;
             let h = if is_major { 10.0 } else { 4.0 };
-            painter.line_segment([pos2(x, ruler_r.bottom() - h), pos2(x, ruler_r.bottom())], Stroke::new(1.0_f32, Color32::from_gray(150)));
+            painter.line_segment(
+                [pos2(x, ruler_r.bottom() - h), pos2(x, ruler_r.bottom())],
+                Stroke::new(1.0_f32, Color32::from_gray(150)),
+            );
             if is_major {
-                painter.text(pos2(x + 3.0, ruler_r.top() + 1.0), Align2::LEFT_TOP, self.fmt_time(t), FontId::monospace(10.0), Color32::from_gray(200));
+                painter.text(
+                    pos2(x + 3.0, ruler_r.top() + 1.0),
+                    Align2::LEFT_TOP,
+                    self.fmt_time(t),
+                    FontId::monospace(10.0),
+                    Color32::from_gray(200),
+                );
             }
             t += minor;
         }
@@ -416,19 +488,56 @@ impl App {
             let xa = self.tl.t2x(reg.start, left);
             let xb = self.tl.t2x(reg.end, left);
             let col = Color32::from_rgb(70, 170, 90);
-            painter.rect_filled(Rect::from_min_max(pos2(xa, marker_r.top() + 1.0), pos2(xb, marker_r.top() + 4.0)), 0.0, col.gamma_multiply(0.5));
-            painter.rect_filled(Rect::from_min_size(pos2(xa, marker_r.top()), vec2(10.0, MARKER_H)), 0.0, col);
-            painter.rect_filled(Rect::from_min_size(pos2(xb - 10.0, marker_r.top()), vec2(10.0, MARKER_H)), 0.0, col);
-            painter.text(pos2(xa + 12.0, marker_r.top() + 3.0), Align2::LEFT_TOP, &reg.label, FontId::proportional(11.0), Color32::WHITE);
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(xa, marker_r.top() + 1.0),
+                    pos2(xb, marker_r.top() + 4.0),
+                ),
+                0.0,
+                col.gamma_multiply(0.5),
+            );
+            painter.rect_filled(
+                Rect::from_min_size(pos2(xa, marker_r.top()), vec2(10.0, MARKER_H)),
+                0.0,
+                col,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(pos2(xb - 10.0, marker_r.top()), vec2(10.0, MARKER_H)),
+                0.0,
+                col,
+            );
+            painter.text(
+                pos2(xa + 12.0, marker_r.top() + 3.0),
+                Align2::LEFT_TOP,
+                &reg.label,
+                FontId::proportional(11.0),
+                Color32::WHITE,
+            );
         }
         let mut sorted: Vec<&Marker> = self.project.markers.iter().collect();
-        sorted.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        sorted.sort_by(|a, b| a.t.total_cmp(&b.t));
         for (i, m) in sorted.iter().enumerate() {
             let x = self.tl.t2x(m.t, left);
             let col = Color32::from_rgb(230, 150, 40);
-            painter.rect_filled(Rect::from_min_size(pos2(x, marker_r.top()), vec2(14.0, MARKER_H - 2.0)), 1.0, col);
-            painter.text(pos2(x + 3.0, marker_r.top() + 2.0), Align2::LEFT_TOP, format!("{}", (i + 1) % 10), FontId::proportional(11.0), Color32::BLACK);
-            painter.text(pos2(x + 17.0, marker_r.top() + 2.0), Align2::LEFT_TOP, &m.label, FontId::proportional(11.0), Color32::from_rgb(255, 210, 150));
+            painter.rect_filled(
+                Rect::from_min_size(pos2(x, marker_r.top()), vec2(14.0, MARKER_H - 2.0)),
+                1.0,
+                col,
+            );
+            painter.text(
+                pos2(x + 3.0, marker_r.top() + 2.0),
+                Align2::LEFT_TOP,
+                format!("{}", (i + 1) % 10),
+                FontId::proportional(11.0),
+                Color32::BLACK,
+            );
+            painter.text(
+                pos2(x + 17.0, marker_r.top() + 2.0),
+                Align2::LEFT_TOP,
+                &m.label,
+                FontId::proportional(11.0),
+                Color32::from_rgb(255, 210, 150),
+            );
         }
 
         // interação
@@ -463,19 +572,27 @@ impl App {
                 let ot = self.tl.x2t(origin.x, left);
                 let in_loop0 = loop_r.contains(origin);
                 let in_marker0 = marker_r.contains(origin);
-                if in_marker0 && hit_marker.is_some() {
+                if let (true, Some(mid)) = (in_marker0, hit_marker) {
                     self.checkpoint();
-                    self.tl.drag = Drag::Marker { id: hit_marker.unwrap() };
-                } else if in_marker0 && hit_region.is_some() {
+                    self.tl.drag = Drag::Marker { id: mid };
+                } else if let (true, Some((id, start))) = (in_marker0, hit_region) {
                     self.checkpoint();
-                    let (id, start) = hit_region.unwrap();
                     self.tl.drag = Drag::RegionEdge { id, start };
                 } else if in_loop0 {
                     let tol = 6.0 / self.tl.px_per_sec as f64;
                     match self.project.loop_region {
-                        Some((a, _)) if (ot - a).abs() < tol => self.tl.drag = Drag::LoopEdge { start: true },
-                        Some((_, b)) if (ot - b).abs() < tol => self.tl.drag = Drag::LoopEdge { start: false },
-                        Some((a, b)) if ot > a && ot < b => self.tl.drag = Drag::LoopMove { orig: (a, b), t0: ot },
+                        Some((a, _)) if (ot - a).abs() < tol => {
+                            self.tl.drag = Drag::LoopEdge { start: true }
+                        }
+                        Some((_, b)) if (ot - b).abs() < tol => {
+                            self.tl.drag = Drag::LoopEdge { start: false }
+                        }
+                        Some((a, b)) if ot > a && ot < b => {
+                            self.tl.drag = Drag::LoopMove {
+                                orig: (a, b),
+                                t0: ot,
+                            }
+                        }
                         _ => {
                             let s = self.snap(ot, &HashSet::new(), shift);
                             self.tl.drag = Drag::TimeSel { anchor: s };
@@ -512,7 +629,11 @@ impl App {
                     Drag::LoopEdge { start } => {
                         let s = self.snap(t, &HashSet::new(), shift);
                         if let Some((a, b)) = self.project.loop_region {
-                            let nr = if start { (s.min(b - 0.01), b) } else { (a, s.max(a + 0.01)) };
+                            let nr = if start {
+                                (s.min(b - 0.01), b)
+                            } else {
+                                (a, s.max(a + 0.01))
+                            };
                             self.project.loop_region = Some(nr);
                             self.time_sel = Some(nr);
                         }
@@ -558,10 +679,22 @@ impl App {
             }
             if resp.double_clicked() && in_marker {
                 if let Some(id) = hit_marker {
-                    let label = self.project.markers.iter().find(|m| m.id == id).map(|m| m.label.clone()).unwrap_or_default();
+                    let label = self
+                        .project
+                        .markers
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
                     self.tl.rename = Some((id, label));
                 } else if let Some((id, _)) = hit_region {
-                    let label = self.project.regions.iter().find(|r| r.id == id).map(|r| r.label.clone()).unwrap_or_default();
+                    let label = self
+                        .project
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.label.clone())
+                        .unwrap_or_default();
                     self.tl.rename = Some((id, label));
                 } else {
                     self.cursor = t;
@@ -585,7 +718,13 @@ impl App {
         resp.context_menu(|ui| match self.tl.ctx_target.clone() {
             CtxTarget::Marker(id) => {
                 if ui.button("Renomear marcador").clicked() {
-                    let label = self.project.markers.iter().find(|m| m.id == id).map(|m| m.label.clone()).unwrap_or_default();
+                    let label = self
+                        .project
+                        .markers
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
                     self.tl.rename = Some((id, label));
                     ui.close_menu();
                 }
@@ -598,7 +737,13 @@ impl App {
             }
             CtxTarget::Region(id) => {
                 if ui.button("Renomear região").clicked() {
-                    let label = self.project.regions.iter().find(|m| m.id == id).map(|m| m.label.clone()).unwrap_or_default();
+                    let label = self
+                        .project
+                        .regions
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
                     self.tl.rename = Some((id, label));
                     ui.close_menu();
                 }
@@ -643,7 +788,9 @@ impl App {
     }
 
     fn rename_popup(&mut self, ui: &mut egui::Ui) {
-        let Some((id, mut label)) = self.tl.rename.clone() else { return };
+        let Some((id, mut label)) = self.tl.rename.clone() else {
+            return;
+        };
         let mut open = true;
         let mut done = false;
         egui::Window::new("Renomear")
@@ -653,7 +800,9 @@ impl App {
             .show(ui.ctx(), |ui| {
                 let r = ui.text_edit_singleline(&mut label);
                 r.request_focus();
-                if ui.button("OK").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                if ui.button("OK").clicked()
+                    || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
                     done = true;
                 }
             });
@@ -681,6 +830,8 @@ impl App {
     // Cabeçalhos de trilha
     // -----------------------------------------------------------------
 
+    // o índice da trilha é usado no layout e no projeto ao mesmo tempo
+    #[allow(clippy::needless_range_loop)]
     fn headers_ui(&mut self, ui: &mut egui::Ui, area: Rect, layout: &[(f32, f32)]) {
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, Color32::from_rgb(36, 36, 40));
@@ -700,10 +851,21 @@ impl App {
             }
             let selected = self.sel_track == Some(ti);
             let track = &self.project.tracks[ti];
-            let bg = if selected { Color32::from_rgb(58, 62, 74) } else { Color32::from_rgb(44, 44, 50) };
+            let bg = if selected {
+                Color32::from_rgb(58, 62, 74)
+            } else {
+                Color32::from_rgb(44, 44, 50)
+            };
             painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, bg);
-            painter.rect_filled(Rect::from_min_size(r.min, vec2(6.0, h)), 0.0, shade(track.color, 1.0));
-            painter.line_segment([pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())], Stroke::new(1.0_f32, Color32::from_gray(25)));
+            painter.rect_filled(
+                Rect::from_min_size(r.min, vec2(6.0, h)),
+                0.0,
+                shade(track.color, 1.0),
+            );
+            painter.line_segment(
+                [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
+                Stroke::new(1.0_f32, Color32::from_gray(25)),
+            );
 
             // clique no fundo seleciona a trilha
             let bresp = ui.interact(r, ui.id().with(("thdr", track.id)), Sense::click());
@@ -712,18 +874,35 @@ impl App {
             }
             let tid = track.id;
             bresp.context_menu(|ui| self.track_menu(ui, ti));
+            // o menu pode ter excluído trilhas: os índices calculados no início
+            // do quadro deixam de valer (evita acesso fora dos limites)
+            if self.project.tracks.get(ti).map(|t| t.id) != Some(tid) {
+                break;
+            }
 
-            let inner = Rect::from_min_max(pos2(r.left() + 10.0, r.top() + 3.0), pos2(r.right() - 14.0, r.bottom() - 3.0));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("th", tid)));
+            let inner = Rect::from_min_max(
+                pos2(r.left() + 10.0, r.top() + 3.0),
+                pos2(r.right() - 14.0, r.bottom() - 3.0),
+            );
+            let mut child =
+                ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("th", tid)));
             child.set_clip_rect(inner.intersect(area));
             let kind = self.project.tracks[ti].kind;
             let mut changed_track = false;
             let mut want_checkpoint = false;
             child.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{}", ti + 1)).strong());
-                ui.label(if kind == TrackKind::Video { "🎞" } else { "🔊" });
+                ui.label(if kind == TrackKind::Video {
+                    "🎞"
+                } else {
+                    "🔊"
+                });
                 let t = &mut self.project.tracks[ti];
-                let r = ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(78.0).font(egui::TextStyle::Small));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut t.name)
+                        .desired_width(78.0)
+                        .font(egui::TextStyle::Small),
+                );
                 if r.changed() {
                     changed_track = true;
                 }
@@ -740,10 +919,19 @@ impl App {
                     changed_track = true;
                 }
                 let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
-                if ui.small_button(fxlabel).on_hover_text("Efeitos da trilha").clicked() {
+                if ui
+                    .small_button(fxlabel)
+                    .on_hover_text("Efeitos da trilha")
+                    .clicked()
+                {
                     self.dlg.fx_target = Some(FxTarget::Track(tid));
                 }
-                if kind == TrackKind::Video && ui.small_button("✥").on_hover_text("Movimento da trilha (Track Motion)").clicked() {
+                if kind == TrackKind::Video
+                    && ui
+                        .small_button("✥")
+                        .on_hover_text("Movimento da trilha (Track Motion)")
+                        .clicked()
+                {
                     self.dlg.track_motion = Some(tid);
                 }
             });
@@ -769,7 +957,12 @@ impl App {
                     } else {
                         ui.label(egui::RichText::new("Nível").small());
                         let mut pct = t.opacity * 100.0;
-                        let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").fixed_decimals(0).trailing_fill(true));
+                        let r = ui.add(
+                            egui::Slider::new(&mut pct, 0.0..=100.0)
+                                .suffix(" %")
+                                .fixed_decimals(0)
+                                .trailing_fill(true),
+                        );
                         if r.drag_started() {
                             want_checkpoint = true;
                         }
@@ -832,11 +1025,17 @@ impl App {
             // medidor de nível (áudio)
             if kind == TrackKind::Audio {
                 let lv = self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]);
-                let mr = Rect::from_min_max(pos2(r.right() - 11.0, r.top() + 4.0), pos2(r.right() - 3.0, r.bottom() - 4.0));
+                let mr = Rect::from_min_max(
+                    pos2(r.right() - 11.0, r.top() + 4.0),
+                    pos2(r.right() - 3.0, r.bottom() - 4.0),
+                );
                 draw_meter(&painter, mr, lv);
             }
             // alça de altura da trilha
-            let hr = Rect::from_min_max(pos2(r.left(), r.bottom() - 3.0), pos2(r.right(), r.bottom() + 2.0));
+            let hr = Rect::from_min_max(
+                pos2(r.left(), r.bottom() - 3.0),
+                pos2(r.right(), r.bottom() + 2.0),
+            );
             let hresp = ui.interact(hr, ui.id().with(("theight", tid)), Sense::drag());
             if hresp.hovered() || hresp.dragged() {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
@@ -849,7 +1048,9 @@ impl App {
                 };
             }
             if hresp.dragged() {
-                if let (Drag::TrackHeight { track, orig_h, y0 }, Some(p)) = (self.tl.drag.clone(), hresp.interact_pointer_pos()) {
+                if let (Drag::TrackHeight { track, orig_h, y0 }, Some(p)) =
+                    (self.tl.drag.clone(), hresp.interact_pointer_pos())
+                {
                     if track == ti {
                         self.project.tracks[ti].height = (orig_h + p.y - y0).clamp(28.0, 400.0);
                     }
@@ -873,10 +1074,18 @@ impl App {
             ui.close_menu();
         }
         ui.separator();
-        let envs: &[EnvKind] = if kind == TrackKind::Audio { &[EnvKind::Volume, EnvKind::Pan] } else { &[EnvKind::Opacity, EnvKind::FadeToColor] };
+        let envs: &[EnvKind] = if kind == TrackKind::Audio {
+            &[EnvKind::Volume, EnvKind::Pan]
+        } else {
+            &[EnvKind::Opacity, EnvKind::FadeToColor]
+        };
         for &k in envs {
             let has = self.project.tracks[ti].envelope(k).is_some();
-            let label = if has { format!("Remover envelope: {}", k.name()) } else { format!("Inserir envelope: {}", k.name()) };
+            let label = if has {
+                format!("Remover envelope: {}", k.name())
+            } else {
+                format!("Inserir envelope: {}", k.name())
+            };
             if ui.button(label).clicked() {
                 self.checkpoint();
                 let t = &mut self.project.tracks[ti];
@@ -924,7 +1133,13 @@ impl App {
         let left = lanes.left();
         let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
         let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
-            (i.modifiers, i.raw_scroll_delta, i.zoom_delta(), i.pointer.middle_down(), i.pointer.hover_pos())
+            (
+                i.modifiers,
+                i.raw_scroll_delta,
+                i.zoom_delta(),
+                i.pointer.middle_down(),
+                i.pointer.hover_pos(),
+            )
         });
 
         // roda do mouse: zoom; Shift = rolar horizontal; Ctrl = rolar vertical
@@ -934,7 +1149,8 @@ impl App {
             } else if scroll != egui::Vec2::ZERO {
                 let d = if scroll.y != 0.0 { scroll.y } else { scroll.x };
                 if mods.shift || scroll.x != 0.0 && scroll.y == 0.0 {
-                    self.tl.scroll_x = (self.tl.scroll_x - (d / self.tl.px_per_sec) as f64).max(0.0);
+                    self.tl.scroll_x =
+                        (self.tl.scroll_x - (d / self.tl.px_per_sec) as f64).max(0.0);
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                 } else {
@@ -946,7 +1162,8 @@ impl App {
             if middle_down {
                 if let Drag::Pan { last } = self.tl.drag {
                     let d = p - last;
-                    self.tl.scroll_x = (self.tl.scroll_x - (d.x / self.tl.px_per_sec) as f64).max(0.0);
+                    self.tl.scroll_x =
+                        (self.tl.scroll_x - (d.x / self.tl.px_per_sec) as f64).max(0.0);
                     self.tl.scroll_y = (self.tl.scroll_y - d.y).max(0.0);
                 }
                 self.tl.drag = Drag::Pan { last: p };
@@ -960,13 +1177,20 @@ impl App {
         self.tl.drop_hint = None;
         if let Some(p) = pointer.filter(|p| lanes.contains(*p)) {
             if egui::DragAndDrop::has_any_payload(ui.ctx()) {
-                let ti = self.track_at(p.y, layout).unwrap_or(self.project.tracks.len());
+                let ti = self
+                    .track_at(p.y, layout)
+                    .unwrap_or(self.project.tracks.len());
                 let t = self.snap(self.tl.x2t(p.x, left), &HashSet::new(), mods.shift);
                 self.tl.drop_hint = Some((ti, t));
                 if ui.input(|i| i.pointer.any_released()) {
                     if let Some(payload) = egui::DragAndDrop::take_payload::<DndPayload>(ui.ctx()) {
                         let hit = self.hit_event(p, left, layout);
-                        self.handle_drop((*payload).clone(), self.track_at(p.y, layout), t, hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id));
+                        self.handle_drop(
+                            (*payload).clone(),
+                            self.track_at(p.y, layout),
+                            t,
+                            hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id),
+                        );
                     }
                 }
             }
@@ -979,9 +1203,15 @@ impl App {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
                 match z {
-                    Zone::LeftEdge | Zone::RightEdge => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
-                    Zone::FadeIn | Zone::FadeOut => ui.ctx().set_cursor_icon(CursorIcon::ResizeNeSw),
-                    Zone::FxButton | Zone::PanCropButton => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
+                    Zone::LeftEdge | Zone::RightEdge => {
+                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal)
+                    }
+                    Zone::FadeIn | Zone::FadeOut => {
+                        ui.ctx().set_cursor_icon(CursorIcon::ResizeNeSw)
+                    }
+                    Zone::FxButton | Zone::PanCropButton => {
+                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand)
+                    }
                     Zone::Body => {
                         if mods.alt {
                             ui.ctx().set_cursor_icon(CursorIcon::AllScroll)
@@ -996,7 +1226,9 @@ impl App {
         }
 
         if resp.drag_started_by(egui::PointerButton::Primary) {
-            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(lanes.center());
+            let origin = ui
+                .input(|i| i.pointer.press_origin())
+                .unwrap_or(lanes.center());
             self.start_lane_drag(origin, left, layout, mods);
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
@@ -1006,7 +1238,8 @@ impl App {
                 if p.x > lanes.right() - 20.0 {
                     self.tl.scroll_x += (8.0 / self.tl.px_per_sec) as f64;
                 } else if p.x < lanes.left() + 10.0 && self.tl.scroll_x > 0.0 {
-                    self.tl.scroll_x = (self.tl.scroll_x - (8.0 / self.tl.px_per_sec) as f64).max(0.0);
+                    self.tl.scroll_x =
+                        (self.tl.scroll_x - (8.0 / self.tl.px_per_sec) as f64).max(0.0);
                 }
             }
         }
@@ -1030,10 +1263,25 @@ impl App {
                 if let Some((ti, kind, None, t)) = self.hit_envelope(p, left, layout) {
                     self.checkpoint();
                     let (y0, h) = layout[ti];
-                    let v = kind.from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
-                    let env = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind).unwrap();
-                    let v = if (Self::env_y(kind, env.eval(t), y0, h) - p.y).abs() < 4.0 { env.eval(t) } else { v };
-                    env.points.push(EnvPoint { t, v, curve: Curve::Linear });
+                    let v = kind.value_from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
+                    let Some(env) = self
+                        .project
+                        .tracks
+                        .get_mut(ti)
+                        .and_then(|t| t.envelopes.iter_mut().find(|e| e.kind == kind))
+                    else {
+                        return;
+                    };
+                    let v = if (Self::env_y(kind, env.eval(t), y0, h) - p.y).abs() < 4.0 {
+                        env.eval(t)
+                    } else {
+                        v
+                    };
+                    env.points.push(EnvPoint {
+                        t,
+                        v,
+                        curve: Curve::Linear,
+                    });
                     env.sort();
                     self.changed();
                 } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
@@ -1047,35 +1295,46 @@ impl App {
         if resp.secondary_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let t = self.tl.x2t(p.x, left);
-                self.tl.ctx_target = if let Some((ti, k, idx, t)) = self.hit_envelope(p, left, layout) {
-                    match idx {
-                        Some(i) => CtxTarget::EnvPoint(ti, k, i),
-                        None => CtxTarget::EnvLine(ti, k, t),
-                    }
-                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
-                    let id = self.project.tracks[ti].events[ei].id;
-                    if !self.sel_events.contains(&id) {
-                        self.sel_events.clear();
-                        self.sel_events.insert(id);
-                    }
-                    self.sel_track = Some(ti);
-                    CtxTarget::Event(id)
-                } else if let Some(ti) = self.track_at(p.y, layout) {
-                    self.sel_track = Some(ti);
-                    CtxTarget::Lane(ti, t)
-                } else {
-                    CtxTarget::None
-                };
+                self.tl.ctx_target =
+                    if let Some((ti, k, idx, t)) = self.hit_envelope(p, left, layout) {
+                        match idx {
+                            Some(i) => CtxTarget::EnvPoint(ti, k, i),
+                            None => CtxTarget::EnvLine(ti, k, t),
+                        }
+                    } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
+                        let id = self.project.tracks[ti].events[ei].id;
+                        if !self.sel_events.contains(&id) {
+                            self.sel_events.clear();
+                            self.sel_events.insert(id);
+                        }
+                        self.sel_track = Some(ti);
+                        CtxTarget::Event(id)
+                    } else if let Some(ti) = self.track_at(p.y, layout) {
+                        self.sel_track = Some(ti);
+                        CtxTarget::Lane(ti, t)
+                    } else {
+                        CtxTarget::None
+                    };
             }
         }
         resp.context_menu(|ui| self.lane_context_menu(ui));
     }
 
-    fn start_lane_drag(&mut self, origin: Pos2, left: f32, layout: &[(f32, f32)], mods: egui::Modifiers) {
+    fn start_lane_drag(
+        &mut self,
+        origin: Pos2,
+        left: f32,
+        layout: &[(f32, f32)],
+        mods: egui::Modifiers,
+    ) {
         let ot = self.tl.x2t(origin.x, left);
         if let Some((ti, kind, Some(idx), _)) = self.hit_envelope(origin, left, layout) {
             self.checkpoint();
-            self.tl.drag = Drag::EnvPoint { track: ti, kind, idx };
+            self.tl.drag = Drag::EnvPoint {
+                track: ti,
+                kind,
+                idx,
+            };
             return;
         }
         if let Some((ti, ei, zone)) = self.hit_event(origin, left, layout) {
@@ -1087,7 +1346,10 @@ impl App {
             match zone {
                 Zone::FadeIn | Zone::FadeOut => {
                     self.checkpoint();
-                    self.tl.drag = Drag::Fade { id, fade_in: zone == Zone::FadeIn };
+                    self.tl.drag = Drag::Fade {
+                        id,
+                        fade_in: zone == Zone::FadeIn,
+                    };
                 }
                 Zone::LeftEdge | Zone::RightEdge => {
                     self.checkpoint();
@@ -1129,7 +1391,10 @@ impl App {
                     }
                     let ids = self.expand_groups(&self.sel_events.clone());
                     if mods.alt {
-                        let orig = ids.iter().filter_map(|i| self.project.event(*i).map(|e| (*i, e.offset))).collect();
+                        let orig = ids
+                            .iter()
+                            .filter_map(|i| self.project.event(*i).map(|e| (*i, e.offset)))
+                            .collect();
                         self.tl.drag = Drag::Slip { origin_t: ot, orig };
                         return;
                     }
@@ -1139,7 +1404,9 @@ impl App {
                         let mut gm = std::collections::HashMap::new();
                         let mut new_sel = HashSet::new();
                         for i in &ids {
-                            let (t, e) = self.project.find_event(*i).unwrap();
+                            let Some((t, e)) = self.project.find_event(*i) else {
+                                continue;
+                            };
                             let mut c = self.project.tracks[t].events[e].clone();
                             c.id = new_id();
                             c.group = c.group.map(|g| *gm.entry(g).or_insert_with(new_id));
@@ -1154,18 +1421,39 @@ impl App {
                         self.changed();
                         let orig = new_sel
                             .iter()
-                            .filter_map(|i| self.project.find_event(*i).map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t)))
+                            .filter_map(|i| {
+                                self.project
+                                    .find_event(*i)
+                                    .map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t))
+                            })
                             .collect();
-                        let anchor_start = self.project.event(anchor).map(|e| e.start).unwrap_or(0.0);
-                        self.tl.drag = Drag::Move { anchor_id: anchor, anchor_start, origin_t: ot, origin_track: ti, orig };
+                        let anchor_start =
+                            self.project.event(anchor).map(|e| e.start).unwrap_or(0.0);
+                        self.tl.drag = Drag::Move {
+                            anchor_id: anchor,
+                            anchor_start,
+                            origin_t: ot,
+                            origin_track: ti,
+                            orig,
+                        };
                         return;
                     }
                     let orig = ids
                         .iter()
-                        .filter_map(|i| self.project.find_event(*i).map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t)))
+                        .filter_map(|i| {
+                            self.project
+                                .find_event(*i)
+                                .map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t))
+                        })
                         .collect();
                     let anchor_start = self.project.tracks[ti].events[ei].start;
-                    self.tl.drag = Drag::Move { anchor_id: anchor, anchor_start, origin_t: ot, origin_track: ti, orig };
+                    self.tl.drag = Drag::Move {
+                        anchor_id: anchor,
+                        anchor_start,
+                        origin_t: ot,
+                        origin_track: ti,
+                        orig,
+                    };
                 }
             }
             return;
@@ -1178,7 +1466,13 @@ impl App {
         self.tl.drag = Drag::TimeSel { anchor: s };
     }
 
-    fn update_lane_drag(&mut self, p: Pos2, left: f32, layout: &[(f32, f32)], mods: egui::Modifiers) {
+    fn update_lane_drag(
+        &mut self,
+        p: Pos2,
+        left: f32,
+        layout: &[(f32, f32)],
+        mods: egui::Modifiers,
+    ) {
         let t = self.tl.x2t(p.x, left);
         match self.tl.drag.clone() {
             Drag::TimeSel { anchor } => {
@@ -1192,15 +1486,30 @@ impl App {
             }
             Drag::EnvPoint { track, kind, idx } => {
                 let (y0, h) = layout[track];
-                let v = kind.from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
+                let v = kind.value_from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
                 let snapped = self.snap(t, &HashSet::new(), mods.shift);
-                let env = self.project.tracks[track].envelopes.iter_mut().find(|e| e.kind == kind);
+                let env = self.project.tracks[track]
+                    .envelopes
+                    .iter_mut()
+                    .find(|e| e.kind == kind);
                 if let Some(env) = env {
-                    let lo = if idx > 0 { env.points[idx - 1].t + 1e-4 } else { 0.0 };
-                    let hi = env.points.get(idx + 1).map(|p| p.t - 1e-4).unwrap_or(f64::MAX);
+                    let lo = if idx > 0 {
+                        env.points[idx - 1].t + 1e-4
+                    } else {
+                        0.0
+                    };
+                    let hi = env
+                        .points
+                        .get(idx + 1)
+                        .map(|p| p.t - 1e-4)
+                        .unwrap_or(f64::MAX);
                     if let Some(pt) = env.points.get_mut(idx) {
                         if !mods.command {
-                            pt.t = if idx == 0 && env_first_locked() { 0.0 } else { snapped.clamp(lo, hi.max(lo)) };
+                            pt.t = if idx == 0 && env_first_locked() {
+                                0.0
+                            } else {
+                                snapped.clamp(lo, hi.max(lo))
+                            };
                         }
                         if !mods.alt {
                             pt.v = v;
@@ -1212,9 +1521,11 @@ impl App {
             Drag::Fade { id, fade_in } => {
                 if let Some(e) = self.project.event_mut(id) {
                     if fade_in {
-                        e.fade_in.len = (t - e.start).clamp(0.0, e.length - e.fade_out.len);
+                        e.fade_in.len =
+                            crate::util::clampd(t - e.start, 0.0, e.length - e.fade_out.len);
                     } else {
-                        e.fade_out.len = (e.end() - t).clamp(0.0, e.length - e.fade_in.len);
+                        e.fade_out.len =
+                            crate::util::clampd(e.end() - t, 0.0, e.length - e.fade_in.len);
                     }
                 }
                 self.changed();
@@ -1222,7 +1533,11 @@ impl App {
             Drag::Slip { origin_t, orig } => {
                 let dt = t - origin_t;
                 for (id, off) in orig {
-                    let dur = self.project.event(id).and_then(|e| self.project.media(e.media_id)).and_then(|m| m.duration);
+                    let dur = self
+                        .project
+                        .event(id)
+                        .and_then(|e| self.project.media(e.media_id))
+                        .and_then(|m| m.duration);
                     if let Some(e) = self.project.event_mut(id) {
                         let mut o = off - dt * e.rate;
                         if let (Some(d), false) = (dur, e.looped) {
@@ -1238,16 +1553,26 @@ impl App {
                 }
                 self.changed();
             }
-            Drag::Trim { left: is_left, slip, origin_t, anchor_id, orig } => {
+            Drag::Trim {
+                left: is_left,
+                slip,
+                origin_t,
+                anchor_id,
+                orig,
+            } => {
                 let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
-                let Some(&(_, a_start, a_len, _)) = orig.iter().find(|o| o.0 == anchor_id) else { return };
+                let Some(&(_, a_start, a_len, _)) = orig.iter().find(|o| o.0 == anchor_id) else {
+                    return;
+                };
                 let fd = self.project.settings.frame_dur();
                 let raw_edge = if is_left { a_start } else { a_start + a_len } + (t - origin_t);
                 let edge = self.snap(raw_edge, &exclude, mods.shift);
                 let mut dt = edge - if is_left { a_start } else { a_start + a_len };
                 // limites para todos os eventos do grupo
                 for &(id, st, len, off) in &orig {
-                    let Some(e) = self.project.event(id) else { continue };
+                    let Some(e) = self.project.event(id) else {
+                        continue;
+                    };
                     let dur = self.project.media(e.media_id).and_then(|m| m.duration);
                     let rate = e.rate;
                     if is_left {
@@ -1287,16 +1612,28 @@ impl App {
                 }
                 self.changed();
             }
-            Drag::Move { anchor_id, anchor_start, origin_t, origin_track, orig } => {
+            Drag::Move {
+                anchor_id,
+                anchor_start,
+                origin_t,
+                origin_track,
+                orig,
+            } => {
                 let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
                 let raw = anchor_start + (t - origin_t);
                 // encaixa o início ou o fim do evento âncora
-                let anchor_len = self.project.event(anchor_id).map(|e| e.length).unwrap_or(0.0);
+                let anchor_len = self
+                    .project
+                    .event(anchor_id)
+                    .map(|e| e.length)
+                    .unwrap_or(0.0);
                 let s1 = self.snap(raw, &exclude, mods.shift);
                 let line1 = self.tl.snap_line;
                 let s2 = self.snap(raw + anchor_len, &exclude, mods.shift) - anchor_len;
                 let line2 = self.tl.snap_line;
-                let ns = if line1.is_some() && (line2.is_none() || (s1 - raw).abs() <= (s2 - raw).abs()) {
+                let ns = if line1.is_some()
+                    && (line2.is_none() || (s1 - raw).abs() <= (s2 - raw).abs())
+                {
                     self.tl.snap_line = line1;
                     s1
                 } else if line2.is_some() {
@@ -1313,15 +1650,25 @@ impl App {
                 let n = self.project.tracks.len() as isize;
                 let valid = orig.iter().all(|&(id, _, ti)| {
                     let nt = ti as isize + dtrack;
-                    let kind = self.project.find_event(id).map(|(t, _)| self.project.tracks[t].kind);
+                    let kind = self
+                        .project
+                        .find_event(id)
+                        .map(|(t, _)| self.project.tracks[t].kind);
                     nt >= 0 && nt < n && Some(self.project.tracks[nt as usize].kind) == kind
                 });
                 let dtrack = if valid && !mods.alt { dtrack } else { 0 };
                 for &(id, st, ti) in &orig {
-                    let Some((cur_t, cur_e)) = self.project.find_event(id) else { continue };
+                    let Some((cur_t, cur_e)) = self.project.find_event(id) else {
+                        continue;
+                    };
                     let new_t = (ti as isize + dtrack) as usize;
                     // grupos áudio/vídeo: só move de trilha os eventos do tipo da âncora
-                    let new_t = if self.project.tracks[new_t].kind == self.project.tracks[cur_t].kind { new_t } else { cur_t };
+                    let new_t =
+                        if self.project.tracks[new_t].kind == self.project.tracks[cur_t].kind {
+                            new_t
+                        } else {
+                            cur_t
+                        };
                     if new_t != cur_t {
                         let ev = self.project.tracks[cur_t].events.remove(cur_e);
                         self.project.tracks[new_t].events.push(ev);
@@ -1381,7 +1728,13 @@ impl App {
         self.set_cursor(s);
     }
 
-    fn handle_drop(&mut self, payload: DndPayload, track: Option<usize>, t: f64, event: Option<Id>) {
+    fn handle_drop(
+        &mut self,
+        payload: DndPayload,
+        track: Option<usize>,
+        t: f64,
+        event: Option<Id>,
+    ) {
         match payload {
             DndPayload::Media(mid) => {
                 self.checkpoint();
@@ -1398,10 +1751,14 @@ impl App {
             DndPayload::Fx(kind) => {
                 let want_audio = kind.is_audio();
                 if let Some(eid) = event {
-                    let Some((ti, _)) = self.project.find_event(eid) else { return };
+                    let Some((ti, _)) = self.project.find_event(eid) else {
+                        return;
+                    };
                     if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
                         self.checkpoint();
-                        self.project.event_mut(eid).unwrap().fx.push(FxInstance::new(kind));
+                        if let Some(ev) = self.project.event_mut(eid) {
+                            ev.fx.push(FxInstance::new(kind));
+                        }
                         self.dlg.fx_target = Some(FxTarget::Event(eid));
                         self.changed();
                         return;
@@ -1416,7 +1773,9 @@ impl App {
                         return;
                     }
                 }
-                self.set_status("Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio");
+                self.set_status(
+                    "Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio",
+                );
             }
             DndPayload::Transition(kind) => {
                 if let Some(eid) = event {
@@ -1427,15 +1786,22 @@ impl App {
     }
 
     pub fn apply_transition(&mut self, eid: Id, kind: TransitionKind) {
-        let Some((ti, _)) = self.project.find_event(eid) else { return };
+        let Some((ti, _)) = self.project.find_event(eid) else {
+            return;
+        };
         if self.project.tracks[ti].kind != TrackKind::Video {
             self.set_status("Transições se aplicam a eventos de vídeo");
             return;
         }
         self.checkpoint();
-        let e = self.project.event_mut(eid).unwrap();
+        let Some(e) = self.project.event_mut(eid) else {
+            return;
+        };
         let soft = e.transition.as_ref().map(|t| t.softness).unwrap_or(0.05);
-        e.transition = Some(TransitionSpec { kind, softness: soft });
+        e.transition = Some(TransitionSpec {
+            kind,
+            softness: soft,
+        });
         if e.fade_in.len <= 0.0 {
             e.fade_in.len = 1.0f64.min(e.length / 2.0);
         }
@@ -1447,7 +1813,9 @@ impl App {
         match self.tl.ctx_target.clone() {
             CtxTarget::Event(id) => self.event_context_menu(ui, id),
             CtxTarget::EnvPoint(ti, kind, idx) => {
-                ui.label(egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong());
+                ui.label(
+                    egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong(),
+                );
                 if let Some(env) = self.project.tracks.get(ti).and_then(|t| t.envelope(kind)) {
                     if let Some(p) = env.points.get(idx) {
                         ui.label(format!("{}  @ {}", kind.format(p.v), self.fmt_time(p.t)));
@@ -1457,7 +1825,11 @@ impl App {
                 for c in Curve::ALL {
                     if ui.button(format!("Curva: {}", c.name())).clicked() {
                         self.checkpoint();
-                        if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                        if let Some(env) = self.project.tracks[ti]
+                            .envelopes
+                            .iter_mut()
+                            .find(|e| e.kind == kind)
+                        {
                             if let Some(p) = env.points.get_mut(idx) {
                                 p.curve = c;
                             }
@@ -1469,7 +1841,11 @@ impl App {
                 ui.separator();
                 if ui.button("Redefinir valor").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                    if let Some(env) = self.project.tracks[ti]
+                        .envelopes
+                        .iter_mut()
+                        .find(|e| e.kind == kind)
+                    {
                         if let Some(p) = env.points.get_mut(idx) {
                             p.v = kind.default_value();
                         }
@@ -1479,7 +1855,11 @@ impl App {
                 }
                 if ui.button("Excluir ponto").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                    if let Some(env) = self.project.tracks[ti]
+                        .envelopes
+                        .iter_mut()
+                        .find(|e| e.kind == kind)
+                    {
                         if env.points.len() > 1 {
                             env.points.remove(idx);
                         }
@@ -1491,9 +1871,17 @@ impl App {
             CtxTarget::EnvLine(ti, kind, t) => {
                 if ui.button("Adicionar ponto aqui").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                    if let Some(env) = self.project.tracks[ti]
+                        .envelopes
+                        .iter_mut()
+                        .find(|e| e.kind == kind)
+                    {
                         let v = env.eval(t);
-                        env.points.push(EnvPoint { t, v, curve: Curve::Linear });
+                        env.points.push(EnvPoint {
+                            t,
+                            v,
+                            curve: Curve::Linear,
+                        });
                         env.sort();
                     }
                     self.changed();
@@ -1501,14 +1889,22 @@ impl App {
                 }
                 if ui.button("Redefinir todos os pontos").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                    if let Some(env) = self.project.tracks[ti]
+                        .envelopes
+                        .iter_mut()
+                        .find(|e| e.kind == kind)
+                    {
                         *env = Envelope::new(kind);
                     }
                     self.changed();
                     ui.close_menu();
                 }
                 if ui.button("Ocultar envelope").clicked() {
-                    if let Some(env) = self.project.tracks[ti].envelopes.iter_mut().find(|e| e.kind == kind) {
+                    if let Some(env) = self.project.tracks[ti]
+                        .envelopes
+                        .iter_mut()
+                        .find(|e| e.kind == kind)
+                    {
                         env.visible = false;
                     }
                     ui.close_menu();
@@ -1521,7 +1917,10 @@ impl App {
                 }
             }
             CtxTarget::Lane(ti, t) => {
-                if ui.add_enabled(!self.clipboard.is_empty(), egui::Button::new("Colar aqui")).clicked() {
+                if ui
+                    .add_enabled(!self.clipboard.is_empty(), egui::Button::new("Colar aqui"))
+                    .clicked()
+                {
                     self.cursor = t;
                     self.sel_track = Some(ti);
                     self.paste(false);
@@ -1634,9 +2033,14 @@ impl App {
         ui.separator();
         ui.menu_button("Curva do fade de entrada", |ui| {
             for c in Curve::ALL.iter().take(5) {
-                if ui.selectable_label(e.fade_in.curve == *c, c.name()).clicked() {
+                if ui
+                    .selectable_label(e.fade_in.curve == *c, c.name())
+                    .clicked()
+                {
                     self.checkpoint();
-                    self.project.event_mut(id).unwrap().fade_in.curve = *c;
+                    if let Some(ev) = self.project.event_mut(id) {
+                        ev.fade_in.curve = *c;
+                    }
                     self.changed();
                     ui.close_menu();
                 }
@@ -1644,9 +2048,14 @@ impl App {
         });
         ui.menu_button("Curva do fade de saída", |ui| {
             for c in Curve::ALL.iter().take(5) {
-                if ui.selectable_label(e.fade_out.curve == *c, c.name()).clicked() {
+                if ui
+                    .selectable_label(e.fade_out.curve == *c, c.name())
+                    .clicked()
+                {
                     self.checkpoint();
-                    self.project.event_mut(id).unwrap().fade_out.curve = *c;
+                    if let Some(ev) = self.project.event_mut(id) {
+                        ev.fade_out.curve = *c;
+                    }
                     self.changed();
                     ui.close_menu();
                 }
@@ -1654,9 +2063,14 @@ impl App {
         });
         if is_video {
             ui.menu_button("Transição de entrada", |ui| {
-                if ui.selectable_label(e.transition.is_none(), "Nenhuma (crossfade)").clicked() {
+                if ui
+                    .selectable_label(e.transition.is_none(), "Nenhuma (crossfade)")
+                    .clicked()
+                {
                     self.checkpoint();
-                    self.project.event_mut(id).unwrap().transition = None;
+                    if let Some(ev) = self.project.event_mut(id) {
+                        ev.transition = None;
+                    }
                     self.changed();
                     ui.close_menu();
                 }
@@ -1671,9 +2085,14 @@ impl App {
         }
         ui.menu_button("Velocidade", |ui| {
             for r in [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0] {
-                if ui.selectable_label((e.rate - r).abs() < 1e-6, format!("{:.0}%", r * 100.0)).clicked() {
+                if ui
+                    .selectable_label((e.rate - r).abs() < 1e-6, format!("{:.0}%", r * 100.0))
+                    .clicked()
+                {
                     self.checkpoint();
-                    let ev = self.project.event_mut(id).unwrap();
+                    let Some(ev) = self.project.event_mut(id) else {
+                        return;
+                    };
                     // mantém o mesmo conteúdo: ajusta a duração
                     let content = ev.length * ev.rate;
                     ev.rate = r;
@@ -1706,6 +2125,7 @@ impl App {
     // Desenho
     // -----------------------------------------------------------------
 
+    #[allow(clippy::needless_range_loop)]
     fn draw_lanes(&mut self, ui: &mut egui::Ui, lanes: Rect, layout: &[(f32, f32)]) {
         let painter = ui.painter_at(lanes);
         painter.rect_filled(lanes, 0.0, Color32::from_rgb(30, 30, 33));
@@ -1718,12 +2138,18 @@ impl App {
         let t_end = self.tl.x2t(lanes.right(), left);
         while gt <= t_end {
             let x = self.tl.t2x(gt, left);
-            painter.line_segment([pos2(x, lanes.top()), pos2(x, lanes.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 44)));
+            painter.line_segment(
+                [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
+                Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 44)),
+            );
             gt += major;
         }
         // seleção de tempo
         if let Some((a, b)) = self.time_sel {
-            let r = Rect::from_min_max(pos2(self.tl.t2x(a, left), lanes.top()), pos2(self.tl.t2x(b, left), lanes.bottom()));
+            let r = Rect::from_min_max(
+                pos2(self.tl.t2x(a, left), lanes.top()),
+                pos2(self.tl.t2x(b, left), lanes.bottom()),
+            );
             painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(90, 130, 200, 40));
         }
         let audio_map = self.media.audio_map();
@@ -1734,8 +2160,22 @@ impl App {
             }
             let lane = Rect::from_min_max(pos2(lanes.left(), y0), pos2(lanes.right(), y0 + h));
             let selected = self.sel_track == Some(ti);
-            painter.rect_filled(lane, 0.0, if selected { Color32::from_rgb(40, 42, 50) } else { Color32::from_rgb(33, 33, 37) });
-            painter.line_segment([pos2(lane.left(), lane.bottom()), pos2(lane.right(), lane.bottom())], Stroke::new(1.0_f32, Color32::from_gray(22)));
+            painter.rect_filled(
+                lane,
+                0.0,
+                if selected {
+                    Color32::from_rgb(40, 42, 50)
+                } else {
+                    Color32::from_rgb(33, 33, 37)
+                },
+            );
+            painter.line_segment(
+                [
+                    pos2(lane.left(), lane.bottom()),
+                    pos2(lane.right(), lane.bottom()),
+                ],
+                Stroke::new(1.0_f32, Color32::from_gray(22)),
+            );
             let track = self.project.tracks[ti].clone();
             let muted = track.mute;
             // sobreposições (crossfades)
@@ -1743,10 +2183,23 @@ impl App {
                 for b in track.events.iter().skip(i + 1) {
                     let (s, e) = (a.start.max(b.start), a.end().min(b.end()));
                     if e > s {
-                        let r = Rect::from_min_max(pos2(self.tl.t2x(s, left), y0 + 1.0), pos2(self.tl.t2x(e, left), y0 + h - 1.0));
-                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18));
-                        painter.line_segment([r.left_top(), r.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(140)));
-                        painter.line_segment([r.left_bottom(), r.right_top()], Stroke::new(1.0_f32, Color32::from_gray(140)));
+                        let r = Rect::from_min_max(
+                            pos2(self.tl.t2x(s, left), y0 + 1.0),
+                            pos2(self.tl.t2x(e, left), y0 + h - 1.0),
+                        );
+                        painter.rect_filled(
+                            r,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                        );
+                        painter.line_segment(
+                            [r.left_top(), r.right_bottom()],
+                            Stroke::new(1.0_f32, Color32::from_gray(140)),
+                        );
+                        painter.line_segment(
+                            [r.left_bottom(), r.right_top()],
+                            Stroke::new(1.0_f32, Color32::from_gray(140)),
+                        );
                     }
                 }
             }
@@ -1757,15 +2210,30 @@ impl App {
                 }
                 let sel = self.sel_events.contains(&e.id);
                 let k = if sel { 1.0 } else { 0.62 };
-                let body = if e.mute || muted { shade([90, 90, 90], 0.7) } else { shade(track.color, k * 0.55) };
+                let body = if e.mute || muted {
+                    shade([90, 90, 90], 0.7)
+                } else {
+                    shade(track.color, k * 0.55)
+                };
                 let hdr_h = 14.0f32.min(r.height() * 0.3);
                 painter.rect_filled(r, 2.0, body);
                 let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
-                painter.rect_filled(hdr, 2.0, if e.mute || muted { Color32::from_gray(80) } else { shade(track.color, k * 0.9) });
+                painter.rect_filled(
+                    hdr,
+                    2.0,
+                    if e.mute || muted {
+                        Color32::from_gray(80)
+                    } else {
+                        shade(track.color, k * 0.9)
+                    },
+                );
                 let content = Rect::from_min_max(pos2(r.left(), hdr.bottom()), r.max);
                 let vis = content.intersect(lanes);
                 // conteúdo: miniaturas ou forma de onda
-                if track.kind == TrackKind::Video && self.opts.show_thumbs && content.height() > 16.0 {
+                if track.kind == TrackKind::Video
+                    && self.opts.show_thumbs
+                    && content.height() > 16.0
+                {
                     if let Some(tex) = self.thumb(&ctx, e.media_id) {
                         let ts = tex.size_vec2();
                         let th = content.height() - 2.0;
@@ -1782,28 +2250,48 @@ impl App {
                                     Color32::from_white_alpha(if e.mute { 80 } else { 230 }),
                                 );
                             }
-                            x += tw.max(8.0) + if content.width() > tw * 3.0 { tw * 2.0 } else { tw };
+                            x += tw.max(8.0)
+                                + if content.width() > tw * 3.0 {
+                                    tw * 2.0
+                                } else {
+                                    tw
+                                };
                             count += 1;
                         }
                     }
                 }
                 if track.kind == TrackKind::Audio && self.opts.show_waveforms && vis.width() > 0.0 {
                     if let Some(a) = audio_map.get(&e.media_id) {
-                        let dur = self.project.media(e.media_id).and_then(|m| m.duration).or(Some(a.duration()));
+                        let dur = self
+                            .project
+                            .media(e.media_id)
+                            .and_then(|m| m.duration)
+                            .or(Some(a.duration()));
                         let mid = content.center().y;
                         let amp = content.height() * 0.48 * db_to_lin(e.gain_db).min(4.0);
-                        let col = Color32::from_rgba_unmultiplied(220, 230, 240, if e.mute { 60 } else { 170 });
+                        let col = Color32::from_rgba_unmultiplied(
+                            220,
+                            230,
+                            240,
+                            if e.mute { 60 } else { 170 },
+                        );
                         let mut x = vis.left().floor();
                         let mut segs = Vec::with_capacity(vis.width() as usize * 2);
                         while x < vis.right() {
                             let t0 = self.tl.x2t(x, left);
                             let t1 = self.tl.x2t(x + 1.0, left);
-                            if let (Some(m0), Some(m1)) = (e.media_time(t0, dur), e.media_time(t1.min(e.end() - 1e-6), dur)) {
+                            if let (Some(m0), Some(m1)) = (
+                                e.media_time(t0, dur),
+                                e.media_time(t1.min(e.end() - 1e-6), dur),
+                            ) {
                                 let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
                                 let (lo, hi) = a.peak_range(m0, m1.max(m0 + 1e-4));
                                 let fg = e.fade_gain(t0);
                                 segs.push(Shape::line_segment(
-                                    [pos2(x, mid - hi * amp * fg), pos2(x, mid - lo * amp * fg + 0.5)],
+                                    [
+                                        pos2(x, mid - hi * amp * fg),
+                                        pos2(x, mid - lo * amp * fg + 0.5),
+                                    ],
                                     Stroke::new(1.0_f32, col),
                                 ));
                             }
@@ -1820,7 +2308,14 @@ impl App {
                 if e.reverse {
                     label.push_str("  ⇄");
                 }
-                if e.looped && self.project.media(e.media_id).and_then(|m| m.duration).map(|d| e.length * e.rate > d + 1e-3).unwrap_or(false) {
+                if e.looped
+                    && self
+                        .project
+                        .media(e.media_id)
+                        .and_then(|m| m.duration)
+                        .map(|d| e.length * e.rate > d + 1e-3)
+                        .unwrap_or(false)
+                {
                     label.push_str("  ⟲");
                 }
                 if e.group.is_some() {
@@ -1839,15 +2334,35 @@ impl App {
                 // botões do evento
                 let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
                 if let Some(b) = fxb {
-                    let col = if e.fx.is_empty() { Color32::from_gray(150) } else { Color32::from_rgb(120, 230, 120) };
+                    let col = if e.fx.is_empty() {
+                        Color32::from_gray(150)
+                    } else {
+                        Color32::from_rgb(120, 230, 120)
+                    };
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
-                    painter.text(b.center(), Align2::CENTER_CENTER, "fx", FontId::proportional(9.0), col);
+                    painter.text(
+                        b.center(),
+                        Align2::CENTER_CENTER,
+                        "fx",
+                        FontId::proportional(9.0),
+                        col,
+                    );
                 }
                 if let Some(b) = pcb {
                     let active = !e.pan_crop.is_identity() || e.pan_crop.keys.len() > 1;
-                    let col = if active { Color32::from_rgb(120, 200, 255) } else { Color32::from_gray(150) };
+                    let col = if active {
+                        Color32::from_rgb(120, 200, 255)
+                    } else {
+                        Color32::from_gray(150)
+                    };
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
-                    painter.text(b.center(), Align2::CENTER_CENTER, "⛶", FontId::proportional(9.0), col);
+                    painter.text(
+                        b.center(),
+                        Align2::CENTER_CENTER,
+                        "⛶",
+                        FontId::proportional(9.0),
+                        col,
+                    );
                 }
                 // fades
                 let fade_col = Stroke::new(1.5_f32, Color32::from_rgb(250, 250, 160));
@@ -1876,12 +2391,26 @@ impl App {
                 let fi_x = r.left() + e.fade_in.len as f32 * pps;
                 let fo_x = r.right() - e.fade_out.len as f32 * pps;
                 for x in [fi_x, fo_x] {
-                    painter.rect_filled(Rect::from_center_size(pos2(x, r.top() + 3.0), vec2(6.0, 6.0)), 1.0, Color32::from_rgb(250, 250, 160));
+                    painter.rect_filled(
+                        Rect::from_center_size(pos2(x, r.top() + 3.0), vec2(6.0, 6.0)),
+                        1.0,
+                        Color32::from_rgb(250, 250, 160),
+                    );
                 }
-                let border = if sel { Stroke::new(2.0_f32, Color32::WHITE) } else { Stroke::new(1.0_f32, Color32::from_gray(15)) };
+                let border = if sel {
+                    Stroke::new(2.0_f32, Color32::WHITE)
+                } else {
+                    Stroke::new(1.0_f32, Color32::from_gray(15))
+                };
                 painter.rect_stroke(r, 2.0, border, StrokeKind::Inside);
                 if e.locked {
-                    painter.text(pos2(r.right() - 4.0, r.bottom() - 2.0), Align2::RIGHT_BOTTOM, "🔒", FontId::proportional(10.0), Color32::WHITE);
+                    painter.text(
+                        pos2(r.right() - 4.0, r.bottom() - 2.0),
+                        Align2::RIGHT_BOTTOM,
+                        "🔒",
+                        FontId::proportional(10.0),
+                        Color32::WHITE,
+                    );
                 }
             }
             // envelopes
@@ -1905,25 +2434,58 @@ impl App {
                             continue;
                         }
                         let py = Self::env_y(env.kind, p.v, y0, h);
-                        painter.rect_filled(Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)), 1.0, col);
-                        painter.rect_stroke(Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)), 1.0, Stroke::new(1.0_f32, Color32::WHITE), StrokeKind::Inside);
+                        painter.rect_filled(
+                            Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
+                            1.0,
+                            col,
+                        );
+                        painter.rect_stroke(
+                            Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
+                            1.0,
+                            Stroke::new(1.0_f32, Color32::WHITE),
+                            StrokeKind::Inside,
+                        );
                     }
-                    painter.text(pos2(lanes.left() + 4.0, y0 + h - 14.0), Align2::LEFT_TOP, env.kind.name(), FontId::proportional(10.0), col);
+                    painter.text(
+                        pos2(lanes.left() + 4.0, y0 + h - 14.0),
+                        Align2::LEFT_TOP,
+                        env.kind.name(),
+                        FontId::proportional(10.0),
+                        col,
+                    );
                 }
             }
         }
         // valor do ponto de envelope durante o arrasto
         if let Drag::EnvPoint { track, kind, idx } = self.tl.drag {
-            if let Some(p) = self.project.tracks.get(track).and_then(|t| t.envelope(kind)).and_then(|e| e.points.get(idx)) {
+            if let Some(p) = self
+                .project
+                .tracks
+                .get(track)
+                .and_then(|t| t.envelope(kind))
+                .and_then(|e| e.points.get(idx))
+            {
                 let (y0, h) = layout[track];
-                let pos = pos2(self.tl.t2x(p.t, left) + 8.0, Self::env_y(kind, p.v, y0, h) - 16.0);
-                painter.text(pos, Align2::LEFT_TOP, format!("{}  {}", kind.format(p.v), self.fmt_time(p.t)), FontId::proportional(11.0), Color32::WHITE);
+                let pos = pos2(
+                    self.tl.t2x(p.t, left) + 8.0,
+                    Self::env_y(kind, p.v, y0, h) - 16.0,
+                );
+                painter.text(
+                    pos,
+                    Align2::LEFT_TOP,
+                    format!("{}  {}", kind.format(p.v), self.fmt_time(p.t)),
+                    FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
             }
         }
         // indicador de soltura
         if let Some((ti, t)) = self.tl.drop_hint {
             let x = self.tl.t2x(t, left);
-            let (y0, h) = layout.get(ti).cloned().unwrap_or((lanes.bottom() - 30.0, 30.0));
+            let (y0, h) = layout
+                .get(ti)
+                .cloned()
+                .unwrap_or((lanes.bottom() - 30.0, 30.0));
             painter.rect_stroke(
                 Rect::from_min_size(pos2(x, y0 + 1.0), vec2(80.0, h - 2.0)),
                 2.0,
@@ -1933,7 +2495,10 @@ impl App {
         }
         if let Some(t) = self.tl.snap_line {
             let x = self.tl.t2x(t, left);
-            painter.line_segment([pos2(x, lanes.top()), pos2(x, lanes.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(255, 220, 90)));
+            painter.line_segment(
+                [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
+                Stroke::new(1.0_f32, Color32::from_rgb(255, 220, 90)),
+            );
         }
     }
 
@@ -1945,20 +2510,33 @@ impl App {
             let x = self.tl.t2x(m.t, left);
             let mut y = area.top() + TOP_H;
             while y < area.bottom() {
-                painter.line_segment([pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))], Stroke::new(1.0_f32, Color32::from_rgb(230, 150, 40)));
+                painter.line_segment(
+                    [pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))],
+                    Stroke::new(1.0_f32, Color32::from_rgb(230, 150, 40)),
+                );
                 y += 8.0;
             }
         }
         let x = self.tl.t2x(self.cursor, left);
-        painter.line_segment([pos2(x, area.top() + LOOP_H), pos2(x, area.bottom())], Stroke::new(1.0_f32, Color32::WHITE));
+        painter.line_segment(
+            [pos2(x, area.top() + LOOP_H), pos2(x, area.bottom())],
+            Stroke::new(1.0_f32, Color32::WHITE),
+        );
         painter.add(Shape::convex_polygon(
-            vec![pos2(x - 5.0, area.top() + LOOP_H + MARKER_H), pos2(x + 5.0, area.top() + LOOP_H + MARKER_H), pos2(x, area.top() + LOOP_H + MARKER_H + 7.0)],
+            vec![
+                pos2(x - 5.0, area.top() + LOOP_H + MARKER_H),
+                pos2(x + 5.0, area.top() + LOOP_H + MARKER_H),
+                pos2(x, area.top() + LOOP_H + MARKER_H + 7.0),
+            ],
             Color32::WHITE,
             Stroke::NONE,
         ));
         if self.is_playing() {
             let px = self.tl.t2x(self.play_pos(), left);
-            painter.line_segment([pos2(px, area.top() + LOOP_H), pos2(px, area.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(255, 120, 60)));
+            painter.line_segment(
+                [pos2(px, area.top() + LOOP_H), pos2(px, area.bottom())],
+                Stroke::new(1.5_f32, Color32::from_rgb(255, 120, 60)),
+            );
         }
     }
 }
@@ -1981,7 +2559,10 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
             Color32::from_rgb(70, 200, 90)
         };
         let x0 = r.left() + i as f32 * (w + 1.0);
-        let bar = Rect::from_min_max(pos2(x0, r.bottom() - n * r.height()), pos2(x0 + w, r.bottom()));
+        let bar = Rect::from_min_max(
+            pos2(x0, r.bottom() - n * r.height()),
+            pos2(x0 + w, r.bottom()),
+        );
         painter.rect_filled(bar, 0.0, col);
     }
 }

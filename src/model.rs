@@ -134,7 +134,10 @@ impl<T: Lerp + Default> Keyframes<T> {
                 return a.value.lerp(&b.value, a.curve.shape(x));
             }
         }
-        self.keys.last().unwrap().value.clone()
+        self.keys
+            .last()
+            .map(|k| k.value.clone())
+            .unwrap_or_default()
     }
 
     /// Insere ou substitui o keyframe no tempo `t` (tolerância de meio frame).
@@ -145,7 +148,7 @@ impl<T: Lerp + Default> Keyframes<T> {
         }
         let curve = self.keys.first().map(|k| k.curve).unwrap_or(Curve::Smooth);
         self.keys.push(Keyframe { t, value, curve });
-        self.keys.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
     }
 
     pub fn is_identity(&self) -> bool
@@ -288,9 +291,270 @@ impl Project {
     /// Ordena os eventos das trilhas por tempo de início.
     pub fn sort_events(&mut self) {
         for t in &mut self.tracks {
-            t.events
-                .sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+            t.events.sort_by(|a, b| a.start.total_cmp(&b.start));
         }
+    }
+
+    /// Valida e corrige um projeto vindo de arquivo (entrada hostil, §0.4):
+    /// números não finitos, faixas inválidas, ids duplicados, fades maiores
+    /// que o evento, tamanhos que causariam alocações gigantes etc.
+    /// Retorna a lista de correções aplicadas.
+    pub fn sanitize(&mut self) -> Vec<String> {
+        use crate::util::{clampd, clampf};
+        let mut fixes: Vec<String> = vec![];
+        // ids novos (renumeração) precisam ficar acima dos já existentes
+        bump_ids(self.max_id());
+        let fin32 = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        let fin64 = |v: f64, d: f64| if v.is_finite() { v } else { d };
+
+        let s = &mut self.settings;
+        let (w0, h0) = (s.width, s.height);
+        s.width = (s.width.clamp(16, MAX_DIM) / 2) * 2;
+        s.height = (s.height.clamp(16, MAX_DIM) / 2) * 2;
+        if (w0, h0) != (s.width, s.height) {
+            fixes.push(format!(
+                "resolução {w0}x{h0} ajustada para {}x{}",
+                s.width, s.height
+            ));
+        }
+        if !s.fps.is_finite() || !(1.0..=240.0).contains(&s.fps) {
+            fixes.push(format!(
+                "taxa de quadros inválida ({}) trocada por 29,97",
+                s.fps
+            ));
+            s.fps = 29.97;
+        }
+        if !(8000..=384_000).contains(&s.sample_rate) {
+            fixes.push(format!(
+                "taxa de amostragem inválida ({}) trocada por 48000",
+                s.sample_rate
+            ));
+            s.sample_rate = 48000;
+        }
+        for c in &mut s.background {
+            *c = clampf(fin32(*c, 0.0), 0.0, 1.0);
+        }
+
+        // mídia
+        let mut seen_media = std::collections::HashSet::new();
+        for m in &mut self.media {
+            if !seen_media.insert(m.id) {
+                let old = m.id;
+                m.id = new_id();
+                fixes.push(format!("id de mídia duplicado {old} renumerado"));
+            }
+            m.duration = m
+                .duration
+                .filter(|d| d.is_finite() && *d > 0.0)
+                .map(|d| d.min(MAX_TIME));
+            m.width = m.width.min(MAX_DIM * 4);
+            m.height = m.height.min(MAX_DIM * 4);
+            m.fps = clampd(fin64(m.fps, 0.0), 0.0, 1000.0);
+            match &mut m.source {
+                MediaSource::ImageSequence { fps, .. } => {
+                    *fps = clampd(fin64(*fps, 30.0), 1.0, 240.0)
+                }
+                MediaSource::Generated(g) => sanitize_gen(g),
+                MediaSource::File { .. } => {}
+            }
+        }
+
+        // trilhas e eventos
+        let mut seen_tracks = std::collections::HashSet::new();
+        let mut seen_events = std::collections::HashSet::new();
+        for t in &mut self.tracks {
+            if !seen_tracks.insert(t.id) {
+                t.id = new_id();
+                fixes.push("id de trilha duplicado renumerado".into());
+            }
+            t.height = clampf(fin32(t.height, 72.0), 28.0, 400.0);
+            t.volume_db = clampf(fin32(t.volume_db, 0.0), -120.0, 24.0);
+            t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
+            t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
+            t.motion.keys.retain(|k| k.t.is_finite());
+            for k in &mut t.motion.keys {
+                k.t = clampd(k.t, 0.0, MAX_TIME);
+                let v = &mut k.value;
+                v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
+                v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
+                v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
+                v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
+                v.rot = fin32(v.rot, 0.0) % 3600.0;
+            }
+            t.motion.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+            if t.motion.keys.is_empty() {
+                t.motion = Keyframes::default();
+            }
+            let mut kinds = std::collections::HashSet::new();
+            t.envelopes.retain(|e| kinds.insert(e.kind));
+            for env in &mut t.envelopes {
+                let (lo, hi) = env.kind.range();
+                env.points.retain(|p| p.t.is_finite() && p.v.is_finite());
+                for p in &mut env.points {
+                    p.t = clampd(p.t, 0.0, MAX_TIME);
+                    p.v = clampf(p.v, lo, hi);
+                }
+                env.sort();
+                if env.points.is_empty() {
+                    *env = Envelope::new(env.kind);
+                }
+            }
+            for f in &mut t.fx {
+                sanitize_fx(f);
+            }
+            for e in &mut t.events {
+                if !seen_events.insert(e.id) {
+                    e.id = new_id();
+                    fixes.push("id de evento duplicado renumerado".into());
+                }
+                e.start = clampd(fin64(e.start, 0.0), 0.0, MAX_TIME);
+                let len = fin64(e.length, 1.0);
+                if len <= 0.0 {
+                    fixes.push(format!("evento \"{}\" com duração inválida", e.name));
+                }
+                e.length = clampd(len, 0.001, MAX_TIME);
+                e.offset = clampd(fin64(e.offset, 0.0), 0.0, MAX_TIME);
+                e.rate = clampd(fin64(e.rate, 1.0), 0.0, 100.0);
+                e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
+                e.fade_in.len = clampd(fin64(e.fade_in.len, 0.0), 0.0, e.length);
+                e.fade_out.len = clampd(fin64(e.fade_out.len, 0.0), 0.0, e.length - e.fade_in.len);
+                e.pan_crop.keys.retain(|k| k.t.is_finite());
+                for k in &mut e.pan_crop.keys {
+                    k.t = clampd(k.t, -MAX_TIME, MAX_TIME);
+                    let v = &mut k.value;
+                    v.cx = clampf(fin32(v.cx, 0.5), -100.0, 100.0);
+                    v.cy = clampf(fin32(v.cy, 0.5), -100.0, 100.0);
+                    v.size = clampf(fin32(v.size, 1.0), 0.001, 100.0);
+                    v.rot = fin32(v.rot, 0.0) % 3600.0;
+                }
+                e.pan_crop.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+                if e.pan_crop.keys.is_empty() {
+                    e.pan_crop = Keyframes::default();
+                }
+                if let Some(tr) = &mut e.transition {
+                    tr.softness = clampf(fin32(tr.softness, 0.0), 0.0, 0.5);
+                }
+                for f in &mut e.fx {
+                    sanitize_fx(f);
+                }
+            }
+        }
+        for f in self
+            .master
+            .fx
+            .iter_mut()
+            .chain(self.master.video_fx.iter_mut())
+        {
+            sanitize_fx(f);
+        }
+        self.master.volume_db = clampf(fin32(self.master.volume_db, 0.0), -120.0, 24.0);
+        self.markers.retain(|m| m.t.is_finite());
+        for m in &mut self.markers {
+            m.t = clampd(m.t, 0.0, MAX_TIME);
+        }
+        self.regions
+            .retain(|r| r.start.is_finite() && r.end.is_finite());
+        for r in &mut self.regions {
+            if r.end < r.start {
+                std::mem::swap(&mut r.start, &mut r.end);
+            }
+            r.start = clampd(r.start, 0.0, MAX_TIME);
+            r.end = clampd(r.end, r.start, MAX_TIME);
+        }
+        self.loop_region = self
+            .loop_region
+            .filter(|(a, b)| a.is_finite() && b.is_finite() && b > a && *a >= 0.0);
+        self.sort_events();
+        fixes
+    }
+}
+
+/// Maior dimensão de quadro aceita (evita alocações gigantes).
+pub const MAX_DIM: u32 = 8192;
+/// Maior tempo aceito na timeline (48 horas).
+pub const MAX_TIME: f64 = 48.0 * 3600.0;
+
+fn sanitize_fx(f: &mut FxInstance) {
+    let specs = f.kind.params();
+    f.params.truncate(specs.len());
+    while f.params.len() < specs.len() {
+        let d = specs.get(f.params.len()).map(|s| s.default).unwrap_or(0.0);
+        f.params.push(AnimParam {
+            value: d,
+            keys: vec![],
+        });
+    }
+    for (p, spec) in f.params.iter_mut().zip(specs.iter()) {
+        if !p.value.is_finite() {
+            p.value = spec.default;
+        }
+        p.keys.retain(|k| k.0.is_finite() && k.1.is_finite());
+        p.keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+}
+
+fn sanitize_gen(g: &mut GenSpec) {
+    use crate::util::clampf;
+    let col = |c: &mut [f32; 4]| {
+        for v in c.iter_mut() {
+            *v = if v.is_finite() {
+                clampf(*v, 0.0, 1.0)
+            } else {
+                1.0
+            };
+        }
+    };
+    match g {
+        GenSpec::SolidColor { color } => col(color),
+        GenSpec::Gradient { a, b, angle, .. } => {
+            col(a);
+            col(b);
+            if !angle.is_finite() {
+                *angle = 0.0;
+            }
+        }
+        GenSpec::Checkerboard { a, b, cells } => {
+            col(a);
+            col(b);
+            *cells = (*cells).clamp(1, 512);
+        }
+        GenSpec::ColorBars | GenSpec::Noise { .. } => {}
+        GenSpec::Text(t) => {
+            col(&mut t.color);
+            col(&mut t.outline_color);
+            col(&mut t.background);
+            let f = |v: f32, d: f32, lo: f32, hi: f32| {
+                if v.is_finite() {
+                    clampf(v, lo, hi)
+                } else {
+                    d
+                }
+            };
+            t.size = f(t.size, 10.0, 0.5, 100.0);
+            t.outline = f(t.outline, 0.0, 0.0, 10.0);
+            t.line_spacing = f(t.line_spacing, 1.2, 0.5, 5.0);
+            t.anim_duration = f(t.anim_duration, 5.0, 0.1, 3600.0);
+            t.x = f(t.x, 0.5, -10.0, 10.0);
+            t.y = f(t.y, 0.5, -10.0, 10.0);
+            if t.text.len() > 100_000 {
+                let mut cut = 100_000;
+                while !t.text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                t.text.truncate(cut);
+            }
+        }
+    }
+}
+
+impl Project {
+    /// Carrega um projeto de JSON validando-o.
+    pub fn from_json(text: &str) -> Result<(Project, Vec<String>), String> {
+        let mut p: Project =
+            serde_json::from_str(text).map_err(|e| format!("projeto inválido: {e}"))?;
+        let fixes = p.sanitize();
+        bump_ids(p.max_id());
+        Ok((p, fixes))
     }
 }
 
@@ -322,16 +586,6 @@ pub enum MediaSource {
     File { path: String },
     ImageSequence { paths: Vec<String>, fps: f64 },
     Generated(GenSpec),
-}
-
-impl MediaSource {
-    pub fn path(&self) -> Option<&str> {
-        match self {
-            MediaSource::File { path } => Some(path),
-            MediaSource::ImageSequence { paths, .. } => paths.first().map(|s| s.as_str()),
-            MediaSource::Generated(_) => None,
-        }
-    }
 }
 
 /// Mídia gerada (Media Generators): cores sólidas, gradientes, padrões, texto.
@@ -456,7 +710,14 @@ impl GenSpec {
             GenSpec::ColorBars => "Barras de cor".into(),
             GenSpec::Noise { .. } => "Ruído".into(),
             GenSpec::Text(t) => {
-                let first = t.text.lines().next().unwrap_or("").chars().take(24).collect::<String>();
+                let first = t
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(24)
+                    .collect::<String>();
                 format!("Texto: {first}")
             }
         }
@@ -579,7 +840,7 @@ impl EnvKind {
             }
         }
     }
-    pub fn from_norm(self, n: f32) -> f32 {
+    pub fn value_from_norm(self, n: f32) -> f32 {
         let n = n.clamp(0.0, 1.0);
         match self {
             EnvKind::Volume => {
@@ -673,10 +934,10 @@ impl Envelope {
                 return w[0].v + (w[1].v - w[0].v) * y;
             }
         }
-        p.last().unwrap().v
+        p.last().map(|x| x.v).unwrap_or(self.kind.default_value())
     }
     pub fn sort(&mut self) {
-        self.points.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        self.points.sort_by(|a, b| a.t.total_cmp(&b.t));
     }
 }
 
@@ -797,7 +1058,9 @@ impl Track {
     }
 
     pub fn env_value(&self, kind: EnvKind, t: f64) -> f32 {
-        self.envelope(kind).map(|e| e.eval(t)).unwrap_or(kind.default_value())
+        self.envelope(kind)
+            .map(|e| e.eval(t))
+            .unwrap_or(kind.default_value())
     }
 
     pub fn is_audible(&self, any_solo: bool) -> bool {
@@ -1184,104 +1447,178 @@ impl FxKind {
 
     pub fn params(self) -> &'static [ParamSpec] {
         match self {
-            FxKind::BrightnessContrast => const { &[p("Brilho", -1.0, 1.0, 0.0), p("Contraste", -1.0, 1.0, 0.0)] },
-            FxKind::HslAdjust => const { &[
-                p("Matiz (graus)", -180.0, 180.0, 0.0),
-                p("Saturação", 0.0, 3.0, 1.0),
-                p("Luminância", -1.0, 1.0, 0.0),
-            ] },
-            FxKind::ColorCorrector => const { &[
-                p("Lift (sombras)", -0.5, 0.5, 0.0),
-                p("Gamma", 0.2, 5.0, 1.0),
-                p("Gain (realces)", 0.0, 3.0, 1.0),
-                p("Temperatura", -1.0, 1.0, 0.0),
-                p("Tonalidade", -1.0, 1.0, 0.0),
-                p("Saturação", 0.0, 3.0, 1.0),
-            ] },
-            FxKind::Levels => const { &[
-                p("Entrada mín.", 0.0, 1.0, 0.0),
-                p("Entrada máx.", 0.0, 1.0, 1.0),
-                p("Gamma", 0.1, 10.0, 1.0),
-                p("Saída mín.", 0.0, 1.0, 0.0),
-                p("Saída máx.", 0.0, 1.0, 1.0),
-            ] },
+            FxKind::BrightnessContrast => {
+                const { &[p("Brilho", -1.0, 1.0, 0.0), p("Contraste", -1.0, 1.0, 0.0)] }
+            }
+            FxKind::HslAdjust => {
+                const {
+                    &[
+                        p("Matiz (graus)", -180.0, 180.0, 0.0),
+                        p("Saturação", 0.0, 3.0, 1.0),
+                        p("Luminância", -1.0, 1.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::ColorCorrector => {
+                const {
+                    &[
+                        p("Lift (sombras)", -0.5, 0.5, 0.0),
+                        p("Gamma", 0.2, 5.0, 1.0),
+                        p("Gain (realces)", 0.0, 3.0, 1.0),
+                        p("Temperatura", -1.0, 1.0, 0.0),
+                        p("Tonalidade", -1.0, 1.0, 0.0),
+                        p("Saturação", 0.0, 3.0, 1.0),
+                    ]
+                }
+            }
+            FxKind::Levels => {
+                const {
+                    &[
+                        p("Entrada mín.", 0.0, 1.0, 0.0),
+                        p("Entrada máx.", 0.0, 1.0, 1.0),
+                        p("Gamma", 0.1, 10.0, 1.0),
+                        p("Saída mín.", 0.0, 1.0, 0.0),
+                        p("Saída máx.", 0.0, 1.0, 1.0),
+                    ]
+                }
+            }
             FxKind::BlackWhite => const { &[p("Intensidade", 0.0, 1.0, 1.0)] },
             FxKind::Sepia => const { &[p("Intensidade", 0.0, 1.0, 1.0)] },
             FxKind::Invert => const { &[p("Intensidade", 0.0, 1.0, 1.0)] },
-            FxKind::GaussianBlur => const { &[
-                p("Raio horizontal (%)", 0.0, 10.0, 1.0),
-                p("Raio vertical (%)", 0.0, 10.0, 1.0),
-            ] },
+            FxKind::GaussianBlur => {
+                const {
+                    &[
+                        p("Raio horizontal (%)", 0.0, 10.0, 1.0),
+                        p("Raio vertical (%)", 0.0, 10.0, 1.0),
+                    ]
+                }
+            }
             FxKind::Sharpen => const { &[p("Intensidade", 0.0, 3.0, 1.0)] },
-            FxKind::Vignette => const { &[
-                p("Intensidade", 0.0, 1.0, 0.6),
-                p("Raio", 0.1, 1.5, 0.8),
-                p("Suavidade", 0.01, 1.0, 0.5),
-            ] },
-            FxKind::ChromaKeyer => const { &[
-                p("Cor R", 0.0, 1.0, 0.0),
-                p("Cor G", 0.0, 1.0, 1.0),
-                p("Cor B", 0.0, 1.0, 0.0),
-                p("Tolerância", 0.0, 1.0, 0.3),
-                p("Suavidade", 0.0, 1.0, 0.1),
-                p("Supressão de spill", 0.0, 1.0, 0.5),
-            ] },
+            FxKind::Vignette => {
+                const {
+                    &[
+                        p("Intensidade", 0.0, 1.0, 0.6),
+                        p("Raio", 0.1, 1.5, 0.8),
+                        p("Suavidade", 0.01, 1.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::ChromaKeyer => {
+                const {
+                    &[
+                        p("Cor R", 0.0, 1.0, 0.0),
+                        p("Cor G", 0.0, 1.0, 1.0),
+                        p("Cor B", 0.0, 1.0, 0.0),
+                        p("Tolerância", 0.0, 1.0, 0.3),
+                        p("Suavidade", 0.0, 1.0, 0.1),
+                        p("Supressão de spill", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
             FxKind::Pixelate => const { &[p("Tamanho do bloco (%)", 0.1, 10.0, 2.0)] },
             FxKind::Mirror => const { &[tg("Horizontal", 1.0), tg("Vertical", 0.0)] },
-            FxKind::Glow => const { &[
-                p("Limiar", 0.0, 1.0, 0.7),
-                p("Intensidade", 0.0, 3.0, 1.0),
-                p("Raio (%)", 0.0, 10.0, 2.0),
-            ] },
-            FxKind::FilmGrain => const { &[p("Quantidade", 0.0, 1.0, 0.15), tg("Monocromático", 1.0)] },
+            FxKind::Glow => {
+                const {
+                    &[
+                        p("Limiar", 0.0, 1.0, 0.7),
+                        p("Intensidade", 0.0, 3.0, 1.0),
+                        p("Raio (%)", 0.0, 10.0, 2.0),
+                    ]
+                }
+            }
+            FxKind::FilmGrain => {
+                const { &[p("Quantidade", 0.0, 1.0, 0.15), tg("Monocromático", 1.0)] }
+            }
             FxKind::Emboss => const { &[p("Intensidade", 0.0, 1.0, 1.0)] },
             FxKind::Posterize => const { &[p("Níveis", 2.0, 32.0, 6.0)] },
-            FxKind::Colorize => const { &[
-                p("Cor R", 0.0, 1.0, 1.0),
-                p("Cor G", 0.0, 1.0, 0.6),
-                p("Cor B", 0.0, 1.0, 0.2),
-                p("Intensidade", 0.0, 1.0, 0.5),
-            ] },
+            FxKind::Colorize => {
+                const {
+                    &[
+                        p("Cor R", 0.0, 1.0, 1.0),
+                        p("Cor G", 0.0, 1.0, 0.6),
+                        p("Cor B", 0.0, 1.0, 0.2),
+                        p("Intensidade", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
             FxKind::Gain => const { &[p("Ganho (dB)", -60.0, 24.0, 0.0)] },
-            FxKind::ParametricEq => const { &[
-                p("Graves freq. (Hz)", 20.0, 1000.0, 100.0),
-                p("Graves ganho (dB)", -24.0, 24.0, 0.0),
-                p("Médios freq. (Hz)", 200.0, 8000.0, 1000.0),
-                p("Médios ganho (dB)", -24.0, 24.0, 0.0),
-                p("Médios Q", 0.1, 10.0, 1.0),
-                p("Agudos freq. (Hz)", 1000.0, 20000.0, 8000.0),
-                p("Agudos ganho (dB)", -24.0, 24.0, 0.0),
-            ] },
-            FxKind::HighPass => const { &[p("Frequência (Hz)", 20.0, 5000.0, 80.0), p("Q", 0.3, 5.0, 0.707)] },
-            FxKind::LowPass => const { &[p("Frequência (Hz)", 200.0, 20000.0, 8000.0), p("Q", 0.3, 5.0, 0.707)] },
-            FxKind::Compressor => const { &[
-                p("Limiar (dB)", -60.0, 0.0, -18.0),
-                p("Razão", 1.0, 20.0, 4.0),
-                p("Ataque (ms)", 0.1, 200.0, 10.0),
-                p("Liberação (ms)", 5.0, 2000.0, 150.0),
-                p("Ganho de saída (dB)", 0.0, 24.0, 0.0),
-            ] },
-            FxKind::NoiseGate => const { &[
-                p("Limiar (dB)", -90.0, 0.0, -50.0),
-                p("Ataque (ms)", 0.1, 100.0, 2.0),
-                p("Liberação (ms)", 5.0, 2000.0, 100.0),
-            ] },
-            FxKind::Delay => const { &[
-                p("Tempo (ms)", 1.0, 2000.0, 350.0),
-                p("Realimentação", 0.0, 0.95, 0.35),
-                p("Mix", 0.0, 1.0, 0.3),
-            ] },
-            FxKind::Reverb => const { &[
-                p("Tamanho da sala", 0.0, 1.0, 0.6),
-                p("Amortecimento", 0.0, 1.0, 0.5),
-                p("Largura", 0.0, 1.0, 1.0),
-                p("Mix", 0.0, 1.0, 0.25),
-            ] },
-            FxKind::Chorus => const { &[
-                p("Taxa (Hz)", 0.05, 5.0, 0.8),
-                p("Profundidade (ms)", 0.0, 20.0, 5.0),
-                p("Mix", 0.0, 1.0, 0.4),
-            ] },
+            FxKind::ParametricEq => {
+                const {
+                    &[
+                        p("Graves freq. (Hz)", 20.0, 1000.0, 100.0),
+                        p("Graves ganho (dB)", -24.0, 24.0, 0.0),
+                        p("Médios freq. (Hz)", 200.0, 8000.0, 1000.0),
+                        p("Médios ganho (dB)", -24.0, 24.0, 0.0),
+                        p("Médios Q", 0.1, 10.0, 1.0),
+                        p("Agudos freq. (Hz)", 1000.0, 20000.0, 8000.0),
+                        p("Agudos ganho (dB)", -24.0, 24.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::HighPass => {
+                const {
+                    &[
+                        p("Frequência (Hz)", 20.0, 5000.0, 80.0),
+                        p("Q", 0.3, 5.0, 0.707),
+                    ]
+                }
+            }
+            FxKind::LowPass => {
+                const {
+                    &[
+                        p("Frequência (Hz)", 200.0, 20000.0, 8000.0),
+                        p("Q", 0.3, 5.0, 0.707),
+                    ]
+                }
+            }
+            FxKind::Compressor => {
+                const {
+                    &[
+                        p("Limiar (dB)", -60.0, 0.0, -18.0),
+                        p("Razão", 1.0, 20.0, 4.0),
+                        p("Ataque (ms)", 0.1, 200.0, 10.0),
+                        p("Liberação (ms)", 5.0, 2000.0, 150.0),
+                        p("Ganho de saída (dB)", 0.0, 24.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::NoiseGate => {
+                const {
+                    &[
+                        p("Limiar (dB)", -90.0, 0.0, -50.0),
+                        p("Ataque (ms)", 0.1, 100.0, 2.0),
+                        p("Liberação (ms)", 5.0, 2000.0, 100.0),
+                    ]
+                }
+            }
+            FxKind::Delay => {
+                const {
+                    &[
+                        p("Tempo (ms)", 1.0, 2000.0, 350.0),
+                        p("Realimentação", 0.0, 0.95, 0.35),
+                        p("Mix", 0.0, 1.0, 0.3),
+                    ]
+                }
+            }
+            FxKind::Reverb => {
+                const {
+                    &[
+                        p("Tamanho da sala", 0.0, 1.0, 0.6),
+                        p("Amortecimento", 0.0, 1.0, 0.5),
+                        p("Largura", 0.0, 1.0, 1.0),
+                        p("Mix", 0.0, 1.0, 0.25),
+                    ]
+                }
+            }
+            FxKind::Chorus => {
+                const {
+                    &[
+                        p("Taxa (Hz)", 0.05, 5.0, 0.8),
+                        p("Profundidade (ms)", 0.0, 20.0, 5.0),
+                        p("Mix", 0.0, 1.0, 0.4),
+                    ]
+                }
+            }
             FxKind::Distortion => const { &[p("Drive", 1.0, 50.0, 5.0), p("Mix", 0.0, 1.0, 1.0)] },
         }
     }
@@ -1311,14 +1648,14 @@ impl AnimParam {
                 return w[0].1 + (w[1].1 - w[0].1) * x;
             }
         }
-        k.last().unwrap().1
+        k.last().map(|x| x.1).unwrap_or(self.value)
     }
     pub fn set_key(&mut self, t: f64, v: f32, tol: f64) {
         if let Some(k) = self.keys.iter_mut().find(|k| (k.0 - t).abs() <= tol) {
             k.1 = v;
         } else {
             self.keys.push((t, v));
-            self.keys.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            self.keys.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
     }
 }
@@ -1348,11 +1685,25 @@ impl FxInstance {
                 .collect(),
         }
     }
-    /// Valores de todos os parâmetros no tempo local `t`.
+    /// Valores de todos os parâmetros no tempo local `t`, sempre dentro da
+    /// faixa declarada (valores vindos de arquivo são hostis: §0.4).
     pub fn values(&self, t: f64) -> Vec<f32> {
-        let specs = self.kind.params();
-        (0..specs.len())
-            .map(|i| self.params.get(i).map(|p| p.eval(t)).unwrap_or(specs[i].default))
+        self.kind
+            .params()
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| {
+                let v = self
+                    .params
+                    .get(i)
+                    .map(|p| p.eval(t))
+                    .unwrap_or(spec.default);
+                if v.is_finite() {
+                    crate::util::clampf(v, spec.min, spec.max)
+                } else {
+                    spec.default
+                }
+            })
             .collect()
     }
     /// Copia com novo id (para colar/duplicar).

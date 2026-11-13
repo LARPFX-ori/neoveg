@@ -23,8 +23,13 @@ pub struct AudioData {
 
 pub const PEAK_BLOCK: usize = 256;
 
+/// Limite de amostras decodificadas em memória (~2 h estéreo a 48 kHz),
+/// para que um arquivo hostil não esgote a memória (§0.4).
+pub const MAX_SAMPLES: usize = 2 * 48_000 * 60 * 120;
+
 impl AudioData {
     pub fn from_interleaved(sample_rate: u32, channels: usize, samples: &[f32]) -> Self {
+        let sample_rate = sample_rate.max(1);
         let ch = channels.max(1);
         let frames = samples.len() / ch;
         let mut data = Vec::with_capacity(frames * 2);
@@ -122,7 +127,8 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
         .ok_or_else(|| anyhow!("nenhuma faixa de áudio suportada"))?;
     let track_id = track.id;
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
-    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let mut out: Vec<f32> = Vec::new();
     let mut channels = 0usize;
     loop {
@@ -145,6 +151,12 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
                 let spec = *buf.spec();
                 sr = spec.rate;
                 let ch = spec.channels.count().max(1);
+                if out.len() >= MAX_SAMPLES {
+                    crate::util::log_warn(
+                        "áudio truncado: arquivo excede o limite de duração em memória",
+                    );
+                    break;
+                }
                 let mut sb = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
                 sb.copy_interleaved_ref(buf);
                 let s = sb.samples();
@@ -172,6 +184,9 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
     }
     if out.is_empty() {
         return Err(anyhow!("nenhuma amostra de áudio decodificada"));
+    }
+    if sr == 0 {
+        return Err(anyhow!("taxa de amostragem inválida"));
     }
     Ok(AudioData::from_interleaved(sr, 2, &out))
 }

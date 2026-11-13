@@ -60,10 +60,26 @@ impl Dialogs {
     pub fn open_render(&mut self, p: &Project, proj_path: Option<&Path>) {
         let base = proj_path
             .map(|pp| pp.with_extension("avi"))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join("render.avi"));
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .join("render.avi")
+            });
         let (path, format, quality, include_audio, wav_bits) = match &self.render {
-            Some(r) => (r.path.clone(), r.format, r.quality, r.include_audio, r.wav_bits),
-            None => (base.to_string_lossy().to_string(), RenderFormat::AviMjpeg, 90, true, WavBits::Pcm16),
+            Some(r) => (
+                r.path.clone(),
+                r.format,
+                r.quality,
+                r.include_audio,
+                r.wav_bits,
+            ),
+            None => (
+                base.to_string_lossy().to_string(),
+                RenderFormat::AviMjpeg,
+                90,
+                true,
+                WavBits::Pcm16,
+            ),
         };
         self.render = Some(RenderDialogState {
             format,
@@ -78,10 +94,22 @@ impl Dialogs {
     }
 }
 
-fn time_field(ui: &mut egui::Ui, value: &mut f64, fps: f64, fmt: TimeFormat, id: impl std::hash::Hash) -> bool {
+fn time_field(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    fps: f64,
+    fmt: TimeFormat,
+    id: impl std::hash::Hash,
+) -> bool {
     let key = egui::Id::new(id);
-    let mut text = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| format_time(*value, fps, fmt));
-    let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(110.0).font(egui::TextStyle::Monospace));
+    let mut text = ui
+        .data_mut(|d| d.get_temp::<String>(key))
+        .unwrap_or_else(|| format_time(*value, fps, fmt));
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(110.0)
+            .font(egui::TextStyle::Monospace),
+    );
     let mut changed = false;
     if r.has_focus() {
         ui.data_mut(|d| d.insert_temp(key, text.clone()));
@@ -102,11 +130,13 @@ fn time_field(ui: &mut egui::Ui, value: &mut f64, fps: f64, fmt: TimeFormat, id:
 
 fn curve_combo(ui: &mut egui::Ui, c: &mut Curve, id: impl std::hash::Hash) -> bool {
     let before = *c;
-    egui::ComboBox::from_id_salt(id).selected_text(c.name()).show_ui(ui, |ui| {
-        for k in Curve::ALL.iter().take(5) {
-            ui.selectable_value(c, *k, k.name());
-        }
-    });
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(c.name())
+        .show_ui(ui, |ui| {
+            for k in Curve::ALL.iter().take(5) {
+                ui.selectable_value(c, *k, k.name());
+            }
+        });
     *c != before
 }
 
@@ -144,54 +174,76 @@ impl App {
         }
         let mut open = true;
         let mut changed = false;
-        egui::Window::new("Propriedades do projeto").open(&mut open).resizable(false).show(ctx, |ui| {
-            let s = &mut self.project.settings;
-            egui::ComboBox::from_label("Modelo")
-                .selected_text("Escolher modelo...")
-                .show_ui(ui, |ui| {
-                    for (name, w, h, fps) in PRESETS {
-                        if ui.selectable_label(false, name).clicked() {
-                            s.width = w;
-                            s.height = h;
-                            s.fps = fps;
-                            changed = true;
+        egui::Window::new("Propriedades do projeto")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let s = &mut self.project.settings;
+                egui::ComboBox::from_label("Modelo")
+                    .selected_text("Escolher modelo...")
+                    .show_ui(ui, |ui| {
+                        for (name, w, h, fps) in PRESETS {
+                            if ui.selectable_label(false, name).clicked() {
+                                s.width = w;
+                                s.height = h;
+                                s.fps = fps;
+                                changed = true;
+                            }
                         }
-                    }
-                });
-            egui::Grid::new("pp").num_columns(2).show(ui, |ui| {
-                ui.label("Largura");
-                changed |= ui.add(egui::DragValue::new(&mut s.width).range(16..=8192)).changed();
-                ui.end_row();
-                ui.label("Altura");
-                changed |= ui.add(egui::DragValue::new(&mut s.height).range(16..=8192)).changed();
-                ui.end_row();
-                ui.label("Quadros por segundo");
-                ui.horizontal(|ui| {
-                    changed |= ui.add(egui::DragValue::new(&mut s.fps).range(1.0..=240.0).speed(0.01).max_decimals(3)).changed();
-                    for f in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0] {
-                        if ui.small_button(format!("{f}")).clicked() {
-                            s.fps = f;
-                            changed = true;
+                    });
+                egui::Grid::new("pp").num_columns(2).show(ui, |ui| {
+                    ui.label("Largura");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut s.width).range(16..=8192))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Altura");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut s.height).range(16..=8192))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Quadros por segundo");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut s.fps)
+                                    .range(1.0..=240.0)
+                                    .speed(0.01)
+                                    .max_decimals(3),
+                            )
+                            .changed();
+                        for f in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0] {
+                            if ui.small_button(format!("{f}")).clicked() {
+                                s.fps = f;
+                                changed = true;
+                            }
                         }
-                    }
+                    });
+                    ui.end_row();
+                    ui.label("Taxa de amostragem (áudio)");
+                    egui::ComboBox::from_id_salt("sr")
+                        .selected_text(format!("{} Hz", s.sample_rate))
+                        .show_ui(ui, |ui| {
+                            for r in [44100, 48000, 88200, 96000] {
+                                changed |= ui
+                                    .selectable_value(&mut s.sample_rate, r, format!("{r} Hz"))
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Cor de fundo");
+                    changed |= ui.color_edit_button_rgb(&mut s.background).changed();
+                    ui.end_row();
                 });
-                ui.end_row();
-                ui.label("Taxa de amostragem (áudio)");
-                egui::ComboBox::from_id_salt("sr").selected_text(format!("{} Hz", s.sample_rate)).show_ui(ui, |ui| {
-                    for r in [44100, 48000, 88200, 96000] {
-                        changed |= ui.selectable_value(&mut s.sample_rate, r, format!("{r} Hz")).changed();
-                    }
-                });
-                ui.end_row();
-                ui.label("Cor de fundo");
-                changed |= ui.color_edit_button_rgb(&mut s.background).changed();
-                ui.end_row();
+                s.width = (s.width / 2).max(8) * 2;
+                s.height = (s.height / 2).max(8) * 2;
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Dimensões pares são exigidas pelos formatos 4:2:0.")
+                        .small()
+                        .weak(),
+                );
             });
-            s.width = (s.width / 2).max(8) * 2;
-            s.height = (s.height / 2).max(8) * 2;
-            ui.separator();
-            ui.label(egui::RichText::new("Dimensões pares são exigidas pelos formatos 4:2:0.").small().weak());
-        });
         if changed {
             self.dialog_change();
         }
@@ -199,7 +251,9 @@ impl App {
     }
 
     fn event_props_window(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.dlg.event_props else { return };
+        let Some(id) = self.dlg.event_props else {
+            return;
+        };
         let Some((ti, _)) = self.project.find_event(id) else {
             self.dlg.event_props = None;
             return;
@@ -210,101 +264,154 @@ impl App {
         let mut open = true;
         let mut changed = false;
         let media_info = {
-            let e = self.project.event(id).unwrap();
-            self.project.media(e.media_id).map(|m| format!("{}  —  {}", m.name, m.info)).unwrap_or_default()
+            let Some(e) = self.project.event(id) else {
+                return;
+            };
+            self.project
+                .media(e.media_id)
+                .map(|m| format!("{}  —  {}", m.name, m.info))
+                .unwrap_or_default()
         };
         let mut open_pc = false;
         let mut open_fx = false;
-        egui::Window::new("Propriedades do evento").open(&mut open).default_width(380.0).show(ctx, |ui| {
-            ui.label(egui::RichText::new(media_info).small());
-            ui.separator();
-            let e = self.project.event_mut(id).unwrap();
-            egui::Grid::new(("ep", id)).num_columns(2).show(ui, |ui| {
-                ui.label("Nome");
-                changed |= ui.text_edit_singleline(&mut e.name).changed();
-                ui.end_row();
-                ui.label("Início");
-                changed |= time_field(ui, &mut e.start, fps, tf, ("ep_start", id));
-                ui.end_row();
-                ui.label("Duração");
-                let mut len = e.length;
-                if time_field(ui, &mut len, fps, tf, ("ep_len", id)) {
-                    e.length = len.max(1.0 / fps);
-                    changed = true;
-                }
-                ui.end_row();
-                ui.label("Deslocamento na mídia (s)");
-                changed |= ui.add(egui::DragValue::new(&mut e.offset).speed(0.01).range(0.0..=1e6).suffix(" s")).changed();
-                ui.end_row();
-                ui.label("Velocidade");
-                let mut pct = e.rate * 100.0;
-                if ui.add(egui::DragValue::new(&mut pct).speed(1.0).range(0.0..=1000.0).suffix(" %")).changed() {
-                    e.rate = pct / 100.0;
-                    changed = true;
-                }
-                ui.end_row();
-                if !is_video {
-                    ui.label("Ganho");
-                    changed |= ui.add(egui::Slider::new(&mut e.gain_db, -40.0..=20.0).suffix(" dB")).changed();
+        egui::Window::new("Propriedades do evento")
+            .open(&mut open)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(media_info).small());
+                ui.separator();
+                let Some(e) = self.project.event_mut(id) else {
+                    return;
+                };
+                egui::Grid::new(("ep", id)).num_columns(2).show(ui, |ui| {
+                    ui.label("Nome");
+                    changed |= ui.text_edit_singleline(&mut e.name).changed();
                     ui.end_row();
-                }
-                ui.label("Fade de entrada");
-                ui.horizontal(|ui| {
-                    changed |= ui.add(egui::DragValue::new(&mut e.fade_in.len).speed(0.01).range(0.0..=e.length).suffix(" s")).changed();
-                    changed |= curve_combo(ui, &mut e.fade_in.curve, ("fic", id));
-                });
-                ui.end_row();
-                ui.label("Fade de saída");
-                ui.horizontal(|ui| {
-                    changed |= ui.add(egui::DragValue::new(&mut e.fade_out.len).speed(0.01).range(0.0..=e.length).suffix(" s")).changed();
-                    changed |= curve_combo(ui, &mut e.fade_out.curve, ("foc", id));
-                });
-                ui.end_row();
-                ui.label("Opções");
-                ui.horizontal_wrapped(|ui| {
-                    changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
-                    changed |= ui.checkbox(&mut e.locked, "Travado").changed();
-                    changed |= ui.checkbox(&mut e.looped, "Loop").changed();
-                    changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
-                    if is_video {
-                        changed |= ui.checkbox(&mut e.maintain_aspect, "Manter proporção").changed();
+                    ui.label("Início");
+                    changed |= time_field(ui, &mut e.start, fps, tf, ("ep_start", id));
+                    ui.end_row();
+                    ui.label("Duração");
+                    let mut len = e.length;
+                    if time_field(ui, &mut len, fps, tf, ("ep_len", id)) {
+                        e.length = len.max(1.0 / fps);
+                        changed = true;
                     }
-                });
-                ui.end_row();
-                if is_video {
-                    ui.label("Transição de entrada");
-                    ui.vertical(|ui| {
-                        let mut kind = e.transition.as_ref().map(|t| t.kind);
-                        let before = kind;
-                        egui::ComboBox::from_id_salt(("trk", id))
-                            .selected_text(kind.map(|k| k.name()).unwrap_or("Nenhuma (crossfade)"))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut kind, None, "Nenhuma (crossfade)");
-                                for k in TransitionKind::ALL {
-                                    ui.selectable_value(&mut kind, Some(k), k.name());
-                                }
-                            });
-                        if kind != before {
-                            e.transition = kind.map(|k| TransitionSpec { kind: k, softness: 0.05 });
-                            changed = true;
-                        }
-                        if let Some(tr) = &mut e.transition {
-                            changed |= ui.add(egui::Slider::new(&mut tr.softness, 0.0..=0.5).text("Suavidade da borda")).changed();
+                    ui.end_row();
+                    ui.label("Deslocamento na mídia (s)");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut e.offset)
+                                .speed(0.01)
+                                .range(0.0..=1e6)
+                                .suffix(" s"),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("Velocidade");
+                    let mut pct = e.rate * 100.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut pct)
+                                .speed(1.0)
+                                .range(0.0..=1000.0)
+                                .suffix(" %"),
+                        )
+                        .changed()
+                    {
+                        e.rate = pct / 100.0;
+                        changed = true;
+                    }
+                    ui.end_row();
+                    if !is_video {
+                        ui.label("Ganho");
+                        changed |= ui
+                            .add(egui::Slider::new(&mut e.gain_db, -40.0..=20.0).suffix(" dB"))
+                            .changed();
+                        ui.end_row();
+                    }
+                    ui.label("Fade de entrada");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut e.fade_in.len)
+                                    .speed(0.01)
+                                    .range(0.0..=e.length)
+                                    .suffix(" s"),
+                            )
+                            .changed();
+                        changed |= curve_combo(ui, &mut e.fade_in.curve, ("fic", id));
+                    });
+                    ui.end_row();
+                    ui.label("Fade de saída");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut e.fade_out.len)
+                                    .speed(0.01)
+                                    .range(0.0..=e.length)
+                                    .suffix(" s"),
+                            )
+                            .changed();
+                        changed |= curve_combo(ui, &mut e.fade_out.curve, ("foc", id));
+                    });
+                    ui.end_row();
+                    ui.label("Opções");
+                    ui.horizontal_wrapped(|ui| {
+                        changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
+                        changed |= ui.checkbox(&mut e.locked, "Travado").changed();
+                        changed |= ui.checkbox(&mut e.looped, "Loop").changed();
+                        changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                        if is_video {
+                            changed |= ui
+                                .checkbox(&mut e.maintain_aspect, "Manter proporção")
+                                .changed();
                         }
                     });
                     ui.end_row();
-                }
+                    if is_video {
+                        ui.label("Transição de entrada");
+                        ui.vertical(|ui| {
+                            let mut kind = e.transition.as_ref().map(|t| t.kind);
+                            let before = kind;
+                            egui::ComboBox::from_id_salt(("trk", id))
+                                .selected_text(
+                                    kind.map(|k| k.name()).unwrap_or("Nenhuma (crossfade)"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut kind, None, "Nenhuma (crossfade)");
+                                    for k in TransitionKind::ALL {
+                                        ui.selectable_value(&mut kind, Some(k), k.name());
+                                    }
+                                });
+                            if kind != before {
+                                e.transition = kind.map(|k| TransitionSpec {
+                                    kind: k,
+                                    softness: 0.05,
+                                });
+                                changed = true;
+                            }
+                            if let Some(tr) = &mut e.transition {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut tr.softness, 0.0..=0.5)
+                                            .text("Suavidade da borda"),
+                                    )
+                                    .changed();
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if is_video && ui.button("Pan/Crop...").clicked() {
+                        open_pc = true;
+                    }
+                    if ui.button("Efeitos do evento...").clicked() {
+                        open_fx = true;
+                    }
+                });
             });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if is_video && ui.button("Pan/Crop...").clicked() {
-                    open_pc = true;
-                }
-                if ui.button("Efeitos do evento...").clicked() {
-                    open_fx = true;
-                }
-            });
-        });
         if open_pc {
             self.dlg.pan_crop = Some(id);
         }
@@ -329,24 +436,41 @@ impl App {
             self.dlg.pan_crop = None;
             return;
         };
-        let Some(m) = self.project.media(ev.media_id).cloned() else { return };
+        let Some(m) = self.project.media(ev.media_id).cloned() else {
+            return;
+        };
         let s = self.project.settings.clone();
-        let local = (self.cursor - ev.start).clamp(0.0, ev.length);
+        let local = crate::util::clampd(self.cursor - ev.start, 0.0, ev.length);
         let tol = 0.5 / s.fps;
         // textura da imagem de origem no tempo atual
         let frame_key = (id, (local * s.fps).round() as i64);
-        if self.dlg.pc_tex.as_ref().map(|t| t.1 != frame_key).unwrap_or(true) || self.generation % 97 == 0 {
+        if self
+            .dlg
+            .pc_tex
+            .as_ref()
+            .map(|t| t.1 != frame_key)
+            .unwrap_or(true)
+            || self.generation.is_multiple_of(97)
+        {
             let mt = ev.media_time(ev.start + local, m.duration).unwrap_or(0.0);
             let (gw, gh) = (s.width / 3, s.height / 3);
             if let Some(img) = self.media.video_frame(&m, mt, gw, gh) {
                 let max = 640u32;
                 let sc = (max as f32 / img.width().max(img.height()) as f32).min(1.0);
                 let small = if sc < 1.0 {
-                    image::imageops::resize(&*img, (img.width() as f32 * sc) as u32, (img.height() as f32 * sc) as u32, image::imageops::FilterType::Triangle)
+                    image::imageops::resize(
+                        &*img,
+                        (img.width() as f32 * sc) as u32,
+                        (img.height() as f32 * sc) as u32,
+                        image::imageops::FilterType::Triangle,
+                    )
                 } else {
                     (*img).clone()
                 };
-                let ci = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
+                let ci = egui::ColorImage::from_rgba_unmultiplied(
+                    [small.width() as usize, small.height() as usize],
+                    small.as_raw(),
+                );
                 let tex = ctx.load_texture("pancrop_src", ci, egui::TextureOptions::LINEAR);
                 self.dlg.pc_tex = Some((tex, frame_key));
             }
@@ -363,7 +487,9 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     // canvas
-                    let canvas_size = vec2(460.0, 460.0 / (s.width as f32 / s.height as f32).max(0.3)).min(vec2(460.0, 420.0));
+                    let canvas_size =
+                        vec2(460.0, 460.0 / (s.width as f32 / s.height as f32).max(0.3))
+                            .min(vec2(460.0, 420.0));
                     let (rect, resp) = ui.allocate_exact_size(canvas_size, Sense::click_and_drag());
                     let painter = ui.painter_at(rect);
                     painter.rect_filled(rect, 0.0, Color32::from_rgb(20, 20, 22));
@@ -375,7 +501,11 @@ impl App {
                     let origin = rect.center() - vec2(s.width as f32, s.height as f32) * sc / 2.0;
                     let to_canvas = |x: f32, y: f32| -> Pos2 { origin + vec2(x, y) * sc };
                     // imagem de origem no retângulo de ajuste (letterbox)
-                    let (sw, sh) = if m.width > 0 { (m.width as f32, m.height as f32) } else { (s.width as f32, s.height as f32) };
+                    let (sw, sh) = if m.width > 0 {
+                        (m.width as f32, m.height as f32)
+                    } else {
+                        (s.width as f32, s.height as f32)
+                    };
                     let (fw, fh) = if ev.maintain_aspect {
                         let k = (s.width as f32 / sw).min(s.height as f32 / sh);
                         (sw * k, sh * k)
@@ -387,10 +517,18 @@ impl App {
                         to_canvas((s.width as f32 + fw) / 2.0, (s.height as f32 + fh) / 2.0),
                     );
                     if let Some((tex, _)) = &self.dlg.pc_tex {
-                        painter.image(tex.id(), fit, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(200));
+                        painter.image(
+                            tex.id(),
+                            fit,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::from_white_alpha(200),
+                        );
                     }
                     painter.rect_stroke(
-                        Rect::from_min_max(to_canvas(0.0, 0.0), to_canvas(s.width as f32, s.height as f32)),
+                        Rect::from_min_max(
+                            to_canvas(0.0, 0.0),
+                            to_canvas(s.width as f32, s.height as f32),
+                        ),
                         0.0,
                         Stroke::new(1.0_f32, Color32::from_gray(90)),
                         StrokeKind::Inside,
@@ -401,12 +539,31 @@ impl App {
                     let hh = s.height as f32 * cur.size / 2.0;
                     let cx = cur.cx * s.width as f32;
                     let cy = cur.cy * s.height as f32;
-                    let corner = |dx: f32, dy: f32| to_canvas(cx + dx * cs - dy * sn, cy + dx * sn + dy * cs);
-                    let pts = vec![corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)];
-                    painter.add(Shape::closed_line(pts.clone(), Stroke::new(2.0_f32, Color32::from_rgb(255, 200, 60))));
+                    let corner = |dx: f32, dy: f32| {
+                        to_canvas(cx + dx * cs - dy * sn, cy + dx * sn + dy * cs)
+                    };
+                    let pts = vec![
+                        corner(-hw, -hh),
+                        corner(hw, -hh),
+                        corner(hw, hh),
+                        corner(-hw, hh),
+                    ];
+                    painter.add(Shape::closed_line(
+                        pts.clone(),
+                        Stroke::new(2.0_f32, Color32::from_rgb(255, 200, 60)),
+                    ));
                     painter.circle_filled(to_canvas(cx, cy), 4.0, Color32::from_rgb(255, 200, 60));
-                    painter.line_segment([to_canvas(cx, cy), corner(0.0, -hh)], Stroke::new(1.0_f32, Color32::from_rgb(255, 200, 60)));
-                    painter.text(pts[0] + vec2(3.0, 3.0), egui::Align2::LEFT_TOP, "F", egui::FontId::proportional(12.0), Color32::from_rgb(255, 200, 60));
+                    painter.line_segment(
+                        [to_canvas(cx, cy), corner(0.0, -hh)],
+                        Stroke::new(1.0_f32, Color32::from_rgb(255, 200, 60)),
+                    );
+                    painter.text(
+                        pts[0] + vec2(3.0, 3.0),
+                        egui::Align2::LEFT_TOP,
+                        "F",
+                        egui::FontId::proportional(12.0),
+                        Color32::from_rgb(255, 200, 60),
+                    );
                     // interação: arrastar move; roda = zoom
                     if resp.dragged() {
                         let d = resp.drag_delta() / sc;
@@ -425,17 +582,33 @@ impl App {
                     }
                     ui.vertical(|ui| {
                         ui.label(format!("Tempo local: {}", self.fmt_time(local)));
-                        ui.checkbox(&mut self.dlg.pc_animate, "Animar (criar keyframe ao editar)");
+                        ui.checkbox(
+                            &mut self.dlg.pc_animate,
+                            "Animar (criar keyframe ao editar)",
+                        );
                         let mut k = new_key.clone().unwrap_or(cur.clone());
                         let mut ch = false;
-                        ch |= ui.add(egui::Slider::new(&mut k.cx, -0.5..=1.5).text("Centro X")).changed();
-                        ch |= ui.add(egui::Slider::new(&mut k.cy, -0.5..=1.5).text("Centro Y")).changed();
+                        ch |= ui
+                            .add(egui::Slider::new(&mut k.cx, -0.5..=1.5).text("Centro X"))
+                            .changed();
+                        ch |= ui
+                            .add(egui::Slider::new(&mut k.cy, -0.5..=1.5).text("Centro Y"))
+                            .changed();
                         let mut zoom = 100.0 / k.size;
-                        if ui.add(egui::Slider::new(&mut zoom, 10.0..=1000.0).logarithmic(true).text("Zoom %")).changed() {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut zoom, 10.0..=1000.0)
+                                    .logarithmic(true)
+                                    .text("Zoom %"),
+                            )
+                            .changed()
+                        {
                             k.size = 100.0 / zoom;
                             ch = true;
                         }
-                        ch |= ui.add(egui::Slider::new(&mut k.rot, -180.0..=180.0).text("Rotação °")).changed();
+                        ch |= ui
+                            .add(egui::Slider::new(&mut k.rot, -180.0..=180.0).text("Rotação °"))
+                            .changed();
                         if ch {
                             new_key = Some(k);
                         }
@@ -443,7 +616,11 @@ impl App {
                             if ui.button("Redefinir").clicked() {
                                 key_action = Some("reset");
                             }
-                            if ui.button("Ajustar preenchendo").on_hover_text("Recorta para preencher o quadro sem barras").clicked() {
+                            if ui
+                                .button("Ajustar preenchendo")
+                                .on_hover_text("Recorta para preencher o quadro sem barras")
+                                .clicked()
+                            {
                                 key_action = Some("fill");
                             }
                         });
@@ -472,38 +649,57 @@ impl App {
                         let (kr, kresp) = ui.allocate_exact_size(vec2(260.0, 22.0), Sense::click());
                         let p = ui.painter_at(kr);
                         p.rect_filled(kr, 2.0, Color32::from_gray(30));
-                        let x_of = |t: f64| kr.left() + (t / ev.length.max(1e-6)) as f32 * kr.width();
+                        let x_of =
+                            |t: f64| kr.left() + (t / ev.length.max(1e-6)) as f32 * kr.width();
                         for kf in &ev.pan_crop.keys {
                             let x = x_of(kf.t);
                             p.add(Shape::convex_polygon(
-                                vec![pos2(x, kr.top() + 3.0), pos2(x + 5.0, kr.center().y), pos2(x, kr.bottom() - 3.0), pos2(x - 5.0, kr.center().y)],
+                                vec![
+                                    pos2(x, kr.top() + 3.0),
+                                    pos2(x + 5.0, kr.center().y),
+                                    pos2(x, kr.bottom() - 3.0),
+                                    pos2(x - 5.0, kr.center().y),
+                                ],
                                 Color32::from_rgb(255, 200, 60),
                                 Stroke::NONE,
                             ));
                         }
                         let cx = x_of(local);
-                        p.line_segment([pos2(cx, kr.top()), pos2(cx, kr.bottom())], Stroke::new(1.0_f32, Color32::WHITE));
+                        p.line_segment(
+                            [pos2(cx, kr.top()), pos2(cx, kr.bottom())],
+                            Stroke::new(1.0_f32, Color32::WHITE),
+                        );
                         if kresp.clicked() {
                             if let Some(pp) = kresp.interact_pointer_pos() {
                                 let t = ((pp.x - kr.left()) / kr.width()) as f64 * ev.length;
                                 // aproxima para um keyframe próximo
-                                let near = ev.pan_crop.keys.iter().find(|k| (x_of(k.t) - pp.x).abs() < 6.0).map(|k| k.t);
+                                let near = ev
+                                    .pan_crop
+                                    .keys
+                                    .iter()
+                                    .find(|k| (x_of(k.t) - pp.x).abs() < 6.0)
+                                    .map(|k| k.t);
                                 sel_key_time = Some(near.unwrap_or(t));
                             }
                         }
-                        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                            for (i, kf) in ev.pan_crop.keys.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    if ui.small_button(format!("◆ {}", self.fmt_time(kf.t))).clicked() {
-                                        sel_key_time = Some(kf.t);
-                                    }
-                                    let mut c = kf.curve;
-                                    if curve_combo(ui, &mut c, ("pck", id, i)) {
-                                        key_curve_change = Some((i, c));
-                                    }
-                                });
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for (i, kf) in ev.pan_crop.keys.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .small_button(format!("◆ {}", self.fmt_time(kf.t)))
+                                            .clicked()
+                                        {
+                                            sel_key_time = Some(kf.t);
+                                        }
+                                        let mut c = kf.curve;
+                                        if curve_combo(ui, &mut c, ("pck", id, i)) {
+                                            key_curve_change = Some((i, c));
+                                        }
+                                    });
+                                }
+                            });
                     });
                 });
             });
@@ -512,7 +708,9 @@ impl App {
         }
         let mut changed = false;
         if let Some(k) = new_key {
-            let e = self.project.event_mut(id).unwrap();
+            let Some(e) = self.project.event_mut(id) else {
+                return;
+            };
             if self.dlg.pc_animate || e.pan_crop.keys.len() > 1 {
                 e.pan_crop.set(local, k, tol);
             } else if let Some(first) = e.pan_crop.keys.first_mut() {
@@ -521,7 +719,11 @@ impl App {
             changed = true;
         }
         if let Some((i, c)) = key_curve_change {
-            if let Some(k) = self.project.event_mut(id).unwrap().pan_crop.keys.get_mut(i) {
+            if let Some(k) = self
+                .project
+                .event_mut(id)
+                .and_then(|e| e.pan_crop.keys.get_mut(i))
+            {
                 k.curve = c;
             }
             changed = true;
@@ -533,7 +735,9 @@ impl App {
                 let fill = (s.width as f32 / sw).max(s.height as f32 / sh);
                 fit / fill
             };
-            let e = self.project.event_mut(id).unwrap();
+            let Some(e) = self.project.event_mut(id) else {
+                return;
+            };
             match a {
                 "reset" => e.pan_crop = Keyframes::default(),
                 "fill" => {
@@ -549,15 +753,37 @@ impl App {
                 }
                 "clear" => {
                     let v = cur.clone();
-                    e.pan_crop.keys = vec![Keyframe { t: 0.0, value: v, curve: Curve::Smooth }];
+                    e.pan_crop.keys = vec![Keyframe {
+                        t: 0.0,
+                        value: v,
+                        curve: Curve::Smooth,
+                    }];
                 }
                 "kb_in" | "kb_out" => {
-                    let a_k = PanCropKey { cx: 0.5, cy: 0.5, size: fill_size, rot: 0.0 };
-                    let b_k = PanCropKey { cx: 0.55, cy: 0.45, size: fill_size * 0.7, rot: 0.0 };
+                    let a_k = PanCropKey {
+                        cx: 0.5,
+                        cy: 0.5,
+                        size: fill_size,
+                        rot: 0.0,
+                    };
+                    let b_k = PanCropKey {
+                        cx: 0.55,
+                        cy: 0.45,
+                        size: fill_size * 0.7,
+                        rot: 0.0,
+                    };
                     let (k0, k1) = if a == "kb_in" { (a_k, b_k) } else { (b_k, a_k) };
                     e.pan_crop.keys = vec![
-                        Keyframe { t: 0.0, value: k0, curve: Curve::Linear },
-                        Keyframe { t: e.length, value: k1, curve: Curve::Linear },
+                        Keyframe {
+                            t: 0.0,
+                            value: k0,
+                            curve: Curve::Linear,
+                        },
+                        Keyframe {
+                            t: e.length,
+                            value: k1,
+                            curve: Curve::Linear,
+                        },
                     ];
                 }
                 _ => {}
@@ -578,7 +804,9 @@ impl App {
     // -----------------------------------------------------------------
 
     fn track_motion_window(&mut self, ctx: &egui::Context) {
-        let Some(tid) = self.dlg.track_motion else { return };
+        let Some(tid) = self.dlg.track_motion else {
+            return;
+        };
         let Some(ti) = self.project.tracks.iter().position(|t| t.id == tid) else {
             self.dlg.track_motion = None;
             return;
@@ -587,7 +815,12 @@ impl App {
         let t = self.cursor;
         let tol = 0.5 / s.fps;
         let cur = self.project.tracks[ti].motion.eval(t);
-        let keys: Vec<(f64, Curve)> = self.project.tracks[ti].motion.keys.iter().map(|k| (k.t, k.curve)).collect();
+        let keys: Vec<(f64, Curve)> = self.project.tracks[ti]
+            .motion
+            .keys
+            .iter()
+            .map(|k| (k.t, k.curve))
+            .collect();
         let mut open = true;
         let mut new_key: Option<MotionKey> = None;
         let mut action: Option<&str> = None;
@@ -598,18 +831,23 @@ impl App {
             .default_size([720.0, 420.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let size = vec2(420.0, 420.0 * s.height as f32 / s.width as f32).min(vec2(420.0, 360.0));
+                    let size = vec2(420.0, 420.0 * s.height as f32 / s.width as f32)
+                        .min(vec2(420.0, 360.0));
                     let (rect, resp) = ui.allocate_exact_size(size, Sense::drag());
                     let painter = ui.painter_at(rect);
                     painter.rect_filled(rect, 0.0, Color32::from_rgb(20, 20, 22));
                     let margin = 0.3;
-                    let sc = (rect.width() / (s.width as f32 * (1.0 + 2.0 * margin))).min(rect.height() / (s.height as f32 * (1.0 + 2.0 * margin)));
+                    let sc = (rect.width() / (s.width as f32 * (1.0 + 2.0 * margin)))
+                        .min(rect.height() / (s.height as f32 * (1.0 + 2.0 * margin)));
                     let origin = rect.center() - vec2(s.width as f32, s.height as f32) * sc / 2.0;
                     let to_c = |x: f32, y: f32| origin + vec2(x, y) * sc;
                     if let Some(tex) = &self.preview_tex {
                         painter.image(
                             tex.id(),
-                            Rect::from_min_max(to_c(0.0, 0.0), to_c(s.width as f32, s.height as f32)),
+                            Rect::from_min_max(
+                                to_c(0.0, 0.0),
+                                to_c(s.width as f32, s.height as f32),
+                            ),
                             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                             Color32::from_white_alpha(120),
                         );
@@ -625,9 +863,15 @@ impl App {
                     let hh = s.height as f32 * cur.scale_y / 2.0;
                     let cx = s.width as f32 / 2.0 + cur.x * s.width as f32;
                     let cy = s.height as f32 / 2.0 + cur.y * s.height as f32;
-                    let corner = |dx: f32, dy: f32| to_c(cx + dx * cs - dy * sn, cy + dx * sn + dy * cs);
+                    let corner =
+                        |dx: f32, dy: f32| to_c(cx + dx * cs - dy * sn, cy + dx * sn + dy * cs);
                     painter.add(Shape::closed_line(
-                        vec![corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)],
+                        vec![
+                            corner(-hw, -hh),
+                            corner(hw, -hh),
+                            corner(hw, hh),
+                            corner(-hw, hh),
+                        ],
                         Stroke::new(2.0_f32, Color32::from_rgb(90, 200, 255)),
                     ));
                     painter.circle_filled(to_c(cx, cy), 4.0, Color32::from_rgb(90, 200, 255));
@@ -650,27 +894,50 @@ impl App {
                     }
                     ui.vertical(|ui| {
                         ui.label(format!("Tempo: {}", self.fmt_time(t)));
-                        ui.checkbox(&mut self.dlg.tm_animate, "Animar (criar keyframe ao editar)");
+                        ui.checkbox(
+                            &mut self.dlg.tm_animate,
+                            "Animar (criar keyframe ao editar)",
+                        );
                         ui.checkbox(&mut self.dlg.tm_lock_aspect, "Travar proporção");
                         let mut k = new_key.clone().unwrap_or(cur.clone());
                         let mut ch = false;
-                        ch |= ui.add(egui::Slider::new(&mut k.x, -1.5..=1.5).text("Posição X")).changed();
-                        ch |= ui.add(egui::Slider::new(&mut k.y, -1.5..=1.5).text("Posição Y")).changed();
+                        ch |= ui
+                            .add(egui::Slider::new(&mut k.x, -1.5..=1.5).text("Posição X"))
+                            .changed();
+                        ch |= ui
+                            .add(egui::Slider::new(&mut k.y, -1.5..=1.5).text("Posição Y"))
+                            .changed();
                         let old_sx = k.scale_x;
                         let old_sy = k.scale_y;
-                        if ui.add(egui::Slider::new(&mut k.scale_x, 0.01..=5.0).logarithmic(true).text("Largura")).changed() {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut k.scale_x, 0.01..=5.0)
+                                    .logarithmic(true)
+                                    .text("Largura"),
+                            )
+                            .changed()
+                        {
                             if self.dlg.tm_lock_aspect {
                                 k.scale_y = old_sy * k.scale_x / old_sx.max(1e-4);
                             }
                             ch = true;
                         }
-                        if ui.add(egui::Slider::new(&mut k.scale_y, 0.01..=5.0).logarithmic(true).text("Altura")).changed() {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut k.scale_y, 0.01..=5.0)
+                                    .logarithmic(true)
+                                    .text("Altura"),
+                            )
+                            .changed()
+                        {
                             if self.dlg.tm_lock_aspect {
                                 k.scale_x = old_sx * k.scale_y / old_sy.max(1e-4);
                             }
                             ch = true;
                         }
-                        ch |= ui.add(egui::Slider::new(&mut k.rot, -360.0..=360.0).text("Rotação °")).changed();
+                        ch |= ui
+                            .add(egui::Slider::new(&mut k.rot, -360.0..=360.0).text("Rotação °"))
+                            .changed();
                         if ch {
                             new_key = Some(k);
                         }
@@ -691,13 +958,18 @@ impl App {
                                 action = Some("del");
                             }
                         });
-                        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                            for (kt, _) in &keys {
-                                if ui.small_button(format!("◆ {}", self.fmt_time(*kt))).clicked() {
-                                    jump = Some(*kt);
+                        egui::ScrollArea::vertical()
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                for (kt, _) in &keys {
+                                    if ui
+                                        .small_button(format!("◆ {}", self.fmt_time(*kt)))
+                                        .clicked()
+                                    {
+                                        jump = Some(*kt);
+                                    }
                                 }
-                            }
-                        });
+                            });
                     });
                 });
             });
@@ -719,7 +991,13 @@ impl App {
             match a {
                 "reset" => tr.motion = Keyframes::default(),
                 "pip" => {
-                    let k = MotionKey { x: 0.3, y: 0.3, scale_x: 0.33, scale_y: 0.33, rot: 0.0 };
+                    let k = MotionKey {
+                        x: 0.3,
+                        y: 0.3,
+                        scale_x: 0.33,
+                        scale_y: 0.33,
+                        rot: 0.0,
+                    };
                     if tr.motion.keys.len() > 1 {
                         tr.motion.set(t, k, tol);
                     } else {
@@ -727,10 +1005,8 @@ impl App {
                     }
                 }
                 "add" => tr.motion.set(t, cur.clone(), tol),
-                "del" => {
-                    if tr.motion.keys.len() > 1 {
-                        tr.motion.keys.retain(|k| (k.t - t).abs() > tol);
-                    }
+                "del" if tr.motion.keys.len() > 1 => {
+                    tr.motion.keys.retain(|k| (k.t - t).abs() > tol);
                 }
                 _ => {}
             }
@@ -751,25 +1027,34 @@ impl App {
     fn fx_chain_mut(&mut self, target: FxTarget) -> Option<&mut Vec<FxInstance>> {
         match target {
             FxTarget::Event(id) => self.project.event_mut(id).map(|e| &mut e.fx),
-            FxTarget::Track(id) => self.project.tracks.iter_mut().find(|t| t.id == id).map(|t| &mut t.fx),
+            FxTarget::Track(id) => self
+                .project
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .map(|t| &mut t.fx),
             FxTarget::MasterAudio => Some(&mut self.project.master.fx),
             FxTarget::MasterVideo => Some(&mut self.project.master.video_fx),
         }
     }
 
     fn fx_window(&mut self, ctx: &egui::Context) {
-        let Some(target) = self.dlg.fx_target else { return };
+        let Some(target) = self.dlg.fx_target else {
+            return;
+        };
         let (title, audio, local_t) = match target {
             FxTarget::Event(id) => {
                 let Some((ti, _)) = self.project.find_event(id) else {
                     self.dlg.fx_target = None;
                     return;
                 };
-                let e = self.project.event(id).unwrap();
+                let Some(e) = self.project.event(id) else {
+                    return;
+                };
                 (
                     format!("Efeitos do evento — {}", e.name),
                     self.project.tracks[ti].kind == TrackKind::Audio,
-                    (self.cursor - e.start).clamp(0.0, e.length),
+                    crate::util::clampd(self.cursor - e.start, 0.0, e.length),
                 )
             }
             FxTarget::Track(id) => {
@@ -777,7 +1062,11 @@ impl App {
                     self.dlg.fx_target = None;
                     return;
                 };
-                (format!("Efeitos da trilha — {}", t.name), t.kind == TrackKind::Audio, self.cursor)
+                (
+                    format!("Efeitos da trilha — {}", t.name),
+                    t.kind == TrackKind::Audio,
+                    self.cursor,
+                )
             }
             FxTarget::MasterAudio => ("Efeitos do master bus (áudio)".into(), true, self.cursor),
             FxTarget::MasterVideo => ("Efeitos de saída de vídeo".into(), false, self.cursor),
@@ -788,99 +1077,147 @@ impl App {
         let mut changed = false;
         let mut add: Option<FxKind> = None;
         let mut op: Option<(usize, &str)> = None;
-        let Some(chain) = self.fx_chain_mut(target) else { return };
+        let Some(chain) = self.fx_chain_mut(target) else {
+            return;
+        };
         let mut chain_copy = chain.clone();
-        egui::Window::new(title).open(&mut open).default_width(420.0).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("fx_add").selected_text("➕ Adicionar efeito...").show_ui(ui, |ui| {
-                    let list: &[FxKind] = if audio { &FxKind::AUDIO } else { &FxKind::VIDEO };
-                    for k in list {
-                        if ui.selectable_label(false, k.name()).clicked() {
-                            add = Some(*k);
-                        }
-                    }
-                });
-                ui.label(egui::RichText::new(format!("tempo local: {fmt_local}")).small());
-            });
-            ui.separator();
-            if chain_copy.is_empty() {
-                ui.label("Nenhum efeito na cadeia.");
-            }
-            egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
-                let n = chain_copy.len();
-                for (i, fx) in chain_copy.iter_mut().enumerate() {
-                    ui.push_id(fx.id, |ui| {
-                        ui.horizontal(|ui| {
-                            changed |= ui.checkbox(&mut fx.enabled, "").on_hover_text("Ativar/ignorar (bypass)").changed();
-                            ui.label(egui::RichText::new(fx.kind.name()).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").on_hover_text("Remover").clicked() {
-                                    op = Some((i, "del"));
+        egui::Window::new(title)
+            .open(&mut open)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("fx_add")
+                        .selected_text("➕ Adicionar efeito...")
+                        .show_ui(ui, |ui| {
+                            let list: &[FxKind] = if audio {
+                                &FxKind::AUDIO
+                            } else {
+                                &FxKind::VIDEO
+                            };
+                            for k in list {
+                                if ui.selectable_label(false, k.name()).clicked() {
+                                    add = Some(*k);
                                 }
-                                if i + 1 < n && ui.small_button("▼").clicked() {
-                                    op = Some((i, "down"));
-                                }
-                                if i > 0 && ui.small_button("▲").clicked() {
-                                    op = Some((i, "up"));
-                                }
-                                if ui.small_button("⟲").on_hover_text("Valores padrão").clicked() {
-                                    op = Some((i, "reset"));
-                                }
-                            });
-                        });
-                        let specs = fx.kind.params();
-                        egui::Grid::new("params").num_columns(3).show(ui, |ui| {
-                            for (pi, spec) in specs.iter().enumerate() {
-                                let Some(p) = fx.params.get_mut(pi) else { continue };
-                                ui.label(spec.name);
-                                let mut v = p.eval(local_t);
-                                let r = if spec.toggle {
-                                    let mut b = v > 0.5;
-                                    let r = ui.checkbox(&mut b, "");
-                                    v = if b { 1.0 } else { 0.0 };
-                                    r
-                                } else {
-                                    let mut sl = egui::Slider::new(&mut v, spec.min..=spec.max);
-                                    if spec.max > 1000.0 || (spec.min > 0.0 && spec.max / spec.min.max(1e-3) > 100.0) {
-                                        sl = sl.logarithmic(true);
-                                    }
-                                    ui.add(sl)
-                                };
-                                if r.changed() {
-                                    if p.keys.is_empty() {
-                                        p.value = v;
-                                    } else {
-                                        p.set_key(local_t, v, tol);
-                                    }
-                                    changed = true;
-                                }
-                                ui.horizontal(|ui| {
-                                    let has_key_here = p.keys.iter().any(|k| (k.0 - local_t).abs() <= tol);
-                                    let lbl = if has_key_here { "◆" } else { "◇" };
-                                    if ui.small_button(lbl).on_hover_text("Criar keyframe neste tempo").clicked() {
-                                        if p.keys.is_empty() && local_t > tol {
-                                            p.keys.push((0.0, p.value));
-                                        }
-                                        p.set_key(local_t, v, tol);
-                                        changed = true;
-                                    }
-                                    if !p.keys.is_empty() {
-                                        ui.label(egui::RichText::new(format!("{}", p.keys.len())).small());
-                                        if ui.small_button("⌫").on_hover_text("Remover keyframes").clicked() {
-                                            p.value = v;
-                                            p.keys.clear();
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                                ui.end_row();
                             }
                         });
-                        ui.separator();
-                    });
+                    ui.label(egui::RichText::new(format!("tempo local: {fmt_local}")).small());
+                });
+                ui.separator();
+                if chain_copy.is_empty() {
+                    ui.label("Nenhum efeito na cadeia.");
                 }
+                egui::ScrollArea::vertical()
+                    .max_height(520.0)
+                    .show(ui, |ui| {
+                        let n = chain_copy.len();
+                        for (i, fx) in chain_copy.iter_mut().enumerate() {
+                            ui.push_id(fx.id, |ui| {
+                                ui.horizontal(|ui| {
+                                    changed |= ui
+                                        .checkbox(&mut fx.enabled, "")
+                                        .on_hover_text("Ativar/ignorar (bypass)")
+                                        .changed();
+                                    ui.label(egui::RichText::new(fx.kind.name()).strong());
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .small_button("✕")
+                                                .on_hover_text("Remover")
+                                                .clicked()
+                                            {
+                                                op = Some((i, "del"));
+                                            }
+                                            if i + 1 < n && ui.small_button("▼").clicked() {
+                                                op = Some((i, "down"));
+                                            }
+                                            if i > 0 && ui.small_button("▲").clicked() {
+                                                op = Some((i, "up"));
+                                            }
+                                            if ui
+                                                .small_button("⟲")
+                                                .on_hover_text("Valores padrão")
+                                                .clicked()
+                                            {
+                                                op = Some((i, "reset"));
+                                            }
+                                        },
+                                    );
+                                });
+                                let specs = fx.kind.params();
+                                egui::Grid::new("params").num_columns(3).show(ui, |ui| {
+                                    for (pi, spec) in specs.iter().enumerate() {
+                                        let Some(p) = fx.params.get_mut(pi) else {
+                                            continue;
+                                        };
+                                        ui.label(spec.name);
+                                        let mut v = p.eval(local_t);
+                                        let r = if spec.toggle {
+                                            let mut b = v > 0.5;
+                                            let r = ui.checkbox(&mut b, "");
+                                            v = if b { 1.0 } else { 0.0 };
+                                            r
+                                        } else {
+                                            let mut sl =
+                                                egui::Slider::new(&mut v, spec.min..=spec.max);
+                                            if spec.max > 1000.0
+                                                || (spec.min > 0.0
+                                                    && spec.max / spec.min.max(1e-3) > 100.0)
+                                            {
+                                                sl = sl.logarithmic(true);
+                                            }
+                                            ui.add(sl)
+                                        };
+                                        if r.changed() {
+                                            if p.keys.is_empty() {
+                                                p.value = v;
+                                            } else {
+                                                p.set_key(local_t, v, tol);
+                                            }
+                                            changed = true;
+                                        }
+                                        ui.horizontal(|ui| {
+                                            let has_key_here =
+                                                p.keys.iter().any(|k| (k.0 - local_t).abs() <= tol);
+                                            let lbl = if has_key_here { "◆" } else { "◇" };
+                                            if ui
+                                                .small_button(lbl)
+                                                .on_hover_text("Criar keyframe neste tempo")
+                                                .clicked()
+                                            {
+                                                if p.keys.is_empty() && local_t > tol {
+                                                    p.keys.push((0.0, p.value));
+                                                }
+                                                p.set_key(local_t, v, tol);
+                                                changed = true;
+                                            }
+                                            if !p.keys.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{}",
+                                                        p.keys.len()
+                                                    ))
+                                                    .small(),
+                                                );
+                                                if ui
+                                                    .small_button("⌫")
+                                                    .on_hover_text("Remover keyframes")
+                                                    .clicked()
+                                                {
+                                                    p.value = v;
+                                                    p.keys.clear();
+                                                    changed = true;
+                                                }
+                                            }
+                                        });
+                                        ui.end_row();
+                                    }
+                                });
+                                ui.separator();
+                            });
+                        }
+                    });
             });
-        });
         if let Some(k) = add {
             chain_copy.push(FxInstance::new(k));
             changed = true;
@@ -917,7 +1254,9 @@ impl App {
     // -----------------------------------------------------------------
 
     fn gen_editor_window(&mut self, ctx: &egui::Context) {
-        let Some(mid) = self.dlg.gen_editor else { return };
+        let Some(mid) = self.dlg.gen_editor else {
+            return;
+        };
         let Some(mi) = self.project.media.iter().position(|m| m.id == mid) else {
             self.dlg.gen_editor = None;
             return;
@@ -935,102 +1274,125 @@ impl App {
         let fonts = self.gen_fonts.clone();
         let mut open = true;
         let before = spec.clone();
-        egui::Window::new("Mídia gerada").open(&mut open).default_width(420.0).show(ctx, |ui| match &mut spec {
-            GenSpec::Text(t) => {
-                ui.label("Texto:");
-                ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(4).desired_width(f32::INFINITY));
-                egui::Grid::new("gen_txt").num_columns(2).show(ui, |ui| {
-                    ui.label("Fonte");
-                    let cur = if t.font_path.is_empty() {
-                        "Padrão".to_string()
-                    } else {
-                        Path::new(&t.font_path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
-                    };
-                    egui::ComboBox::from_id_salt("font").selected_text(cur).height(300.0).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut t.font_path, String::new(), "Padrão");
-                        for f in &fonts {
-                            let n = Path::new(f).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                            ui.selectable_value(&mut t.font_path, f.clone(), n);
-                        }
+        egui::Window::new("Mídia gerada")
+            .open(&mut open)
+            .default_width(420.0)
+            .show(ctx, |ui| match &mut spec {
+                GenSpec::Text(t) => {
+                    ui.label("Texto:");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut t.text)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY),
+                    );
+                    egui::Grid::new("gen_txt").num_columns(2).show(ui, |ui| {
+                        ui.label("Fonte");
+                        let cur = if t.font_path.is_empty() {
+                            "Padrão".to_string()
+                        } else {
+                            Path::new(&t.font_path)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        };
+                        egui::ComboBox::from_id_salt("font")
+                            .selected_text(cur)
+                            .height(300.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut t.font_path, String::new(), "Padrão");
+                                for f in &fonts {
+                                    let n = Path::new(f)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_default();
+                                    ui.selectable_value(&mut t.font_path, f.clone(), n);
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Tamanho (% altura)");
+                        ui.add(egui::Slider::new(&mut t.size, 1.0..=40.0));
+                        ui.end_row();
+                        ui.label("Cor do texto");
+                        ui.color_edit_button_rgba_unmultiplied(&mut t.color);
+                        ui.end_row();
+                        ui.label("Contorno");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Slider::new(&mut t.outline, 0.0..=3.0));
+                            ui.color_edit_button_rgba_unmultiplied(&mut t.outline_color);
+                        });
+                        ui.end_row();
+                        ui.label("Sombra");
+                        ui.checkbox(&mut t.shadow, "");
+                        ui.end_row();
+                        ui.label("Fundo");
+                        ui.color_edit_button_rgba_unmultiplied(&mut t.background);
+                        ui.end_row();
+                        ui.label("Alinhamento");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut t.align, TextAlign::Left, "Esquerda");
+                            ui.selectable_value(&mut t.align, TextAlign::Center, "Centro");
+                            ui.selectable_value(&mut t.align, TextAlign::Right, "Direita");
+                        });
+                        ui.end_row();
+                        ui.label("Posição X / Y");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Slider::new(&mut t.x, 0.0..=1.0));
+                            ui.add(egui::Slider::new(&mut t.y, 0.0..=1.0));
+                        });
+                        ui.end_row();
+                        ui.label("Espaçamento de linha");
+                        ui.add(egui::Slider::new(&mut t.line_spacing, 0.6..=3.0));
+                        ui.end_row();
+                        ui.label("Animação");
+                        egui::ComboBox::from_id_salt("anim")
+                            .selected_text(t.anim.name())
+                            .show_ui(ui, |ui| {
+                                for a in TextAnim::ALL {
+                                    ui.selectable_value(&mut t.anim, a, a.name());
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Duração da animação (s)");
+                        ui.add(egui::Slider::new(&mut t.anim_duration, 0.5..=60.0));
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Tamanho (% altura)");
-                    ui.add(egui::Slider::new(&mut t.size, 1.0..=40.0));
-                    ui.end_row();
-                    ui.label("Cor do texto");
-                    ui.color_edit_button_rgba_unmultiplied(&mut t.color);
-                    ui.end_row();
-                    ui.label("Contorno");
+                }
+                GenSpec::SolidColor { color } => {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Slider::new(&mut t.outline, 0.0..=3.0));
-                        ui.color_edit_button_rgba_unmultiplied(&mut t.outline_color);
+                        ui.label("Cor");
+                        ui.color_edit_button_rgba_unmultiplied(color);
                     });
-                    ui.end_row();
-                    ui.label("Sombra");
-                    ui.checkbox(&mut t.shadow, "");
-                    ui.end_row();
-                    ui.label("Fundo");
-                    ui.color_edit_button_rgba_unmultiplied(&mut t.background);
-                    ui.end_row();
-                    ui.label("Alinhamento");
+                }
+                GenSpec::Gradient {
+                    a,
+                    b,
+                    angle,
+                    radial,
+                } => {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut t.align, TextAlign::Left, "Esquerda");
-                        ui.selectable_value(&mut t.align, TextAlign::Center, "Centro");
-                        ui.selectable_value(&mut t.align, TextAlign::Right, "Direita");
+                        ui.label("Cor inicial");
+                        ui.color_edit_button_rgba_unmultiplied(a);
+                        ui.label("Cor final");
+                        ui.color_edit_button_rgba_unmultiplied(b);
                     });
-                    ui.end_row();
-                    ui.label("Posição X / Y");
+                    ui.checkbox(radial, "Radial");
+                    ui.add(egui::Slider::new(angle, -180.0..=180.0).text("Ângulo"));
+                }
+                GenSpec::Checkerboard { a, b, cells } => {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Slider::new(&mut t.x, 0.0..=1.0));
-                        ui.add(egui::Slider::new(&mut t.y, 0.0..=1.0));
+                        ui.color_edit_button_rgba_unmultiplied(a);
+                        ui.color_edit_button_rgba_unmultiplied(b);
                     });
-                    ui.end_row();
-                    ui.label("Espaçamento de linha");
-                    ui.add(egui::Slider::new(&mut t.line_spacing, 0.6..=3.0));
-                    ui.end_row();
-                    ui.label("Animação");
-                    egui::ComboBox::from_id_salt("anim").selected_text(t.anim.name()).show_ui(ui, |ui| {
-                        for a in TextAnim::ALL {
-                            ui.selectable_value(&mut t.anim, a, a.name());
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Duração da animação (s)");
-                    ui.add(egui::Slider::new(&mut t.anim_duration, 0.5..=60.0));
-                    ui.end_row();
-                });
-            }
-            GenSpec::SolidColor { color } => {
-                ui.horizontal(|ui| {
-                    ui.label("Cor");
-                    ui.color_edit_button_rgba_unmultiplied(color);
-                });
-            }
-            GenSpec::Gradient { a, b, angle, radial } => {
-                ui.horizontal(|ui| {
-                    ui.label("Cor inicial");
-                    ui.color_edit_button_rgba_unmultiplied(a);
-                    ui.label("Cor final");
-                    ui.color_edit_button_rgba_unmultiplied(b);
-                });
-                ui.checkbox(radial, "Radial");
-                ui.add(egui::Slider::new(angle, -180.0..=180.0).text("Ângulo"));
-            }
-            GenSpec::Checkerboard { a, b, cells } => {
-                ui.horizontal(|ui| {
-                    ui.color_edit_button_rgba_unmultiplied(a);
-                    ui.color_edit_button_rgba_unmultiplied(b);
-                });
-                ui.add(egui::Slider::new(cells, 1..=64).text("Células (vertical)"));
-            }
-            GenSpec::ColorBars => {
-                ui.label("Barras de cor SMPTE (sem parâmetros).");
-            }
-            GenSpec::Noise { mono, animated } => {
-                ui.checkbox(mono, "Monocromático");
-                ui.checkbox(animated, "Animado");
-            }
-        });
+                    ui.add(egui::Slider::new(cells, 1..=64).text("Células (vertical)"));
+                }
+                GenSpec::ColorBars => {
+                    ui.label("Barras de cor SMPTE (sem parâmetros).");
+                }
+                GenSpec::Noise { mono, animated } => {
+                    ui.checkbox(mono, "Monocromático");
+                    ui.checkbox(animated, "Animado");
+                }
+            });
         if spec != before {
             self.dlg.edit_in_progress = self.dlg.edit_in_progress && true;
             let label = spec.label();
@@ -1071,7 +1433,9 @@ impl App {
         let fmt_dur = self.fmt_time(dur);
         let fmt_loop = loop_r.map(|(a, b)| format!("{} → {}", self.fmt_time(a), self.fmt_time(b)));
         let mut use_loop = self.dlg.render_use_loop;
-        let r = self.dlg.render.as_mut().unwrap();
+        let Some(r) = self.dlg.render.as_mut() else {
+            return;
+        };
         egui::Window::new("Renderizar como").open(&mut open).resizable(false).show(ctx, |ui| {
             egui::Grid::new("rg").num_columns(2).show(ui, |ui| {
                 ui.label("Formato");
@@ -1159,8 +1523,13 @@ impl App {
         });
         self.dlg.render_use_loop = use_loop && has_loop;
         if start {
-            let r = self.dlg.render.as_ref().unwrap();
-            let (a, b) = if self.dlg.render_use_loop { loop_r.unwrap() } else { (0.0, dur) };
+            let Some(r) = self.dlg.render.as_ref() else {
+                return;
+            };
+            let (a, b) = match (self.dlg.render_use_loop, loop_r) {
+                (true, Some(lr)) => lr,
+                _ => (0.0, dur),
+            };
             if b - a <= 0.0 {
                 self.set_status("Nada para renderizar (projeto vazio)");
             } else if self.render_job.is_some() {
@@ -1178,7 +1547,11 @@ impl App {
                     wav_bits: r.wav_bits,
                 };
                 self.project.sort_events();
-                let progress = crate::render::spawn(self.project.clone(), self.media.clone(), settings.clone());
+                let progress = crate::render::spawn(
+                    self.project.clone(),
+                    self.media.clone(),
+                    settings.clone(),
+                );
                 self.render_job = Some(RenderJob { progress, settings });
                 open = false;
             }
@@ -1192,24 +1565,39 @@ impl App {
         if let Some(job) = &self.render_job {
             let p = &job.progress;
             let frac = p.fraction();
-            let started = p.started.lock().unwrap().unwrap_or_else(std::time::Instant::now);
+            let started = p
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(std::time::Instant::now);
             let el = started.elapsed().as_secs_f64();
-            let eta = if frac > 0.001 { el / frac as f64 - el } else { 0.0 };
+            let eta = if frac > 0.001 {
+                el / frac as f64 - el
+            } else {
+                0.0
+            };
             let mut cancel = false;
-            egui::Window::new("Renderizando...").collapsible(true).resizable(false).show(ctx, |ui| {
-                ui.label(job.settings.path.display().to_string());
-                ui.add(egui::ProgressBar::new(frac).show_percentage().desired_width(360.0));
-                ui.label(format!(
-                    "{} / {}   •   decorrido {:.0} s   •   restante ~{:.0} s",
-                    p.done.load(std::sync::atomic::Ordering::Relaxed),
-                    p.total.load(std::sync::atomic::Ordering::Relaxed),
-                    el,
-                    eta
-                ));
-                if ui.button("Cancelar").clicked() {
-                    cancel = true;
-                }
-            });
+            egui::Window::new("Renderizando...")
+                .collapsible(true)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(job.settings.path.display().to_string());
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .show_percentage()
+                            .desired_width(360.0),
+                    );
+                    ui.label(format!(
+                        "{} / {}   •   decorrido {:.0} s   •   restante ~{:.0} s",
+                        p.done.load(std::sync::atomic::Ordering::Relaxed),
+                        p.total.load(std::sync::atomic::Ordering::Relaxed),
+                        el,
+                        eta
+                    ));
+                    if ui.button("Cancelar").clicked() {
+                        cancel = true;
+                    }
+                });
             if cancel {
                 p.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
             }
@@ -1219,12 +1607,15 @@ impl App {
     fn misc_windows(&mut self, ctx: &egui::Context) {
         if let Some(msg) = self.dlg.render_done.clone() {
             let mut close = false;
-            egui::Window::new("Renderização").collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.label(msg);
-                if ui.button("OK").clicked() {
-                    close = true;
-                }
-            });
+            egui::Window::new("Renderização")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(msg);
+                    if ui.button("OK").clicked() {
+                        close = true;
+                    }
+                });
             if close {
                 self.dlg.render_done = None;
             }
@@ -1232,14 +1623,20 @@ impl App {
         if self.dlg.goto_open {
             let mut open = true;
             let mut go = None;
-            egui::Window::new("Ir para").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.label("Tempo (hh:mm:ss;ff, segundos ou Nf para quadros):");
-                let r = ui.text_edit_singleline(&mut self.dlg.goto_text);
-                r.request_focus();
-                if ui.button("Ir").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                    go = parse_time(&self.dlg.goto_text, self.project.settings.fps);
-                }
-            });
+            egui::Window::new("Ir para")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Tempo (hh:mm:ss;ff, segundos ou Nf para quadros):");
+                    let r = ui.text_edit_singleline(&mut self.dlg.goto_text);
+                    r.request_focus();
+                    if ui.button("Ir").clicked()
+                        || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    {
+                        go = parse_time(&self.dlg.goto_text, self.project.settings.fps);
+                    }
+                });
             if let Some(t) = go {
                 self.set_cursor(t);
                 self.tl.center_on(t);
@@ -1249,17 +1646,25 @@ impl App {
         }
         if self.dlg.shortcuts {
             let mut open = true;
-            egui::Window::new("Atalhos de teclado").open(&mut open).default_width(460.0).show(ctx, |ui| {
-                egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-                    egui::Grid::new("sc").striped(true).num_columns(2).show(ui, |ui| {
-                        for (k, d) in SHORTCUTS {
-                            ui.label(egui::RichText::new(*k).monospace());
-                            ui.label(*d);
-                            ui.end_row();
-                        }
-                    });
+            egui::Window::new("Atalhos de teclado")
+                .open(&mut open)
+                .default_width(460.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(480.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("sc")
+                                .striped(true)
+                                .num_columns(2)
+                                .show(ui, |ui| {
+                                    for (k, d) in SHORTCUTS {
+                                        ui.label(egui::RichText::new(*k).monospace());
+                                        ui.label(*d);
+                                        ui.end_row();
+                                    }
+                                });
+                        });
                 });
-            });
             self.dlg.shortcuts = open;
         }
         if self.dlg.about {
@@ -1299,7 +1704,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+← / Ctrl+→", "Marcador anterior / próximo"),
     ("0-9", "Ir para o marcador"),
     ("↑ / ↓ , Ctrl+↑ / Ctrl+↓", "Zoom horizontal"),
-    ("Roda / Shift+roda / Ctrl+roda", "Zoom / rolar horizontal / rolar vertical"),
+    (
+        "Roda / Shift+roda / Ctrl+roda",
+        "Zoom / rolar horizontal / rolar vertical",
+    ),
     ("\\", "Centralizar no cursor"),
     ("Ctrl+G", "Ir para..."),
     ("I / O", "Definir entrada / saída (seleção)"),
@@ -1322,7 +1730,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+L", "Ripple automático"),
     ("Shift+arrastar", "Ignorar encaixe temporariamente"),
     ("Ctrl+arrastar evento", "Copiar evento"),
-    ("Alt+arrastar evento", "Slip (mover a mídia dentro do evento)"),
+    (
+        "Alt+arrastar evento",
+        "Slip (mover a mídia dentro do evento)",
+    ),
     ("Alt+arrastar borda", "Slip-trim"),
     ("Duplo clique no envelope", "Adicionar ponto"),
     ("Botão do meio", "Mover a vista (pan)"),

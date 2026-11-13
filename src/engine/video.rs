@@ -12,7 +12,13 @@ use rayon::prelude::*;
 
 /// Desenha uma imagem de origem no quadro de saída aplicando ajuste à tela
 /// (letterbox) e o enquadramento do Pan/Crop.
-pub fn draw_source(src: &RgbaImage, w: usize, h: usize, key: &PanCropKey, maintain_aspect: bool) -> Frame {
+pub fn draw_source(
+    src: &RgbaImage,
+    w: usize,
+    h: usize,
+    key: &PanCropKey,
+    maintain_aspect: bool,
+) -> Frame {
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     let (wf, hf) = (w as f32, h as f32);
     let identity = key.size == 1.0 && key.rot == 0.0 && key.cx == 0.5 && key.cy == 0.5;
@@ -30,7 +36,10 @@ pub fn draw_source(src: &RgbaImage, w: usize, h: usize, key: &PanCropKey, mainta
     };
     // caminho rápido: mesma resolução e sem pan/crop
     if identity && src.width() as usize == w && src.height() as usize == h {
-        out.px.par_iter_mut().enumerate().for_each(|(i, p)| *p = to_f(i * 4));
+        out.px
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, p)| *p = to_f(i * 4));
         return out;
     }
     let (fw, fh) = if maintain_aspect {
@@ -63,7 +72,12 @@ pub fn draw_source(src: &RgbaImage, w: usize, h: usize, key: &PanCropKey, mainta
                 to_f((yy as usize * srcw + xx as usize) * 4)
             }
         };
-        let (p00, p10, p01, p11) = (get(x0, y0), get(x0 + 1, y0), get(x0, y0 + 1), get(x0 + 1, y0 + 1));
+        let (p00, p10, p01, p11) = (
+            get(x0, y0),
+            get(x0 + 1, y0),
+            get(x0, y0 + 1),
+            get(x0 + 1, y0 + 1),
+        );
         let mut o = [0.0; 4];
         for k in 0..4 {
             let a = p00[k] + (p10[k] - p00[k]) * ax;
@@ -153,30 +167,33 @@ pub fn blend(dst: &mut Frame, top: &Frame, mode: BlendMode, opacity: f32) {
     if op <= 0.0 {
         return;
     }
-    dst.px.par_iter_mut().zip(top.px.par_iter()).for_each(|(d, s)| {
-        let s = [s[0] * op, s[1] * op, s[2] * op, s[3] * op];
-        let sa = s[3];
-        if sa <= 1e-6 {
-            return;
-        }
-        if mode == BlendMode::SourceAlpha {
-            let ia = 1.0 - sa;
-            for k in 0..4 {
-                d[k] = s[k] + d[k] * ia;
+    dst.px
+        .par_iter_mut()
+        .zip(top.px.par_iter())
+        .for_each(|(d, s)| {
+            let s = [s[0] * op, s[1] * op, s[2] * op, s[3] * op];
+            let sa = s[3];
+            if sa <= 1e-6 {
+                return;
             }
-            return;
-        }
-        let da = d[3];
-        let mut o = [0f32; 4];
-        for k in 0..3 {
-            let cs = s[k] / sa;
-            let cb = if da > 1e-6 { d[k] / da } else { 0.0 };
-            let b = blend_channel(mode, cb, cs);
-            o[k] = s[k] * (1.0 - da) + d[k] * (1.0 - sa) + sa * da * b;
-        }
-        o[3] = sa + da * (1.0 - sa);
-        *d = o;
-    });
+            if mode == BlendMode::SourceAlpha {
+                let ia = 1.0 - sa;
+                for k in 0..4 {
+                    d[k] = s[k] + d[k] * ia;
+                }
+                return;
+            }
+            let da = d[3];
+            let mut o = [0f32; 4];
+            for k in 0..3 {
+                let cs = s[k] / sa;
+                let cb = if da > 1e-6 { d[k] / da } else { 0.0 };
+                let b = blend_channel(mode, cb, cs);
+                o[k] = s[k] * (1.0 - da) + d[k] * (1.0 - sa) + sa * da * b;
+            }
+            o[3] = sa + da * (1.0 - sa);
+            *d = o;
+        });
 }
 
 /// Alfa de um evento considerando fades, com opção de ignorar fade de
@@ -194,7 +211,14 @@ fn event_alpha(e: &Event, t: f64, ignore_in: bool, ignore_out: bool) -> f32 {
     g
 }
 
-pub fn event_layer(p: &Project, media: &MediaCache, e: &Event, t: f64, w: usize, h: usize) -> Option<Frame> {
+pub fn event_layer(
+    p: &Project,
+    media: &MediaCache,
+    e: &Event,
+    t: f64,
+    w: usize,
+    h: usize,
+) -> Option<Frame> {
     let m = p.media(e.media_id)?;
     if !m.has_video {
         return None;
@@ -210,12 +234,23 @@ pub fn event_layer(p: &Project, media: &MediaCache, e: &Event, t: f64, w: usize,
     Some(f)
 }
 
-fn render_track(p: &Project, media: &MediaCache, track: &Track, t: f64, w: usize, h: usize) -> Option<Frame> {
-    let mut active: Vec<&Event> = track.events.iter().filter(|e| !e.mute && e.contains(t)).collect();
+fn render_track(
+    p: &Project,
+    media: &MediaCache,
+    track: &Track,
+    t: f64,
+    w: usize,
+    h: usize,
+) -> Option<Frame> {
+    let mut active: Vec<&Event> = track
+        .events
+        .iter()
+        .filter(|e| !e.mute && e.contains(t))
+        .collect();
     if active.is_empty() {
         return None;
     }
-    active.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    active.sort_by(|a, b| a.start.total_cmp(&b.start));
     let n = active.len();
     // camadas mais antigas por baixo (sem transição)
     let mut base: Option<Frame> = None;
@@ -284,7 +319,9 @@ pub fn render_frame(p: &Project, media: &MediaCache, t: f64, w: usize, h: usize)
         if track.kind != TrackKind::Video || !track.is_audible(any_solo) {
             continue;
         }
-        let Some(mut layer) = render_track(p, media, track, t, w, h) else { continue };
+        let Some(mut layer) = render_track(p, media, track, t, w, h) else {
+            continue;
+        };
         for fx in &track.fx {
             vfx::apply(fx, &mut layer, t);
         }
