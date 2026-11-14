@@ -373,6 +373,8 @@ pub enum UiAction {
     ExportEdlDialog,
     ImportFcpxmlDialog,
     ExportFcpxmlDialog,
+    ImportFcp7Dialog,
+    ExportFcp7Dialog,
     OpenRenderDialog,
     SnapshotDialog,
     OpenProjectProps,
@@ -765,6 +767,33 @@ pub static COMMANDS: &[CommandDef] = &[
                 "fcpxml",
                 "FCPXML",
                 |sess, p| crate::fcpxml::export_fcpxml_file(&sess.project, p, None),
+            )
+        },
+    },
+    CommandDef {
+        id: "file.import_fcp7",
+        label: "Importar Final Cut Pro 7 XML (.xml)...",
+        menu_path: "Arquivo/Importar Final Cut Pro 7 XML (.xml)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportFcp7Dialog, h),
+    },
+    CommandDef {
+        id: "file.export_fcp7",
+        label: "Exportar Final Cut Pro 7 XML (.xml)...",
+        menu_path: "Arquivo/Exportar Final Cut Pro 7 XML (.xml)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(
+                s,
+                h,
+                UiAction::ExportFcp7Dialog,
+                "xml",
+                "FCP7 XML",
+                |sess, p| crate::fcp7xml::export_fcp7_file(&sess.project, p, None),
             )
         },
     },
