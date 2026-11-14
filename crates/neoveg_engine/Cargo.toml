@@ -1,0 +1,35 @@
+[package]
+name = "neoveg_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Motor de edição, mídia, composição de vídeo, áudio, renderização e tabela única de comandos do Neoveg"
+
+[dependencies]
+neoveg_common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+image.workspace = true
+ab_glyph.workspace = true
+rayon.workspace = true
+cpal.workspace = true
+claxon.workspace = true
+lewton.workspace = true
+puremp3.workspace = true
+fundsp.workspace = true
+rubato.workspace = true
+dasp.workspace = true
+ebur128.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+] }
+
+[lints.rust]
+# AGENTS.md §0.3: unsafe proibido em todo o crate, exceto no módulo de
+# fronteira FFI isolado `media::mf`.
+unsafe_code = "deny"

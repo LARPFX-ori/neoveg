@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/neoveg_common",
+    "crates/neoveg_engine",
+    "crates/neoveg_scripting",
+    "crates/neoveg_ui",
+    "crates/neoveg",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+neoveg_common = { path = "crates/neoveg_common" }
+neoveg_engine = { path = "crates/neoveg_engine" }
+neoveg_scripting = { path = "crates/neoveg_scripting" }
+neoveg_ui = { path = "crates/neoveg_ui" }
+
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "glow", "accesskit"] }
+egui_tiles = "0.12"
+fundsp = { version = "0.23", default-features = false, features = ["std", "fft"] }
+rubato = "5.1"
+dasp = { version = "0.11", default-features = false, features = ["std", "slice", "peak", "rms", "ring_buffer"] }
+ebur128 = { version = "0.1.11", default-features = false }
+netcorehost = { version = "0.22", default-features = false, features = ["net10_0"] }
+rfd = "0.15"
+cpal = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp", "rayon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ab_glyph = "0.2"
+rayon = "1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+claxon = "0.4.3"
+lewton = "0.10.2"
+puremp3 = "0.1.0"
+
+[workspace.lints.rust]
+# AGENTS.md §0.3: unsafe proibido fora de módulos de fronteira FFI nomeados.
+unsafe_code = "forbid"
+
+[profile.dev]
+opt-level = 1
+# AGENTS.md §0.7: o hook de pânico e o isolamento por catch_unwind exigem unwind.
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "unwind"

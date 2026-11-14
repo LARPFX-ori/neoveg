@@ -1,0 +1,17 @@
+[package]
+name = "neoveg_scripting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ponte de scripting (.NET Host / ScriptPortal.Vegas) e automação headless do Neoveg"
+
+[dependencies]
+neoveg_common.workspace = true
+neoveg_engine.workspace = true
+netcorehost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints.rust]
+# AGENTS.md §0.3: fronteira FFI .NET Host isolada em dotnet_host.rs.
+unsafe_code = "deny"

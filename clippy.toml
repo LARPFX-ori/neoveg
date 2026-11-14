@@ -1,0 +1,5 @@
+# AGENTS.md ?0.9: os lints de p?nico valem s? para c?digo de produ??o;
+# em testes, uma falha deve falhar ruidosamente.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

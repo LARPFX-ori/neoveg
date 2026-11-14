@@ -1,0 +1,11 @@
+/target
+# material de refer?ncia local (AGENTS.md ?1.4) e m?dia de teste (?3.4)
+/manuais/
+/plan/
+/design de layouts/
+/test_media/
+# logs e recupera??o gerados em tempo de execu??o
+/logs/
+/autosave/
+# configura??o local de build (pode conter caminhos desta m?quina)
+/.cargo/config.toml

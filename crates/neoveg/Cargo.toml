@@ -1,0 +1,21 @@
+[package]
+name = "neoveg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neoveg - editor de vídeo não-linear em Rust puro com semântica VEGAS Pro"
+
+[[bin]]
+name = "neoveg"
+path = "src/main.rs"
+
+[dependencies]
+neoveg_common.workspace = true
+neoveg_engine.workspace = true
+neoveg_scripting.workspace = true
+neoveg_ui.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+
+[lints]
+workspace = true
