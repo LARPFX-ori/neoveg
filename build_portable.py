@@ -3,12 +3,13 @@
 
 Compila o binário principal `neoveg` em modo `--release` (sem `-C target-cpu=native`
 para preservar compatibilidade com CPUs x86-64 sem AVX2) e gera uma pasta
-portátil autocontida em `target/portable/neoveg-portable/`.
+portátil autocontida em `<target-dir>/portable/neoveg-portable/`, onde `<target-dir>`
+é a pasta de build do cargo (respeita `CARGO_TARGET_DIR` e `.cargo/config.toml`).
 
 Uso:
     python build_portable.py
     python build_portable.py --no-build
-    python build_portable.py --out target/portable/meu-pacote
+    python build_portable.py --out ../pacotes/neoveg-portable
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ def cargo_target_dir(repo_root: Path) -> Path:
         cwd=repo_root,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     )
     data = json.loads(res.stdout)
@@ -124,15 +126,23 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
-        default="target/portable/neoveg-portable",
-        help="Pasta de saída do pacote portátil",
+        default=None,
+        help=(
+            "Pasta de saída do pacote portátil (padrão: <target-dir>/portable/neoveg-portable; "
+            "caminhos relativos partem da raiz do repositório)"
+        ),
     )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
-    out_path = Path(args.out)
-    if not out_path.is_absolute():
-        out_path = repo_root / out_path
+    if args.out is None:
+        # Segue o target-dir do cargo para que o pacote fique fora de pastas
+        # sincronizadas (ex.: Google Drive) quando CARGO_TARGET_DIR apontar para fora.
+        out_path = cargo_target_dir(repo_root) / "portable" / "neoveg-portable"
+    else:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = repo_root / out_path
 
     build_and_package(repo_root, out_path, args.no_build)
     return 0
