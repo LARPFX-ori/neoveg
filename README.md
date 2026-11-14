@@ -53,3 +53,13 @@ O script `build_portable.py` gera o pacote portátil em `target/portable/neoveg-
 - [Roadmap](ROADMAP.md)
 - [Matriz de Paridade VEGAS Pro](docs_obsidian/ui_references/matriz_de_paridade.md)
 - [Atribuição e Licenças de Assets](ATTRIBUTION.md)
+
+## Licença
+
+O Neoveg é distribuído sob licença dupla, à sua escolha:
+
+- MIT ([LICENSE-MIT](LICENSE-MIT))
+- Apache 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+Salvo declaração explícita em contrário, toda contribuição enviada para inclusão no projeto é licenciada
+sob esses mesmos termos, sem condições adicionais.
