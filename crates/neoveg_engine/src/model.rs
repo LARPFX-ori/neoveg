@@ -885,9 +885,6 @@ impl GenSpec {
 // Trilhas
 // ---------------------------------------------------------------------------
 
-// TODO(paridade timeline): *Adjustment Track* (trilha de ajuste cujos efeitos
-// valem para as trilhas de vídeo abaixo dela). Nova variante exige migração
-// compatível do `.neoveg` e entrada hostil validada (§0.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum TrackKind {
     Video,
@@ -1171,6 +1168,11 @@ pub struct Track {
     /// Envios auxiliares para barramentos de áudio (`sends`).
     #[serde(default)]
     pub sends: Vec<AudioSend>,
+    /// Vídeo: trilha de ajuste (*Adjustment Track*). Não desenha eventos; aplica
+    /// os FX da trilha sobre a composição das trilhas abaixo dela, com a
+    /// intensidade dada por opacidade × envelope de opacidade. Ignorado em áudio.
+    #[serde(default)]
+    pub adjustment: bool,
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1272,7 +1274,19 @@ impl Track {
             color: TRACK_COLORS[(id as usize) % TRACK_COLORS.len()],
             output_bus: None,
             sends: vec![],
+            adjustment: false,
         }
+    }
+
+    /// Verdadeiro para trilha de vídeo marcada como trilha de ajuste.
+    pub fn is_adjustment(&self) -> bool {
+        self.kind == TrackKind::Video && self.adjustment
+    }
+
+    /// Verdadeiro se a trilha pode receber eventos do tipo `kind`. Trilhas de
+    /// ajuste não recebem eventos: o compositor os ignoraria.
+    pub fn accepts(&self, kind: TrackKind) -> bool {
+        self.kind == kind && !self.is_adjustment()
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {

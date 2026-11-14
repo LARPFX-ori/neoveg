@@ -337,6 +337,33 @@ fn render_track(
     }
 }
 
+/// Trilha de ajuste: aplica os FX da trilha sobre a composição acumulada das
+/// trilhas abaixo e mistura o resultado pela opacidade × envelope (0..1).
+fn apply_adjustment(track: &Track, out: &mut Frame, t: Ticks) {
+    let op = track.opacity * track.env_value(EnvKind::Opacity, t);
+    // NaN ou intensidade nula não aplica nada (§0.4).
+    if op.is_nan() || op <= 1e-4 || !track.fx.iter().any(|fx| fx.enabled) {
+        return;
+    }
+    let op = op.min(1.0);
+    let mut adj = out.clone();
+    for fx in &track.fx {
+        vfx::apply(fx, &mut adj, t);
+    }
+    if op >= 1.0 {
+        *out = adj;
+        return;
+    }
+    out.px
+        .par_iter_mut()
+        .zip(adj.px.par_iter())
+        .for_each(|(o, a)| {
+            for c in 0..4 {
+                o[c] += (a[c] - o[c]) * op;
+            }
+        });
+}
+
 /// Renderiza o quadro do projeto no tempo exato `t` (ticks) na resolução w x h.
 pub fn render_frame(p: &Project, media: &MediaCache, t: Ticks, w: usize, h: usize) -> Frame {
     render_frame_preview(p, media, t, w, h, false)
@@ -356,6 +383,10 @@ pub fn render_frame_preview(
     let any_solo = p.any_solo(TrackKind::Video);
     for track in p.tracks.iter().rev() {
         if track.kind != TrackKind::Video || !track.is_audible(any_solo) {
+            continue;
+        }
+        if track.is_adjustment() {
+            apply_adjustment(track, &mut out, t);
             continue;
         }
         let Some(mut layer) = render_track(p, media, track, t, w, h, prefer_proxy) else {
@@ -395,4 +426,94 @@ pub fn render_frame_preview(
         }
     });
     out
+}
+
+#[cfg(test)]
+mod adjustment_tests {
+    use super::*;
+    use crate::commands::{run_command, HeadlessHost};
+    use crate::session::EditorSession;
+
+    fn project_with_adjustment(fx: Option<FxKind>) -> Project {
+        let mut p = Project::default();
+        let mut t = Track::new(TrackKind::Video, "Ajuste 1");
+        t.adjustment = true;
+        if let Some(k) = fx {
+            t.fx.push(FxInstance::new(k));
+        }
+        p.tracks.push(t);
+        p
+    }
+
+    fn first_red(p: &Project) -> f32 {
+        let cache = MediaCache::default();
+        let f = render_frame(p, &cache, Ticks::ZERO, 4, 4);
+        f.px[0][0]
+    }
+
+    #[test]
+    fn adjustment_track_applies_fx_to_composite_below() {
+        // fundo preto invertido vira branco
+        let p = project_with_adjustment(Some(FxKind::Invert));
+        assert!((first_red(&p) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn adjustment_track_mixes_by_opacity() {
+        let mut p = project_with_adjustment(Some(FxKind::Invert));
+        p.tracks[0].opacity = 0.5;
+        assert!((first_red(&p) - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn adjustment_track_muted_or_empty_does_nothing() {
+        let mut p = project_with_adjustment(Some(FxKind::Invert));
+        p.tracks[0].mute = true;
+        assert!(first_red(&p).abs() < 1e-4);
+        let p = project_with_adjustment(None);
+        assert!(first_red(&p).abs() < 1e-4);
+    }
+
+    #[test]
+    fn adjustment_track_nan_opacity_is_ignored() {
+        let mut p = project_with_adjustment(Some(FxKind::Invert));
+        p.tracks[0].opacity = f32::NAN;
+        assert!(first_red(&p).abs() < 1e-4);
+    }
+
+    #[test]
+    fn old_project_without_field_loads_as_normal_track() {
+        let json = r#"{"settings": {"width": 8, "height": 8, "fps": 30.0, "sample_rate": 48000},
+            "media": [],
+            "tracks": [{"id": 1, "name": "V", "kind": "Video", "events": []}]}"#;
+        let (p, _) = Project::from_json(json).expect("projeto válido");
+        assert!(!p.tracks[0].adjustment);
+        assert!(!p.tracks[0].is_adjustment());
+    }
+
+    #[test]
+    fn insert_adjustment_command_creates_video_adjustment_track() {
+        let mut s = EditorSession::new(Project::new_default());
+        let before = s.project.tracks.len();
+        run_command("insert.track_adjustment", &mut s, &mut HeadlessHost).expect("comando executa");
+        assert_eq!(s.project.tracks.len(), before + 1);
+        let adj: Vec<_> = s
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.is_adjustment())
+            .collect();
+        assert_eq!(adj.len(), 1);
+        assert_eq!(adj[0].kind, TrackKind::Video);
+        assert_eq!(adj[0].name, "Ajuste 1");
+    }
+
+    #[test]
+    fn adjustment_track_does_not_accept_events() {
+        let mut t = Track::new(TrackKind::Video, "A");
+        assert!(t.accepts(TrackKind::Video));
+        t.adjustment = true;
+        assert!(!t.accepts(TrackKind::Video));
+        assert!(!t.accepts(TrackKind::Audio));
+    }
 }

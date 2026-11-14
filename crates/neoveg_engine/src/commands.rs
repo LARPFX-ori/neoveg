@@ -1328,6 +1328,19 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "insert.track_adjustment",
+        label: "Trilha de ajuste",
+        menu_path: "Inserir/Trilha de ajuste",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.checkpoint();
+            s.insert_adjustment_track();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.audio_bus",
         label: "Barramento de áudio",
         menu_path: "Inserir/Barramento de áudio",

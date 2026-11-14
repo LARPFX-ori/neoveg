@@ -1657,6 +1657,19 @@ impl App {
                     14.0,
                     &self.theme,
                 );
+                let is_adjustment = self.project.tracks[ti].is_adjustment();
+                if is_adjustment {
+                    ui.label(
+                        egui::RichText::new("AJ")
+                            .small()
+                            .strong()
+                            .color(self.theme.text_muted),
+                    )
+                    .on_hover_text(
+                        "Trilha de ajuste (Adjustment Track): os efeitos desta trilha \
+                         valem para todas as trilhas de vídeo abaixo dela",
+                    );
+                }
                 let t = &mut self.project.tracks[ti];
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut t.name)
@@ -1687,6 +1700,7 @@ impl App {
                     self.dlg.fx_target = Some(FxTarget::Track(tid));
                 }
                 if kind == TrackKind::Video
+                    && !is_adjustment
                     && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
                         .on_hover_text("Movimento da trilha (Track Motion)")
                         .clicked()
@@ -2657,7 +2671,9 @@ impl App {
                         .project
                         .find_event(id)
                         .map(|(t, _)| self.project.tracks[t].kind);
-                    nt >= 0 && nt < n && Some(self.project.tracks[nt as usize].kind) == kind
+                    nt >= 0
+                        && nt < n
+                        && kind.is_some_and(|k| self.project.tracks[nt as usize].accepts(k))
                 });
                 let dtrack = if valid && !mods.alt { dtrack } else { 0 };
                 for &(id, st, ti) in &orig {
@@ -2667,7 +2683,7 @@ impl App {
                     let new_t = (ti as isize + dtrack) as usize;
                     // grupos áudio/vídeo: só move de trilha os eventos do tipo da âncora
                     let new_t =
-                        if self.project.tracks[new_t].kind == self.project.tracks[cur_t].kind {
+                        if self.project.tracks[new_t].accepts(self.project.tracks[cur_t].kind) {
                             new_t
                         } else {
                             cur_t

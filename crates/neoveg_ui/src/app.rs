@@ -1172,17 +1172,17 @@ impl App {
     pub fn find_or_create_track(&mut self, kind: TrackKind, hint: Option<usize>) -> usize {
         if let Some(h) = hint {
             if let Some(t) = self.project.tracks.get(h) {
-                if t.kind == kind {
+                if t.accepts(kind) {
                     return h;
                 }
             }
             if let Some(i) =
-                (h..self.project.tracks.len()).find(|&i| self.project.tracks[i].kind == kind)
+                (h..self.project.tracks.len()).find(|&i| self.project.tracks[i].accepts(kind))
             {
                 return i;
             }
         }
-        if let Some(i) = self.project.tracks.iter().position(|t| t.kind == kind) {
+        if let Some(i) = self.project.tracks.iter().position(|t| t.accepts(kind)) {
             return i;
         }
         self.insert_track(kind)
@@ -1830,6 +1830,7 @@ impl App {
             ui.menu_button("Inserir", |ui| {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
+                self.cmd_menu_btn(ui, "insert.track_adjustment");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
