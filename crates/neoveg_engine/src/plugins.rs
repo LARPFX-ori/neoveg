@@ -133,6 +133,44 @@ fn stem_name(path: &Path, suffix: &str) -> String {
     }
 }
 
+/// Remove vírgulas finais antes de `}` ou `]`, fora de strings. O
+/// `moduleinfo.json` gerado pelo VST 3 SDK oficial usa vírgulas finais, que o
+/// JSON estrito não aceita.
+fn strip_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let (mut in_str, mut escaped) = (false, false);
+    for (i, &c) in chars.iter().enumerate() {
+        if in_str {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            ',' => {
+                let next = chars
+                    .get(i + 1..)
+                    .and_then(|rest| rest.iter().find(|n| !n.is_whitespace()));
+                if !matches!(next, Some('}') | Some(']')) {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Lê os metadados de `moduleinfo.json` (tolerante: JSON inválido só é ignorado).
 fn read_moduleinfo(bundle: &Path, plugin: &mut ExternalPlugin) {
     let path = bundle
@@ -148,7 +186,7 @@ fn read_moduleinfo(bundle: &Path, plugin: &mut ExternalPlugin) {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&strip_trailing_commas(&text)) else {
         return;
     };
     let s = |v: &serde_json::Value| v.as_str().map(|s| s.trim().to_string());
@@ -315,6 +353,65 @@ mod tests {
         assert!(found[0].binary.is_some());
         assert_eq!(found[0].name, "Brilho");
         assert!(found[1].binary.is_none());
+    }
+
+    /// Regressão: o `moduleinfo.json` do VST 3 SDK oficial tem vírgulas finais;
+    /// antes da correção o JSON era rejeitado e o plug-in ficava sem metadados.
+    #[test]
+    fn moduleinfo_with_trailing_commas_is_read() {
+        let d = tmp_dir("virgulas");
+        let res = d.join("again.vst3").join("Contents").join("Resources");
+        std::fs::create_dir_all(&res).expect("cria");
+        std::fs::write(
+            res.join("moduleinfo.json"),
+            r#"{
+  "Name": "again",
+  "Version": "3.8.1.0",
+  "Factory Info": {
+    "Vendor": "Steinberg Media Technologies",
+    "Flags": {
+      "Unicode": true,
+      "Component Non Discardable": false,
+    },
+  },
+  "Classes": [
+    {
+      "Category": "Audio Module Class",
+      "Name": "AGain VST3",
+      "Sub Categories": [
+        "Fx",
+      ],
+    },
+  ],
+}"#,
+        )
+        .expect("grava");
+        let found = scan_dir(ExternalKind::Vst3, &d);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].vendor.as_deref(),
+            Some("Steinberg Media Technologies")
+        );
+        assert_eq!(found[0].version.as_deref(), Some("3.8.1.0"));
+        assert_eq!(
+            found[0].classes,
+            vec!["AGain VST3 (Audio Module Class)".to_string()]
+        );
+    }
+
+    #[test]
+    fn strip_trailing_commas_keeps_commas_inside_strings() {
+        assert_eq!(
+            strip_trailing_commas(r#"{"a": [1, 2,], }"#),
+            r#"{"a": [1, 2] }"#
+        );
+        assert_eq!(
+            strip_trailing_commas(r#"{"t": "x,}\",]"}"#),
+            r#"{"t": "x,}\",]"}"#
+        );
+        assert_eq!(strip_trailing_commas(""), "");
+        assert_eq!(strip_trailing_commas(",,,"), ",,,");
     }
 
     #[test]
