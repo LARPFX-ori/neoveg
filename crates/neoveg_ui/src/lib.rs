@@ -20,6 +20,7 @@ mod edit_details;
 mod icons;
 pub mod layout;
 mod panels;
+mod plugin_manager;
 mod scrollbars;
 mod splash;
 mod surround_panel;

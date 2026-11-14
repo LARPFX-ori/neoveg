@@ -70,11 +70,13 @@ pub enum Icon {
     TrimmerBlade,
     EditDetailsTable,
     SurroundSpeakers,
+    PluginPlug,
+    Compositors,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 62] = [
+    pub const ALL: [Icon; 64] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -137,6 +139,8 @@ impl Icon {
         Icon::TrimmerBlade,
         Icon::EditDetailsTable,
         Icon::SurroundSpeakers,
+        Icon::PluginPlug,
+        Icon::Compositors,
     ];
 }
 
@@ -971,6 +975,28 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                     pal.blue,
                 );
             }
+        }
+        Icon::PluginPlug => {
+            // tomada: corpo arredondado, dois pinos e cabo
+            c.p.rect_filled(c.rect(0.24, 0.34, 0.76, 0.66), c.u(0.08), pal.purple);
+            c.line(0.38, 0.14, 0.38, 0.34, pal.ink, 0.09);
+            c.line(0.62, 0.14, 0.62, 0.34, pal.ink, 0.09);
+            c.polyline(&[(0.50, 0.66), (0.50, 0.78), (0.70, 0.88)], pal.ink, 0.08);
+        }
+        Icon::Compositors => {
+            // duas camadas sobrepostas, a de cima translúcida
+            c.p.rect_filled(c.rect(0.12, 0.30, 0.62, 0.80), c.u(0.04), pal.blue);
+            c.p.rect_filled(
+                c.rect(0.38, 0.18, 0.88, 0.68),
+                c.u(0.04),
+                pal.amber.gamma_multiply(0.75),
+            );
+            c.p.rect_stroke(
+                c.rect(0.38, 0.18, 0.88, 0.68),
+                c.u(0.04),
+                c.stroke(0.05, pal.ink),
+                StrokeKind::Inside,
+            );
         }
     }
 }

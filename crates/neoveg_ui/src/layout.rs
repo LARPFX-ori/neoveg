@@ -23,6 +23,8 @@ pub fn panel_key(tab: DockTab) -> &'static str {
         DockTab::Mixer => "mixer",
         DockTab::Loudness => "loudness",
         DockTab::SurroundPanner => "surround_panner",
+        DockTab::PluginManager => "plugin_manager",
+        DockTab::Compositors => "compositors",
         DockTab::Scopes => "scopes",
         DockTab::Notes => "notes",
     }

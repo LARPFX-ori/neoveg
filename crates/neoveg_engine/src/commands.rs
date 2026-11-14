@@ -271,8 +271,6 @@ impl Shortcut {
     }
 }
 
-// TODO(paridade UI): painéis *Plug-In Manager* e *Compositors* ainda não
-// existem como abas acopláveis.
 /// Abas acopláveis da área inferior (espelhadas na UI).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DockPanel {
@@ -288,12 +286,14 @@ pub enum DockPanel {
     Mixer,
     Loudness,
     SurroundPanner,
+    PluginManager,
+    Compositors,
     Scopes,
     Notes,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 14] = [
+    pub const ALL: [DockPanel; 16] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -306,6 +306,8 @@ impl DockPanel {
         DockPanel::Mixer,
         DockPanel::Loudness,
         DockPanel::SurroundPanner,
+        DockPanel::PluginManager,
+        DockPanel::Compositors,
         DockPanel::Scopes,
         DockPanel::Notes,
     ];
@@ -324,6 +326,8 @@ impl DockPanel {
             DockPanel::Mixer => "Mixer",
             DockPanel::Loudness => "Medidores de Loudness",
             DockPanel::SurroundPanner => "Surround Panner",
+            DockPanel::PluginManager => "Plug-In Manager",
+            DockPanel::Compositors => "Compositores",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
         }
@@ -343,6 +347,8 @@ impl DockPanel {
             DockPanel::Mixer => "view.tab.mixer",
             DockPanel::Loudness => "view.tab.loudness",
             DockPanel::SurroundPanner => "view.tab.surround_panner",
+            DockPanel::PluginManager => "view.tab.plugin_manager",
+            DockPanel::Compositors => "view.tab.compositors",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
         }
@@ -1216,6 +1222,24 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::SurroundPanner), h),
+    },
+    CommandDef {
+        id: "view.tab.plugin_manager",
+        label: "Plug-In Manager",
+        menu_path: "Exibir/Plug-In Manager",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num1)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::PluginManager), h),
+    },
+    CommandDef {
+        id: "view.tab.compositors",
+        label: "Compositores",
+        menu_path: "Exibir/Compositores",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Compositors), h),
     },
     CommandDef {
         id: "view.bus_tracks",
