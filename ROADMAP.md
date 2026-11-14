@@ -42,8 +42,13 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Scripting `.NET` sob demanda (`netcorehost`):** carregamento isolado do host `.NET`/CLR (`Hostfxr`) em `neoveg_scripting` com ponte *Clean Room* `ScriptPortal.Vegas` (`NeovegBridge`), hospedagem de assemblies `.dll` externos em `AssemblyLoadContext` coletável (sem bloqueio de arquivo no Windows) com mutação atômica em passo único de Desfazer, execução via *Ferramentas → Executar script (.cs/.dll)...* e CLI `--run-script`.
 - **Empacotamento portátil (`build_portable.py`):** build `--release` portátil sem `target-cpu=native` e auditoria contra assets/fontes/ferramentas não redistribuíveis.
 
-## Fase 4 — Próximos Marcos *(Planejado)*
+## Fase 4 — Próximos Marcos *(Em andamento)*
 
+- **Concluído:**
+  - *Surround Panner* 5.1 (`engine/surround.rs`, painel `surround_panel.rs`): modo do Master estéreo/5.1, posição 2D por trilha e barramento no anel ITU-R BS.775, LFE, downmix para monitoração e render WAV de 6 canais (`WAVE_FORMAT_EXTENSIBLE`);
+  - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`);
+  - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores*;
+  - Descoberta de plug-ins VST3/OFX nas pastas padrão (`plugins.rs`), sem carregar binários.
 - **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
-- **Intercâmbio aberto restante:** importação e exportação de FCP7 XML e AAF a partir de especificações públicas.
-- **Áudio espacial e plug-ins externos:** *Surround Panner* 5.1 e hospedagem isolada de plug-ins VST3 e OpenFX (OFX).
+- **Intercâmbio aberto restante:** importação e exportação de AAF a partir da especificação pública.
+- **Hospedagem de plug-ins externos:** carregar e processar VST3 e OpenFX (OFX) num processo isolado.

@@ -22,6 +22,11 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** Especificação pública **Apple Final Cut Pro XML Format Reference / FCPXML DTD 1.8–1.11** (elementos `<fcpxml>`, `<resources>`, `<format>`, `<asset>`, `<media-rep>`, `<effect>`, `<library>`, `<event>`, `<project>`, `<sequence>`, `<spine>`, `<asset-clip>`, `<clip>`, `<ref-clip>`, `<sync-clip>`, `<gap>`, `<title>`, `<transition>`, `<marker>`, `<chapter-marker>`, `<timeMap>`).
 - **Método de implementação:** Parser XML limitado próprio em sala limpa sem `unsafe` (máximo `16 MiB`, profundidade `48`, `100_000` nós), conversão racional exata `"N/Ds"` em `i128` para `Ticks` e rejeição segura de XML malformado ou cíclico (`fuzz_fcpxml`).
 
+### Final Cut Pro 7 XML (`.xml`, `xmeml`) — `src/fcp7xml.rs`
+
+- **Edição de referência:** Documento público **Apple *Final Cut Pro XML Interchange Format*** (edição para Final Cut Pro 7, `xmeml` versão 5; também lê a versão 4): elementos `<xmeml>`, `<sequence>`, `<rate>` (`<timebase>` + `<ntsc>`), `<timecode>`/`<displayformat>`, `<media>`/`<video>`/`<audio>`, `<format>`/`<samplecharacteristics>`, `<track>`, `<clipitem>` (`<start>`, `<end>`, `<in>`, `<out>`, `-1` em bordas de transição), `<transitionitem>`, `<file>` (`<pathurl>`, definição única + referências por `id`), `<link>`/`<linkclipref>` e `<marker>`.
+- **Método de implementação:** Reusa o parser XML limitado de `fcpxml.rs`; quadros inteiros limitados a `50 000 000` e convertidos para `Ticks` exatos; até `20 000` clipes e `64` trilhas. Na exportação, eventos sobrepostos de uma trilha vão para trilhas extras (o FCP7 não admite sobreposição numa trilha). Fuzzing por mutação em `fcp7xml::tests`.
+
 ### EDL CMX 3600 (`.edl`) — `src/edl.rs`
 
 - **Edição de referência:** Especificação pública **CMX 3600 Edit Decision List (SMPTE 258M / ASCII EDL)**: cabeçalhos `TITLE:` e `FCM: DROP FRAME | NON-DROP FRAME`, registros `<NUM> <REEL> <CANAL> <MODO> [DUR_QUADROS] <SRC_IN> <SRC_OUT> <REC_IN> <REC_OUT>`, `M2` (*motion/speed*), rolo preto `BL` e comentários `* FROM CLIP NAME:`, `* SOURCE FILE:`, `* LOC:`.

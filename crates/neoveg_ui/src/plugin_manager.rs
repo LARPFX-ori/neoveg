@@ -9,6 +9,8 @@ use super::{App, DndPayload};
 use crate::icons::{self, Icon};
 use crate::model::{BlendMode, FxKind, TrackKind, TransitionKind};
 use eframe::egui;
+use neoveg_engine::plugins::{self, ExternalPlugin};
+use std::sync::Arc;
 
 /// Categoria da árvore do *Plug-In Manager*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -148,13 +150,7 @@ impl App {
                     }
                     egui::CollapsingHeader::new("Plug-ins externos (VST3 / OFX)")
                         .id_salt("plugin_cat_external")
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new("Nenhum plug-in externo carregado.")
-                                    .small()
-                                    .color(self.theme.text_muted),
-                            );
-                        });
+                        .show(ui, |ui| self.external_plugins_list(ui, &filter));
                 });
             let ui = &mut cols[1];
             match selected {
@@ -178,6 +174,56 @@ impl App {
                 None => d.remove::<PluginEntry>(sel_key),
             }
         });
+    }
+
+    /// Plug-ins VST3/OFX encontrados nas pastas padrão. Só lista: nenhum
+    /// binário é carregado (a hospedagem isolada ainda não existe).
+    fn external_plugins_list(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let key = egui::Id::new("plugin_manager_external");
+        let cached: Option<Arc<Vec<ExternalPlugin>>> = ui.data(|d| d.get_temp(key));
+        let refresh = ui.small_button("Atualizar").clicked();
+        let list = match (cached, refresh) {
+            (Some(l), false) => l,
+            _ => {
+                let l = Arc::new(plugins::scan_default());
+                ui.data_mut(|d| d.insert_temp(key, l.clone()));
+                l
+            }
+        };
+        let f = filter.trim().to_lowercase();
+        let shown: Vec<&ExternalPlugin> = list
+            .iter()
+            .filter(|p| f.is_empty() || p.name.to_lowercase().contains(&f))
+            .collect();
+        if shown.is_empty() {
+            ui.label(
+                egui::RichText::new("Nenhum plug-in externo encontrado nas pastas padrão.")
+                    .small()
+                    .color(self.theme.text_muted),
+            );
+            return;
+        }
+        for p in shown {
+            let mut tip = format!("{}\n{}", p.kind.name(), p.path.display());
+            if let Some(v) = &p.vendor {
+                tip.push_str(&format!("\nFabricante: {v}"));
+            }
+            if let Some(v) = &p.version {
+                tip.push_str(&format!("\nVersão: {v}"));
+            }
+            for c in &p.classes {
+                tip.push_str(&format!("\n• {c}"));
+            }
+            if p.binary.is_none() {
+                tip.push_str("\nSem binário para esta arquitetura.");
+            }
+            tip.push_str("\nHospedagem de plug-ins externos ainda não disponível.");
+            ui.add_enabled(
+                false,
+                egui::Label::new(format!("{} [{}]", p.name, p.kind.name())),
+            )
+            .on_disabled_hover_text(tip);
+        }
     }
 
     fn plugin_details(&mut self, ui: &mut egui::Ui, e: PluginEntry) {

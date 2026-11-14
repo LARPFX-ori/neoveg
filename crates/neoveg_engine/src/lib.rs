@@ -33,6 +33,8 @@ pub mod otio;
 #[forbid(unsafe_code)]
 pub mod playback;
 #[forbid(unsafe_code)]
+pub mod plugins;
+#[forbid(unsafe_code)]
 pub mod recovery;
 #[forbid(unsafe_code)]
 pub mod render;
