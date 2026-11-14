@@ -61,5 +61,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # §3.4.3. Os testes do host .NET pulam sozinhos quando o runtime não existe.
+      # --test-threads=1: os testes de janela do neoveg_ui (egui_kittest) derrubam
+      # o processo com STATUS_ACCESS_VIOLATION quando rodam em paralelo no runner;
+      # um por vez é também como o projeto roda localmente. Não remova sem
+      # resolver essa falha em paralelo.
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
