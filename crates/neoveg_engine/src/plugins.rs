@@ -262,23 +262,55 @@ fn scan_ofx_entry(path: &Path) -> Option<ExternalPlugin> {
     })
 }
 
-/// Lista os plug-ins de um formato numa pasta (só o primeiro nível, como nas
-/// pastas padrão). Pasta ausente devolve lista vazia.
+/// Profundidade máxima de subpastas varridas (fabricantes costumam usar
+/// `VST3/<Fabricante>/<Categoria>/`).
+const MAX_SCAN_DEPTH: usize = 8;
+/// Máximo de entradas de diretório visitadas por varredura (§0.4).
+const MAX_SCAN_ENTRIES: usize = 50_000;
+
+fn is_bundle_name(kind: ExternalKind, name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    match kind {
+        ExternalKind::Vst3 => n.ends_with(".vst3"),
+        ExternalKind::Ofx => n.ends_with(".ofx.bundle"),
+    }
+}
+
+/// Lista os plug-ins de um formato numa pasta e nas subpastas dela, como pede a
+/// documentação de cada formato. Pacotes (`.vst3`, `.ofx.bundle`) não são
+/// abertos como pastas; links simbólicos não são seguidos; profundidade e
+/// número de entradas são limitados. Pasta ausente devolve lista vazia.
 pub fn scan_dir(kind: ExternalKind, dir: &Path) -> Vec<ExternalPlugin> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    let mut out: Vec<ExternalPlugin> = rd
-        .filter_map(Result::ok)
-        .take(MAX_PLUGINS_PER_DIR)
-        .filter_map(|e| {
-            let p = e.path();
-            match kind {
-                ExternalKind::Vst3 => scan_vst3_entry(&p),
-                ExternalKind::Ofx => scan_ofx_entry(&p),
+    let mut out = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            visited += 1;
+            if visited > MAX_SCAN_ENTRIES || out.len() >= MAX_PLUGINS_PER_DIR {
+                stack.clear();
+                break;
             }
-        })
-        .collect();
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            // `file_type` não segue links: um link simbólico nunca é descido
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if is_bundle_name(kind, &name) {
+                let found = match kind {
+                    ExternalKind::Vst3 => scan_vst3_entry(&p),
+                    ExternalKind::Ofx => scan_ofx_entry(&p),
+                };
+                out.extend(found);
+            } else if ft.is_dir() && depth < MAX_SCAN_DEPTH {
+                stack.push((p, depth + 1));
+            }
+        }
+    }
     out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
@@ -398,6 +430,33 @@ mod tests {
             found[0].classes,
             vec!["AGain VST3 (Audio Module Class)".to_string()]
         );
+    }
+
+    /// Regressão: fabricantes como a MeldaProduction instalam em subpastas
+    /// (`VST3/<Fabricante>/<Categoria>/X.vst3`); antes só o 1º nível era lido.
+    #[test]
+    fn scan_finds_plugins_in_nested_vendor_folders() {
+        let d = tmp_dir("aninhado");
+        let deep = d.join("Fabricante").join("Dinamica");
+        std::fs::create_dir_all(&deep).expect("cria");
+        std::fs::write(deep.join("Compressor.vst3"), b"x").expect("grava");
+        std::fs::write(d.join("Fabricante").join("Eq.vst3"), b"x").expect("grava");
+        // pacote com outro .vst3 dentro: conta uma vez, sem descer nele
+        let bundle_bin = d.join("Pacote.vst3").join("Contents").join(vst3_arch_dir());
+        std::fs::create_dir_all(&bundle_bin).expect("cria pacote");
+        std::fs::write(bundle_bin.join("Pacote.vst3"), b"x").expect("grava");
+        // além da profundidade máxima: ignorado
+        let mut too_deep = d.clone();
+        for i in 0..=MAX_SCAN_DEPTH {
+            too_deep = too_deep.join(format!("n{i}"));
+        }
+        std::fs::create_dir_all(&too_deep).expect("cria");
+        std::fs::write(too_deep.join("Fundo.vst3"), b"x").expect("grava");
+
+        let found = scan_dir(ExternalKind::Vst3, &d);
+        let _ = std::fs::remove_dir_all(&d);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Compressor", "Eq", "Pacote"], "{names:?}");
     }
 
     #[test]
