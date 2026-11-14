@@ -885,6 +885,9 @@ impl GenSpec {
 // Trilhas
 // ---------------------------------------------------------------------------
 
+// TODO(paridade timeline): *Adjustment Track* (trilha de ajuste cujos efeitos
+// valem para as trilhas de vídeo abaixo dela). Nova variante exige migração
+// compatível do `.neoveg` e entrada hostil validada (§0.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum TrackKind {
     Video,
@@ -1144,6 +1147,8 @@ pub struct Track {
     /// Áudio: volume em dB.
     #[serde(default)]
     pub volume_db: f32,
+    // TODO(roadmap fase 4): *Surround Panner* 5.1. O pan estéreo -1..1 não
+    // representa posição 2D; o modo surround precisa de campo próprio.
     /// Áudio: pan -1..1.
     #[serde(default)]
     pub pan: f32,
@@ -1524,6 +1529,8 @@ impl Event {
 // Efeitos
 // ---------------------------------------------------------------------------
 
+// TODO(roadmap fase 4): efeitos externos VST3 e OpenFX (OFX) em host isolado
+// (fronteira FFI §0.3, com catch_unwind §0.6). Hoje só há DSP/efeitos nativos.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum FxKind {
     // vídeo

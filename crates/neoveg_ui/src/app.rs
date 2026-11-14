@@ -644,6 +644,9 @@ impl App {
                     self.import_fcpxml_path(&path);
                     return;
                 }
+                // TODO(roadmap fase 4): importar FCP7 XML (`.xml`) e AAF (`.aaf`)
+                // a partir das especificações públicas, em Sala Limpa (§2.3), com
+                // fuzzing por mutação (§0.8) e comando na Tabela Única.
                 "srt" | "vtt" => {
                     self.import_subtitles_path(&path);
                     return;
@@ -2047,6 +2050,8 @@ impl App {
                         );
                         ui.separator();
                     }
+                    // TODO(paridade timeline): botão `More (...)` ao lado das caixas
+                    // In/Fim/Tam, despachando por id da Tabela Única (§3.3).
                     if ui
                         .small_button("+")
                         .on_hover_text(

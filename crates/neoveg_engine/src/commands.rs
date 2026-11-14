@@ -271,6 +271,8 @@ impl Shortcut {
     }
 }
 
+// TODO(paridade UI): painéis *Plug-In Manager*, *Compositors* e
+// *Surround Panner* ainda não existem como abas acopláveis.
 /// Abas acopláveis da área inferior (espelhadas na UI).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DockPanel {
