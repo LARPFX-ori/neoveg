@@ -100,7 +100,7 @@ def build_and_package(repo_root: Path, out_dir: Path, skip_build: bool) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(bin_path, out_dir / exe_name)
-    for doc in ("README.md", "ROADMAP.md", "ATTRIBUTION.md"):
+    for doc in ("README.md", "ROADMAP.md", "ATTRIBUTION.md", "LICENSE-MIT", "LICENSE-APACHE"):
         src = repo_root / doc
         if src.is_file():
             shutil.copy2(src, out_dir / doc)
