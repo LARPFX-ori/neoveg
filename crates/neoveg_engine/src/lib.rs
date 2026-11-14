@@ -34,6 +34,8 @@ pub mod model;
 pub mod otio;
 #[forbid(unsafe_code)]
 pub mod playback;
+/// Fronteira FFI isolada de plug-ins externos (`AGENTS.md` §0.3).
+pub mod plugin_host;
 #[forbid(unsafe_code)]
 pub mod plugins;
 #[forbid(unsafe_code)]

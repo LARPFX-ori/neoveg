@@ -9,8 +9,52 @@ use super::{App, DndPayload};
 use crate::icons::{self, Icon};
 use crate::model::{BlendMode, FxKind, TrackKind, TransitionKind};
 use eframe::egui;
-use neoveg_engine::plugins::{self, ExternalPlugin};
-use std::sync::Arc;
+use neoveg_engine::plugin_host::{probe_ofx_isolated, OfxPluginInfo};
+use neoveg_engine::plugins::{self, ExternalKind, ExternalPlugin};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+/// Tempo máximo de uma sondagem de plug-in no subprocesso.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
+enum ProbeState {
+    Running,
+    Done(Result<Arc<Vec<OfxPluginInfo>>, String>),
+}
+
+type ProbeMap = Arc<Mutex<HashMap<PathBuf, ProbeState>>>;
+
+/// Dispara a sondagem isolada numa thread; o resultado volta pelo mapa.
+fn start_probe(probes: &ProbeMap, bin: PathBuf, ctx: egui::Context) {
+    probes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(bin.clone(), ProbeState::Running);
+    let worker = probes.clone();
+    let spawned = std::thread::Builder::new()
+        .name("ofx-probe".into())
+        .spawn(move || {
+            let result = std::env::current_exe()
+                .map_err(|e| format!("executável do Neoveg não encontrado: {e}"))
+                .and_then(|exe| probe_ofx_isolated(&exe, &bin, PROBE_TIMEOUT))
+                .map(Arc::new);
+            worker
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(bin, ProbeState::Done(result));
+            ctx.request_repaint();
+        });
+    if spawned.is_err() {
+        // sem thread: devolve o estado para o usuário tentar de novo
+        probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+}
 
 /// Categoria da árvore do *Plug-In Manager*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -176,8 +220,8 @@ impl App {
         });
     }
 
-    /// Plug-ins VST3/OFX encontrados nas pastas padrão. Só lista: nenhum
-    /// binário é carregado (a hospedagem isolada ainda não existe).
+    /// Plug-ins VST3/OFX encontrados nas pastas padrão. Binários OFX só são
+    /// carregados sob pedido e sempre no subprocesso isolado.
     fn external_plugins_list(&mut self, ui: &mut egui::Ui, filter: &str) {
         let key = egui::Id::new("plugin_manager_external");
         let cached: Option<Arc<Vec<ExternalPlugin>>> = ui.data(|d| d.get_temp(key));
@@ -217,12 +261,78 @@ impl App {
             if p.binary.is_none() {
                 tip.push_str("\nSem binário para esta arquitetura.");
             }
-            tip.push_str("\nHospedagem de plug-ins externos ainda não disponível.");
-            ui.add_enabled(
-                false,
-                egui::Label::new(format!("{} [{}]", p.name, p.kind.name())),
-            )
-            .on_disabled_hover_text(tip);
+            tip.push_str("\nAplicar plug-ins externos a eventos ainda não está disponível.");
+            let title = format!("{} [{}]", p.name, p.kind.name());
+            match (&p.binary, p.kind) {
+                (Some(bin), ExternalKind::Ofx) => {
+                    egui::CollapsingHeader::new(title)
+                        .id_salt(("plugin_ext", p.path.display().to_string()))
+                        .show(ui, |ui| self.ofx_probe_view(ui, bin));
+                }
+                _ => {
+                    ui.add_enabled(false, egui::Label::new(title))
+                        .on_disabled_hover_text(tip);
+                }
+            }
+        }
+    }
+
+    /// Lista os plug-ins de um binário OFX, sondado no subprocesso isolado
+    /// `neoveg --plugin-host` numa thread de fundo (a UI nunca bloqueia).
+    fn ofx_probe_view(&mut self, ui: &mut egui::Ui, bin: &Path) {
+        let key = egui::Id::new("plugin_manager_ofx_probes");
+        let probes: ProbeMap = ui.data_mut(|d| d.get_temp_mut_or_default::<ProbeMap>(key).clone());
+        let state = probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(bin)
+            .cloned();
+        match state {
+            None => {
+                if ui
+                    .small_button("Listar plug-ins")
+                    .on_hover_text("Carrega o binário num processo isolado e lista os efeitos dele")
+                    .clicked()
+                {
+                    start_probe(&probes, bin.to_path_buf(), ui.ctx().clone());
+                }
+            }
+            Some(ProbeState::Running) => {
+                ui.label(
+                    egui::RichText::new("Consultando o plug-in em processo isolado…")
+                        .small()
+                        .color(self.theme.text_muted),
+                );
+            }
+            Some(ProbeState::Done(Err(e))) => {
+                ui.label(
+                    egui::RichText::new(format!("Erro: {e}"))
+                        .small()
+                        .color(self.theme.text_muted),
+                );
+            }
+            Some(ProbeState::Done(Ok(list))) => {
+                ui.label(
+                    egui::RichText::new(format!("{} plug-in(s)", list.len()))
+                        .small()
+                        .color(self.theme.text_muted),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt(("ofx_probe_scroll", bin.display().to_string()))
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for info in list.iter() {
+                            ui.label(egui::RichText::new(&info.identifier).small().monospace())
+                                .on_hover_text(format!(
+                                    "{} v{} — versão {}.{}",
+                                    info.api,
+                                    info.api_version,
+                                    info.version_major,
+                                    info.version_minor
+                                ));
+                        }
+                    });
+            }
         }
     }
 

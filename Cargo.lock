@@ -2954,6 +2954,7 @@ dependencies = [
  "neoveg_scripting",
  "neoveg_ui",
  "rayon",
+ "serde_json",
 ]
 
 [[package]]
@@ -2979,6 +2980,7 @@ dependencies = [
  "fundsp",
  "image",
  "lewton",
+ "libloading",
  "neoveg_common",
  "puremp3",
  "rayon",
