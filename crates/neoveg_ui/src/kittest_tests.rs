@@ -226,6 +226,26 @@ fn kittest_loudness_e_trilhas_de_barramentos() {
 }
 
 #[test]
+fn kittest_surround_panner_abre_e_muda_para_5_1() {
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.surround_panner");
+    harness.run_steps(2);
+    assert_eq!(harness.state().dock_tab, DockTab::SurroundPanner);
+    // em estéreo o painel só oferece o seletor de modo
+    harness.state_mut().project.settings.channel_layout = crate::model::ChannelLayout::Surround51;
+    harness.run_steps(3);
+    assert!(harness.get_all_by_label("Frente central").count() >= 1);
+    harness.get_by_label("Frente central").click();
+    harness.run_steps(2);
+}
+
+#[test]
 fn kittest_trimmer_in_out_e_inserir() {
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))

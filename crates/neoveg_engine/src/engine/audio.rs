@@ -6,6 +6,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::afx::{self, FxState};
+use super::surround;
 use crate::media::AudioData;
 use crate::model::*;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -398,6 +399,8 @@ pub struct Mixer {
     ev_buf: Vec<f32>,
     bus_bufs: Vec<Vec<f32>>,
     master_buf: Vec<f32>,
+    /// Master 5.1 intercalado (FL, FR, C, LFE, BL, BR), só no modo surround.
+    master6: Vec<f32>,
 }
 
 /// Fades efetivos de um evento de áudio: o maior entre o fade definido e a
@@ -484,6 +487,7 @@ impl Mixer {
             ev_buf: vec![],
             bus_bufs: vec![],
             master_buf: vec![],
+            master6: vec![],
         }
     }
 
@@ -570,7 +574,8 @@ impl Mixer {
         }
     }
 
-    /// Mixa `out.len()/2` quadros a partir da amostra `start` (na taxa `sr`).
+    /// Mixa `out.len()/2` quadros estéreo a partir da amostra `start` (na taxa
+    /// `sr`). Em projeto 5.1, devolve o downmix ITU-R BS.775 (monitoração).
     pub fn process(
         &mut self,
         p: &Project,
@@ -579,15 +584,85 @@ impl Mixer {
         out: &mut [f32],
     ) {
         let n = out.len() / 2;
+        out.fill(0.0);
         if n == 0 {
             return;
         }
+        let is_surround = self.mix_block(p, audio, start, n);
+        let mv = master_gain(p);
+        let mut peak = [0f32; 2];
+        for i in 0..n {
+            let (l, r) = if is_surround {
+                self.master6
+                    .get(i * surround::CHANNELS..(i + 1) * surround::CHANNELS)
+                    .map(surround::downmix_frame)
+                    .unwrap_or((0.0, 0.0))
+            } else {
+                (
+                    self.master_buf.get(i * 2).copied().unwrap_or(0.0),
+                    self.master_buf.get(i * 2 + 1).copied().unwrap_or(0.0),
+                )
+            };
+            let (l, r) = (l * mv, r * mv);
+            peak[0] = peak[0].max(l.abs());
+            peak[1] = peak[1].max(r.abs());
+            out[i * 2] = l;
+            out[i * 2 + 1] = r;
+        }
+        self.meters.master = peak;
+    }
+
+    /// Mixa no layout de canais do projeto: `out` tem `n * channel_layout.channels()`
+    /// amostras intercaladas (5.1: FL, FR, C, LFE, BL, BR). Usado pelo render.
+    pub fn process_multichannel(
+        &mut self,
+        p: &Project,
+        audio: &HashMap<Id, Arc<AudioData>>,
+        start: i64,
+        out: &mut [f32],
+    ) {
+        if p.settings.channel_layout != ChannelLayout::Surround51 {
+            self.process(p, audio, start, out);
+            return;
+        }
+        let ch = surround::CHANNELS;
+        let n = out.len() / ch;
+        out.fill(0.0);
+        if n == 0 {
+            return;
+        }
+        self.mix_block(p, audio, start, n);
+        let mv = master_gain(p);
+        let mut peak = [0f32; 2];
+        for (o, s) in out[..n * ch].iter_mut().zip(self.master6.iter()) {
+            *o = s * mv;
+        }
+        for f in out[..n * ch].chunks_exact(ch) {
+            peak[0] = peak[0].max(f[surround::FL].abs().max(f[surround::SL].abs()));
+            peak[1] = peak[1].max(f[surround::FR].abs().max(f[surround::SR].abs()));
+        }
+        self.meters.master = peak;
+    }
+
+    /// Mixa `n` quadros em `master_buf` (estéreo) ou `master6` (5.1), sem o
+    /// volume do Master. Devolve verdadeiro no modo 5.1.
+    fn mix_block(
+        &mut self,
+        p: &Project,
+        audio: &HashMap<Id, Arc<AudioData>>,
+        start: i64,
+        n: usize,
+    ) -> bool {
         let sr = self.sr;
         let t0 = timeline_sample_time(start, sr);
         let t1 = timeline_sample_time(start.saturating_add(n as i64), sr);
-        out.fill(0.0);
+        let is_surround = p.settings.channel_layout == ChannelLayout::Surround51;
         self.master_buf.resize(n * 2, 0.0);
         self.master_buf.fill(0.0);
+        if is_surround {
+            self.master6.resize(n * surround::CHANNELS, 0.0);
+            self.master6.fill(0.0);
+        }
 
         let num_buses = p.audio_buses.len().min(MAX_AUDIO_BUSES);
         if self.bus_bufs.len() < num_buses {
@@ -664,16 +739,21 @@ impl Mixer {
                 }
             }
 
-            // Volume, envelope de volume e pan
+            // Volume, envelope de volume e pan (em 5.1 o pan estéreo dá lugar
+            // ao Surround Panner, aplicado na saída para o Master)
             let peak = apply_volume_pan_envelopes(
                 &mut track_buf[..n * 2],
                 n,
                 sr,
                 start,
                 track.volume_db,
-                track.pan,
+                if is_surround { 0.0 } else { track.pan },
                 track.envelope(EnvKind::Volume),
-                track.envelope(EnvKind::Pan),
+                if is_surround {
+                    None
+                } else {
+                    track.envelope(EnvKind::Pan)
+                },
             );
             self.meters.tracks.insert(track.id, peak);
 
@@ -701,6 +781,9 @@ impl Mixer {
                 for i in 0..n * 2 {
                     dst[i] += track_buf[i];
                 }
+            } else if is_surround {
+                let g = surround::gains(track.surround);
+                surround::mix_into(&mut self.master6, &track_buf[..n * 2], n, &g);
             } else {
                 for i in 0..n * 2 {
                     self.master_buf[i] += track_buf[i];
@@ -731,9 +814,13 @@ impl Mixer {
                 sr,
                 start,
                 bus.volume_db,
-                bus.pan,
+                if is_surround { 0.0 } else { bus.pan },
                 bus.envelope(EnvKind::Volume),
-                bus.envelope(EnvKind::Pan),
+                if is_surround {
+                    None
+                } else {
+                    bus.envelope(EnvKind::Pan)
+                },
             );
             self.meters.buses.insert(bus.id, bpeak);
 
@@ -752,35 +839,48 @@ impl Mixer {
                 }
             }
             if !sent_to_downstream {
-                for i in 0..n * 2 {
-                    self.master_buf[i] += bbuf[i];
+                if is_surround {
+                    let g = surround::gains(bus.surround);
+                    surround::mix_into(&mut self.master6, &bbuf[..n * 2], n, &g);
+                } else {
+                    for i in 0..n * 2 {
+                        self.master_buf[i] += bbuf[i];
+                    }
                 }
             }
             self.bus_bufs[bi] = bbuf;
         }
 
+        // FX do Master: em 5.1 processam o par frontal FL/FR (os efeitos são
+        // estéreo); C, LFE e surrounds passam sem efeito.
         let mut master = std::mem::take(&mut self.master_buf);
+        if is_surround && !p.master.fx.is_empty() {
+            for i in 0..n {
+                master[i * 2] = self.master6[i * surround::CHANNELS + surround::FL];
+                master[i * 2 + 1] = self.master6[i * surround::CHANNELS + surround::FR];
+            }
+        }
         for fx in &p.master.fx {
             self.run_fx(fx, &mut master[..n * 2], t0);
         }
-        let mv = if p.master.mute {
-            0.0
-        } else {
-            db_to_lin(p.master.volume_db)
-        };
-        let mut peak = [0f32; 2];
-        for i in 0..n {
-            let l = master[i * 2] * mv;
-            let r = master[i * 2 + 1] * mv;
-            peak[0] = peak[0].max(l.abs());
-            peak[1] = peak[1].max(r.abs());
-            out[i * 2] = l;
-            out[i * 2 + 1] = r;
+        if is_surround && !p.master.fx.is_empty() {
+            for i in 0..n {
+                self.master6[i * surround::CHANNELS + surround::FL] = master[i * 2];
+                self.master6[i * surround::CHANNELS + surround::FR] = master[i * 2 + 1];
+            }
         }
-        self.meters.master = peak;
         self.master_buf = master;
         self.track_buf = track_buf;
         self.ev_buf = ev_buf;
+        is_surround
+    }
+}
+
+fn master_gain(p: &Project) -> f32 {
+    if p.master.mute {
+        0.0
+    } else {
+        db_to_lin(p.master.volume_db)
     }
 }
 
@@ -836,6 +936,79 @@ mod tests {
         mixer.process(&p, &audio, 0, &mut out);
         assert!(out.iter().all(|&v| v == 0.0));
         assert_eq!(mixer.meters.master, [0.0, 0.0]);
+    }
+
+    fn surround_project(pan: SurroundPan) -> (Project, HashMap<Id, Arc<AudioData>>) {
+        let mut p = Project::new_default();
+        p.settings.channel_layout = ChannelLayout::Surround51;
+        let mid = new_id();
+        let item = test_audio_item(mid, 2);
+        let t = p
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::Audio)
+            .expect("projeto padrão contém faixa de áudio");
+        t.surround = pan;
+        t.events
+            .push(Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(1)));
+        p.media.push(item);
+        let mut audio = HashMap::new();
+        audio.insert(
+            mid,
+            Arc::new(AudioData::from_stereo(48000, vec![0.5; 48000 * 2])),
+        );
+        (p, audio)
+    }
+
+    #[test]
+    fn surround_front_center_goes_to_center_channel() {
+        let (p, audio) = surround_project(SurroundPan::default());
+        let mut mixer = Mixer::new(48000);
+        let mut out = vec![0.0_f32; 64 * 6];
+        mixer.process_multichannel(&p, &audio, 0, &mut out);
+        let f = &out[32 * 6..33 * 6];
+        assert!((f[surround::C] - 0.5).abs() < 1e-3, "{f:?}");
+        assert!(f[surround::FL].abs() < 1e-3 && f[surround::SL].abs() < 1e-3);
+        assert!(f[surround::LFE].abs() < 1e-6);
+    }
+
+    #[test]
+    fn surround_rear_left_goes_to_left_surround() {
+        let a = (-110.0f32).to_radians();
+        let pan = SurroundPan {
+            x: a.sin(),
+            y: -a.cos(),
+            ..SurroundPan::default()
+        };
+        let (p, audio) = surround_project(pan);
+        let mut mixer = Mixer::new(48000);
+        let mut out = vec![0.0_f32; 64 * 6];
+        mixer.process_multichannel(&p, &audio, 0, &mut out);
+        let f = &out[32 * 6..33 * 6];
+        assert!((f[surround::SL] - 0.5).abs() < 1e-3, "{f:?}");
+        assert!(f[surround::C].abs() < 1e-3);
+    }
+
+    #[test]
+    fn surround_stereo_output_is_itu_downmix() {
+        let (p, audio) = surround_project(SurroundPan::default());
+        let mut mixer = Mixer::new(48000);
+        let mut out = vec![0.0_f32; 64 * 2];
+        mixer.process(&p, &audio, 0, &mut out);
+        let k = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out[64] - 0.5 * k).abs() < 1e-3, "{}", out[64]);
+        assert!((out[65] - 0.5 * k).abs() < 1e-3);
+    }
+
+    #[test]
+    fn multichannel_on_stereo_project_matches_process() {
+        let (mut p, audio) = surround_project(SurroundPan::default());
+        p.settings.channel_layout = ChannelLayout::Stereo;
+        let mut a = vec![0.0_f32; 64 * 2];
+        let mut b = vec![0.0_f32; 64 * 2];
+        Mixer::new(48000).process(&p, &audio, 0, &mut a);
+        Mixer::new(48000).process_multichannel(&p, &audio, 0, &mut b);
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -271,8 +271,8 @@ impl Shortcut {
     }
 }
 
-// TODO(paridade UI): painéis *Plug-In Manager*, *Compositors* e
-// *Surround Panner* ainda não existem como abas acopláveis.
+// TODO(paridade UI): painéis *Plug-In Manager* e *Compositors* ainda não
+// existem como abas acopláveis.
 /// Abas acopláveis da área inferior (espelhadas na UI).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DockPanel {
@@ -287,12 +287,13 @@ pub enum DockPanel {
     Generators,
     Mixer,
     Loudness,
+    SurroundPanner,
     Scopes,
     Notes,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 13] = [
+    pub const ALL: [DockPanel; 14] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -304,6 +305,7 @@ impl DockPanel {
         DockPanel::Generators,
         DockPanel::Mixer,
         DockPanel::Loudness,
+        DockPanel::SurroundPanner,
         DockPanel::Scopes,
         DockPanel::Notes,
     ];
@@ -321,6 +323,7 @@ impl DockPanel {
             DockPanel::Generators => "Geradores de Mídia",
             DockPanel::Mixer => "Mixer",
             DockPanel::Loudness => "Medidores de Loudness",
+            DockPanel::SurroundPanner => "Surround Panner",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
         }
@@ -339,6 +342,7 @@ impl DockPanel {
             DockPanel::Generators => "view.tab.generators",
             DockPanel::Mixer => "view.tab.mixer",
             DockPanel::Loudness => "view.tab.loudness",
+            DockPanel::SurroundPanner => "view.tab.surround_panner",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
         }
@@ -1203,6 +1207,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Loudness), h),
+    },
+    CommandDef {
+        id: "view.tab.surround_panner",
+        label: "Surround Panner",
+        menu_path: "Exibir/Surround Panner",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::SurroundPanner), h),
     },
     CommandDef {
         id: "view.bus_tracks",

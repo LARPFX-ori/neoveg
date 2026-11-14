@@ -66,6 +66,7 @@ pub fn dock_tab_icon(tab: DockTab) -> Icon {
         DockTab::Generators => Icon::GeneratorFrame,
         DockTab::Mixer => Icon::MixerFaders,
         DockTab::Loudness => Icon::LoudnessMeter,
+        DockTab::SurroundPanner => Icon::SurroundSpeakers,
         DockTab::Scopes => Icon::ScopesWave,
         DockTab::Notes => Icon::NotesPad,
     }

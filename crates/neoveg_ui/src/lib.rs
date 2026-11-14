@@ -22,6 +22,7 @@ pub mod layout;
 mod panels;
 mod scrollbars;
 mod splash;
+mod surround_panel;
 pub mod theme;
 mod timeline;
 mod trimmer_panel;

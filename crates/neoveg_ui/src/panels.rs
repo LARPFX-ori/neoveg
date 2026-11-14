@@ -224,6 +224,7 @@ impl App {
             DockTab::Generators => self.generators_tab(ui),
             DockTab::Mixer => self.mixer_tab(ui),
             DockTab::Loudness => self.loudness_tab(ui),
+            DockTab::SurroundPanner => self.surround_panner_tab(ui),
             DockTab::Trimmer => self.trimmer_tab(ui),
             DockTab::EditDetails => self.edit_details_tab(ui),
             DockTab::Scopes => self.scopes_tab(ui),

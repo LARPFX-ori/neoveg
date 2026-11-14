@@ -495,6 +495,17 @@ impl App {
                             }
                         });
                     ui.end_row();
+                    ui.label("Modo do Master (áudio)");
+                    egui::ComboBox::from_id_salt("master_layout")
+                        .selected_text(s.channel_layout.name())
+                        .show_ui(ui, |ui| {
+                            for l in crate::model::ChannelLayout::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.channel_layout, l, l.name())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
                     ui.label("Cor de fundo");
                     changed |= ui.color_edit_button_rgb(&mut s.background).changed();
                     ui.end_row();

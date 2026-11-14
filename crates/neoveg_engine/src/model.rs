@@ -27,6 +27,79 @@ pub struct ProjectSettings {
     /// Indica se o formato do projeto foi escolhido explicitamente pelo usuário (§3.1).
     #[serde(default)]
     pub manually_configured: bool,
+    /// Layout de canais da mixagem (estéreo ou 5.1 surround).
+    #[serde(default)]
+    pub channel_layout: ChannelLayout,
+}
+
+/// Layout de canais do projeto (*Project Properties → Audio → Master bus mode*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ChannelLayout {
+    #[default]
+    Stereo,
+    /// 5.1 na ordem FL, FR, C, LFE, BL, BR (ver `engine::surround`).
+    Surround51,
+}
+
+impl ChannelLayout {
+    pub const ALL: [ChannelLayout; 2] = [ChannelLayout::Stereo, ChannelLayout::Surround51];
+
+    pub fn channels(self) -> usize {
+        match self {
+            ChannelLayout::Stereo => 2,
+            ChannelLayout::Surround51 => 6,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ChannelLayout::Stereo => "Estéreo",
+            ChannelLayout::Surround51 => "5.1 Surround",
+        }
+    }
+}
+
+/// Posição no *Surround Panner* 5.1. `x`: -1 esquerda .. 1 direita;
+/// `y`: -1 frente .. 1 trás. `lfe`: nível linear 0..1 enviado ao LFE.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SurroundPan {
+    #[serde(default)]
+    pub x: f32,
+    #[serde(default = "minus_one")]
+    pub y: f32,
+    /// Usa o alto-falante central; sem ele, a frente vira um par fantasma L/R.
+    #[serde(default = "yes")]
+    pub use_center: bool,
+    #[serde(default)]
+    pub lfe: f32,
+}
+
+impl Default for SurroundPan {
+    fn default() -> Self {
+        SurroundPan {
+            x: 0.0,
+            y: -1.0,
+            use_center: true,
+            lfe: 0.0,
+        }
+    }
+}
+
+impl SurroundPan {
+    /// Valores finitos e dentro da faixa (entrada hostil, §0.4).
+    pub fn sanitized(self) -> Self {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        SurroundPan {
+            x: fin(self.x, 0.0).clamp(-1.0, 1.0),
+            y: fin(self.y, -1.0).clamp(-1.0, 1.0),
+            use_center: self.use_center,
+            lfe: fin(self.lfe, 0.0).clamp(0.0, 1.0),
+        }
+    }
+}
+
+fn minus_one() -> f32 {
+    -1.0
 }
 
 fn default_bg() -> [f32; 3] {
@@ -43,6 +116,7 @@ impl Default for ProjectSettings {
             sample_rate: 48000,
             background: default_bg(),
             manually_configured: false,
+            channel_layout: ChannelLayout::Stereo,
         }
     }
 }
@@ -347,6 +421,7 @@ impl Project {
             t.height = clampf(fin32(t.height, 72.0), 28.0, 400.0);
             t.volume_db = clampf(fin32(t.volume_db, 0.0), -120.0, 24.0);
             t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
+            t.surround = t.surround.sanitized();
             t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
             for k in &mut t.motion.keys {
                 k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
@@ -438,6 +513,7 @@ impl Project {
             }
             b.volume_db = clampf(fin32(b.volume_db, 0.0), -120.0, 24.0);
             b.pan = clampf(fin32(b.pan, 0.0), -1.0, 1.0);
+            b.surround = b.surround.sanitized();
             for f in &mut b.fx {
                 sanitize_fx(f);
             }
@@ -1144,11 +1220,12 @@ pub struct Track {
     /// Áudio: volume em dB.
     #[serde(default)]
     pub volume_db: f32,
-    // TODO(roadmap fase 4): *Surround Panner* 5.1. O pan estéreo -1..1 não
-    // representa posição 2D; o modo surround precisa de campo próprio.
-    /// Áudio: pan -1..1.
+    /// Áudio: pan -1..1 (modo estéreo).
     #[serde(default)]
     pub pan: f32,
+    /// Áudio: posição no *Surround Panner* (modo 5.1; substitui `pan`).
+    #[serde(default)]
+    pub surround: SurroundPan,
     /// Vídeo: nível de composição 0..1.
     #[serde(default = "one")]
     pub opacity: f32,
@@ -1201,6 +1278,9 @@ pub struct AudioBus {
     pub volume_db: f32,
     #[serde(default)]
     pub pan: f32,
+    /// Posição no *Surround Panner* quando o barramento sai para o Master em 5.1.
+    #[serde(default)]
+    pub surround: SurroundPan,
     /// Saída do barramento (`None` = Master Bus, `Some(id)` = outro barramento acíclico).
     #[serde(default)]
     pub output_bus: Option<Id>,
@@ -1219,6 +1299,7 @@ impl AudioBus {
             solo: false,
             volume_db: 0.0,
             pan: 0.0,
+            surround: SurroundPan::default(),
             output_bus: None,
             fx: vec![],
             envelopes: vec![],
@@ -1266,6 +1347,7 @@ impl Track {
             height: default_track_height(),
             volume_db: 0.0,
             pan: 0.0,
+            surround: SurroundPan::default(),
             opacity: 1.0,
             blend: BlendMode::SourceAlpha,
             motion: Keyframes::default(),
