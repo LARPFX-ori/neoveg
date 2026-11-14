@@ -1,0 +1,69 @@
+# Portões de qualidade do AGENTS.md §3.4, executados em todo pull request e push em main.
+#
+# Por quê: sem CI, um PR pode entrar com formatação quebrada, avisos do clippy
+# (incluindo os lints anti-pânico de §0.9), testes falhando ou dependência com
+# licença fora da lista SPDX permitida. Não remova um passo sem ler o motivo dele.
+#
+# Provisório: AGENTS.md (Regras da Casa, regra 11) pede que os workflows chamem
+# `neoveg/common-actions`. Esse repositório ainda não existe; quando existir,
+# troque estes passos pelos workflows reutilizáveis de lá.
+#
+# Windows primeiro: Linux/macOS entram junto com os backends nativos (ROADMAP, Fase 4).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gates:
+    name: Portões (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # §3.4.1: formatação padrão do rustfmt.
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # §3.4.4: licenças das dependências contra a lista SPDX permitida.
+      # Barato, roda antes do build para falhar cedo.
+      - name: Auditoria de licenças
+        run: python tools/check_licenses.py
+
+      # §3.4.2 e §0.9: avisos viram erro, incluindo unwrap/expect/panic em produção.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # §3.4.3. Os testes do host .NET pulam sozinhos quando o runtime não existe.
+      # --test-threads=1: os testes de janela do neoveg_ui (egui_kittest) derrubam
+      # o processo com STATUS_ACCESS_VIOLATION quando rodam em paralelo no runner;
+      # um por vez é também como o projeto roda localmente. Não remova sem
+      # resolver essa falha em paralelo.
+      - name: cargo test
+        run: cargo test --workspace -- --test-threads=1
