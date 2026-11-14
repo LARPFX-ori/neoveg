@@ -35,6 +35,50 @@ pub use crate::dialogs::Dialogs;
 pub use crate::timeline::TimelineState;
 pub use neoveg_engine::commands::DockPanel as DockTab;
 
+/// Comandos do menu `More (...)` da barra de transporte, em grupos separados
+/// por divisória. Só ids da Tabela Única (§3.3); o teste abaixo garante isso.
+pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
+    &[
+        "edit.trim_to_selection",
+        "edit.trim_start",
+        "edit.trim_end",
+        "edit.delete_range_ripple",
+        "edit.insert_time",
+        "edit.close_gaps",
+    ],
+    &["edit.group", "edit.ungroup", "edit.select_group"],
+    &["tools.reverse", "tools.freeze_frame", "tools.event_props"],
+    &[
+        "insert.marker",
+        "insert.region",
+        "transport.jump_prev_marker",
+        "transport.jump_next_marker",
+    ],
+];
+
+#[cfg(test)]
+mod more_tools_tests {
+    use super::MORE_TOOLS_COMMANDS;
+
+    #[test]
+    fn more_tools_ids_exist_in_command_table() {
+        for id in MORE_TOOLS_COMMANDS.iter().flat_map(|g| g.iter()) {
+            assert!(
+                neoveg_engine::commands::find_command(id).is_some(),
+                "id ausente na Tabela Única: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_tools_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for id in MORE_TOOLS_COMMANDS.iter().flat_map(|g| g.iter()) {
+            assert!(seen.insert(*id), "id repetido no menu More: {id}");
+        }
+    }
+}
+
 /// Itens arrastáveis entre janelas (drag and drop).
 #[derive(Clone, Debug)]
 pub enum DndPayload {
@@ -1515,6 +1559,29 @@ impl App {
         }
     }
 
+    /// Conteúdo do menu `More (...)` da barra de transporte. Em barras estreitas,
+    /// mostra também as caixas In/Fim/Tam que foram ocultadas por falta de espaço.
+    fn more_tools_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        (sel_start, sel_end, sel_len): (Ticks, Ticks, Ticks),
+        avail_w: f32,
+    ) {
+        if avail_w < 430.0 {
+            let label = if self.time_sel.is_some() { "In" } else { "Pos" };
+            ui.label(format!("{label}: {}", self.fmt_time(sel_start)));
+            ui.label(format!("Fim: {}", self.fmt_time(sel_end)));
+            ui.label(format!("Tam: {}", self.fmt_time(sel_len)));
+            ui.separator();
+        }
+        for group in MORE_TOOLS_COMMANDS {
+            for id in *group {
+                self.cmd_menu_btn(ui, id);
+            }
+            ui.separator();
+        }
+    }
+
     fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
         let label = menu_label(id, &self.prefs.shortcuts);
         if ui.checkbox(&mut value, label).changed() {
@@ -2017,6 +2084,13 @@ impl App {
                         Some((a, b)) if b >= a => (a, b, b - a),
                         _ => (self.view_time(), Ticks::ZERO, Ticks::ZERO),
                     };
+                    // Botão `More (...)`: ferramentas de edição que não cabem na
+                    // barra, despachadas pelo id da Tabela Única (§3.3).
+                    ui.menu_button("…", |ui| {
+                        self.more_tools_menu(ui, (sel_start, sel_end, sel_len), avail_w);
+                    })
+                    .response
+                    .on_hover_text("Mais ferramentas de edição (More)");
                     if avail_w >= 430.0 {
                         self.time_readout_chip(
                             ui,
@@ -2050,8 +2124,6 @@ impl App {
                         );
                         ui.separator();
                     }
-                    // TODO(paridade timeline): botão `More (...)` ao lado das caixas
-                    // In/Fim/Tam, despachando por id da Tabela Única (§3.3).
                     if ui
                         .small_button("+")
                         .on_hover_text(
