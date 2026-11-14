@@ -64,7 +64,7 @@ def used_packages():
     """Pacotes realmente presentes no grafo de dependências normais da plataforma atual."""
     out = subprocess.run(
         ["cargo", "tree", "--workspace", "-e", "normal", "--prefix", "none", "--format", "{p}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout
     names = set()
     for line in out.splitlines():
@@ -77,7 +77,7 @@ def used_packages():
 def main():
     meta = json.loads(subprocess.run(
         ["cargo", "metadata", "--format-version", "1"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout)
     used = used_packages()
     root = {p["name"] for p in meta["packages"] if p.get("source") is None}

@@ -238,9 +238,9 @@ impl LoudnessAnalyzer {
             if let Ok(lra) = ebur.loudness_range() {
                 snap.loudness_range_lu = if lra.is_finite() { lra.max(0.0) } else { 0.0 };
             }
-            for ch in 0..2 {
-                if let Ok(tp) = ebur.true_peak(ch as u32) {
-                    snap.true_peak_dbtp[ch] = lin_to_db_f64(tp);
+            for (ch, slot) in (0u32..).zip(snap.true_peak_dbtp.iter_mut()) {
+                if let Ok(tp) = ebur.true_peak(ch) {
+                    *slot = lin_to_db_f64(tp);
                 }
             }
         }
