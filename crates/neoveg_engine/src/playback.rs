@@ -48,8 +48,44 @@ pub struct AudioOut {
     pub error: Option<String>,
 }
 
+/// Mantém viva a thread que fez a primeira consulta de dispositivos de áudio.
+///
+/// Por quê: no Windows o `cpal` (WASAPI) cria o enumerador de dispositivos COM
+/// uma única vez, num `static`, na primeira thread que consulta dispositivos, e
+/// cada thread desinicializa o COM ao terminar. Se essa primeira thread morre
+/// (um teste, um worker), o enumerador fica sem apartamento e a próxima
+/// consulta derruba o processo com `STATUS_ACCESS_VIOLATION` — visto no runner
+/// da CI, que não tem placa de som (com placa, a thread do stream mantém o COM
+/// vivo e esconde o problema). Esta thread faz a primeira consulta e nunca
+/// termina. Não remova sem resolver o enumerador do `cpal` de outro jeito.
+#[cfg(windows)]
+fn ensure_audio_com_keeper() {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    static KEEPER: OnceLock<()> = OnceLock::new();
+    KEEPER.get_or_init(|| {
+        let (tx, rx) = channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("audio-com".into())
+            .spawn(move || {
+                let _ = cpal::default_host().default_output_device();
+                let _ = tx.send(());
+                loop {
+                    std::thread::park();
+                }
+            });
+        if spawned.is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(10));
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn ensure_audio_com_keeper() {}
+
 impl AudioOut {
     pub fn new(project: Arc<Project>) -> Self {
+        ensure_audio_com_keeper();
         let mut sr = 48000;
         let mut device_name = "(sem dispositivo)".to_string();
         let mut error = None;
@@ -359,5 +395,24 @@ impl Preview {
 
     pub fn request(&self, r: PreviewRequest) {
         let _ = self.tx.send(r);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regressão: criar a saída de áudio em threads que terminam não pode
+    /// derrubar o processo. Sem a thread guardiã, num Windows sem placa de som
+    /// (runner da CI), a segunda criação caía em `STATUS_ACCESS_VIOLATION`.
+    #[test]
+    fn audio_out_survives_creator_threads_exiting() {
+        for i in 0..4 {
+            let h = std::thread::spawn(|| {
+                let a = AudioOut::new(Arc::new(Project::new_default()));
+                a.has_device()
+            });
+            assert!(h.join().is_ok(), "criação {i} falhou");
+        }
     }
 }
