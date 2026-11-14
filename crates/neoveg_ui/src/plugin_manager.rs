@@ -9,7 +9,7 @@ use super::{App, DndPayload};
 use crate::icons::{self, Icon};
 use crate::model::{BlendMode, FxKind, TrackKind, TransitionKind};
 use eframe::egui;
-use neoveg_engine::plugin_host::{probe_ofx_isolated, OfxPluginInfo};
+use neoveg_engine::plugin_host::{probe_ofx_isolated, OfxParamInfo, OfxPluginInfo};
 use neoveg_engine::plugins::{self, ExternalKind, ExternalPlugin};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,134 @@ enum ProbeState {
 }
 
 type ProbeMap = Arc<Mutex<HashMap<PathBuf, ProbeState>>>;
+
+type ParamsState = Option<Result<Arc<Vec<OfxParamInfo>>, String>>;
+type ParamsMap = Arc<Mutex<HashMap<(String, String), ParamsState>>>;
+
+/// Editor dos parâmetros de um efeito OFX (no diálogo de FX). Os descritores
+/// vêm do host isolado numa thread de fundo e ficam em cache por plug-in.
+/// Devolve verdadeiro quando algum valor mudou.
+pub(crate) fn ofx_params_editor(
+    ui: &mut egui::Ui,
+    fx: &mut crate::model::FxInstance,
+    theme: &crate::theme::ThemeColors,
+) -> bool {
+    let Some(r) = fx.ofx.as_mut() else {
+        return false;
+    };
+    let cache_key = egui::Id::new("ofx_param_descriptors");
+    let map: ParamsMap = ui.data_mut(|d| d.get_temp_mut_or_default::<ParamsMap>(cache_key).clone());
+    let k = (r.binary.clone(), r.plugin_id.clone());
+    let state = map
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&k)
+        .cloned();
+    let muted = |t: String| egui::RichText::new(t).small().color(theme.text_muted);
+    let infos = match state {
+        None => {
+            map.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(k.clone(), None);
+            let (map2, r2, ctx) = (map.clone(), r.clone(), ui.ctx().clone());
+            let _ = std::thread::Builder::new()
+                .name("ofx-params".into())
+                .spawn(move || {
+                    let res = neoveg_engine::plugin_host::default_host_exe()
+                        .ok_or_else(|| "executável do Neoveg não encontrado".to_string())
+                        .and_then(|exe| neoveg_engine::plugin_host::ofx_params(&exe, &r2))
+                        .map(Arc::new);
+                    map2.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert((r2.binary, r2.plugin_id), Some(res));
+                    ctx.request_repaint();
+                });
+            ui.label(muted("Abrindo o plug-in em processo isolado…".into()));
+            return false;
+        }
+        Some(None) => {
+            ui.label(muted("Abrindo o plug-in em processo isolado…".into()));
+            return false;
+        }
+        Some(Some(Err(e))) => {
+            ui.label(muted(format!("Plug-in indisponível: {e}")));
+            return false;
+        }
+        Some(Some(Ok(infos))) => infos,
+    };
+    let mut changed = false;
+    egui::Grid::new(("ofx_params", fx.id))
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for info in infos.iter() {
+                let n = info.default.len();
+                if n == 0 || n > 4 {
+                    continue;
+                }
+                let mut vals: Vec<f64> = r
+                    .params
+                    .iter()
+                    .find(|p| p.name == info.name)
+                    .map(|p| p.values.clone())
+                    .unwrap_or_else(|| info.default.clone());
+                vals.resize(n, 0.0);
+                ui.label(&info.label);
+                let mut edited = false;
+                ui.horizontal(|ui| match info.kind.as_str() {
+                    "Boolean" => {
+                        let mut b = vals[0] > 0.5;
+                        edited |= ui.checkbox(&mut b, "").changed();
+                        vals[0] = if b { 1.0 } else { 0.0 };
+                    }
+                    "Choice" if !info.choices.is_empty() => {
+                        let cur =
+                            vals[0].round().clamp(0.0, (info.choices.len() - 1) as f64) as usize;
+                        let mut sel = cur;
+                        egui::ComboBox::from_id_salt(("ofx_choice", fx.id, &info.name))
+                            .selected_text(info.choices.get(cur).cloned().unwrap_or_default())
+                            .show_ui(ui, |ui| {
+                                for (ci, c) in info.choices.iter().enumerate() {
+                                    ui.selectable_value(&mut sel, ci, c);
+                                }
+                            });
+                        if sel != cur {
+                            vals[0] = sel as f64;
+                            edited = true;
+                        }
+                    }
+                    kind => {
+                        let int = kind.starts_with("Integer");
+                        for v in vals.iter_mut() {
+                            let mut dv =
+                                egui::DragValue::new(v).speed(if int { 1.0 } else { 0.01 });
+                            if let (Some(lo), Some(hi)) = (info.min, info.max) {
+                                if lo.is_finite() && hi.is_finite() && lo <= hi {
+                                    dv = dv.range(lo..=hi);
+                                }
+                            }
+                            if int {
+                                dv = dv.fixed_decimals(0);
+                            }
+                            edited |= ui.add(dv).changed();
+                        }
+                    }
+                });
+                ui.end_row();
+                if edited {
+                    changed = true;
+                    match r.params.iter_mut().find(|p| p.name == info.name) {
+                        Some(p) => p.values = vals,
+                        None => r.params.push(crate::model::OfxParamValue {
+                            name: info.name.clone(),
+                            values: vals,
+                        }),
+                    }
+                }
+            }
+        });
+    changed
+}
 
 /// Dispara a sondagem isolada numa thread; o resultado volta pelo mapa.
 fn start_probe(probes: &ProbeMap, bin: PathBuf, ctx: egui::Context) {
@@ -321,15 +449,28 @@ impl App {
                     .id_salt(("ofx_probe_scroll", bin.display().to_string()))
                     .max_height(160.0)
                     .show(ui, |ui| {
+                        let can_apply = !self.selected_video_events().is_empty();
                         for info in list.iter() {
-                            ui.label(egui::RichText::new(&info.identifier).small().monospace())
-                                .on_hover_text(format!(
-                                    "{} v{} — versão {}.{}",
-                                    info.api,
-                                    info.api_version,
-                                    info.version_major,
-                                    info.version_minor
-                                ));
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(can_apply, egui::Button::new("Aplicar").small())
+                                    .on_hover_text("Aplicar aos eventos de vídeo selecionados")
+                                    .on_disabled_hover_text(
+                                        "Selecione eventos de vídeo na timeline",
+                                    )
+                                    .clicked()
+                                {
+                                    self.apply_ofx_to_selection(bin, &info.identifier);
+                                }
+                                ui.label(egui::RichText::new(&info.identifier).small().monospace())
+                                    .on_hover_text(format!(
+                                        "{} v{} — versão {}.{}",
+                                        info.api,
+                                        info.api_version,
+                                        info.version_major,
+                                        info.version_minor
+                                    ));
+                            });
                         }
                     });
             }
@@ -421,6 +562,48 @@ impl App {
                     ui.end_row();
                 }
             });
+    }
+
+    /// Eventos selecionados que estão em trilhas de vídeo.
+    fn selected_video_events(&self) -> Vec<crate::model::Id> {
+        self.sel_events
+            .iter()
+            .filter(|id| {
+                self.project
+                    .find_event(**id)
+                    .and_then(|(t, _)| self.project.tracks.get(t))
+                    .is_some_and(|t| t.kind == TrackKind::Video)
+            })
+            .copied()
+            .collect()
+    }
+
+    /// Aplica o efeito OFX aos eventos de vídeo selecionados (um passo de Desfazer).
+    pub(crate) fn apply_ofx_to_selection(&mut self, bin: &Path, plugin_id: &str) {
+        let ids = self.selected_video_events();
+        let Some(first) = ids.first().copied() else {
+            return;
+        };
+        let label = plugin_id
+            .rsplit('.')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(plugin_id)
+            .to_string();
+        let bin = bin.display().to_string();
+        self.checkpoint();
+        for id in &ids {
+            if let Some(ev) = self.project.event_mut(*id) {
+                ev.fx
+                    .push(crate::model::FxInstance::new_ofx(&bin, plugin_id, &label));
+            }
+        }
+        self.dlg.fx_target = Some(super::FxTarget::Event(first));
+        self.changed();
+        self.set_status(format!(
+            "Efeito OFX \"{label}\" aplicado a {} evento(s)",
+            ids.len()
+        ));
     }
 
     /// Índice da trilha de vídeo selecionada, se houver.

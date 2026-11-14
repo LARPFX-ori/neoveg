@@ -48,7 +48,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - *Surround Panner* 5.1 (`engine/surround.rs`, painel `surround_panel.rs`): modo do Master estéreo/5.1, posição 2D por trilha e barramento no anel ITU-R BS.775, LFE, downmix para monitoração e render WAV de 6 canais (`WAVE_FORMAT_EXTENSIBLE`);
   - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e importação de **AAF** (`aaf.rs`);
   - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores*;
-  - Descoberta de plug-ins VST3/OFX nas pastas padrão (`plugins.rs`) e listagem dos plug-ins OFX num subprocesso isolado `neoveg --plugin-host` (`plugin_host.rs`);
+  - Descoberta de plug-ins VST3/OFX nas pastas padrão (`plugins.rs`) e efeitos de vídeo OFX aplicados a eventos pelo host isolado `neoveg --plugin-host` (`plugin_host.rs`, `plugin_host/ofx.rs`);
 - **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
 - **Intercâmbio aberto restante:** exportação AAF a partir da especificação pública.
-- **Hospedagem de plug-ins externos:** host suites do OFX para processar quadros e host VST3 para áudio, no mesmo processo isolado.
+- **Hospedagem de plug-ins externos:** OFX com keyframes de parâmetros, tiles e contexto General completo; host VST3 para áudio no mesmo processo isolado.

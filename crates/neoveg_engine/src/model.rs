@@ -597,6 +597,15 @@ fn sanitize_envelopes(envelopes: &mut Vec<Envelope>, allowed: &[EnvKind]) {
 }
 
 fn sanitize_fx(f: &mut FxInstance) {
+    // a referência OFX só vale em efeitos OFX; sem ela o efeito vira inofensivo
+    if f.kind == FxKind::Ofx {
+        match f.ofx.as_mut() {
+            Some(o) => o.sanitize(),
+            None => f.enabled = false,
+        }
+    } else {
+        f.ofx = None;
+    }
     let specs = f.kind.params();
     f.params.truncate(specs.len());
     while f.params.len() < specs.len() {
@@ -1660,6 +1669,59 @@ pub enum FxKind {
     Chorus,
     Distortion,
     Limiter,
+    /// Efeito de vídeo OpenFX de terceiros (ver `FxInstance::ofx`), processado
+    /// no host isolado `neoveg --plugin-host`.
+    Ofx,
+}
+
+/// Valor de um parâmetro de plug-in OFX, pelo nome do parâmetro.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfxParamValue {
+    pub name: String,
+    #[serde(default)]
+    pub values: Vec<f64>,
+}
+
+/// Referência a um efeito OFX: binário, identificador e valores dos parâmetros.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfxFxRef {
+    pub binary: String,
+    pub plugin_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub params: Vec<OfxParamValue>,
+}
+
+const MAX_OFX_REF_TEXT: usize = 4096;
+const MAX_OFX_REF_PARAMS: usize = 1024;
+
+impl OfxFxRef {
+    /// Saneia textos, contagens e valores vindos de arquivo (§0.4).
+    pub fn sanitize(&mut self) {
+        let cut = |s: &mut String| {
+            if s.len() > MAX_OFX_REF_TEXT {
+                let mut end = MAX_OFX_REF_TEXT;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        };
+        cut(&mut self.binary);
+        cut(&mut self.plugin_id);
+        cut(&mut self.label);
+        self.params.truncate(MAX_OFX_REF_PARAMS);
+        for p in &mut self.params {
+            cut(&mut p.name);
+            p.values.truncate(4);
+            for v in &mut p.values {
+                if !v.is_finite() {
+                    *v = 0.0;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1761,11 +1823,14 @@ impl FxKind {
             FxKind::Chorus => "Chorus",
             FxKind::Distortion => "Distorção",
             FxKind::Limiter => "Limiter",
+            FxKind::Ofx => "Plug-in OFX",
         }
     }
 
     pub fn params(self) -> &'static [ParamSpec] {
         match self {
+            // os parâmetros de um plug-in OFX vêm dele, em `FxInstance::ofx`
+            FxKind::Ofx => &[],
             FxKind::BrightnessContrast => {
                 const { &[p("Brilho", -1.0, 1.0, 0.0), p("Contraste", -1.0, 1.0, 0.0)] }
             }
@@ -1996,6 +2061,9 @@ pub struct FxInstance {
     #[serde(default = "yes")]
     pub enabled: bool,
     pub params: Vec<AnimParam>,
+    /// Só em `FxKind::Ofx`: o plug-in OFX e os valores dos parâmetros dele.
+    #[serde(default)]
+    pub ofx: Option<OfxFxRef>,
 }
 
 impl FxInstance {
@@ -2012,6 +2080,28 @@ impl FxInstance {
                     keys: vec![],
                 })
                 .collect(),
+            ofx: None,
+        }
+    }
+
+    /// Efeito OFX de terceiros (`binary` + `plugin_id`), com os parâmetros padrão.
+    pub fn new_ofx(binary: &str, plugin_id: &str, label: &str) -> Self {
+        let mut f = FxInstance::new(FxKind::Ofx);
+        f.ofx = Some(OfxFxRef {
+            binary: binary.into(),
+            plugin_id: plugin_id.into(),
+            label: label.into(),
+            params: vec![],
+        });
+        f
+    }
+
+    /// Nome para exibição (rótulo do plug-in OFX ou nome nativo).
+    pub fn display_name(&self) -> String {
+        match (&self.ofx, self.kind) {
+            (Some(o), FxKind::Ofx) if !o.label.is_empty() => o.label.clone(),
+            (Some(o), FxKind::Ofx) => o.plugin_id.clone(),
+            _ => self.kind.name().to_string(),
         }
     }
     /// Valores de todos os parâmetros no tempo local `t`, sempre dentro da

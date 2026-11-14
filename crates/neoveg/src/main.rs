@@ -139,6 +139,10 @@ fn plugin_host_mode(args: &[String]) -> Option<i32> {
                 }
             }
         }
+        ["--plugin-host", "serve-ofx", bin, id] => Some(neoveg_engine::plugin_host::serve_ofx(
+            std::path::Path::new(bin),
+            id,
+        )),
         ["--plugin-host", ..] => {
             eprintln!("modo de host de plug-ins desconhecido");
             Some(2)
