@@ -2402,7 +2402,6 @@ impl App {
         let mut reset_defaults = false;
         let mut clear_cache_now = false;
         let mut clear_recents_now = false;
-        let mut open_edit_layout = false;
         let mut open_shortcuts = false;
         let mut apply_defaults_to_session = false;
         let mut live_layout_preview = false;
@@ -2534,7 +2533,6 @@ impl App {
                                             live_layout_preview: &mut live_layout_preview,
                                             clear_cache_now: &mut clear_cache_now,
                                             clear_recents_now: &mut clear_recents_now,
-                                            open_edit_layout: &mut open_edit_layout,
                                             open_shortcuts: &mut open_shortcuts,
                                             apply_defaults_to_session:
                                                 &mut apply_defaults_to_session,
@@ -2584,7 +2582,6 @@ impl App {
                                     live_layout_preview: &mut live_layout_preview,
                                     clear_cache_now: &mut clear_cache_now,
                                     clear_recents_now: &mut clear_recents_now,
-                                    open_edit_layout: &mut open_edit_layout,
                                     open_shortcuts: &mut open_shortcuts,
                                     apply_defaults_to_session: &mut apply_defaults_to_session,
                                 },
@@ -2654,10 +2651,6 @@ impl App {
             }
         }
 
-        if open_edit_layout {
-            self.dlg
-                .open_edit_layout(&self.prefs, self.dock_height, self.preview_ratio);
-        }
         if open_shortcuts {
             self.dlg.shortcuts = true;
         }
@@ -3302,7 +3295,6 @@ struct PrefsActions<'a> {
     live_layout_preview: &'a mut bool,
     clear_cache_now: &'a mut bool,
     clear_recents_now: &'a mut bool,
-    open_edit_layout: &'a mut bool,
     open_shortcuts: &'a mut bool,
     apply_defaults_to_session: &'a mut bool,
 }
@@ -3590,14 +3582,6 @@ fn prefs_appearance(
                 if edit_layout_checkboxes(ui, &mut draft.edit_layout, Some(&mut draft.theme)) {
                     *act.live_layout_preview = true;
                 }
-
-                ui.add_space(2.0);
-                if ui
-                    .button("Abrir diálogo Editar > Propriedades > Layout...")
-                    .clicked()
-                {
-                    *act.open_edit_layout = true;
-                }
             });
         },
     );
@@ -3685,27 +3669,22 @@ fn prefs_video_preview(
     act: &mut PrefsActions<'_>,
 ) {
     let inner_lw = inner_label_w(cx.label_w);
-    prefs_group_box(
-        ui,
-        cx.theme,
-        "Prévia de Vídeo Escalonável (Matriz 4×3)",
-        |ui| {
-            prefs_row(ui, inner_lw, "Qualidade inicial da Prévia:", |ui| {
-                egui::ComboBox::from_id_salt("prefs_default_preview_quality")
-                    .selected_text(draft.default_preview_quality.name())
-                    .show_ui(ui, |ui| {
-                        for pq in PreviewQuality::ALL {
-                            ui.selectable_value(&mut draft.default_preview_quality, pq, pq.name());
-                        }
-                    });
-            });
-            prefs_indented(ui, inner_lw, |ui| {
-                if ui.button("Aplicar qualidade à sessão aberta").clicked() {
-                    *act.apply_defaults_to_session = true;
-                }
-            });
-        },
-    );
+    prefs_group_box(ui, cx.theme, "Prévia de Vídeo Escalonável", |ui| {
+        prefs_row(ui, inner_lw, "Qualidade inicial da Prévia:", |ui| {
+            egui::ComboBox::from_id_salt("prefs_default_preview_quality")
+                .selected_text(draft.default_preview_quality.name())
+                .show_ui(ui, |ui| {
+                    for pq in PreviewQuality::ALL {
+                        ui.selectable_value(&mut draft.default_preview_quality, pq, pq.name());
+                    }
+                });
+        });
+        prefs_indented(ui, inner_lw, |ui| {
+            if ui.button("Aplicar qualidade à sessão aberta").clicked() {
+                *act.apply_defaults_to_session = true;
+            }
+        });
+    });
 
     prefs_group_box(
         ui,

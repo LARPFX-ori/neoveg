@@ -16,8 +16,44 @@ const LOOP_H: f32 = 12.0;
 const MARKER_H: f32 = 18.0;
 const RULER_H: f32 = 22.0;
 const TOP_H: f32 = LOOP_H + MARKER_H + RULER_H;
-const FOOTER_H: f32 = 26.0;
+const TRACK_FOOTER_H: f32 = 26.0;
+const STATUS_BAR_H: f32 = 22.0;
+const BOTTOM_BARS_H: f32 = TRACK_FOOTER_H + STATUS_BAR_H;
 const EDGE_PX: f32 = 5.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EnvOwner {
+    Track(usize),
+    Bus(usize),
+}
+
+struct TimelineRows {
+    track_rects: Vec<(f32, f32)>,
+    bus_rects: Vec<(f32, f32)>,
+}
+
+impl TimelineRows {
+    fn row_rect(&self, owner: EnvOwner) -> Option<(f32, f32)> {
+        match owner {
+            EnvOwner::Track(ti) => self.track_rects.get(ti).copied(),
+            EnvOwner::Bus(bi) => self.bus_rects.get(bi).copied(),
+        }
+    }
+
+    fn owner_at(&self, y: f32) -> Option<EnvOwner> {
+        if let Some(ti) = self
+            .track_rects
+            .iter()
+            .position(|(y0, h)| y >= *y0 && y < y0 + h)
+        {
+            return Some(EnvOwner::Track(ti));
+        }
+        self.bus_rects
+            .iter()
+            .position(|(y0, h)| y >= *y0 && y < y0 + h)
+            .map(EnvOwner::Bus)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Zone {
@@ -74,7 +110,7 @@ enum Drag {
         orig: Vec<(Id, Ticks)>,
     },
     EnvPoint {
-        track: usize,
+        owner: EnvOwner,
         kind: EnvKind,
         idx: usize,
     },
@@ -100,8 +136,8 @@ enum CtxTarget {
     #[default]
     None,
     Event(Id),
-    EnvPoint(usize, EnvKind, usize),
-    EnvLine(usize, EnvKind, Ticks),
+    EnvPoint(EnvOwner, EnvKind, usize),
+    EnvLine(EnvOwner, EnvKind, Ticks),
     Lane(usize, Ticks),
     Marker(Id),
     Region(Id),
@@ -221,10 +257,13 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
     )
 }
 
+const BUS_TRACK_H: f32 = 58.0;
+
 impl App {
-    fn track_layout(&self, lanes_top: f32) -> Vec<(f32, f32)> {
+    fn timeline_rows(&self, lanes_top: f32) -> TimelineRows {
         let mut y = lanes_top - self.tl.scroll_y;
-        self.project
+        let track_rects = self
+            .project
             .tracks
             .iter()
             .map(|t| {
@@ -232,7 +271,46 @@ impl App {
                 y += t.height;
                 r
             })
-            .collect()
+            .collect();
+        let bus_rects = if self.opts.show_bus_tracks {
+            self.project
+                .audio_buses
+                .iter()
+                .map(|_| {
+                    let r = (y, BUS_TRACK_H);
+                    y += BUS_TRACK_H;
+                    r
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        TimelineRows {
+            track_rects,
+            bus_rects,
+        }
+    }
+
+    fn owner_envelopes(&self, owner: EnvOwner) -> Option<&[Envelope]> {
+        match owner {
+            EnvOwner::Track(ti) => self.project.tracks.get(ti).map(|t| t.envelopes.as_slice()),
+            EnvOwner::Bus(bi) => self
+                .project
+                .audio_buses
+                .get(bi)
+                .map(|b| b.envelopes.as_slice()),
+        }
+    }
+
+    fn owner_envelopes_mut(&mut self, owner: EnvOwner) -> Option<&mut Vec<Envelope>> {
+        match owner {
+            EnvOwner::Track(ti) => self.project.tracks.get_mut(ti).map(|t| &mut t.envelopes),
+            EnvOwner::Bus(bi) => self
+                .project
+                .audio_buses
+                .get_mut(bi)
+                .map(|b| &mut b.envelopes),
+        }
     }
 
     fn track_at(&self, y: f32, layout: &[(f32, f32)]) -> Option<usize> {
@@ -328,29 +406,25 @@ impl App {
         &self,
         pos: Pos2,
         left: f32,
-        layout: &[(f32, f32)],
-    ) -> Option<(usize, EnvKind, Option<usize>, Ticks)> {
+        rows: &TimelineRows,
+    ) -> Option<(EnvOwner, EnvKind, Option<usize>, Ticks)> {
         if !self.opts.show_envelopes {
             return None;
         }
-        let ti = self.track_at(pos.y, layout)?;
-        let (y0, h) = layout[ti];
+        let owner = rows.owner_at(pos.y)?;
+        let (y0, h) = rows.row_rect(owner)?;
         let t = self.tl.x2t(pos.x, left);
-        for env in self.project.tracks[ti]
-            .envelopes
-            .iter()
-            .filter(|e| e.visible)
-        {
+        for env in self.owner_envelopes(owner)?.iter().filter(|e| e.visible) {
             for (i, p) in env.points.iter().enumerate() {
                 let px = self.tl.t2x(p.t, left);
                 let py = Self::env_y(env.kind, p.v, y0, h);
                 if (px - pos.x).abs() < 6.0 && (py - pos.y).abs() < 6.0 {
-                    return Some((ti, env.kind, Some(i), t));
+                    return Some((owner, env.kind, Some(i), t));
                 }
             }
             let ly = Self::env_y(env.kind, env.eval(t), y0, h);
             if (ly - pos.y).abs() < 4.0 {
-                return Some((ti, env.kind, None, t));
+                return Some((owner, env.kind, None, t));
             }
         }
         None
@@ -406,38 +480,40 @@ impl App {
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
         let left = full.left() + HEADER_W;
+        let show_h_col = full.width() > HEADER_W + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
+        let show_footer = full.height() > TOP_H + BOTTOM_BARS_H + 40.0;
+        let bottom_h = if show_footer { BOTTOM_BARS_H } else { 0.0 };
+        let show_v_col = show_h_col && full.height() > TOP_H + bottom_h + 60.0;
+        let v_col_w = if show_v_col {
+            crate::scrollbars::TIMELINE_V_SCROLL_W
+        } else {
+            0.0
+        };
+        let lanes_right = (full.right() - v_col_w).max(left + 10.0);
+        let lanes_bottom = (full.bottom() - bottom_h).max(full.top() + TOP_H + 10.0);
+
         let corner = Rect::from_min_max(full.min, pos2(left, full.top() + TOP_H));
         let top = Rect::from_min_max(
             pos2(left, full.top()),
-            pos2(full.right(), full.top() + TOP_H),
+            pos2(lanes_right, full.top() + TOP_H),
         );
-        let show_footer = full.height() > TOP_H + FOOTER_H + 56.0;
         let headers = Rect::from_min_max(
             pos2(full.left(), full.top() + TOP_H),
-            pos2(
-                left,
-                if show_footer {
-                    full.bottom() - FOOTER_H
-                } else {
-                    full.bottom()
-                },
-            ),
+            pos2(left, lanes_bottom),
         );
         let lanes = Rect::from_min_max(
             pos2(left, full.top() + TOP_H),
-            pos2(
-                full.right(),
-                if show_footer {
-                    full.bottom() - FOOTER_H
-                } else {
-                    full.bottom()
-                },
-            ),
+            pos2(lanes_right, lanes_bottom),
         );
         self.tl.width = lanes.width().max(10.0);
 
         // limite de rolagem vertical
-        let total_h: f32 = self.project.tracks.iter().map(|t| t.height).sum();
+        let bus_h: f32 = if self.opts.show_bus_tracks {
+            self.project.audio_buses.len() as f32 * BUS_TRACK_H
+        } else {
+            0.0
+        };
+        let total_h: f32 = self.project.tracks.iter().map(|t| t.height).sum::<f32>() + bus_h;
         self.tl.scroll_y = self
             .tl
             .scroll_y
@@ -445,22 +521,351 @@ impl App {
 
         self.time_display_ui(ui, corner);
         self.top_strip(ui, top);
-        let layout = self.track_layout(lanes.top());
-        self.lanes_interact(ui, lanes, &layout);
-        let layout = self.track_layout(lanes.top());
-        self.draw_lanes(ui, lanes, &layout);
-        self.headers_ui(ui, headers, &layout);
-        if show_footer {
-            let track_footer_r = Rect::from_min_max(
-                pos2(full.left(), headers.bottom()),
-                pos2(left, full.bottom()),
+        if show_v_col {
+            let cap = Rect::from_min_max(
+                pos2(lanes_right, full.top()),
+                pos2(full.right(), lanes.top()),
             );
-            let render_bar_r = Rect::from_min_max(pos2(left, lanes.bottom()), full.max);
+            let p = ui.painter();
+            p.rect_filled(cap, egui::CornerRadius::ZERO, self.theme.tl_ruler_bg);
+            p.rect_stroke(
+                cap,
+                egui::CornerRadius::ZERO,
+                Stroke::new(1.0_f32, self.theme.border),
+                StrokeKind::Inside,
+            );
+        }
+
+        let rows = self.timeline_rows(lanes.top());
+        self.lanes_interact(ui, lanes, &rows);
+        let rows = self.timeline_rows(lanes.top());
+        self.draw_lanes(ui, lanes, &rows);
+        self.headers_ui(ui, headers, &rows);
+
+        if show_v_col {
+            let v_col = Rect::from_min_max(
+                pos2(lanes_right, lanes.top()),
+                pos2(full.right(), lanes.bottom()),
+            );
+            self.timeline_v_scrollbar_ui(ui, v_col, total_h, bus_h, lanes.height());
+        }
+
+        if show_footer {
+            let footer_bottom = (lanes.bottom() + TRACK_FOOTER_H).min(full.bottom());
+            let track_footer_r =
+                Rect::from_min_max(pos2(full.left(), lanes.bottom()), pos2(left, footer_bottom));
+            let h_scroll_r =
+                Rect::from_min_max(pos2(left, lanes.bottom()), pos2(lanes_right, footer_bottom));
+            let corner_r = show_v_col.then(|| {
+                Rect::from_min_max(
+                    pos2(lanes_right, lanes.bottom()),
+                    pos2(full.right(), footer_bottom),
+                )
+            });
+            let render_bar_r = Rect::from_min_max(pos2(full.left(), footer_bottom), full.max);
             self.track_list_footer_ui(ui, track_footer_r);
+            self.timeline_h_scrollbar_ui(ui, h_scroll_r, corner_r, lanes.width());
             self.render_status_bar_ui(ui, render_bar_r);
         }
         self.draw_cursors(ui, top.union(lanes));
         self.rename_popup(ui);
+    }
+
+    fn timeline_zoom_anchor(&self) -> Option<Ticks> {
+        let vis_end = self.tl.scroll_x + self.tl.dx_to_ticks(self.tl.width);
+        if self.cursor >= self.tl.scroll_x && self.cursor <= vis_end {
+            Some(self.cursor)
+        } else {
+            None
+        }
+    }
+
+    fn fit_project_to_timeline(&mut self, lanes_width: f32) {
+        let mut target_secs = self.project.duration().as_secs_f64() as f32;
+        if target_secs <= 0.05 {
+            if let Some((a, b)) = self.time_sel {
+                if b > a {
+                    target_secs = (b - a).as_secs_f64() as f32;
+                }
+            }
+        }
+        if target_secs.is_finite() && target_secs > 0.05 {
+            let pps = ((lanes_width - 24.0).max(40.0) / target_secs).clamp(2.0, 4000.0);
+            self.tl.px_per_sec = pps;
+        } else {
+            self.tl.px_per_sec = 60.0;
+        }
+        self.tl.scroll_x = Ticks::ZERO;
+    }
+
+    fn fit_tracks_vertically(&mut self, lanes_height: f32, bus_h: f32) {
+        if self.project.tracks.is_empty() {
+            self.tl.scroll_y = 0.0;
+            return;
+        }
+        let n = self.project.tracks.len() as f32;
+        let avail = (lanes_height - bus_h - 4.0).max(28.0 * n);
+        let h = (avail / n).clamp(28.0, 120.0);
+        for tr in &mut self.project.tracks {
+            tr.height = h;
+        }
+        self.tl.scroll_y = 0.0;
+    }
+
+    fn adjust_all_track_heights(&mut self, delta: f32) {
+        if !delta.is_finite() || delta == 0.0 {
+            return;
+        }
+        for tr in &mut self.project.tracks {
+            tr.height = (tr.height + delta).clamp(28.0, 400.0);
+        }
+    }
+
+    fn timeline_v_scrollbar_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        col: Rect,
+        total_h: f32,
+        bus_h: f32,
+        lanes_h: f32,
+    ) {
+        let p = ui.painter();
+        p.rect_filled(col, egui::CornerRadius::ZERO, self.theme.panel_fill);
+        p.vline(
+            col.left(),
+            col.top()..=col.bottom(),
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let show_track_zoom = !self.project.tracks.is_empty() && col.height() >= 96.0;
+        let zoom_pair_h = if show_track_zoom { 34.0 } else { 0.0 };
+        let scroll_r = Rect::from_min_max(col.min, pos2(col.right(), col.bottom() - zoom_pair_h));
+
+        let v_content = (total_h + 40.0).max(lanes_h);
+        let v_range = crate::scrollbars::ScrollbarRange {
+            offset: self.tl.scroll_y,
+            content: v_content,
+            viewport: lanes_h,
+        };
+        let step = (lanes_h * 0.18).clamp(28.0, 84.0);
+        let res = crate::scrollbars::arrow_scrollbar(
+            ui,
+            egui::Id::new("tl_v_scroll"),
+            scroll_r,
+            crate::scrollbars::Axis::Vertical,
+            v_range,
+            step,
+            "Rolar trilhas para cima",
+            "Rolar trilhas para baixo",
+            &self.theme,
+        );
+        if let Some(off) = res.new_offset {
+            self.tl.scroll_y = off.clamp(0.0, (total_h - lanes_h + 40.0).max(0.0));
+        }
+        if res.double_clicked {
+            self.fit_tracks_vertically(lanes_h, bus_h);
+        }
+
+        if show_track_zoom {
+            let zoom_top = scroll_r.bottom() + 2.0;
+            let btn_h = ((col.bottom() - zoom_top) * 0.5).max(12.0);
+            let inc_r = Rect::from_min_max(
+                pos2(col.left(), zoom_top),
+                pos2(col.right(), zoom_top + btn_h),
+            );
+            let dec_r = Rect::from_min_max(
+                pos2(col.left(), zoom_top + btn_h),
+                pos2(col.right(), col.bottom()),
+            );
+
+            let can_inc = self.project.tracks.iter().any(|t| t.height < 399.5);
+            let can_dec = self.project.tracks.iter().any(|t| t.height > 28.5);
+
+            let (inc_click, inc_drag) = crate::scrollbars::zoom_button(
+                ui,
+                egui::Id::new("tl_track_h_plus"),
+                inc_r,
+                crate::scrollbars::SymbolGlyph::Plus,
+                crate::scrollbars::Axis::Vertical,
+                can_inc,
+                "Aumentar altura das trilhas",
+                "Aumentar altura das trilhas (clique ou arraste verticalmente)",
+                &self.theme,
+            );
+            let (dec_click, dec_drag) = crate::scrollbars::zoom_button(
+                ui,
+                egui::Id::new("tl_track_h_minus"),
+                dec_r,
+                crate::scrollbars::SymbolGlyph::Minus,
+                crate::scrollbars::Axis::Vertical,
+                can_dec,
+                "Diminuir altura das trilhas",
+                "Diminuir altura das trilhas (clique ou arraste verticalmente)",
+                &self.theme,
+            );
+
+            if inc_click {
+                self.adjust_all_track_heights(10.0);
+            }
+            if dec_click {
+                self.adjust_all_track_heights(-10.0);
+            }
+            let drag = inc_drag + dec_drag;
+            if drag.abs() > 0.01 {
+                self.adjust_all_track_heights(drag);
+            }
+        }
+    }
+
+    fn timeline_h_scrollbar_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        row: Rect,
+        corner: Option<Rect>,
+        lanes_w: f32,
+    ) {
+        let p = ui.painter();
+        p.rect_filled(row, egui::CornerRadius::ZERO, self.theme.panel_fill);
+        p.hline(
+            row.left()..=row.right(),
+            row.top(),
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let bar_h = 18.0_f32.min((row.height() - 2.0).max(12.0));
+        let bar_top = (row.center().y - bar_h * 0.5).max(row.top() + 1.0);
+        let bar_bottom = (bar_top + bar_h).min(row.bottom() - 1.0);
+        let inner = Rect::from_min_max(
+            pos2(row.left() + 2.0, bar_top),
+            pos2((row.right() - 2.0).max(row.left() + 8.0), bar_bottom),
+        );
+
+        let show_zoom = inner.width() >= 96.0;
+        let btn_w = bar_h;
+        let zoom_w = if show_zoom { btn_w * 2.0 + 3.0 } else { 0.0 };
+        let scroll_r = Rect::from_min_max(
+            inner.min,
+            pos2(
+                (inner.right() - zoom_w).max(inner.left() + 12.0),
+                inner.bottom(),
+            ),
+        );
+
+        let view_secs = (lanes_w / self.tl.px_per_sec.max(1.0)).max(0.5);
+        let proj_secs = self.project.duration().as_secs_f64() as f32;
+        let mut max_end_secs = proj_secs.max(self.cursor.as_secs_f64() as f32);
+        if let Some((a, b)) = self.time_sel {
+            if b > a {
+                max_end_secs = max_end_secs.max(b.as_secs_f64() as f32);
+            }
+        }
+        let cur_scroll_secs = self.tl.scroll_x.as_secs_f64().max(0.0) as f32;
+        let content_secs = (max_end_secs + (view_secs * 0.35).max(10.0))
+            .max(view_secs * 2.0)
+            .max(cur_scroll_secs + view_secs);
+
+        let h_range = crate::scrollbars::ScrollbarRange {
+            offset: cur_scroll_secs,
+            content: content_secs,
+            viewport: view_secs,
+        };
+        let step_secs = (view_secs * 0.15).max(self.tl.dx_to_ticks(48.0).as_secs_f64() as f32);
+        let res = crate::scrollbars::arrow_scrollbar(
+            ui,
+            egui::Id::new("tl_h_scroll"),
+            scroll_r,
+            crate::scrollbars::Axis::Horizontal,
+            h_range,
+            step_secs,
+            "Rolar timeline para a esquerda",
+            "Rolar timeline para a direita",
+            &self.theme,
+        );
+        if let Some(secs) = res.new_offset {
+            self.tl.scroll_x = Ticks::from_secs_f64_clamped(secs.max(0.0) as f64);
+        }
+        if res.double_clicked {
+            self.fit_project_to_timeline(lanes_w);
+        }
+
+        if show_zoom {
+            let zoom_left = scroll_r.right() + 3.0;
+            let dec_r = Rect::from_min_max(
+                pos2(zoom_left, inner.top()),
+                pos2(zoom_left + btn_w, inner.bottom()),
+            );
+            let inc_r = Rect::from_min_max(
+                pos2(zoom_left + btn_w, inner.top()),
+                pos2(inner.right(), inner.bottom()),
+            );
+            let anchor = self.timeline_zoom_anchor();
+            let can_out = self.tl.px_per_sec > 2.01;
+            let can_in = self.tl.px_per_sec < 3999.0;
+
+            let (dec_click, dec_drag) = crate::scrollbars::zoom_button(
+                ui,
+                egui::Id::new("tl_h_zoom_out"),
+                dec_r,
+                crate::scrollbars::SymbolGlyph::Minus,
+                crate::scrollbars::Axis::Horizontal,
+                can_out,
+                "Diminuir zoom horizontal",
+                "Afastar zoom horizontal (clique ou arraste horizontalmente)",
+                &self.theme,
+            );
+            let (inc_click, inc_drag) = crate::scrollbars::zoom_button(
+                ui,
+                egui::Id::new("tl_h_zoom_in"),
+                inc_r,
+                crate::scrollbars::SymbolGlyph::Plus,
+                crate::scrollbars::Axis::Horizontal,
+                can_in,
+                "Aumentar zoom horizontal",
+                "Aproximar zoom horizontal (clique ou arraste horizontalmente)",
+                &self.theme,
+            );
+
+            if dec_click {
+                self.tl.zoom_by(0.8, anchor);
+            }
+            if inc_click {
+                self.tl.zoom_by(1.25, anchor);
+            }
+            let drag = dec_drag + inc_drag;
+            if drag.abs() > 0.01 {
+                let factor = (1.0 + drag * 0.012).clamp(0.5, 2.0);
+                self.tl.zoom_by(factor, anchor);
+            }
+        }
+
+        if let Some(c_rect) = corner {
+            let cp = ui.painter();
+            cp.rect_filled(c_rect, egui::CornerRadius::ZERO, self.theme.panel_fill);
+            cp.rect_stroke(
+                c_rect,
+                egui::CornerRadius::ZERO,
+                Stroke::new(1.0_f32, self.theme.border),
+                StrokeKind::Inside,
+            );
+            let fit_btn_r = Rect::from_min_max(
+                pos2(c_rect.left() + 1.0, bar_top),
+                pos2(c_rect.right() - 1.0, bar_bottom),
+            );
+            let (fit_click, _) = crate::scrollbars::zoom_button(
+                ui,
+                egui::Id::new("tl_fit_project"),
+                fit_btn_r,
+                crate::scrollbars::SymbolGlyph::Fit,
+                crate::scrollbars::Axis::Horizontal,
+                true,
+                "Ajustar projeto à timeline",
+                "Ajustar todo o projeto à largura visível da timeline (ou duplo clique na barra horizontal)",
+                &self.theme,
+            );
+            if fit_click {
+                self.fit_project_to_timeline(lanes_w);
+            }
+        }
     }
 
     /// Visor de Tempo dedicado acima da lista de faixas de áudio/vídeo, alinhado à régua e barra de marcadores.
@@ -1158,7 +1563,7 @@ impl App {
 
     // o índice da trilha é usado no layout e no projeto ao mesmo tempo
     #[allow(clippy::needless_range_loop)]
-    fn headers_ui(&mut self, ui: &mut egui::Ui, area: Rect, layout: &[(f32, f32)]) {
+    fn headers_ui(&mut self, ui: &mut egui::Ui, area: Rect, rows: &TimelineRows) {
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, self.theme.tl_header_bg);
         // rolagem vertical com a roda sobre os cabeçalhos
@@ -1170,7 +1575,7 @@ impl App {
         }
         let n = self.project.tracks.len();
         for ti in 0..n {
-            let (y0, h) = layout[ti];
+            let (y0, h) = rows.track_rects[ti];
             let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
             if r.bottom() < area.top() || r.top() > area.bottom() {
                 continue;
@@ -1329,8 +1734,8 @@ impl App {
             }
             if h >= 72.0 {
                 child.horizontal(|ui| {
-                    let t = &mut self.project.tracks[ti];
                     if kind == TrackKind::Audio {
+                        let t = &mut self.project.tracks[ti];
                         ui.label(egui::RichText::new("Pan").small());
                         let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
                         if r.drag_started() {
@@ -1341,7 +1746,40 @@ impl App {
                         }
                         changed_track |= r.changed() || r.double_clicked();
                         ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
+                        if !self.project.audio_buses.is_empty() {
+                            let bus_list: Vec<(Id, String)> = self
+                                .project
+                                .audio_buses
+                                .iter()
+                                .map(|b| (b.id, b.name.clone()))
+                                .collect();
+                            let t = &mut self.project.tracks[ti];
+                            let out_lbl = t
+                                .output_bus
+                                .and_then(|bid| {
+                                    bus_list
+                                        .iter()
+                                        .find(|(id, _)| *id == bid)
+                                        .map(|(_, nm)| nm.as_str())
+                                })
+                                .unwrap_or("Master");
+                            let before = t.output_bus;
+                            egui::ComboBox::from_id_salt(("hdr_out", tid))
+                                .width(64.0)
+                                .selected_text(out_lbl)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut t.output_bus, None, "Master");
+                                    for (bid, bname) in &bus_list {
+                                        ui.selectable_value(&mut t.output_bus, Some(*bid), bname);
+                                    }
+                                });
+                            if t.output_bus != before {
+                                want_checkpoint = true;
+                                changed_track = true;
+                            }
+                        }
                     } else {
+                        let t = &mut self.project.tracks[ti];
                         ui.label(egui::RichText::new("Modo").small());
                         let before = t.blend;
                         egui::ComboBox::from_id_salt(("blend", tid))
@@ -1369,6 +1807,7 @@ impl App {
                     t.volume_db = old.volume_db;
                     t.opacity = old.opacity;
                     t.pan = old.pan;
+                    t.output_bus = old.output_bus;
                 }
                 self.undo.push(snap);
                 self.redo.clear();
@@ -1414,6 +1853,120 @@ impl App {
                 self.tl.drag = Drag::None;
             }
         }
+
+        // Trilhas de barramentos auxiliares (Ctrl+B)
+        for bi in 0..rows.bus_rects.len() {
+            if bi >= self.project.audio_buses.len() {
+                break;
+            }
+            let (y0, h) = rows.bus_rects[bi];
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
+            if r.bottom() < area.top() || r.top() > area.bottom() {
+                continue;
+            }
+            let bid = self.project.audio_buses[bi].id;
+            painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, self.theme.tl_header_idle);
+            painter.rect_filled(
+                Rect::from_min_size(r.min, vec2(6.0, h)),
+                0.0,
+                self.theme.accent,
+            );
+            painter.line_segment(
+                [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
+                Stroke::new(1.0_f32, self.theme.border),
+            );
+            let bresp = ui.interact(r, ui.id().with(("bhdr", bid)), Sense::click());
+            bresp.context_menu(|ui| self.bus_menu(ui, bi));
+            if self.project.audio_buses.get(bi).map(|b| b.id) != Some(bid) {
+                break;
+            }
+            let inner = Rect::from_min_max(
+                pos2(r.left() + 10.0, r.top() + 3.0),
+                pos2(r.right() - 14.0, r.bottom() - 3.0),
+            );
+            let mut child =
+                ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("bh", bid)));
+            child.set_clip_rect(inner.intersect(area));
+            let mut changed_bus = false;
+            let mut commit_name: Option<String> = None;
+            child.horizontal(|ui| {
+                icons::paint_inline(ui, Icon::BusTrack, 14.0, &self.theme);
+                let cur_name = self.project.audio_buses[bi].name.clone();
+                let buf_id = egui::Id::new(("tl_bus_name", bid));
+                let mut draft = ui.data_mut(|d| {
+                    d.get_temp::<String>(buf_id)
+                        .unwrap_or_else(|| cur_name.clone())
+                });
+                let nr = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .desired_width(90.0)
+                        .font(egui::TextStyle::Small),
+                );
+                if nr.has_focus() {
+                    ui.data_mut(|d| d.insert_temp(buf_id, draft.clone()));
+                } else if nr.lost_focus() {
+                    commit_name = Some(draft.clone());
+                    ui.data_mut(|d| d.remove::<String>(buf_id));
+                } else if draft != cur_name {
+                    ui.data_mut(|d| d.remove::<String>(buf_id));
+                }
+                let b_mute = self.project.audio_buses[bi].mute;
+                let b_solo = self.project.audio_buses[bi].solo;
+                let b_fx_empty = self.project.audio_buses[bi].fx.is_empty();
+                if ui.selectable_label(b_mute, "M").clicked() {
+                    self.checkpoint();
+                    self.project.audio_buses[bi].mute = !b_mute;
+                    changed_bus = true;
+                }
+                if ui.selectable_label(b_solo, "S").clicked() {
+                    self.checkpoint();
+                    self.project.audio_buses[bi].solo = !b_solo;
+                    changed_bus = true;
+                }
+                let fxlabel = if b_fx_empty { "fx" } else { "FX" };
+                if ui
+                    .small_button(fxlabel)
+                    .on_hover_text("Efeitos do barramento")
+                    .clicked()
+                {
+                    self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
+                }
+            });
+            child.horizontal(|ui| {
+                ui.label(egui::RichText::new("Vol").small());
+                let mut vol = self.project.audio_buses[bi].volume_db;
+                let sr = ui.add(
+                    egui::Slider::new(&mut vol, -60.0..=12.0)
+                        .show_value(true)
+                        .suffix(" dB")
+                        .fixed_decimals(1)
+                        .trailing_fill(true),
+                );
+                if sr.drag_started() {
+                    self.checkpoint();
+                }
+                if sr.double_clicked() {
+                    self.checkpoint();
+                    self.project.audio_buses[bi].volume_db = 0.0;
+                    changed_bus = true;
+                } else if sr.changed() {
+                    self.project.audio_buses[bi].volume_db = vol;
+                    changed_bus = true;
+                }
+            });
+            if let Some(new_name) = commit_name {
+                self.session.rename_audio_bus(bid, new_name);
+            }
+            if changed_bus {
+                self.changed();
+            }
+            let lv = self.meters_hold.get(&bid).cloned().unwrap_or([0.0; 2]);
+            let mr = Rect::from_min_max(
+                pos2(r.right() - 11.0, r.top() + 4.0),
+                pos2(r.right() - 3.0, r.bottom() - 4.0),
+            );
+            draw_meter(&painter, mr, lv);
+        }
     }
 
     pub fn track_menu(&mut self, ui: &mut egui::Ui, ti: usize) {
@@ -1453,6 +2006,31 @@ impl App {
                 ui.close_menu();
             }
         }
+        if kind == TrackKind::Audio && !self.project.audio_buses.is_empty() {
+            ui.menu_button("Roteamento de saída", |ui| {
+                let cur_out = self.project.tracks[ti].output_bus;
+                if ui.selectable_label(cur_out.is_none(), "Master").clicked() {
+                    self.checkpoint();
+                    self.project.tracks[ti].output_bus = None;
+                    self.changed();
+                    ui.close_menu();
+                }
+                let buses: Vec<(Id, String)> = self
+                    .project
+                    .audio_buses
+                    .iter()
+                    .map(|b| (b.id, b.name.clone()))
+                    .collect();
+                for (bid, bname) in buses {
+                    if ui.selectable_label(cur_out == Some(bid), bname).clicked() {
+                        self.checkpoint();
+                        self.project.tracks[ti].output_bus = Some(bid);
+                        self.changed();
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
         ui.separator();
         if ui.button("Duplicar trilha").clicked() {
             self.duplicate_track(ti);
@@ -1479,11 +2057,42 @@ impl App {
         }
     }
 
+    fn bus_menu(&mut self, ui: &mut egui::Ui, bi: usize) {
+        let Some(bid) = self.project.audio_buses.get(bi).map(|b| b.id) else {
+            return;
+        };
+        if ui.button("Efeitos do barramento...").clicked() {
+            self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
+            ui.close_menu();
+        }
+        ui.separator();
+        for &k in &[EnvKind::Volume, EnvKind::Pan] {
+            let has = self.project.audio_buses[bi].envelope(k).is_some();
+            let label = if has {
+                format!("Remover envelope: {}", k.name())
+            } else {
+                format!("Inserir envelope: {}", k.name())
+            };
+            if ui.button(label).clicked() {
+                if self.session.toggle_bus_envelope(bid, k) && !has {
+                    self.opts.show_envelopes = true;
+                }
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button("Excluir barramento").clicked() {
+            self.session.remove_audio_bus(bid);
+            ui.close_menu();
+        }
+    }
+
     // -----------------------------------------------------------------
     // Interação com eventos
     // -----------------------------------------------------------------
 
-    fn lanes_interact(&mut self, ui: &mut egui::Ui, lanes: Rect, layout: &[(f32, f32)]) {
+    fn lanes_interact(&mut self, ui: &mut egui::Ui, lanes: Rect, rows: &TimelineRows) {
+        let layout = &rows.track_rects;
         let left = lanes.left();
         let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
         let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
@@ -1564,7 +2173,7 @@ impl App {
         let hover = pointer.filter(|p| lanes.contains(*p));
         // cursor do mouse conforme a zona
         if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
-            if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, layout) {
+            if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, rows) {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
                 match z {
@@ -1586,7 +2195,7 @@ impl App {
                         }
                     }
                 }
-            } else if self.hit_envelope(p, left, layout).is_some() {
+            } else if self.hit_envelope(p, left, rows).is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
         }
@@ -1595,11 +2204,11 @@ impl App {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
                 .unwrap_or(lanes.center());
-            self.start_lane_drag(origin, left, layout, mods);
+            self.start_lane_drag(origin, left, rows, mods);
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
             if let Some(p) = resp.interact_pointer_pos() {
-                self.update_lane_drag(p, left, layout, mods);
+                self.update_lane_drag(p, left, rows, mods);
                 // rolagem automática perto das bordas
                 if p.x > lanes.right() - 20.0 {
                     self.tl.scroll_x += self.tl.dx_to_ticks(8.0);
@@ -1621,35 +2230,34 @@ impl App {
 
         if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                self.lane_click(p, left, layout, mods);
+                self.lane_click(p, left, rows, mods);
             }
         }
         if resp.double_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                if let Some((ti, kind, None, t)) = self.hit_envelope(p, left, layout) {
-                    self.checkpoint();
-                    let (y0, h) = layout[ti];
-                    let v = kind.value_from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
-                    let Some(env) = self
-                        .project
-                        .tracks
-                        .get_mut(ti)
-                        .and_then(|t| t.envelopes.iter_mut().find(|e| e.kind == kind))
-                    else {
-                        return;
-                    };
-                    let v = if (Self::env_y(kind, env.eval(t), y0, h) - p.y).abs() < 4.0 {
-                        env.eval(t)
-                    } else {
-                        v
-                    };
-                    env.points.push(EnvPoint {
-                        t,
-                        v,
-                        curve: Curve::Linear,
-                    });
-                    env.sort();
-                    self.changed();
+                if let Some((owner, kind, None, t)) = self.hit_envelope(p, left, rows) {
+                    if let Some((y0, h)) = rows.row_rect(owner) {
+                        self.checkpoint();
+                        let v = kind.value_from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
+                        let Some(env) = self
+                            .owner_envelopes_mut(owner)
+                            .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
+                        else {
+                            return;
+                        };
+                        let v = if (Self::env_y(kind, env.eval(t), y0, h) - p.y).abs() < 4.0 {
+                            env.eval(t)
+                        } else {
+                            v
+                        };
+                        env.points.push(EnvPoint {
+                            t,
+                            v,
+                            curve: Curve::Linear,
+                        });
+                        env.sort();
+                        self.changed();
+                    }
                 } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
                     let e = &self.project.tracks[ti].events[ei];
                     let sel = (e.start, e.end());
@@ -1662,10 +2270,10 @@ impl App {
             if let Some(p) = resp.interact_pointer_pos() {
                 let t = self.tl.x2t(p.x, left);
                 self.tl.ctx_target =
-                    if let Some((ti, k, idx, t)) = self.hit_envelope(p, left, layout) {
+                    if let Some((owner, k, idx, t)) = self.hit_envelope(p, left, rows) {
                         match idx {
-                            Some(i) => CtxTarget::EnvPoint(ti, k, i),
-                            None => CtxTarget::EnvLine(ti, k, t),
+                            Some(i) => CtxTarget::EnvPoint(owner, k, i),
+                            None => CtxTarget::EnvLine(owner, k, t),
                         }
                     } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
                         let id = self.project.tracks[ti].events[ei].id;
@@ -1690,17 +2298,14 @@ impl App {
         &mut self,
         origin: Pos2,
         left: f32,
-        layout: &[(f32, f32)],
+        rows: &TimelineRows,
         mods: egui::Modifiers,
     ) {
+        let layout = &rows.track_rects;
         let ot = self.tl.x2t(origin.x, left);
-        if let Some((ti, kind, Some(idx), _)) = self.hit_envelope(origin, left, layout) {
+        if let Some((owner, kind, Some(idx), _)) = self.hit_envelope(origin, left, rows) {
             self.checkpoint();
-            self.tl.drag = Drag::EnvPoint {
-                track: ti,
-                kind,
-                idx,
-            };
+            self.tl.drag = Drag::EnvPoint { owner, kind, idx };
             return;
         }
         if let Some((ti, ei, zone)) = self.hit_event(origin, left, layout) {
@@ -1844,13 +2449,8 @@ impl App {
         self.tl.drag = Drag::TimeSel { anchor: s };
     }
 
-    fn update_lane_drag(
-        &mut self,
-        p: Pos2,
-        left: f32,
-        layout: &[(f32, f32)],
-        mods: egui::Modifiers,
-    ) {
+    fn update_lane_drag(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
+        let layout = &rows.track_rects;
         let t = self.tl.x2t(p.x, left);
         match self.tl.drag.clone() {
             Drag::TimeSel { anchor } => {
@@ -1862,14 +2462,15 @@ impl App {
                 }
                 self.cursor = sel.0;
             }
-            Drag::EnvPoint { track, kind, idx } => {
-                let (y0, h) = layout[track];
+            Drag::EnvPoint { owner, kind, idx } => {
+                let Some((y0, h)) = rows.row_rect(owner) else {
+                    return;
+                };
                 let v = kind.value_from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
                 let snapped = self.snap(t, &HashSet::new(), mods.shift);
-                let env = self.project.tracks[track]
-                    .envelopes
-                    .iter_mut()
-                    .find(|e| e.kind == kind);
+                let env = self
+                    .owner_envelopes_mut(owner)
+                    .and_then(|list| list.iter_mut().find(|e| e.kind == kind));
                 if let Some(env) = env {
                     let gap = Ticks::from_raw(TICKS_PER_MS / 10);
                     let lo = if idx > 0 {
@@ -2085,7 +2686,8 @@ impl App {
         }
     }
 
-    fn lane_click(&mut self, p: Pos2, left: f32, layout: &[(f32, f32)], mods: egui::Modifiers) {
+    fn lane_click(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
+        let layout = &rows.track_rects;
         let t = self.tl.x2t(p.x, left);
         if let Some(ti) = self.track_at(p.y, layout) {
             self.sel_track = Some(ti);
@@ -2119,7 +2721,7 @@ impl App {
             self.set_cursor(s);
             return;
         }
-        if self.hit_envelope(p, left, layout).is_some() {
+        if self.hit_envelope(p, left, rows).is_some() {
             return;
         }
         if !mods.command && !mods.shift {
@@ -2214,11 +2816,14 @@ impl App {
     fn lane_context_menu(&mut self, ui: &mut egui::Ui) {
         match self.tl.ctx_target.clone() {
             CtxTarget::Event(id) => self.event_context_menu(ui, id),
-            CtxTarget::EnvPoint(ti, kind, idx) => {
+            CtxTarget::EnvPoint(owner, kind, idx) => {
                 ui.label(
                     egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong(),
                 );
-                if let Some(env) = self.project.tracks.get(ti).and_then(|t| t.envelope(kind)) {
+                if let Some(env) = self
+                    .owner_envelopes(owner)
+                    .and_then(|list| list.iter().find(|e| e.kind == kind))
+                {
                     if let Some(p) = env.points.get(idx) {
                         ui.label(format!("{}  @ {}", kind.format(p.v), self.fmt_time(p.t)));
                     }
@@ -2227,10 +2832,9 @@ impl App {
                 for c in Curve::ALL {
                     if ui.button(format!("Curva: {}", c.name())).clicked() {
                         self.checkpoint();
-                        if let Some(env) = self.project.tracks[ti]
-                            .envelopes
-                            .iter_mut()
-                            .find(|e| e.kind == kind)
+                        if let Some(env) = self
+                            .owner_envelopes_mut(owner)
+                            .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
                         {
                             if let Some(p) = env.points.get_mut(idx) {
                                 p.curve = c;
@@ -2243,10 +2847,9 @@ impl App {
                 ui.separator();
                 if ui.button("Redefinir valor").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti]
-                        .envelopes
-                        .iter_mut()
-                        .find(|e| e.kind == kind)
+                    if let Some(env) = self
+                        .owner_envelopes_mut(owner)
+                        .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
                     {
                         if let Some(p) = env.points.get_mut(idx) {
                             p.v = kind.default_value();
@@ -2257,10 +2860,9 @@ impl App {
                 }
                 if ui.button("Excluir ponto").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti]
-                        .envelopes
-                        .iter_mut()
-                        .find(|e| e.kind == kind)
+                    if let Some(env) = self
+                        .owner_envelopes_mut(owner)
+                        .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
                     {
                         if env.points.len() > 1 {
                             env.points.remove(idx);
@@ -2270,13 +2872,12 @@ impl App {
                     ui.close_menu();
                 }
             }
-            CtxTarget::EnvLine(ti, kind, t) => {
+            CtxTarget::EnvLine(owner, kind, t) => {
                 if ui.button("Adicionar ponto aqui").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti]
-                        .envelopes
-                        .iter_mut()
-                        .find(|e| e.kind == kind)
+                    if let Some(env) = self
+                        .owner_envelopes_mut(owner)
+                        .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
                     {
                         let v = env.eval(t);
                         env.points.push(EnvPoint {
@@ -2291,10 +2892,9 @@ impl App {
                 }
                 if ui.button("Redefinir todos os pontos").clicked() {
                     self.checkpoint();
-                    if let Some(env) = self.project.tracks[ti]
-                        .envelopes
-                        .iter_mut()
-                        .find(|e| e.kind == kind)
+                    if let Some(env) = self
+                        .owner_envelopes_mut(owner)
+                        .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
                     {
                         *env = Envelope::new(kind);
                     }
@@ -2302,10 +2902,9 @@ impl App {
                     ui.close_menu();
                 }
                 if ui.button("Ocultar envelope").clicked() {
-                    if let Some(env) = self.project.tracks[ti]
-                        .envelopes
-                        .iter_mut()
-                        .find(|e| e.kind == kind)
+                    if let Some(env) = self
+                        .owner_envelopes_mut(owner)
+                        .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
                     {
                         env.visible = false;
                     }
@@ -2313,7 +2912,9 @@ impl App {
                 }
                 if ui.button("Remover envelope").clicked() {
                     self.checkpoint();
-                    self.project.tracks[ti].envelopes.retain(|e| e.kind != kind);
+                    if let Some(list) = self.owner_envelopes_mut(owner) {
+                        list.retain(|e| e.kind != kind);
+                    }
                     self.changed();
                     ui.close_menu();
                 }
@@ -2541,8 +3142,62 @@ impl App {
     // Desenho
     // -----------------------------------------------------------------
 
+    fn draw_row_envelopes(
+        &self,
+        painter: &egui::Painter,
+        lanes: Rect,
+        left: f32,
+        y0: f32,
+        h: f32,
+        envelopes: &[Envelope],
+    ) {
+        if !self.opts.show_envelopes {
+            return;
+        }
+        for env in envelopes.iter().filter(|e| e.visible) {
+            let col = match env.kind {
+                EnvKind::Volume | EnvKind::Opacity => self.theme.tl_env_primary,
+                EnvKind::Pan | EnvKind::FadeToColor => self.theme.tl_env_secondary,
+            };
+            let mut pts = vec![];
+            let mut x = lanes.left();
+            while x <= lanes.right() + 3.0 {
+                let t = self.tl.x2t(x, left);
+                pts.push(pos2(x, Self::env_y(env.kind, env.eval(t), y0, h)));
+                x += 3.0;
+            }
+            painter.add(Shape::line(pts, Stroke::new(1.5_f32, col)));
+            for p in &env.points {
+                let px = self.tl.t2x(p.t, left);
+                if px < lanes.left() - 5.0 || px > lanes.right() + 5.0 {
+                    continue;
+                }
+                let py = Self::env_y(env.kind, p.v, y0, h);
+                painter.rect_filled(
+                    Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
+                    1.0,
+                    col,
+                );
+                painter.rect_stroke(
+                    Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
+                    1.0,
+                    Stroke::new(1.0_f32, crate::theme::contrast_on(col)),
+                    StrokeKind::Inside,
+                );
+            }
+            painter.text(
+                pos2(lanes.left() + 4.0, y0 + h - 14.0),
+                Align2::LEFT_TOP,
+                env.kind.name(),
+                FontId::proportional(10.0),
+                col,
+            );
+        }
+    }
+
     #[allow(clippy::needless_range_loop)]
-    fn draw_lanes(&mut self, ui: &mut egui::Ui, lanes: Rect, layout: &[(f32, f32)]) {
+    fn draw_lanes(&mut self, ui: &mut egui::Ui, lanes: Rect, rows: &TimelineRows) {
+        let layout = &rows.track_rects;
         let painter = ui.painter_at(lanes);
         painter.rect_filled(lanes, 0.0, self.theme.tl_bg);
         let left = lanes.left();
@@ -2906,58 +3561,43 @@ impl App {
                 }
             }
             // envelopes
-            if self.opts.show_envelopes {
-                for env in track.envelopes.iter().filter(|e| e.visible) {
-                    let col = match env.kind {
-                        EnvKind::Volume | EnvKind::Opacity => self.theme.tl_env_primary,
-                        EnvKind::Pan | EnvKind::FadeToColor => self.theme.tl_env_secondary,
-                    };
-                    let mut pts = vec![];
-                    let mut x = lanes.left();
-                    while x <= lanes.right() + 3.0 {
-                        let t = self.tl.x2t(x, left);
-                        pts.push(pos2(x, Self::env_y(env.kind, env.eval(t), y0, h)));
-                        x += 3.0;
-                    }
-                    painter.add(Shape::line(pts, Stroke::new(1.5_f32, col)));
-                    for p in &env.points {
-                        let px = self.tl.t2x(p.t, left);
-                        if px < lanes.left() - 5.0 || px > lanes.right() + 5.0 {
-                            continue;
-                        }
-                        let py = Self::env_y(env.kind, p.v, y0, h);
-                        painter.rect_filled(
-                            Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
-                            1.0,
-                            col,
-                        );
-                        painter.rect_stroke(
-                            Rect::from_center_size(pos2(px, py), vec2(7.0, 7.0)),
-                            1.0,
-                            Stroke::new(1.0_f32, crate::theme::contrast_on(col)),
-                            StrokeKind::Inside,
-                        );
-                    }
-                    painter.text(
-                        pos2(lanes.left() + 4.0, y0 + h - 14.0),
-                        Align2::LEFT_TOP,
-                        env.kind.name(),
-                        FontId::proportional(10.0),
-                        col,
-                    );
-                }
+            self.draw_row_envelopes(&painter, lanes, left, y0, h, &track.envelopes);
+        }
+        // trilhas de barramentos auxiliares (Ctrl+B)
+        for bi in 0..rows.bus_rects.len() {
+            let Some(bus) = self.project.audio_buses.get(bi) else {
+                break;
+            };
+            let (y0, h) = rows.bus_rects[bi];
+            if y0 + h < lanes.top() || y0 > lanes.bottom() {
+                continue;
             }
+            let lane = Rect::from_min_max(pos2(lanes.left(), y0), pos2(lanes.right(), y0 + h));
+            painter.rect_filled(lane, 0.0, self.theme.tl_lane_odd);
+            painter.line_segment(
+                [
+                    pos2(lane.left(), lane.bottom()),
+                    pos2(lane.right(), lane.bottom()),
+                ],
+                Stroke::new(1.0_f32, self.theme.border),
+            );
+            painter.text(
+                pos2(lane.left() + 6.0, lane.top() + 3.0),
+                Align2::LEFT_TOP,
+                format!("Barramento: {}", bus.name),
+                FontId::proportional(10.0),
+                self.theme.text_muted,
+            );
+            self.draw_row_envelopes(&painter, lanes, left, y0, h, &bus.envelopes);
         }
         // valor do ponto de envelope durante o arrasto
-        if let Drag::EnvPoint { track, kind, idx } = self.tl.drag {
-            if let Some(p) = self
-                .project
-                .tracks
-                .get(track)
-                .and_then(|t| t.envelope(kind))
-                .and_then(|e| e.points.get(idx))
-            {
-                let (y0, h) = layout[track];
+        if let Drag::EnvPoint { owner, kind, idx } = self.tl.drag {
+            if let (Some((y0, h)), Some(p)) = (
+                rows.row_rect(owner),
+                self.owner_envelopes(owner)
+                    .and_then(|list| list.iter().find(|e| e.kind == kind))
+                    .and_then(|e| e.points.get(idx)),
+            ) {
                 let g = painter.layout_no_wrap(
                     format!("{}  {}", kind.format(p.v), self.fmt_time(p.t)),
                     FontId::proportional(11.0),

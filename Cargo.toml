@@ -23,6 +23,8 @@ eframe = { version = "0.31", default-features = false, features = ["default_font
 egui_tiles = "0.12"
 fundsp = { version = "0.23", default-features = false, features = ["std", "fft"] }
 rubato = "5.1"
+dasp = { version = "0.11", default-features = false, features = ["std", "slice", "peak", "rms", "ring_buffer"] }
+ebur128 = { version = "0.1.11", default-features = false }
 netcorehost = { version = "0.22", default-features = false, features = ["net10_0"] }
 rfd = "0.15"
 cpal = "0.15"

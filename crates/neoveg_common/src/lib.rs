@@ -23,7 +23,6 @@ pub use curve::{bump_ids, new_id, peek_next_id, Curve, Fade, Id, Keyframe, Keyfr
 pub use error::{NeovegError, Result};
 pub use prefs::{
     recommended_worker_threads, EditLayoutPrefs, LayoutType, Preferences, PreviewQuality,
-    PreviewResolution, PreviewTier,
 };
 pub use time::{
     format_ticks, parse_time, FrameRate, Rate, Ticks, TimeFormat, TICKS_PER_MS, TICKS_PER_SEC,

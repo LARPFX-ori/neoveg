@@ -51,7 +51,7 @@ fn schema_matches(v: &Value, prefix: &str) -> bool {
         .is_some_and(|s| s.starts_with(prefix))
 }
 
-fn div_round_i128(num: i128, den: i128) -> i128 {
+pub(crate) fn div_round_i128(num: i128, den: i128) -> i128 {
     if den <= 0 {
         return 0;
     }
@@ -62,7 +62,7 @@ fn div_round_i128(num: i128, den: i128) -> i128 {
     }
 }
 
-fn clamp_i128_ticks(v: i128) -> Ticks {
+pub(crate) fn clamp_i128_ticks(v: i128) -> Ticks {
     Ticks::from_raw(v.clamp(-MAX_TICKS as i128, MAX_TICKS as i128) as i64)
 }
 
@@ -143,7 +143,7 @@ fn percent_decode_bytes(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-fn decode_target_url(raw: &str) -> String {
+pub(crate) fn decode_target_url(raw: &str) -> String {
     let bounded = truncate_utf8(raw.trim(), MAX_URL_BYTES);
     let rest = if let Some(s) = bounded.strip_prefix("file://localhost/") {
         s
@@ -165,7 +165,7 @@ fn decode_target_url(raw: &str) -> String {
     }
 }
 
-fn encode_target_url(path: &str) -> String {
+pub(crate) fn encode_target_url(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     if normalized.starts_with("file://") || normalized.contains("://") {
         return normalized;
@@ -833,20 +833,47 @@ pub fn import_otio_str(text: &str) -> Result<(Project, Vec<String>), NeovegError
     Ok((project, fixes))
 }
 
-/// Carrega e valida um arquivo `.otio` do disco com limite de tamanho (§0.4).
-pub fn import_otio_file(path: &Path) -> Result<(Project, Vec<String>), NeovegError> {
-    let meta = std::fs::metadata(path).map_err(|e| {
-        NeovegError::Io(format!("não foi possível acessar {}: {e}", path.display()))
-    })?;
-    if meta.len() > MAX_OTIO_BYTES as u64 {
+/// Lê um arquivo de texto UTF-8 respeitando um limite rígido de bytes (`AGENTS.md` §0.4).
+pub(crate) fn read_bounded_utf8_file(
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String, NeovegError> {
+    use std::io::Read;
+
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > max_bytes as u64 {
+            return Err(NeovegError::InvalidInput(format!(
+                "arquivo {label} '{}' excede o limite de {} bytes",
+                path.display(),
+                max_bytes
+            )));
+        }
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| NeovegError::Io(format!("não foi possível abrir {}: {e}", path.display())))?;
+    let mut buf = Vec::with_capacity(max_bytes.min(64 * 1024));
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| NeovegError::Io(format!("erro ao ler '{}': {e}", path.display())))?;
+    if buf.len() > max_bytes {
         return Err(NeovegError::InvalidInput(format!(
-            "arquivo '{}' excede o limite de {} MiB",
+            "arquivo {label} '{}' excede o limite de {} bytes",
             path.display(),
-            MAX_OTIO_BYTES / (1024 * 1024)
+            max_bytes
         )));
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| NeovegError::Io(format!("erro ao ler '{}': {e}", path.display())))?;
+    String::from_utf8(buf).map_err(|_| {
+        NeovegError::InvalidInput(format!(
+            "arquivo {label} '{}' não está codificado em UTF-8 válido",
+            path.display()
+        ))
+    })
+}
+
+/// Carrega e valida um arquivo `.otio` do disco com limite de tamanho (§0.4).
+pub fn import_otio_file(path: &Path) -> Result<(Project, Vec<String>), NeovegError> {
+    let text = read_bounded_utf8_file(path, MAX_OTIO_BYTES, "OTIO")?;
     import_otio_str(&text)
 }
 

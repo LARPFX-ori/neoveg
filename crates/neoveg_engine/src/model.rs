@@ -361,20 +361,15 @@ impl Project {
             if t.motion.keys.is_empty() {
                 t.motion = Keyframes::default();
             }
-            let mut kinds = std::collections::HashSet::new();
-            t.envelopes.retain(|e| kinds.insert(e.kind));
-            for env in &mut t.envelopes {
-                let (lo, hi) = env.kind.range();
-                env.points.retain(|p| p.v.is_finite());
-                for p in &mut env.points {
-                    p.t = p.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                    p.v = clampf(p.v, lo, hi);
-                }
-                env.sort();
-                if env.points.is_empty() {
-                    *env = Envelope::new(env.kind);
-                }
-            }
+            sanitize_envelopes(
+                &mut t.envelopes,
+                &[
+                    EnvKind::Volume,
+                    EnvKind::Pan,
+                    EnvKind::Opacity,
+                    EnvKind::FadeToColor,
+                ],
+            );
             for f in &mut t.fx {
                 sanitize_fx(f);
             }
@@ -446,6 +441,7 @@ impl Project {
             for f in &mut b.fx {
                 sanitize_fx(f);
             }
+            sanitize_envelopes(&mut b.envelopes, &[EnvKind::Volume, EnvKind::Pan]);
         }
         let bus_ids: std::collections::HashSet<Id> =
             self.audio_buses.iter().map(|b| b.id).collect();
@@ -506,6 +502,23 @@ impl Project {
 
 /// Maior dimensão de quadro aceita (evita alocações gigantes).
 pub const MAX_DIM: u32 = 8192;
+
+fn sanitize_envelopes(envelopes: &mut Vec<Envelope>, allowed: &[EnvKind]) {
+    let mut kinds = std::collections::HashSet::new();
+    envelopes.retain(|e| allowed.contains(&e.kind) && kinds.insert(e.kind));
+    for env in envelopes.iter_mut() {
+        let (lo, hi) = env.kind.range();
+        env.points.retain(|p| p.v.is_finite());
+        for p in &mut env.points {
+            p.t = p.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            p.v = crate::util::clampf(p.v, lo, hi);
+        }
+        env.sort();
+        if env.points.is_empty() {
+            *env = Envelope::new(env.kind);
+        }
+    }
+}
 
 fn sanitize_fx(f: &mut FxInstance) {
     let specs = f.kind.params();
@@ -1186,6 +1199,8 @@ pub struct AudioBus {
     pub output_bus: Option<Id>,
     #[serde(default)]
     pub fx: Vec<FxInstance>,
+    #[serde(default)]
+    pub envelopes: Vec<Envelope>,
 }
 
 impl AudioBus {
@@ -1199,7 +1214,12 @@ impl AudioBus {
             pan: 0.0,
             output_bus: None,
             fx: vec![],
+            envelopes: vec![],
         }
+    }
+
+    pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        self.envelopes.iter().find(|e| e.kind == kind)
     }
 
     pub fn is_audible(&self, any_bus_solo: bool) -> bool {

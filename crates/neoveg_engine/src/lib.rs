@@ -18,7 +18,11 @@ pub use neoveg_common::{curve, error, prefs, time, util};
 #[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
+pub mod edl;
+#[forbid(unsafe_code)]
 pub mod engine;
+#[forbid(unsafe_code)]
+pub mod fcpxml;
 pub mod media;
 #[forbid(unsafe_code)]
 pub mod model;
@@ -34,6 +38,8 @@ pub mod render;
 pub mod scopes;
 #[forbid(unsafe_code)]
 pub mod session;
+#[forbid(unsafe_code)]
+pub mod subtitles;
 
 #[cfg(test)]
 #[forbid(unsafe_code)]

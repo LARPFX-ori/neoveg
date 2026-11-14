@@ -58,6 +58,7 @@ pub struct EditorOptions {
     pub show_envelopes: bool,
     pub show_waveforms: bool,
     pub show_thumbs: bool,
+    pub show_bus_tracks: bool,
     pub time_format: TimeFormat,
     pub preview_quality: PreviewQuality,
     pub safe_areas: bool,
@@ -74,8 +75,9 @@ impl Default for EditorOptions {
             show_envelopes: true,
             show_waveforms: true,
             show_thumbs: true,
+            show_bus_tracks: false,
             time_format: TimeFormat::SmpteDrop,
-            preview_quality: PreviewQuality::PreviewHalf,
+            preview_quality: PreviewQuality::Preview,
             safe_areas: false,
             loop_playback: false,
         }
@@ -334,6 +336,46 @@ impl EditorSession {
             if b.output_bus == Some(bus_id) {
                 b.output_bus = None;
             }
+        }
+        self.changed();
+        true
+    }
+
+    pub fn rename_audio_bus(&mut self, bus_id: Id, name: String) -> bool {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let Some(bus) = self.project.audio_bus_mut(bus_id) else {
+            return false;
+        };
+        if bus.name == trimmed {
+            return false;
+        }
+        let new_name = trimmed.to_string();
+        self.checkpoint();
+        if let Some(bus) = self.project.audio_bus_mut(bus_id) {
+            bus.name = new_name;
+        }
+        self.changed();
+        true
+    }
+
+    pub fn toggle_bus_envelope(&mut self, bus_id: Id, kind: EnvKind) -> bool {
+        if !matches!(kind, EnvKind::Volume | EnvKind::Pan) {
+            return false;
+        }
+        let Some(pos) = self.project.audio_buses.iter().position(|b| b.id == bus_id) else {
+            return false;
+        };
+        self.checkpoint();
+        let bus = &mut self.project.audio_buses[pos];
+        if bus.envelope(kind).is_some() {
+            bus.envelopes.retain(|e| e.kind != kind);
+        } else {
+            bus.envelopes.push(Envelope::new(kind));
+            self.opts.show_envelopes = true;
+            self.opts.show_bus_tracks = true;
         }
         self.changed();
         true

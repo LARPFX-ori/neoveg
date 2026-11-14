@@ -510,7 +510,8 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
         }
     }
 
-    for tab_label in ["Escopos", "Color Grading", "Notas", "Destacar"] {
+    let mut row_tops = Vec::new();
+    for tab_label in ["Mídia do Projeto", "Explorer", "Destacar"] {
         let tab = texts
             .iter()
             .find(|(txt, _, _, _)| txt == tab_label)
@@ -526,6 +527,13 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
                 && rect.bottom() <= clip.bottom() + 1.5
                 && rect.bottom() <= 800.0,
             "aba/botão '{tab_label}' não pode ficar clipado fora do rodapé: rect={rect:?}, clip={clip:?}"
+        );
+        row_tops.push(rect.top());
+    }
+    if let (Some(&first), Some(&last)) = (row_tops.first(), row_tops.last()) {
+        assert!(
+            (first - last).abs() <= 2.5,
+            "abas inferiores devem ficar em linha única com rolagem horizontal em vez de quebrar em várias linhas: row_tops={row_tops:?}"
         );
     }
 
@@ -615,6 +623,24 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
             && texts.iter().any(|(t, _, _, _)| t.starts_with("Projeto:")),
         "Área 2 (VEGAS 21) deve exibir Prévia de Vídeo, Master Bus acoplado à direita e resumo do projeto"
     );
+    for needle in [
+        "Projeto:",
+        "Prévia:",
+        "Quadro:",
+        "Exibição:",
+        "Prévia de Vídeo",
+        "Master",
+    ] {
+        let found = texts
+            .iter()
+            .find(|(t, _, _, _)| t == needle || t.starts_with(needle));
+        let (txt, _, rect, clip) =
+            found.unwrap_or_else(|| panic!("texto `{needle}` deve estar visível na Área 2"));
+        assert!(
+            rect.top() >= clip.top() - 0.5 && rect.bottom() <= clip.bottom() + 0.5,
+            "`{txt}` não deve ser cortado verticalmente: text={rect:?}, clip={clip:?}"
+        );
+    }
     assert!(
         texts.iter().any(|(t, _, _, _)| t == "Tam:"),
         "Área 6 (VEGAS 21) deve exibir o bloco In/Fim/Tam na barra de transporte em largura desktop"

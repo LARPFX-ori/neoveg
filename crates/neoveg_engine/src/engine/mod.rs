@@ -2,6 +2,7 @@
 
 pub mod afx;
 pub mod audio;
+pub mod loudness;
 pub mod transition;
 pub mod vfx;
 pub mod video;

@@ -457,6 +457,10 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
 
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.scroll = egui::style::ScrollStyle {
+        bar_width: 10.0,
+        ..egui::style::ScrollStyle::solid()
+    };
     ctx.set_style(style);
     c
 }

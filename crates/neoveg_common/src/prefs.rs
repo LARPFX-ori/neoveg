@@ -6,179 +6,48 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Nível de qualidade de pré-visualização (VEGAS Pro: Draft/Preview/Good/Best).
+/// Nível de qualidade/resolução de pré-visualização da Prévia de Vídeo (§3.6).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub enum PreviewTier {
+pub enum PreviewQuality {
+    #[serde(alias = "DraftQuarter", alias = "DraftHalf", alias = "DraftFull")]
     Draft,
     #[default]
+    #[serde(alias = "PreviewQuarter", alias = "PreviewHalf", alias = "PreviewFull")]
     Preview,
+    #[serde(alias = "GoodQuarter", alias = "GoodHalf", alias = "GoodFull")]
     Good,
+    #[serde(alias = "BestQuarter", alias = "BestHalf", alias = "BestFull")]
     Best,
 }
 
-impl PreviewTier {
-    pub const ALL: [PreviewTier; 4] = [
-        PreviewTier::Draft,
-        PreviewTier::Preview,
-        PreviewTier::Good,
-        PreviewTier::Best,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            PreviewTier::Draft => "Rascunho",
-            PreviewTier::Preview => "Prévia",
-            PreviewTier::Good => "Boa",
-            PreviewTier::Best => "Melhor",
-        }
-    }
-}
-
-/// Escala de resolução da pré-visualização (Full / Half / Quarter).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub enum PreviewResolution {
-    Quarter,
-    #[default]
-    Half,
-    Full,
-}
-
-impl PreviewResolution {
-    pub const ALL: [PreviewResolution; 3] = [
-        PreviewResolution::Quarter,
-        PreviewResolution::Half,
-        PreviewResolution::Full,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            PreviewResolution::Quarter => "1/4",
-            PreviewResolution::Half => "1/2",
-            PreviewResolution::Full => "Completa",
-        }
-    }
-
-    pub fn scale(self) -> f32 {
-        match self {
-            PreviewResolution::Quarter => 0.25,
-            PreviewResolution::Half => 0.5,
-            PreviewResolution::Full => 1.0,
-        }
-    }
-}
-
-/// Matriz completa de qualidade de pré-visualização (*Draft/Preview/Good/Best*
-/// × *Quarter/Half/Full*), conforme semântica do VEGAS Pro (§3.6).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub enum PreviewQuality {
-    #[serde(alias = "Draft")]
-    DraftQuarter,
-    DraftHalf,
-    DraftFull,
-    PreviewQuarter,
-    #[default]
-    #[serde(alias = "Preview")]
-    PreviewHalf,
-    PreviewFull,
-    GoodQuarter,
-    GoodHalf,
-    #[serde(alias = "Good")]
-    GoodFull,
-    BestQuarter,
-    BestHalf,
-    BestFull,
-}
-
 impl PreviewQuality {
-    pub const ALL: [PreviewQuality; 12] = [
-        PreviewQuality::DraftQuarter,
-        PreviewQuality::DraftHalf,
-        PreviewQuality::DraftFull,
-        PreviewQuality::PreviewQuarter,
-        PreviewQuality::PreviewHalf,
-        PreviewQuality::PreviewFull,
-        PreviewQuality::GoodQuarter,
-        PreviewQuality::GoodHalf,
-        PreviewQuality::GoodFull,
-        PreviewQuality::BestQuarter,
-        PreviewQuality::BestHalf,
-        PreviewQuality::BestFull,
+    pub const ALL: [PreviewQuality; 4] = [
+        PreviewQuality::Draft,
+        PreviewQuality::Preview,
+        PreviewQuality::Good,
+        PreviewQuality::Best,
     ];
-
-    pub fn from_parts(tier: PreviewTier, res: PreviewResolution) -> Self {
-        match (tier, res) {
-            (PreviewTier::Draft, PreviewResolution::Quarter) => PreviewQuality::DraftQuarter,
-            (PreviewTier::Draft, PreviewResolution::Half) => PreviewQuality::DraftHalf,
-            (PreviewTier::Draft, PreviewResolution::Full) => PreviewQuality::DraftFull,
-            (PreviewTier::Preview, PreviewResolution::Quarter) => PreviewQuality::PreviewQuarter,
-            (PreviewTier::Preview, PreviewResolution::Half) => PreviewQuality::PreviewHalf,
-            (PreviewTier::Preview, PreviewResolution::Full) => PreviewQuality::PreviewFull,
-            (PreviewTier::Good, PreviewResolution::Quarter) => PreviewQuality::GoodQuarter,
-            (PreviewTier::Good, PreviewResolution::Half) => PreviewQuality::GoodHalf,
-            (PreviewTier::Good, PreviewResolution::Full) => PreviewQuality::GoodFull,
-            (PreviewTier::Best, PreviewResolution::Quarter) => PreviewQuality::BestQuarter,
-            (PreviewTier::Best, PreviewResolution::Half) => PreviewQuality::BestHalf,
-            (PreviewTier::Best, PreviewResolution::Full) => PreviewQuality::BestFull,
-        }
-    }
-
-    pub fn tier(self) -> PreviewTier {
-        match self {
-            PreviewQuality::DraftQuarter
-            | PreviewQuality::DraftHalf
-            | PreviewQuality::DraftFull => PreviewTier::Draft,
-            PreviewQuality::PreviewQuarter
-            | PreviewQuality::PreviewHalf
-            | PreviewQuality::PreviewFull => PreviewTier::Preview,
-            PreviewQuality::GoodQuarter | PreviewQuality::GoodHalf | PreviewQuality::GoodFull => {
-                PreviewTier::Good
-            }
-            PreviewQuality::BestQuarter | PreviewQuality::BestHalf | PreviewQuality::BestFull => {
-                PreviewTier::Best
-            }
-        }
-    }
-
-    pub fn resolution(self) -> PreviewResolution {
-        match self {
-            PreviewQuality::DraftQuarter
-            | PreviewQuality::PreviewQuarter
-            | PreviewQuality::GoodQuarter
-            | PreviewQuality::BestQuarter => PreviewResolution::Quarter,
-            PreviewQuality::DraftHalf
-            | PreviewQuality::PreviewHalf
-            | PreviewQuality::GoodHalf
-            | PreviewQuality::BestHalf => PreviewResolution::Half,
-            PreviewQuality::DraftFull
-            | PreviewQuality::PreviewFull
-            | PreviewQuality::GoodFull
-            | PreviewQuality::BestFull => PreviewResolution::Full,
-        }
-    }
 
     pub fn name(self) -> &'static str {
         match self {
-            PreviewQuality::DraftQuarter => "Rascunho (1/4)",
-            PreviewQuality::DraftHalf => "Rascunho (1/2)",
-            PreviewQuality::DraftFull => "Rascunho (completa)",
-            PreviewQuality::PreviewQuarter => "Prévia (1/4)",
-            PreviewQuality::PreviewHalf => "Prévia (1/2)",
-            PreviewQuality::PreviewFull => "Prévia (completa)",
-            PreviewQuality::GoodQuarter => "Boa (1/4)",
-            PreviewQuality::GoodHalf => "Boa (1/2)",
-            PreviewQuality::GoodFull => "Boa (completa)",
-            PreviewQuality::BestQuarter => "Melhor (1/4)",
-            PreviewQuality::BestHalf => "Melhor (1/2)",
-            PreviewQuality::BestFull => "Melhor (completa)",
+            PreviewQuality::Draft => "Rascunho",
+            PreviewQuality::Preview => "Prévia",
+            PreviewQuality::Good => "Boa",
+            PreviewQuality::Best => "Melhor",
         }
     }
 
     pub fn scale(self) -> f32 {
-        self.resolution().scale()
+        match self {
+            PreviewQuality::Draft => 0.25,
+            PreviewQuality::Preview => 0.5,
+            PreviewQuality::Good => 1.0,
+            PreviewQuality::Best => 1.0,
+        }
     }
 
     pub fn prefer_proxy(self) -> bool {
-        matches!(self.tier(), PreviewTier::Draft | PreviewTier::Preview)
+        matches!(self, PreviewQuality::Draft | PreviewQuality::Preview)
     }
 }
 
@@ -476,7 +345,7 @@ pub struct Preferences {
     /// Ativa reprodução contínua em loop por padrão ao iniciar.
     #[serde(default)]
     pub default_loop_playback: bool,
-    /// Qualidade inicial da Prévia de Vídeo (matriz 4×3 do VEGAS Pro).
+    /// Qualidade inicial da Prévia de Vídeo (*Rascunho / Prévia / Boa / Melhor*).
     #[serde(default)]
     pub default_preview_quality: PreviewQuality,
     /// Formato inicial padrão da régua e do Visor de Tempo.
@@ -623,7 +492,7 @@ impl Default for Preferences {
             default_show_thumbs: true,
             default_show_envelopes: true,
             default_loop_playback: false,
-            default_preview_quality: PreviewQuality::PreviewHalf,
+            default_preview_quality: PreviewQuality::Preview,
             default_time_format: default_time_format(),
             default_sample_rate: default_sample_rate(),
             action_safe_pct: default_action_safe_pct(),
@@ -795,16 +664,36 @@ mod tests {
     }
 
     #[test]
-    fn matriz_previa_quatro_por_tres() {
-        assert_eq!(PreviewQuality::ALL.len(), 12);
-        assert_eq!(
-            PreviewQuality::from_parts(PreviewTier::Draft, PreviewResolution::Quarter),
-            PreviewQuality::DraftQuarter
-        );
-        assert_eq!(
-            PreviewQuality::from_parts(PreviewTier::Best, PreviewResolution::Full).scale(),
-            1.0
-        );
+    fn resolucoes_de_previa_e_aliases_legados() {
+        let names: Vec<&str> = PreviewQuality::ALL.iter().map(|q| q.name()).collect();
+        assert_eq!(names, vec!["Rascunho", "Prévia", "Boa", "Melhor"]);
+        assert_eq!(PreviewQuality::Draft.scale(), 0.25);
+        assert_eq!(PreviewQuality::Preview.scale(), 0.5);
+        assert_eq!(PreviewQuality::Good.scale(), 1.0);
+        assert_eq!(PreviewQuality::Best.scale(), 1.0);
+        assert!(PreviewQuality::Draft.prefer_proxy());
+        assert!(PreviewQuality::Preview.prefer_proxy());
+        assert!(!PreviewQuality::Good.prefer_proxy());
+        assert!(!PreviewQuality::Best.prefer_proxy());
+
+        for (raw, expected) in [
+            ("DraftQuarter", PreviewQuality::Draft),
+            ("DraftHalf", PreviewQuality::Draft),
+            ("DraftFull", PreviewQuality::Draft),
+            ("PreviewQuarter", PreviewQuality::Preview),
+            ("PreviewHalf", PreviewQuality::Preview),
+            ("PreviewFull", PreviewQuality::Preview),
+            ("GoodQuarter", PreviewQuality::Good),
+            ("GoodHalf", PreviewQuality::Good),
+            ("GoodFull", PreviewQuality::Good),
+            ("BestQuarter", PreviewQuality::Best),
+            ("BestHalf", PreviewQuality::Best),
+            ("BestFull", PreviewQuality::Best),
+        ] {
+            let json = format!(r#"{{"default_preview_quality":"{raw}"}}"#);
+            let parsed: Preferences = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.default_preview_quality, expected);
+        }
     }
 
     #[test]

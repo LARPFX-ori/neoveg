@@ -440,6 +440,35 @@ fn fade_gain(e: &Event, fi: &Fade, fo: &Fade, t: Ticks) -> f32 {
     g
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_volume_pan_envelopes(
+    buf: &mut [f32],
+    n: usize,
+    sr: u32,
+    start: i64,
+    base_vol_db: f32,
+    base_pan: f32,
+    venv: Option<&Envelope>,
+    penv: Option<&Envelope>,
+) -> [f32; 2] {
+    let vol = db_to_lin(base_vol_db);
+    let mut peak = [0f32; 2];
+    for i in 0..n {
+        let t = timeline_sample_time(start.saturating_add(i as i64), sr);
+        let ve = venv.map(|e| e.eval(t)).unwrap_or(1.0);
+        let pan = (base_pan + penv.map(|e| e.eval(t)).unwrap_or(0.0)).clamp(-1.0, 1.0);
+        let gl = vol * ve * (1.0 - pan).min(1.0);
+        let gr = vol * ve * (1.0 + pan).min(1.0);
+        let l = buf[i * 2] * gl;
+        let r = buf[i * 2 + 1] * gr;
+        buf[i * 2] = l;
+        buf[i * 2 + 1] = r;
+        peak[0] = peak[0].max(l.abs());
+        peak[1] = peak[1].max(r.abs());
+    }
+    peak
+}
+
 fn find_bus_index(buses: &[AudioBus], limit: usize, bus_id: Id) -> Option<usize> {
     buses[..limit].iter().position(|b| b.id == bus_id)
 }
@@ -636,23 +665,16 @@ impl Mixer {
             }
 
             // Volume, envelope de volume e pan
-            let vol = db_to_lin(track.volume_db);
-            let venv = track.envelope(EnvKind::Volume);
-            let penv = track.envelope(EnvKind::Pan);
-            let mut peak = [0f32; 2];
-            for i in 0..n {
-                let t = timeline_sample_time(start.saturating_add(i as i64), sr);
-                let ve = venv.map(|e| e.eval(t)).unwrap_or(1.0);
-                let pan = (track.pan + penv.map(|e| e.eval(t)).unwrap_or(0.0)).clamp(-1.0, 1.0);
-                let gl = vol * ve * (1.0 - pan).min(1.0);
-                let gr = vol * ve * (1.0 + pan).min(1.0);
-                let l = track_buf[i * 2] * gl;
-                let r = track_buf[i * 2 + 1] * gr;
-                track_buf[i * 2] = l;
-                track_buf[i * 2 + 1] = r;
-                peak[0] = peak[0].max(l.abs());
-                peak[1] = peak[1].max(r.abs());
-            }
+            let peak = apply_volume_pan_envelopes(
+                &mut track_buf[..n * 2],
+                n,
+                sr,
+                start,
+                track.volume_db,
+                track.pan,
+                track.envelope(EnvKind::Volume),
+                track.envelope(EnvKind::Pan),
+            );
             self.meters.tracks.insert(track.id, peak);
 
             // Envios auxiliares pós-fader (post-fader sends)
@@ -703,19 +725,16 @@ impl Mixer {
             for fx in &bus.fx {
                 self.run_fx(fx, &mut bbuf[..n * 2], t0);
             }
-            let bvol = db_to_lin(bus.volume_db);
-            let bpan = bus.pan.clamp(-1.0, 1.0);
-            let gl = bvol * (1.0 - bpan).min(1.0);
-            let gr = bvol * (1.0 + bpan).min(1.0);
-            let mut bpeak = [0f32; 2];
-            for i in 0..n {
-                let l = bbuf[i * 2] * gl;
-                let r = bbuf[i * 2 + 1] * gr;
-                bbuf[i * 2] = l;
-                bbuf[i * 2 + 1] = r;
-                bpeak[0] = bpeak[0].max(l.abs());
-                bpeak[1] = bpeak[1].max(r.abs());
-            }
+            let bpeak = apply_volume_pan_envelopes(
+                &mut bbuf[..n * 2],
+                n,
+                sr,
+                start,
+                bus.volume_db,
+                bus.pan,
+                bus.envelope(EnvKind::Volume),
+                bus.envelope(EnvKind::Pan),
+            );
             self.meters.buses.insert(bus.id, bpeak);
 
             let mut sent_to_downstream = false;
@@ -923,5 +942,59 @@ mod tests {
         );
         assert!(out_rev.iter().all(|v| v.is_finite()));
         assert!(pos >= 0);
+    }
+
+    #[test]
+    fn barramento_aplica_envelope_de_volume_e_pan() {
+        let mut p = Project::new_default();
+        let bus_id = p.add_audio_bus(Some("Bus A")).expect("bus A");
+        let mid = new_id();
+        let item = test_audio_item(mid, 2);
+        let ti = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio");
+        p.tracks[ti].output_bus = Some(bus_id);
+        p.tracks[ti]
+            .events
+            .push(Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(2)));
+        p.media.push(item);
+        let mut audio = HashMap::new();
+        audio.insert(
+            mid,
+            Arc::new(AudioData::from_stereo(48_000, vec![0.5; 48_000 * 2])),
+        );
+
+        let mut env_vol = Envelope::new(EnvKind::Volume);
+        env_vol.points = vec![EnvPoint {
+            t: Ticks::ZERO,
+            v: 0.25,
+            curve: Curve::Linear,
+        }];
+        let mut env_pan = Envelope::new(EnvKind::Pan);
+        env_pan.points = vec![EnvPoint {
+            t: Ticks::ZERO,
+            v: -1.0,
+            curve: Curve::Linear,
+        }];
+        let bus = p.audio_bus_mut(bus_id).expect("bus A");
+        bus.envelopes.push(env_vol);
+        bus.envelopes.push(env_pan);
+
+        let mut mixer = Mixer::new(48_000);
+        let mut out = vec![0.0_f32; 256 * 2];
+        mixer.process(&p, &audio, 0, &mut out);
+        let m = mixer.meters.buses.get(&bus_id).copied().unwrap_or([0.0; 2]);
+        assert!(
+            m[0] > 0.05 && m[0] < 0.20,
+            "envelope de volume do barramento deve atenuar L: {}",
+            m[0]
+        );
+        assert!(
+            m[1] < 1e-5,
+            "envelope de pan em -1.0 deve silenciar canal R do barramento: {}",
+            m[1]
+        );
     }
 }

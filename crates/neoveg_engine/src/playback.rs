@@ -2,6 +2,7 @@
 //! relógio mestre, e um worker de prévia de vídeo em segundo plano.
 
 use crate::engine::audio::{Meters, Mixer, TransportVarispeed};
+use crate::engine::loudness::{LoudnessAnalyzer, LoudnessSnapshot};
 use crate::engine::video::render_frame_preview;
 use crate::media::{AudioData, MediaCache};
 use crate::model::{Id, Project, Ticks};
@@ -21,6 +22,8 @@ pub struct Shared {
     pub mixer: Mixer,
     pub varispeed: TransportVarispeed,
     pub meters: Meters,
+    pub loudness: LoudnessAnalyzer,
+    pub loudness_snapshot: LoudnessSnapshot,
     /// Velocidade de reprodução (`Playback Rate` contínuo / shuttle J-K-L).
     pub speed: f64,
     pub frac: f64,
@@ -65,6 +68,8 @@ impl AudioOut {
             mixer: Mixer::new(sr),
             varispeed: TransportVarispeed::new(),
             meters: Meters::default(),
+            loudness: LoudnessAnalyzer::new(sr),
+            loudness_snapshot: LoudnessSnapshot::default(),
             speed: 1.0,
             frac: 0.0,
             dim: false,
@@ -97,6 +102,16 @@ impl AudioOut {
 
     pub fn has_device(&self) -> bool {
         self._stream.is_some()
+    }
+
+    pub fn loudness_snapshot(&self) -> LoudnessSnapshot {
+        crate::util::lock(&self.shared).loudness_snapshot.clone()
+    }
+
+    pub fn reset_loudness(&self) {
+        let mut s = crate::util::lock(&self.shared);
+        s.loudness.reset();
+        s.loudness_snapshot = s.loudness.snapshot();
     }
 
     /// Avança o relógio quando não há dispositivo de áudio.
@@ -224,6 +239,8 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                 sh.reset_dsp();
             }
             s.meters = s.mixer.meters.clone();
+            s.loudness.push_interleaved(&buf[..frames * 2]);
+            s.loudness_snapshot = s.loudness.snapshot();
             if s.mono_downmix {
                 let mut mono_peak = 0.0_f32;
                 for pair in buf.as_chunks_mut::<2>().0.iter_mut().take(frames) {

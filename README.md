@@ -18,7 +18,7 @@ Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativ
 - **Formatos Suportados:**
   - **Rust puro (multiplataforma):** projetos `.neoveg` (e legado `.nvp`), intercâmbio OpenTimelineIO `.otio` (Clean Room, esquema 0.17: *Arquivo → Importar/Exportar OpenTimelineIO (.otio)...* e arrastar-e-soltar), `AVI (MJPEG/PCM)`, `Y4M`, `GIF`, sequências de imagens (`PNG`, `JPEG`, `BMP`, `TIFF`, `WebP`), áudio `WAV`/`AIFF` (leitor próprio), `FLAC` (`claxon`), `Ogg Vorbis` (`.ogg`, `.oga`, `lewton`) e `MP3` (`puremp3`).
   - **Windows nativo (Media Foundation):** importação e decodificação em streaming de vídeo e áudio em `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `M4A`, `AAC`, `WMV` e `ASF`. (`ffmpeg`/`ffprobe` são utilizados exclusivamente como oráculos de teste externos e geradores de fixtures em `target/fixtures/`, nunca linkados nem distribuídos.)
-- **Hardware Limitado:** matriz de prévia 4×3 (*Rascunho / Prévia / Boa / Melhor* × *1/4 / 1/2 / Completa*), geração de proxies `.avi`, pré-renderização seletiva de região, limite configurável de RAM/quadros em cache e compilação portátil sem `-C target-cpu=native`.
+- **Hardware Limitado:** resoluções de prévia (*Rascunho / Prévia / Boa / Melhor*), geração de proxies `.avi`, pré-renderização seletiva de região, limite configurável de RAM/quadros em cache e compilação portátil sem `-C target-cpu=native`.
 
 ## Como Executar
 

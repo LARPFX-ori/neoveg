@@ -57,12 +57,15 @@ pub fn dock_tab_icon(tab: DockTab) -> Icon {
     match tab {
         DockTab::ProjectMedia => Icon::MediaItem,
         DockTab::Explorer => Icon::FolderItem,
+        DockTab::Trimmer => Icon::TrimmerBlade,
+        DockTab::EditDetails => Icon::EditDetailsTable,
         DockTab::Transitions => Icon::TransitionSplit,
         DockTab::VideoFx => Icon::FxSparkle,
         DockTab::ColorGrading => Icon::ColorWheels,
         DockTab::AudioFx => Icon::FxAudio,
         DockTab::Generators => Icon::GeneratorFrame,
         DockTab::Mixer => Icon::MixerFaders,
+        DockTab::Loudness => Icon::LoudnessMeter,
         DockTab::Scopes => Icon::ScopesWave,
         DockTab::Notes => Icon::NotesPad,
     }
@@ -377,26 +380,55 @@ impl NeovegTileBehavior<'_> {
                 siblings: vec![(tile_id, pane, true)],
             });
 
-        let avail = ui.available_rect_before_wrap();
-        let max_w = (avail.width() - 6.0).max(120.0);
-        let mut rows = 1usize;
-        let mut cur_x = 0.0_f32;
-        for (_, sib_pane, _) in &snapshot.siblings {
-            let item_w = 32.0 + sib_pane.title().chars().count() as f32 * 7.0;
-            if cur_x > 0.0 && cur_x + item_w + 4.0 > max_w {
-                rows += 1;
-                cur_x = item_w;
-            } else {
-                cur_x += item_w + 4.0;
+        let outer_rect = ui.available_rect_before_wrap();
+        let inner = outer_rect.shrink(2.0);
+        let max_w = inner.width().max(80.0);
+        let font_id = egui::TextStyle::Button.resolve(ui.style());
+        let item_sp = ui.spacing().item_spacing;
+        let text_fg = self.app.theme.text_primary;
+
+        let mut tabs_est_w = 0.0_f32;
+        let mut btn_h = 20.0_f32;
+        for (idx, (_, sib_pane, _)) in snapshot.siblings.iter().enumerate() {
+            let g =
+                ui.painter()
+                    .layout_no_wrap(sib_pane.title().to_owned(), font_id.clone(), text_fg);
+            let item_w = (6.0 + 13.0 + g.size().x + 8.0).max(24.0);
+            btn_h = btn_h.max((4.0 + g.size().y.max(13.0)).max(19.0));
+            if idx > 0 {
+                tabs_est_w += item_sp.x;
             }
+            tabs_est_w += item_w;
         }
+
         let has_close = matches!(pane, DockPane::Preview | DockPane::MasterBus);
-        let action_w = if has_close { 60.0 } else { 32.0 + 8.0 * 7.0 };
-        if cur_x > 0.0 && cur_x + action_w + 4.0 > max_w {
-            rows += 1;
-        }
-        let strip_h = (rows.min(5) as f32) * 24.0 + 4.0;
-        let (content_rect, strip_rect) = split_pane_chrome(avail, strip_h, false);
+        let action_w = if has_close {
+            // [PopOut] + [CloseX]
+            22.0 + item_sp.x + 22.0
+        } else {
+            let g = ui
+                .painter()
+                .layout_no_wrap("Destacar".to_owned(), font_id, text_fg);
+            btn_h = btn_h.max((4.0 + g.size().y.max(13.0)).max(19.0));
+            (6.0 + 13.0 + g.size().x + 8.0).max(24.0)
+        };
+
+        let row_h = btn_h.ceil();
+        let avail_tabs_w = (max_w - action_w - item_sp.x - 4.0).max(32.0);
+        let cached_w_id = egui::Id::new(("bot_tab_content_w", snapshot.container_id));
+        let prev_tabs_w = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<f32>(cached_w_id).unwrap_or(tabs_est_w));
+        let overflow =
+            snapshot.siblings.len() > 1 && prev_tabs_w.max(tabs_est_w) > avail_tabs_w + 1.0;
+
+        let bar_h = if overflow {
+            crate::scrollbars::TAB_SCROLL_BAR_H
+        } else {
+            0.0
+        };
+        let strip_h = 3.0 + row_h + if overflow { 2.0 + bar_h } else { 0.0 } + 3.0;
+        let (content_rect, strip_rect) = split_pane_chrome(inner, strip_h, false);
 
         let mut content_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -406,41 +438,90 @@ impl NeovegTileBehavior<'_> {
         content_ui.set_clip_rect(content_rect);
         self.render_pane_body(&mut content_ui, pane);
 
-        let mut strip_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(strip_rect)
-                .id_salt(("tile_strip_bot", snapshot.container_id)),
+        ui.painter().hline(
+            (outer_rect.left() + 1.0)..=(outer_rect.right() - 1.0),
+            strip_rect.top(),
+            Stroke::new(1.0_f32, self.app.theme.border),
         );
-        strip_ui.set_clip_rect(strip_rect);
-        strip_ui.separator();
-        strip_ui.horizontal_wrapped(|ui| {
-            let active_sib = snapshot
-                .siblings
-                .iter()
-                .find(|(_, _, active)| *active)
-                .map(|&(id, p, _)| (id, p))
-                .unwrap_or((tile_id, pane));
 
-            for &(sib_id, sib_pane, active) in &snapshot.siblings {
-                let resp = icons::small_icon_drag_button(
-                    ui,
-                    sib_pane.icon(),
-                    Some(sib_pane.title()),
-                    active,
-                    &self.app.theme,
-                )
-                .on_hover_text(
-                    "Clique para selecionar; arraste para dividir ou reorganizar painéis",
-                );
-                if resp.clicked() {
-                    self.pending_activate = Some((snapshot.container_id, sib_id, sib_pane));
-                }
-                if resp.drag_started() {
-                    self.pending_drag_tile = Some(sib_id);
-                }
-                resp.context_menu(|ui| self.queue_pane_context_menu(ui, sib_pane));
-            }
+        let row_top = strip_rect.top() + 3.0;
+        let row_bottom = (row_top + row_h).min(strip_rect.bottom());
+        let actions_left = (strip_rect.right() - action_w - 2.0).max(strip_rect.left() + 36.0);
+        let tabs_rect = egui::Rect::from_min_max(
+            egui::pos2(strip_rect.left() + 2.0, row_top),
+            egui::pos2(
+                (actions_left - 4.0).max(strip_rect.left() + 4.0),
+                row_bottom,
+            ),
+        );
+        let actions_rect = egui::Rect::from_min_max(
+            egui::pos2(actions_left, row_top),
+            egui::pos2(strip_rect.right() - 2.0, row_bottom),
+        );
 
+        let active_sib = snapshot
+            .siblings
+            .iter()
+            .find(|(_, _, active)| *active)
+            .map(|&(id, p, _)| (id, p))
+            .unwrap_or((tile_id, pane));
+
+        let active_cache_id = egui::Id::new(("bot_tab_last_active", snapshot.container_id));
+        let prev_active = ui.ctx().data_mut(|d| d.get_temp::<TileId>(active_cache_id));
+        let active_changed = prev_active != Some(active_sib.0);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(active_cache_id, active_sib.0));
+
+        let mut tabs_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(tabs_rect)
+                .id_salt(("tile_strip_tabs", snapshot.container_id)),
+        );
+        tabs_ui.set_clip_rect(tabs_rect);
+        let scroll_out = egui::ScrollArea::horizontal()
+            .id_salt(("tile_strip_scroll", snapshot.container_id))
+            .auto_shrink([false, false])
+            .max_width(tabs_rect.width())
+            .max_height(tabs_rect.height())
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(&mut tabs_ui, |ui| {
+                ui.horizontal(|ui| {
+                    for &(sib_id, sib_pane, active) in &snapshot.siblings {
+                        let resp = icons::small_icon_drag_button(
+                            ui,
+                            sib_pane.icon(),
+                            Some(sib_pane.title()),
+                            active,
+                            &self.app.theme,
+                        )
+                        .on_hover_text(
+                            "Clique para selecionar; arraste para dividir ou reorganizar painéis",
+                        );
+                        if active && active_changed {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if resp.clicked() {
+                            self.pending_activate = Some((snapshot.container_id, sib_id, sib_pane));
+                        }
+                        if resp.drag_started() {
+                            self.pending_drag_tile = Some(sib_id);
+                        }
+                        resp.context_menu(|ui| self.queue_pane_context_menu(ui, sib_pane));
+                    }
+                });
+            });
+
+        let measured_content_w = scroll_out.content_size.x.max(tabs_est_w);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(cached_w_id, measured_content_w));
+
+        let mut actions_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(actions_rect)
+                .id_salt(("tile_strip_actions", snapshot.container_id)),
+        );
+        actions_ui.set_clip_rect(actions_rect);
+        actions_ui.horizontal(|ui| {
             if icons::small_icon_button(
                 ui,
                 Icon::PopOut,
@@ -461,15 +542,76 @@ impl NeovegTileBehavior<'_> {
                 self.pending_close.push(active_sib.1);
             }
         });
+
+        let tab_range = crate::scrollbars::ScrollbarRange {
+            offset: scroll_out.state.offset.x,
+            content: measured_content_w,
+            viewport: tabs_rect.width(),
+        };
+
+        let mut next_scroll_x = None;
+        if overflow && strip_rect.bottom() - row_bottom >= bar_h + 2.0 {
+            let bar_rect = egui::Rect::from_min_max(
+                egui::pos2(strip_rect.left() + 2.0, row_bottom + 2.0),
+                egui::pos2(strip_rect.right() - 2.0, row_bottom + 2.0 + bar_h),
+            );
+            let step = (tabs_rect.width() * 0.35).clamp(48.0, 160.0);
+            let outcome = crate::scrollbars::arrow_scrollbar(
+                ui,
+                egui::Id::new(("tile_strip_hbar", snapshot.container_id)),
+                bar_rect,
+                crate::scrollbars::Axis::Horizontal,
+                tab_range,
+                step,
+                "Rolar abas para a esquerda",
+                "Rolar abas para a direita",
+                &self.app.theme,
+            );
+            if outcome.new_offset.is_some() {
+                next_scroll_x = outcome.new_offset;
+            }
+        }
+
+        // Roda do mouse sobre a faixa de abas rola horizontalmente.
+        if tab_range.is_scrollable()
+            && ui
+                .ctx()
+                .pointer_hover_pos()
+                .is_some_and(|p| strip_rect.contains(p))
+        {
+            let delta = ui.input(|i| i.smooth_scroll_delta);
+            let wheel = if delta.x.abs() > 0.1 {
+                -delta.x
+            } else if delta.y.abs() > 0.1 {
+                -delta.y
+            } else {
+                0.0
+            };
+            if wheel.abs() > 0.1 {
+                let cur = next_scroll_x.unwrap_or_else(|| tab_range.sanitized_offset());
+                next_scroll_x = Some((cur + wheel).clamp(0.0, tab_range.max_offset()));
+            }
+        }
+
+        if let Some(sx) = next_scroll_x {
+            let mut st = scroll_out.state;
+            st.offset.x = sx;
+            st.store(ui.ctx(), scroll_out.id);
+            ui.ctx().request_repaint();
+        }
     }
 
     fn render_pane_body(&mut self, ui: &mut Ui, pane: DockPane) {
         match pane {
             DockPane::Tab(tab) => {
-                egui::ScrollArea::both()
-                    .id_salt(("dock_tab_scroll", tab.command_id()))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.app.show_dock_tab_contents(ui, tab));
+                let theme = self.app.theme.clone();
+                crate::scrollbars::arrow_scroll_area(
+                    ui,
+                    egui::Id::new(("dock_tab_scroll", tab.command_id())),
+                    &theme,
+                    true,
+                    |ui| self.app.show_dock_tab_contents(ui, tab),
+                );
             }
             DockPane::Preview => self.app.preview_panel(ui, false),
             DockPane::MasterBus => self.app.master_bus_panel(ui, false),

@@ -65,11 +65,15 @@ pub enum Icon {
     ResetSpin,
     CloseX,
     Backspace,
+    LoudnessMeter,
+    BusTrack,
+    TrimmerBlade,
+    EditDetailsTable,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 57] = [
+    pub const ALL: [Icon; 61] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -127,6 +131,10 @@ impl Icon {
         Icon::ResetSpin,
         Icon::CloseX,
         Icon::Backspace,
+        Icon::LoudnessMeter,
+        Icon::BusTrack,
+        Icon::TrimmerBlade,
+        Icon::EditDetailsTable,
     ];
 }
 
@@ -914,6 +922,35 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             );
             c.line(0.46, 0.36, 0.72, 0.64, pal.red, 0.09);
             c.line(0.72, 0.36, 0.46, 0.64, pal.red, 0.09);
+        }
+        Icon::LoudnessMeter => {
+            c.p.rect_filled(c.rect(0.14, 0.24, 0.34, 0.86), c.u(0.03), pal.green);
+            c.p.rect_filled(c.rect(0.40, 0.16, 0.60, 0.86), c.u(0.03), pal.amber);
+            c.p.rect_filled(c.rect(0.66, 0.34, 0.86, 0.86), c.u(0.03), pal.cyan);
+            c.line(0.10, 0.36, 0.90, 0.36, pal.ink, 0.08);
+        }
+        Icon::BusTrack => {
+            let r = c.rect(0.12, 0.16, 0.88, 0.84);
+            c.p.rect_filled(r, c.u(0.07), pal.cyan.gamma_multiply(0.30));
+            c.p.rect_stroke(r, c.u(0.07), c.stroke(0.07, pal.cyan), StrokeKind::Inside);
+            c.line(0.24, 0.42, 0.76, 0.42, pal.ink, 0.10);
+            c.line(0.24, 0.62, 0.62, 0.62, pal.ink, 0.10);
+            c.poly(&[(0.78, 0.62), (0.62, 0.52), (0.62, 0.72)], pal.amber, None);
+        }
+        Icon::TrimmerBlade => {
+            c.p.rect_filled(c.rect(0.24, 0.24, 0.76, 0.76), c.u(0.04), pal.blue);
+            c.line(0.22, 0.16, 0.22, 0.84, pal.green, 0.11);
+            c.line(0.78, 0.16, 0.78, 0.84, pal.amber, 0.11);
+            c.line(0.50, 0.12, 0.50, 0.88, pal.red, 0.08);
+        }
+        Icon::EditDetailsTable => {
+            let r = c.rect(0.12, 0.16, 0.88, 0.84);
+            c.p.rect_filled(r, c.u(0.05), pal.paper.gamma_multiply(0.18));
+            c.p.rect_filled(c.rect(0.12, 0.16, 0.88, 0.34), 0.0, pal.blue);
+            c.p.rect_stroke(r, c.u(0.05), c.stroke(0.06, pal.ink), StrokeKind::Inside);
+            c.line(0.14, 0.52, 0.86, 0.52, pal.muted, 0.06);
+            c.line(0.14, 0.70, 0.86, 0.70, pal.muted, 0.06);
+            c.line(0.42, 0.18, 0.42, 0.84, pal.muted, 0.06);
         }
     }
 }

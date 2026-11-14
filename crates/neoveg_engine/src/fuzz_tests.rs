@@ -553,3 +553,98 @@ fn fuzz_otio_json() {
         });
     }
 }
+
+#[test]
+fn fuzz_subtitles_srt_and_vtt() {
+    let valid_srt = "1\n00:00:01,000 --> 00:00:03,500\n<i>Olá</i> mundo\n\n2\n00:00:04,000 --> 00:00:06,250\nSegunda fala\n";
+    for (i, m) in mutations(valid_srt.as_bytes(), 250, 0x5352)
+        .iter()
+        .enumerate()
+    {
+        let text = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("SRT", i, || {
+            if let Ok((cues, _)) = crate::subtitles::parse_srt(&text) {
+                let mut p = Project::new_default();
+                crate::subtitles::import_subtitles_into_project(&mut p, &cues, "Sub");
+                let _ = crate::subtitles::export_srt_string(&p);
+            }
+        });
+    }
+
+    let valid_vtt = "WEBVTT - Demo\nKind: captions\n\nNOTE ignore me\n\n1\n00:01.200 --> 00:03.400 align:left line:25%\n<c.cyan>Texto</c> WebVTT\n";
+    for (i, m) in mutations(valid_vtt.as_bytes(), 250, 0x5654)
+        .iter()
+        .enumerate()
+    {
+        let text = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("WebVTT", i, || {
+            if let Ok((cues, _)) = crate::subtitles::parse_vtt(&text) {
+                let mut p = Project::new_default();
+                crate::subtitles::import_subtitles_into_project(&mut p, &cues, "VTT");
+                let _ = crate::subtitles::export_vtt_string(&p);
+            }
+        });
+    }
+}
+
+#[test]
+fn fuzz_edl_cmx3600() {
+    let valid_edl = "\
+TITLE: Fuzz EDL
+FCM: NON-DROP FRAME
+
+001  001      V     C        00:00:00:00 00:00:04:00 01:00:00:00 01:00:04:00
+* FROM CLIP NAME: Corte 1
+* SOURCE FILE: C:/clip1.mp4
+002  002      B     D    024 00:00:01:00 00:00:05:00 01:00:04:00 01:00:08:00
+* FROM CLIP NAME: Corte 2
+* LOC: 01:00:02:12 YELLOW Ponto A
+M2   002      48.00          00:00:01:00
+";
+    for (i, m) in mutations(valid_edl.as_bytes(), 250, 0x4544)
+        .iter()
+        .enumerate()
+    {
+        let text = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("CMX3600", i, || {
+            if let Ok((p, _)) = crate::edl::import_edl_str(&text, crate::time::FrameRate::FPS_24) {
+                let _ = crate::edl::export_edl_string(&p, None);
+            }
+        });
+    }
+}
+
+#[test]
+fn fuzz_fcpxml() {
+    let valid_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" frameDuration="1001/24000s" width="1920" height="1080"/>
+    <asset id="r2" name="A" src="file:///C:/a.mp4" duration="240/24s" hasVideo="1" hasAudio="1"/>
+    <effect id="r3" name="Basic Title"/>
+  </resources>
+  <library><event name="E"><project name="Fuzz FCPXML"><sequence format="r1" duration="240/24s" tcStart="0s">
+    <spine>
+      <gap name="Gap" offset="0s" duration="1s"/>
+      <asset-clip name="A" ref="r2" offset="1s" start="0s" duration="3s">
+        <title name="T" ref="r3" lane="1" offset="500/1000s" duration="2s"><text><text-style>Oi &amp; Bye</text-style></text></title>
+        <marker start="1s" value="M1"/>
+      </asset-clip>
+      <transition name="Cross Dissolve" offset="4s" duration="1s"/>
+      <asset-clip name="A2" ref="r2" offset="4s" start="2s" duration="3s"/>
+    </spine>
+  </sequence></project></event></library>
+</fcpxml>"#;
+    for (i, m) in mutations(valid_xml.as_bytes(), 250, 0x4643)
+        .iter()
+        .enumerate()
+    {
+        let text = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("FCPXML", i, || {
+            if let Ok((p, _)) = crate::fcpxml::import_fcpxml_str(&text) {
+                let _ = crate::fcpxml::export_fcpxml_string(&p, None);
+            }
+        });
+    }
+}

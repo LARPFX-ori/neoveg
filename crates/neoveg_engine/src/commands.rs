@@ -276,26 +276,32 @@ impl Shortcut {
 pub enum DockPanel {
     ProjectMedia,
     Explorer,
+    Trimmer,
+    EditDetails,
     Transitions,
     VideoFx,
     ColorGrading,
     AudioFx,
     Generators,
     Mixer,
+    Loudness,
     Scopes,
     Notes,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 10] = [
+    pub const ALL: [DockPanel; 13] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
+        DockPanel::Trimmer,
+        DockPanel::EditDetails,
         DockPanel::Transitions,
         DockPanel::VideoFx,
         DockPanel::ColorGrading,
         DockPanel::AudioFx,
         DockPanel::Generators,
         DockPanel::Mixer,
+        DockPanel::Loudness,
         DockPanel::Scopes,
         DockPanel::Notes,
     ];
@@ -304,12 +310,15 @@ impl DockPanel {
         match self {
             DockPanel::ProjectMedia => "Mídia do Projeto",
             DockPanel::Explorer => "Explorer",
+            DockPanel::Trimmer => "Trimmer",
+            DockPanel::EditDetails => "Detalhes da Edição",
             DockPanel::Transitions => "Transições",
             DockPanel::VideoFx => "Efeitos de Vídeo",
             DockPanel::ColorGrading => "Color Grading",
             DockPanel::AudioFx => "Efeitos de Áudio",
             DockPanel::Generators => "Geradores de Mídia",
             DockPanel::Mixer => "Mixer",
+            DockPanel::Loudness => "Medidores de Loudness",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
         }
@@ -319,12 +328,15 @@ impl DockPanel {
         match self {
             DockPanel::ProjectMedia => "view.tab.project_media",
             DockPanel::Explorer => "view.tab.explorer",
+            DockPanel::Trimmer => "view.tab.trimmer",
+            DockPanel::EditDetails => "view.tab.edit_details",
             DockPanel::Transitions => "view.tab.transitions",
             DockPanel::VideoFx => "view.tab.video_fx",
             DockPanel::ColorGrading => "view.tab.color_grading",
             DockPanel::AudioFx => "view.tab.audio_fx",
             DockPanel::Generators => "view.tab.generators",
             DockPanel::Mixer => "view.tab.mixer",
+            DockPanel::Loudness => "view.tab.loudness",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
         }
@@ -342,6 +354,13 @@ pub enum UiAction {
     ImportSequenceDialog,
     ImportOtioDialog,
     ExportOtioDialog,
+    ImportSubtitlesDialog,
+    ExportSrtDialog,
+    ExportVttDialog,
+    ImportEdlDialog,
+    ExportEdlDialog,
+    ImportFcpxmlDialog,
+    ExportFcpxmlDialog,
     OpenRenderDialog,
     SnapshotDialog,
     OpenProjectProps,
@@ -506,6 +525,30 @@ fn ui_action(action: UiAction, host: &mut dyn CommandHost) -> Result<CommandOutc
     Ok(CommandOutcome::UiDispatched(action))
 }
 
+fn export_or_ui(
+    s: &EditorSession,
+    h: &mut dyn CommandHost,
+    action: UiAction,
+    ext: &str,
+    label: &str,
+    writer: impl FnOnce(
+        &EditorSession,
+        &std::path::Path,
+    ) -> Result<(), neoveg_common::error::NeovegError>,
+) -> Result<CommandOutcome, String> {
+    if h.supports_ui() {
+        ui_action(action, h)
+    } else if let Some(p) = s.path.as_ref() {
+        let out_path = p.with_extension(ext);
+        writer(s, &out_path).map_err(|e| format!("{e}"))?;
+        Ok(CommandOutcome::Executed)
+    } else {
+        Err(format!(
+            "projeto ainda não tem caminho definido para exportar {label} sem diálogo"
+        ))
+    }
+}
+
 fn ok_mutated(
     session: &mut EditorSession,
     host: &mut dyn CommandHost,
@@ -614,15 +657,103 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
-            if h.supports_ui() {
-                ui_action(UiAction::ExportOtioDialog, h)
-            } else if let Some(p) = s.path.as_ref() {
-                let out_path = p.with_extension("otio");
-                crate::otio::export_otio_file(&s.project, &out_path).map_err(|e| format!("{e}"))?;
-                Ok(CommandOutcome::Executed)
-            } else {
-                Err("projeto ainda não tem caminho definido para exportar OTIO sem diálogo".into())
-            }
+            export_or_ui(
+                s,
+                h,
+                UiAction::ExportOtioDialog,
+                "otio",
+                "OTIO",
+                |sess, p| crate::otio::export_otio_file(&sess.project, p),
+            )
+        },
+    },
+    CommandDef {
+        id: "file.import_subtitles",
+        label: "Importar legendas (SRT/WebVTT)...",
+        menu_path: "Arquivo/Importar legendas (SRT/WebVTT)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportSubtitlesDialog, h),
+    },
+    CommandDef {
+        id: "file.export_srt",
+        label: "Exportar legendas SRT (.srt)...",
+        menu_path: "Arquivo/Exportar legendas SRT (.srt)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(s, h, UiAction::ExportSrtDialog, "srt", "SRT", |sess, p| {
+                crate::subtitles::export_srt_file(&sess.project, p).map(|_| ())
+            })
+        },
+    },
+    CommandDef {
+        id: "file.export_vtt",
+        label: "Exportar legendas WebVTT (.vtt)...",
+        menu_path: "Arquivo/Exportar legendas WebVTT (.vtt)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(
+                s,
+                h,
+                UiAction::ExportVttDialog,
+                "vtt",
+                "WebVTT",
+                |sess, p| crate::subtitles::export_vtt_file(&sess.project, p).map(|_| ()),
+            )
+        },
+    },
+    CommandDef {
+        id: "file.import_edl",
+        label: "Importar EDL CMX 3600 (.edl)...",
+        menu_path: "Arquivo/Importar EDL CMX 3600 (.edl)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportEdlDialog, h),
+    },
+    CommandDef {
+        id: "file.export_edl",
+        label: "Exportar EDL CMX 3600 (.edl)...",
+        menu_path: "Arquivo/Exportar EDL CMX 3600 (.edl)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(s, h, UiAction::ExportEdlDialog, "edl", "EDL", |sess, p| {
+                crate::edl::export_edl_file(&sess.project, p, None)
+            })
+        },
+    },
+    CommandDef {
+        id: "file.import_fcpxml",
+        label: "Importar Final Cut Pro XML (.fcpxml)...",
+        menu_path: "Arquivo/Importar Final Cut Pro XML (.fcpxml)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportFcpxmlDialog, h),
+    },
+    CommandDef {
+        id: "file.export_fcpxml",
+        label: "Exportar Final Cut Pro XML (.fcpxml)...",
+        menu_path: "Arquivo/Exportar Final Cut Pro XML (.fcpxml)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(
+                s,
+                h,
+                UiAction::ExportFcpxmlDialog,
+                "fcpxml",
+                "FCPXML",
+                |sess, p| crate::fcpxml::export_fcpxml_file(&sess.project, p, None),
+            )
         },
     },
     CommandDef {
@@ -991,6 +1122,24 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Explorer), h),
     },
     CommandDef {
+        id: "view.tab.trimmer",
+        label: "Trimmer",
+        menu_path: "Exibir/Trimmer",
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num2)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Trimmer), h),
+    },
+    CommandDef {
+        id: "view.tab.edit_details",
+        label: "Detalhes da Edição",
+        menu_path: "Exibir/Detalhes da Edição",
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num3)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::EditDetails), h),
+    },
+    CommandDef {
         id: "view.tab.transitions",
         label: "Transições",
         menu_path: "Exibir/Transições",
@@ -1043,6 +1192,27 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Mixer), h),
+    },
+    CommandDef {
+        id: "view.tab.loudness",
+        label: "Medidores de Loudness",
+        menu_path: "Exibir/Medidores de Loudness",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num7)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Loudness), h),
+    },
+    CommandDef {
+        id: "view.bus_tracks",
+        label: "Mostrar trilhas de barramentos",
+        menu_path: "Exibir/Mostrar trilhas de barramentos",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::B)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.show_bus_tracks = !s.opts.show_bus_tracks;
+            ok_mutated(s, h)
+        },
     },
     CommandDef {
         id: "view.tab.scopes",

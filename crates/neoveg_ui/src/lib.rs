@@ -16,12 +16,15 @@ mod color_grading;
 mod dialogs;
 mod dock;
 mod edit;
+mod edit_details;
 mod icons;
 pub mod layout;
 mod panels;
+mod scrollbars;
 mod splash;
 pub mod theme;
 mod timeline;
+mod trimmer_panel;
 mod welcome;
 
 #[cfg(test)]

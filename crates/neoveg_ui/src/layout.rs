@@ -13,12 +13,15 @@ pub fn panel_key(tab: DockTab) -> &'static str {
     match tab {
         DockTab::ProjectMedia => "project_media",
         DockTab::Explorer => "explorer",
+        DockTab::Trimmer => "trimmer",
+        DockTab::EditDetails => "edit_details",
         DockTab::Transitions => "transitions",
         DockTab::VideoFx => "video_fx",
         DockTab::ColorGrading => "color_grading",
         DockTab::AudioFx => "audio_fx",
         DockTab::Generators => "generators",
         DockTab::Mixer => "mixer",
+        DockTab::Loudness => "loudness",
         DockTab::Scopes => "scopes",
         DockTab::Notes => "notes",
     }

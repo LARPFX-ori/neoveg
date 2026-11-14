@@ -14,6 +14,7 @@ use neoveg_engine::commands::{
     self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
     ShortcutKey, UiAction, COMMANDS,
 };
+use neoveg_engine::engine::loudness::{LoudnessReport, LoudnessSnapshot, LoudnessTarget};
 use neoveg_engine::media::{self, MediaCache};
 use neoveg_engine::model::*;
 use neoveg_engine::otio;
@@ -25,6 +26,7 @@ use neoveg_engine::util;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -66,7 +68,14 @@ pub enum LoadMsg {
         end: Ticks,
         result: Result<PathBuf, String>,
     },
+    LoudnessAnalyzed(Result<LoudnessReport, String>),
     Error(String),
+}
+
+pub struct LoudnessJob {
+    pub cancel: Arc<AtomicBool>,
+    pub done: Arc<AtomicU64>,
+    pub total: Arc<AtomicU64>,
 }
 
 pub struct RenderJob {
@@ -118,6 +127,12 @@ pub struct App {
     pub(crate) last_frame: Instant,
     pub(crate) meters_hold: HashMap<Id, [f32; 2]>,
     pub(crate) master_hold: [f32; 2],
+    pub loudness_target: LoudnessTarget,
+    pub loudness_live: LoudnessSnapshot,
+    pub loudness_report: Option<LoudnessReport>,
+    pub loudness_job: Option<LoudnessJob>,
+    pub trimmer: crate::trimmer_panel::TrimmerState,
+    pub edit_details: crate::edit_details::EditDetailsState,
     pub(crate) confirm_close: bool,
     pub(crate) allow_close: bool,
     pub shuttle: f64,
@@ -254,6 +269,12 @@ impl App {
             last_frame: Instant::now(),
             meters_hold: HashMap::new(),
             master_hold: [0.0; 2],
+            loudness_target: LoudnessTarget::default(),
+            loudness_live: LoudnessSnapshot::default(),
+            loudness_report: None,
+            loudness_job: None,
+            trimmer: crate::trimmer_panel::TrimmerState::default(),
+            edit_details: crate::edit_details::EditDetailsState::default(),
             confirm_close: false,
             allow_close: false,
             shuttle: 0.0,
@@ -608,13 +629,27 @@ impl App {
     }
 
     pub fn open_project_path(&mut self, path: PathBuf) {
-        if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("otio"))
-        {
-            self.import_otio_path(&path);
-            return;
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext_low = ext.to_ascii_lowercase();
+            match ext_low.as_str() {
+                "otio" => {
+                    self.import_otio_path(&path);
+                    return;
+                }
+                "edl" => {
+                    self.import_edl_path(&path);
+                    return;
+                }
+                "fcpxml" => {
+                    self.import_fcpxml_path(&path);
+                    return;
+                }
+                "srt" | "vtt" => {
+                    self.import_subtitles_path(&path);
+                    return;
+                }
+                _ => {}
+            }
         }
         // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
         let res = Project::load_file(&path);
@@ -640,6 +675,43 @@ impl App {
         }
     }
 
+    fn apply_imported_project(
+        &mut self,
+        label: &str,
+        path: &std::path::Path,
+        res: Result<(Project, Vec<String>), neoveg_common::error::NeovegError>,
+    ) {
+        match res {
+            Ok((p, warnings)) => {
+                self.stop(false);
+                for w in &warnings {
+                    util::log_warn(&format!("{label}: {w}"));
+                }
+                self.session.reset_project(p, None);
+                self.reload_all_media();
+                if warnings.is_empty() {
+                    self.set_status(format!("{label} importado: {}", path.display()));
+                } else {
+                    self.set_status(format!(
+                        "{label} importado com {} aviso(s): {}",
+                        warnings.len(),
+                        path.display()
+                    ));
+                }
+            }
+            Err(e) => self.set_status(format!("Erro ao importar {label}: {e}")),
+        }
+    }
+
+    fn export_interchange_path(&self, ext: &str) -> String {
+        self.path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s}.{ext}"))
+            .unwrap_or_else(|| format!("projeto.{ext}"))
+    }
+
     pub fn import_otio_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("OpenTimelineIO", &["otio", "json"])
@@ -650,36 +722,12 @@ impl App {
     }
 
     pub fn import_otio_path(&mut self, path: &std::path::Path) {
-        match otio::import_otio_file(path) {
-            Ok((p, warnings)) => {
-                self.stop(false);
-                for w in &warnings {
-                    util::log_warn(&format!("OTIO: {w}"));
-                }
-                self.session.reset_project(p, None);
-                self.reload_all_media();
-                if warnings.is_empty() {
-                    self.set_status(format!("OTIO importado: {}", path.display()));
-                } else {
-                    self.set_status(format!(
-                        "OTIO importado com {} aviso(s): {}",
-                        warnings.len(),
-                        path.display()
-                    ));
-                }
-            }
-            Err(e) => self.set_status(format!("Erro ao importar OTIO: {e}")),
-        }
+        let res = otio::import_otio_file(path);
+        self.apply_imported_project("OTIO", path, res);
     }
 
     pub fn export_otio_dialog(&mut self) {
-        let default_name = self
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .and_then(|s| s.to_str())
-            .map(|s| format!("{s}.otio"))
-            .unwrap_or_else(|| "projeto.otio".into());
+        let default_name = self.export_interchange_path("otio");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("OpenTimelineIO", &["otio"])
             .set_file_name(&default_name)
@@ -691,6 +739,137 @@ impl App {
         match otio::export_otio_file(&self.session.project, &p) {
             Ok(()) => self.set_status(format!("OTIO exportado: {}", p.display())),
             Err(e) => self.set_status(format!("Erro ao exportar OTIO: {e}")),
+        }
+    }
+
+    pub fn import_subtitles_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Legendas", &["srt", "vtt"])
+            .pick_file()
+        {
+            self.import_subtitles_path(&p);
+        }
+    }
+
+    pub fn import_subtitles_path(&mut self, path: &std::path::Path) {
+        match neoveg_engine::subtitles::import_subtitles_file(path) {
+            Ok((fmt, cues, warnings)) => {
+                for w in &warnings {
+                    util::log_warn(&format!("Legendas: {w}"));
+                }
+                if cues.is_empty() {
+                    self.set_status(format!("Nenhuma legenda encontrada em {}", path.display()));
+                    return;
+                }
+                self.checkpoint();
+                let label = match fmt {
+                    neoveg_engine::subtitles::SubtitleFormat::Srt => "Legendas (SRT)",
+                    neoveg_engine::subtitles::SubtitleFormat::Vtt => "Legendas (WebVTT)",
+                };
+                let added = neoveg_engine::subtitles::import_subtitles_into_project(
+                    &mut self.session.project,
+                    &cues,
+                    label,
+                );
+                self.changed();
+                self.set_status(format!(
+                    "{added} legenda(s) importada(s) de {}",
+                    path.display()
+                ));
+            }
+            Err(e) => self.set_status(format!("Erro ao importar legendas: {e}")),
+        }
+    }
+
+    pub fn export_subtitles_dialog(&mut self, fmt: neoveg_engine::subtitles::SubtitleFormat) {
+        let (label, ext) = match fmt {
+            neoveg_engine::subtitles::SubtitleFormat::Srt => ("Legendas SubRip", "srt"),
+            neoveg_engine::subtitles::SubtitleFormat::Vtt => ("Legendas WebVTT", "vtt"),
+        };
+        let default_name = self.export_interchange_path(ext);
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter(label, &[ext])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        let res = match fmt {
+            neoveg_engine::subtitles::SubtitleFormat::Srt => {
+                neoveg_engine::subtitles::export_srt_file(&self.session.project, &p)
+            }
+            neoveg_engine::subtitles::SubtitleFormat::Vtt => {
+                neoveg_engine::subtitles::export_vtt_file(&self.session.project, &p)
+            }
+        };
+        match res {
+            Ok(n) => self.set_status(format!(
+                "{label} exportado ({n} legenda(s)): {}",
+                p.display()
+            )),
+            Err(e) => self.set_status(format!("Erro ao exportar {label}: {e}")),
+        }
+    }
+
+    pub fn import_edl_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("CMX 3600 EDL", &["edl"])
+            .pick_file()
+        {
+            self.import_edl_path(&p);
+        }
+    }
+
+    pub fn import_edl_path(&mut self, path: &std::path::Path) {
+        let fps = self.session.project.settings.fps;
+        let res = neoveg_engine::edl::import_edl_file(path, fps);
+        self.apply_imported_project("EDL CMX 3600", path, res);
+    }
+
+    pub fn export_edl_dialog(&mut self) {
+        let default_name = self.export_interchange_path("edl");
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("CMX 3600 EDL", &["edl"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::edl::export_edl_file(&self.session.project, &p, None) {
+            Ok(()) => self.set_status(format!("EDL CMX 3600 exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar EDL: {e}")),
+        }
+    }
+
+    pub fn import_fcpxml_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Final Cut Pro XML", &["fcpxml", "xml"])
+            .pick_file()
+        {
+            self.import_fcpxml_path(&p);
+        }
+    }
+
+    pub fn import_fcpxml_path(&mut self, path: &std::path::Path) {
+        let res = neoveg_engine::fcpxml::import_fcpxml_file(path);
+        self.apply_imported_project("FCPXML", path, res);
+    }
+
+    pub fn export_fcpxml_dialog(&mut self) {
+        let default_name = self.export_interchange_path("fcpxml");
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Final Cut Pro XML", &["fcpxml"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::fcpxml::export_fcpxml_file(&self.session.project, &p, None) {
+            Ok(()) => self.set_status(format!("FCPXML exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar FCPXML: {e}")),
         }
     }
 
@@ -891,6 +1070,23 @@ impl App {
                         Err(e) => self.set_status(format!("Erro na pré-renderização: {e}")),
                     }
                 }
+                LoadMsg::LoudnessAnalyzed(result) => {
+                    self.loudness_job = None;
+                    match result {
+                        Ok(rep) => {
+                            let summary = format!(
+                                "Loudness analisado: {} (LRA {:.1} LU)",
+                                neoveg_engine::engine::loudness::format_lufs(
+                                    rep.snapshot.integrated_lufs
+                                ),
+                                rep.snapshot.loudness_range_lu
+                            );
+                            self.loudness_report = Some(rep);
+                            self.set_status(summary);
+                        }
+                        Err(e) => self.set_status(format!("Análise de loudness: {e}")),
+                    }
+                }
                 LoadMsg::Error(e) => self.set_status(format!("Erro de importação: {e}")),
             }
         }
@@ -915,46 +1111,14 @@ impl App {
         t: Ticks,
         track_hint: Option<usize>,
     ) -> Vec<Id> {
-        let Some(m) = self.project.media(media_id).cloned() else {
-            return vec![];
-        };
         let still_len = Ticks::from_secs_f64_clamped(self.prefs.still_image_secs as f64);
-        let len = m
-            .duration
+        let len = self
+            .project
+            .media(media_id)
+            .and_then(|m| m.duration)
             .unwrap_or(still_len)
             .max(self.project.settings.frame_dur());
-        let mut created = vec![];
-        let group = if m.has_video && m.has_audio {
-            Some(new_id())
-        } else {
-            None
-        };
-        let mut video_track_idx = None;
-        if m.has_video {
-            let ti = self.find_or_create_track(TrackKind::Video, track_hint);
-            let mut e = Event::new(&m, t, len);
-            e.group = group;
-            if m.duration.is_none() {
-                e.looped = false;
-            }
-            created.push(e.id);
-            self.project.tracks[ti].events.push(e);
-            video_track_idx = Some(ti);
-        }
-        if m.has_audio {
-            let hint = match video_track_idx {
-                Some(v) => Some(v + 1),
-                None => track_hint,
-            };
-            let ti = self.find_or_create_track(TrackKind::Audio, hint);
-            let mut e = Event::new(&m, t, len);
-            e.group = group;
-            created.push(e.id);
-            self.project.tracks[ti].events.push(e);
-        }
-        self.sel_events = created.iter().cloned().collect();
-        self.changed();
-        created
+        self.add_trimmed_media_to_timeline(media_id, t, Ticks::ZERO, len, true, true, track_hint)
     }
 
     /// Procura uma trilha do tipo a partir do índice sugerido; cria se não houver.
@@ -1130,6 +1294,17 @@ impl App {
             UiAction::ImportSequenceDialog => self.import_sequence_dialog(),
             UiAction::ImportOtioDialog => self.import_otio_dialog(),
             UiAction::ExportOtioDialog => self.export_otio_dialog(),
+            UiAction::ImportSubtitlesDialog => self.import_subtitles_dialog(),
+            UiAction::ExportSrtDialog => {
+                self.export_subtitles_dialog(neoveg_engine::subtitles::SubtitleFormat::Srt)
+            }
+            UiAction::ExportVttDialog => {
+                self.export_subtitles_dialog(neoveg_engine::subtitles::SubtitleFormat::Vtt)
+            }
+            UiAction::ImportEdlDialog => self.import_edl_dialog(),
+            UiAction::ExportEdlDialog => self.export_edl_dialog(),
+            UiAction::ImportFcpxmlDialog => self.import_fcpxml_dialog(),
+            UiAction::ExportFcpxmlDialog => self.export_fcpxml_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -1357,6 +1532,17 @@ impl App {
                 self.cmd_menu_btn(ui, "file.import_sequence");
                 self.cmd_menu_btn(ui, "file.import_otio");
                 self.cmd_menu_btn(ui, "file.export_otio");
+                ui.menu_button("Intercâmbio & Legendas", |ui| {
+                    self.cmd_menu_btn(ui, "file.import_fcpxml");
+                    self.cmd_menu_btn(ui, "file.export_fcpxml");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "file.import_edl");
+                    self.cmd_menu_btn(ui, "file.export_edl");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "file.import_subtitles");
+                    self.cmd_menu_btn(ui, "file.export_srt");
+                    self.cmd_menu_btn(ui, "file.export_vtt");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.render");
                 self.cmd_menu_btn(ui, "file.snapshot");
@@ -1564,6 +1750,7 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
+                self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
                 ui.separator();
                 ui.label("Formato de tempo:");
                 for fmt in TimeFormat::ALL {
@@ -2101,9 +2288,12 @@ impl App {
             .iter()
             .filter(|p| {
                 is_project_file(p)
-                    || p.extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case("otio"))
+                    || p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                        matches!(
+                            e.to_ascii_lowercase().as_str(),
+                            "otio" | "edl" | "fcpxml" | "srt" | "vtt"
+                        )
+                    })
             })
             .cloned()
             .collect();
@@ -2143,6 +2333,7 @@ impl App {
         for k in 0..2 {
             self.master_hold[k] = (self.master_hold[k] * decay).max(m.master[k]);
         }
+        self.loudness_live = self.audio.loudness_snapshot();
     }
 
     fn poll_render(&mut self) {
@@ -2224,7 +2415,11 @@ impl App {
             }
             ctx.request_repaint();
         }
-        if self.render_job.is_some() || self.prerender_job.is_some() || self.loading > 0 {
+        if self.render_job.is_some()
+            || self.prerender_job.is_some()
+            || self.loudness_job.is_some()
+            || self.loading > 0
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
@@ -2592,7 +2787,7 @@ impl App {
         self.sync_snapshot();
         let proj = Arc::new((*self.session.snapshot).clone());
         let media = self.media.clone();
-        let scale = self.opts.preview_quality.resolution().scale();
+        let scale = self.opts.preview_quality.scale();
         let w = (((proj.settings.width as f32 * scale) as u32 / 2).max(32)) * 2;
         let h = (((proj.settings.height as f32 * scale) as u32 / 2).max(18)) * 2;
         let dir = neoveg_common::util::base_dir().join("prerender");
