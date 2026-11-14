@@ -46,7 +46,7 @@ python tools/check_licenses.py
 python build_portable.py
 ```
 
-O script `build_portable.py` gera o pacote portátil em `target/portable/neoveg-portable/` sem dependência de instalador, fontes proprietárias ou binários externos.
+O script `build_portable.py` gera o pacote portátil em `<target-dir>/portable/neoveg-portable/` (a pasta de build do cargo, que respeita `CARGO_TARGET_DIR`) sem dependência de instalador, fontes proprietárias ou binários externos.
 
 ## Acompanhamento de Paridade
 
