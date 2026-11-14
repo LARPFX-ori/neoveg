@@ -688,9 +688,10 @@ impl App {
                     self.import_fcpxml_path(&path);
                     return;
                 }
-                // TODO(roadmap fase 4): importar AAF (`.aaf`) a partir da
-                // especificação pública, em Sala Limpa (§2.3), com fuzzing por
-                // mutação (§0.8) e comando na Tabela Única.
+                "aaf" => {
+                    self.import_aaf_path(&path);
+                    return;
+                }
                 "srt" | "vtt" => {
                     self.import_subtitles_path(&path);
                     return;
@@ -920,6 +921,20 @@ impl App {
             return false;
         }
         neoveg_engine::fcp7xml::looks_like_fcp7(&String::from_utf8_lossy(&head))
+    }
+
+    pub fn import_aaf_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Advanced Authoring Format", &["aaf"])
+            .pick_file()
+        {
+            self.import_aaf_path(&p);
+        }
+    }
+
+    pub fn import_aaf_path(&mut self, path: &std::path::Path) {
+        let res = neoveg_engine::aaf::import_aaf_file(path);
+        self.apply_imported_project("AAF", path, res);
     }
 
     pub fn import_fcp7_dialog(&mut self) {
@@ -1402,6 +1417,7 @@ impl App {
             UiAction::ExportFcpxmlDialog => self.export_fcpxml_dialog(),
             UiAction::ImportFcp7Dialog => self.import_fcp7_dialog(),
             UiAction::ExportFcp7Dialog => self.export_fcp7_dialog(),
+            UiAction::ImportAafDialog => self.import_aaf_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -1657,6 +1673,7 @@ impl App {
                     self.cmd_menu_btn(ui, "file.export_fcpxml");
                     self.cmd_menu_btn(ui, "file.import_fcp7");
                     self.cmd_menu_btn(ui, "file.export_fcp7");
+                    self.cmd_menu_btn(ui, "file.import_aaf");
                     ui.separator();
                     self.cmd_menu_btn(ui, "file.import_edl");
                     self.cmd_menu_btn(ui, "file.export_edl");
@@ -2421,7 +2438,7 @@ impl App {
                     || p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                         matches!(
                             e.to_ascii_lowercase().as_str(),
-                            "otio" | "edl" | "fcpxml" | "xml" | "srt" | "vtt"
+                            "otio" | "edl" | "fcpxml" | "xml" | "aaf" | "srt" | "vtt"
                         )
                     })
             })

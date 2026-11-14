@@ -38,6 +38,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 claxon = "0.4.3"
 lewton = "0.10.2"
 puremp3 = "0.1.0"
+cfb = "0.16"
 
 [workspace.lints.rust]
 # AGENTS.md §0.3: unsafe proibido fora de módulos de fronteira FFI nomeados.

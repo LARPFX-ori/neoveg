@@ -16,6 +16,8 @@
 pub use neoveg_common::{curve, error, prefs, time, util};
 
 #[forbid(unsafe_code)]
+pub mod aaf;
+#[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;

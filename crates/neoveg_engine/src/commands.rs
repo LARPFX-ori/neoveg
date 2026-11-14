@@ -375,6 +375,7 @@ pub enum UiAction {
     ExportFcpxmlDialog,
     ImportFcp7Dialog,
     ExportFcp7Dialog,
+    ImportAafDialog,
     OpenRenderDialog,
     SnapshotDialog,
     OpenProjectProps,
@@ -769,6 +770,15 @@ pub static COMMANDS: &[CommandDef] = &[
                 |sess, p| crate::fcpxml::export_fcpxml_file(&sess.project, p, None),
             )
         },
+    },
+    CommandDef {
+        id: "file.import_aaf",
+        label: "Importar AAF (.aaf)...",
+        menu_path: "Arquivo/Importar AAF (.aaf)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportAafDialog, h),
     },
     CommandDef {
         id: "file.import_fcp7",
