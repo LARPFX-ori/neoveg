@@ -247,7 +247,7 @@ pub fn run(
     let den = TICKS_PER_SEC as i128 * fps.den.max(1) as i128;
     let n_frames = ((dur * fps.num.max(1) as i128 + den / 2) / den).max(1) as u64;
     let (w, h) = (s.width.max(2) as usize, s.height.max(2) as usize);
-    let mut mixer = Mixer::new(sr);
+    let mut mixer = Mixer::new_offline(sr);
     let sample_at = |i: u64| (s.start + fps.frame_to_ticks(i as i64)).to_samples_round(sr);
 
     if s.format == RenderFormat::Wav {

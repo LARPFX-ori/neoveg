@@ -606,6 +606,15 @@ fn sanitize_fx(f: &mut FxInstance) {
     } else {
         f.ofx = None;
     }
+    // idem para a referência VST3
+    if f.kind == FxKind::Vst3 {
+        match f.vst3.as_mut() {
+            Some(v) => v.sanitize(),
+            None => f.enabled = false,
+        }
+    } else {
+        f.vst3 = None;
+    }
     let specs = f.kind.params();
     f.params.truncate(specs.len());
     while f.params.len() < specs.len() {
@@ -1634,8 +1643,8 @@ impl Event {
 // Efeitos
 // ---------------------------------------------------------------------------
 
-// TODO(roadmap fase 4): efeitos externos VST3 e OpenFX (OFX) em host isolado
-// (fronteira FFI §0.3, com catch_unwind §0.6). Hoje só há DSP/efeitos nativos.
+// Efeitos externos (OFX para vídeo, VST3 para áudio) rodam no host isolado
+// `neoveg --plugin-host` (fronteira FFI §0.3); ver `plugin_host`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum FxKind {
     // vídeo
@@ -1672,6 +1681,9 @@ pub enum FxKind {
     /// Efeito de vídeo OpenFX de terceiros (ver `FxInstance::ofx`), processado
     /// no host isolado `neoveg --plugin-host`.
     Ofx,
+    /// Efeito de áudio VST3 de terceiros (ver `FxInstance::vst3`), processado
+    /// no host isolado `neoveg --plugin-host serve-vst3`.
+    Vst3,
 }
 
 /// Valor de um parâmetro de plug-in OFX, pelo nome do parâmetro.
@@ -1720,6 +1732,68 @@ impl OfxFxRef {
                     *v = 0.0;
                 }
             }
+        }
+    }
+}
+
+/// Valor normalizado (0..1) de um parâmetro VST3, pelo `ParamID` do plug-in.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vst3ParamValue {
+    pub id: u32,
+    pub value: f64,
+}
+
+/// Referência a um efeito VST3: binário do módulo, classe (`TUID` em
+/// hexadecimal) e valores normalizados dos parâmetros alterados pelo usuário.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vst3FxRef {
+    pub binary: String,
+    pub class_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub params: Vec<Vst3ParamValue>,
+}
+
+const MAX_VST3_REF_PARAMS: usize = 16384;
+
+impl Vst3FxRef {
+    /// Saneia textos, contagens e valores vindos de arquivo (§0.4).
+    pub fn sanitize(&mut self) {
+        let cut = |s: &mut String| {
+            if s.len() > MAX_OFX_REF_TEXT {
+                let mut end = MAX_OFX_REF_TEXT;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        };
+        cut(&mut self.binary);
+        cut(&mut self.class_id);
+        cut(&mut self.label);
+        self.params.truncate(MAX_VST3_REF_PARAMS);
+        let mut seen = std::collections::HashSet::new();
+        self.params.retain(|p| seen.insert(p.id));
+        for p in &mut self.params {
+            p.value = if p.value.is_finite() {
+                p.value.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+    }
+
+    /// Grava o valor normalizado de um parâmetro (substitui o anterior).
+    pub fn set_param(&mut self, id: u32, value: f64) {
+        let value = if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        match self.params.iter_mut().find(|p| p.id == id) {
+            Some(p) => p.value = value,
+            None => self.params.push(Vst3ParamValue { id, value }),
         }
     }
 }
@@ -1789,7 +1863,7 @@ impl FxKind {
     ];
 
     pub fn is_audio(self) -> bool {
-        Self::AUDIO.contains(&self)
+        self == FxKind::Vst3 || Self::AUDIO.contains(&self)
     }
 
     pub fn name(self) -> &'static str {
@@ -1824,13 +1898,15 @@ impl FxKind {
             FxKind::Distortion => "Distorção",
             FxKind::Limiter => "Limiter",
             FxKind::Ofx => "Plug-in OFX",
+            FxKind::Vst3 => "Plug-in VST3",
         }
     }
 
     pub fn params(self) -> &'static [ParamSpec] {
         match self {
-            // os parâmetros de um plug-in OFX vêm dele, em `FxInstance::ofx`
-            FxKind::Ofx => &[],
+            // os parâmetros de um plug-in OFX/VST3 vêm dele, em
+            // `FxInstance::ofx` / `FxInstance::vst3`
+            FxKind::Ofx | FxKind::Vst3 => &[],
             FxKind::BrightnessContrast => {
                 const { &[p("Brilho", -1.0, 1.0, 0.0), p("Contraste", -1.0, 1.0, 0.0)] }
             }
@@ -2064,6 +2140,9 @@ pub struct FxInstance {
     /// Só em `FxKind::Ofx`: o plug-in OFX e os valores dos parâmetros dele.
     #[serde(default)]
     pub ofx: Option<OfxFxRef>,
+    /// Só em `FxKind::Vst3`: o plug-in VST3 e os valores dos parâmetros dele.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vst3: Option<Vst3FxRef>,
 }
 
 impl FxInstance {
@@ -2081,6 +2160,7 @@ impl FxInstance {
                 })
                 .collect(),
             ofx: None,
+            vst3: None,
         }
     }
 
@@ -2096,11 +2176,26 @@ impl FxInstance {
         f
     }
 
-    /// Nome para exibição (rótulo do plug-in OFX ou nome nativo).
+    /// Efeito de áudio VST3 de terceiros (`binary` + classe), com os
+    /// parâmetros no padrão do plug-in.
+    pub fn new_vst3(binary: &str, class_id: &str, label: &str) -> Self {
+        let mut f = FxInstance::new(FxKind::Vst3);
+        f.vst3 = Some(Vst3FxRef {
+            binary: binary.into(),
+            class_id: class_id.into(),
+            label: label.into(),
+            params: vec![],
+        });
+        f
+    }
+
+    /// Nome para exibição (rótulo do plug-in externo ou nome nativo).
     pub fn display_name(&self) -> String {
-        match (&self.ofx, self.kind) {
-            (Some(o), FxKind::Ofx) if !o.label.is_empty() => o.label.clone(),
-            (Some(o), FxKind::Ofx) => o.plugin_id.clone(),
+        match (&self.ofx, &self.vst3, self.kind) {
+            (Some(o), _, FxKind::Ofx) if !o.label.is_empty() => o.label.clone(),
+            (Some(o), _, FxKind::Ofx) => o.plugin_id.clone(),
+            (_, Some(v), FxKind::Vst3) if !v.label.is_empty() => v.label.clone(),
+            (_, Some(v), FxKind::Vst3) => v.class_id.clone(),
             _ => self.kind.name().to_string(),
         }
     }
@@ -2180,6 +2275,68 @@ pub fn lin_to_db(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Referência VST3 vinda de arquivo é hostil (§0.4): valores fora de
+    /// 0..1, NaN, ids repetidos e textos enormes são saneados; um FX VST3 sem
+    /// referência fica desligado; e projetos antigos carregam sem o campo.
+    #[test]
+    fn vst3_fx_ref_is_sanitized_and_optional() {
+        let mut p = Project::new_default();
+        let mut fx = FxInstance::new_vst3("x.vst3", &"A".repeat(32), &"é".repeat(5000));
+        if let Some(r) = fx.vst3.as_mut() {
+            r.params = vec![
+                Vst3ParamValue { id: 1, value: 2.5 },
+                Vst3ParamValue { id: 2, value: -3.0 },
+                Vst3ParamValue { id: 1, value: 0.5 },
+            ];
+        }
+        let mut orphan = FxInstance::new(FxKind::Vst3);
+        orphan.vst3 = None;
+        let mut native = FxInstance::new(FxKind::Gain);
+        native.vst3 = Some(Vst3FxRef {
+            binary: "y".into(),
+            class_id: "z".into(),
+            label: String::new(),
+            params: vec![],
+        });
+        p.master.fx = vec![fx, orphan, native];
+        let json = serde_json::to_string(&p).expect("serializa");
+        let mut back: Project = serde_json::from_str(&json).expect("lê de volta");
+        // NaN não sobrevive ao JSON; injeta direto, como um script faria
+        if let Some(r) = back.master.fx[0].vst3.as_mut() {
+            r.params.push(Vst3ParamValue {
+                id: 3,
+                value: f64::NAN,
+            });
+        }
+        let _ = back.sanitize();
+        let r = back.master.fx[0].vst3.as_ref().expect("referência mantida");
+        assert_eq!(
+            r.params,
+            vec![
+                Vst3ParamValue { id: 1, value: 1.0 },
+                Vst3ParamValue { id: 2, value: 0.0 },
+                Vst3ParamValue { id: 3, value: 0.0 },
+            ]
+        );
+        assert!(r.label.len() <= 4096 && r.label.is_char_boundary(r.label.len()));
+        assert!(!back.master.fx[1].enabled, "FX VST3 sem referência desliga");
+        assert!(
+            back.master.fx[2].vst3.is_none(),
+            "FX nativo não guarda VST3"
+        );
+        assert!(FxKind::Vst3.is_audio());
+
+        // projeto salvo antes do host VST3: sem o campo `vst3`
+        let old = serde_json::json!({
+            "id": 5, "kind": "Gain", "enabled": true, "params": [{"value": 0.0, "keys": []}]
+        });
+        let f: FxInstance = serde_json::from_value(old).expect("formato antigo");
+        assert!(f.vst3.is_none());
+        // e um FX sem VST3 não grava o campo
+        let out = serde_json::to_value(FxInstance::new(FxKind::Gain)).expect("grava");
+        assert!(out.get("vst3").is_none());
+    }
 
     #[test]
     fn time_roundtrip() {

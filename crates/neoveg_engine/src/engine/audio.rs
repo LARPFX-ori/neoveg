@@ -401,6 +401,17 @@ pub struct Mixer {
     master_buf: Vec<f32>,
     /// Master 5.1 intercalado (FL, FR, C, LFE, BL, BR), só no modo surround.
     master6: Vec<f32>,
+    /// Dono das instâncias VST3 deste mixer no host isolado.
+    vst3_owner: u64,
+    /// Render/análise offline: espera o plug-in VST3 abrir em vez de passar
+    /// o sinal seco nos primeiros blocos.
+    offline: bool,
+}
+
+impl Drop for Mixer {
+    fn drop(&mut self) {
+        crate::plugin_host::vst3_release_owner(self.vst3_owner);
+    }
 }
 
 /// Fades efetivos de um evento de áudio: o maior entre o fade definido e a
@@ -488,16 +499,63 @@ impl Mixer {
             bus_bufs: vec![],
             master_buf: vec![],
             master6: vec![],
+            vst3_owner: crate::plugin_host::new_vst3_owner(),
+            offline: false,
         }
+    }
+
+    /// Mixer para render e análise offline: os efeitos VST3 são abertos de
+    /// forma síncrona, então nenhum bloco sai sem o efeito.
+    pub fn new_offline(sr: u32) -> Self {
+        let mut m = Mixer::new(sr);
+        m.offline = true;
+        m
     }
 
     /// Zera o estado dos efeitos e reamostradores (após salto de posição).
     pub fn reset(&mut self) {
         self.states.clear();
         self.event_resamplers.clear();
+        crate::plugin_host::vst3_reset_owner(self.vst3_owner);
+    }
+
+    /// Efeito VST3 pelo host isolado. Em falha o bloco passa seco e o erro
+    /// vai uma vez para o log (por efeito), sem travar o áudio.
+    fn run_vst3(&mut self, fx: &FxInstance, buf: &mut [f32]) {
+        use std::sync::{Mutex, OnceLock, PoisonError};
+        static LOGGED: OnceLock<Mutex<std::collections::HashSet<Id>>> = OnceLock::new();
+        let (Some(r), true) = (fx.vst3.as_ref(), fx.enabled) else {
+            return;
+        };
+        let Some(host) = crate::plugin_host::default_host_exe() else {
+            return;
+        };
+        let res = crate::plugin_host::vst3_process(
+            &host,
+            self.vst3_owner,
+            fx.id,
+            r,
+            self.sr,
+            buf,
+            self.offline,
+        );
+        if let Err(e) = res {
+            let set = LOGGED.get_or_init(|| Mutex::new(Default::default()));
+            if set
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(fx.id)
+            {
+                crate::util::log_error(&format!("efeito VST3 '{}' falhou: {e}", r.label));
+            }
+        }
     }
 
     fn run_fx(&mut self, fx: &FxInstance, buf: &mut [f32], t: Ticks) {
+        if fx.kind == FxKind::Vst3 {
+            self.run_vst3(fx, buf);
+            return;
+        }
         let sr = self.sr;
         let st = self
             .states

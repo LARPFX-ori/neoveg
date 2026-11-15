@@ -9,7 +9,10 @@ use super::{App, DndPayload};
 use crate::icons::{self, Icon};
 use crate::model::{BlendMode, FxKind, TrackKind, TransitionKind};
 use eframe::egui;
-use neoveg_engine::plugin_host::{probe_ofx_isolated, OfxParamInfo, OfxPluginInfo};
+use neoveg_engine::plugin_host::{
+    probe_ofx_isolated, probe_vst3_isolated, OfxParamInfo, OfxPluginInfo, Vst3ClassInfo,
+    Vst3ParamInfo,
+};
 use neoveg_engine::plugins::{self, ExternalKind, ExternalPlugin};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,12 +23,143 @@ use std::time::Duration;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
-enum ProbeState {
+enum ProbeState<T> {
     Running,
-    Done(Result<Arc<Vec<OfxPluginInfo>>, String>),
+    Done(Result<Arc<Vec<T>>, String>),
 }
 
-type ProbeMap = Arc<Mutex<HashMap<PathBuf, ProbeState>>>;
+type ProbeMap<T> = Arc<Mutex<HashMap<PathBuf, ProbeState<T>>>>;
+type ProbeFn<T> = fn(&Path, &Path, Duration) -> Result<Vec<T>, String>;
+
+type Vst3ParamsState = Option<Result<Arc<Vec<Vst3ParamInfo>>, String>>;
+type Vst3ParamsMap = Arc<Mutex<HashMap<(String, String), Vst3ParamsState>>>;
+
+/// Editor dos parâmetros de um efeito VST3 (no diálogo de FX), em valores
+/// normalizados. Os descritores vêm do host isolado numa thread de fundo e
+/// ficam em cache por plug-in. Devolve verdadeiro quando algum valor mudou.
+pub(crate) fn vst3_params_editor(
+    ui: &mut egui::Ui,
+    fx: &mut crate::model::FxInstance,
+    theme: &crate::theme::ThemeColors,
+) -> bool {
+    let fx_id = fx.id;
+    let Some(r) = fx.vst3.as_mut() else {
+        return false;
+    };
+    let cache_key = egui::Id::new("vst3_param_descriptors");
+    let map: Vst3ParamsMap = ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vst3ParamsMap>(cache_key)
+            .clone()
+    });
+    let k = (r.binary.clone(), r.class_id.clone());
+    let state = map
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&k)
+        .cloned();
+    let muted = |t: String| egui::RichText::new(t).small().color(theme.text_muted);
+    let infos = match state {
+        None => {
+            map.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(k.clone(), None);
+            let (map2, r2, ctx) = (map.clone(), r.clone(), ui.ctx().clone());
+            let _ = std::thread::Builder::new()
+                .name("vst3-params".into())
+                .spawn(move || {
+                    let res = neoveg_engine::plugin_host::default_host_exe()
+                        .ok_or_else(|| "executável do Neoveg não encontrado".to_string())
+                        .and_then(|exe| neoveg_engine::plugin_host::vst3_params(&exe, &r2))
+                        .map(Arc::new);
+                    map2.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert((r2.binary, r2.class_id), Some(res));
+                    ctx.request_repaint();
+                });
+            ui.label(muted("Abrindo o plug-in em processo isolado…".into()));
+            return false;
+        }
+        Some(None) => {
+            ui.label(muted("Abrindo o plug-in em processo isolado…".into()));
+            return false;
+        }
+        Some(Some(Err(e))) => {
+            ui.label(muted(format!("Plug-in indisponível: {e}")));
+            return false;
+        }
+        Some(Some(Ok(infos))) => infos,
+    };
+    if infos.is_empty() {
+        ui.label(muted("O plug-in não expõe parâmetros.".into()));
+        return false;
+    }
+    let filter_key = egui::Id::new(("vst3_param_filter", fx_id));
+    let mut filter: String = ui.data(|d| d.get_temp(filter_key)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(muted(format!("{} parâmetro(s)", infos.len())));
+        ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text("Filtrar")
+                .desired_width(120.0),
+        );
+    });
+    let f = filter.trim().to_lowercase();
+    ui.data_mut(|d| d.insert_temp(filter_key, filter));
+    let mut changed = false;
+    egui::ScrollArea::vertical()
+        .id_salt(("vst3_params_scroll", fx_id))
+        .max_height(260.0)
+        .show(ui, |ui| {
+            egui::Grid::new(("vst3_params", fx_id))
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    for info in infos.iter() {
+                        if !f.is_empty() && !info.title.to_lowercase().contains(&f) {
+                            continue;
+                        }
+                        let cur = r
+                            .params
+                            .iter()
+                            .find(|p| p.id == info.id)
+                            .map(|p| p.value)
+                            .unwrap_or(info.current);
+                        let mut v = cur;
+                        ui.label(&info.title);
+                        let edited = ui
+                            .horizontal(|ui| {
+                                if info.bypass || info.step_count == 1 {
+                                    let mut b = v > 0.5;
+                                    let e = ui.checkbox(&mut b, "").changed();
+                                    v = if b { 1.0 } else { 0.0 };
+                                    e
+                                } else if info.step_count > 1 {
+                                    let steps = f64::from(info.step_count);
+                                    let mut k = (v * steps).round().clamp(0.0, steps) as i32;
+                                    let e = ui
+                                        .add(egui::Slider::new(&mut k, 0..=info.step_count))
+                                        .changed();
+                                    v = f64::from(k) / steps;
+                                    e
+                                } else {
+                                    ui.add(egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(3))
+                                        .changed()
+                                }
+                            })
+                            .inner;
+                        if !info.units.is_empty() {
+                            ui.label(muted(info.units.clone()));
+                        }
+                        ui.end_row();
+                        if edited && v != cur {
+                            r.set_param(info.id, v);
+                            changed = true;
+                        }
+                    }
+                });
+        });
+    changed
+}
 
 type ParamsState = Option<Result<Arc<Vec<OfxParamInfo>>, String>>;
 type ParamsMap = Arc<Mutex<HashMap<(String, String), ParamsState>>>;
@@ -156,18 +290,23 @@ pub(crate) fn ofx_params_editor(
 }
 
 /// Dispara a sondagem isolada numa thread; o resultado volta pelo mapa.
-fn start_probe(probes: &ProbeMap, bin: PathBuf, ctx: egui::Context) {
+fn start_probe<T: Send + Sync + 'static>(
+    probes: &ProbeMap<T>,
+    bin: PathBuf,
+    ctx: egui::Context,
+    probe: ProbeFn<T>,
+) {
     probes
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(bin.clone(), ProbeState::Running);
     let worker = probes.clone();
     let spawned = std::thread::Builder::new()
-        .name("ofx-probe".into())
+        .name("plugin-probe".into())
         .spawn(move || {
             let result = std::env::current_exe()
                 .map_err(|e| format!("executável do Neoveg não encontrado: {e}"))
-                .and_then(|exe| probe_ofx_isolated(&exe, &bin, PROBE_TIMEOUT))
+                .and_then(|exe| probe(&exe, &bin, PROBE_TIMEOUT))
                 .map(Arc::new);
             worker
                 .lock()
@@ -389,13 +528,17 @@ impl App {
             if p.binary.is_none() {
                 tip.push_str("\nSem binário para esta arquitetura.");
             }
-            tip.push_str("\nAplicar plug-ins externos a eventos ainda não está disponível.");
             let title = format!("{} [{}]", p.name, p.kind.name());
             match (&p.binary, p.kind) {
                 (Some(bin), ExternalKind::Ofx) => {
                     egui::CollapsingHeader::new(title)
                         .id_salt(("plugin_ext", p.path.display().to_string()))
                         .show(ui, |ui| self.ofx_probe_view(ui, bin));
+                }
+                (Some(bin), ExternalKind::Vst3) => {
+                    egui::CollapsingHeader::new(title)
+                        .id_salt(("plugin_ext", p.path.display().to_string()))
+                        .show(ui, |ui| self.vst3_probe_view(ui, bin));
                 }
                 _ => {
                     ui.add_enabled(false, egui::Label::new(title))
@@ -409,7 +552,10 @@ impl App {
     /// `neoveg --plugin-host` numa thread de fundo (a UI nunca bloqueia).
     fn ofx_probe_view(&mut self, ui: &mut egui::Ui, bin: &Path) {
         let key = egui::Id::new("plugin_manager_ofx_probes");
-        let probes: ProbeMap = ui.data_mut(|d| d.get_temp_mut_or_default::<ProbeMap>(key).clone());
+        let probes: ProbeMap<OfxPluginInfo> = ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<ProbeMap<OfxPluginInfo>>(key)
+                .clone()
+        });
         let state = probes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -422,7 +568,12 @@ impl App {
                     .on_hover_text("Carrega o binário num processo isolado e lista os efeitos dele")
                     .clicked()
                 {
-                    start_probe(&probes, bin.to_path_buf(), ui.ctx().clone());
+                    start_probe(
+                        &probes,
+                        bin.to_path_buf(),
+                        ui.ctx().clone(),
+                        probe_ofx_isolated,
+                    );
                 }
             }
             Some(ProbeState::Running) => {
@@ -473,6 +624,78 @@ impl App {
                             });
                         }
                     });
+            }
+        }
+    }
+
+    /// Lista as classes de efeito de um módulo VST3, sondado no subprocesso
+    /// isolado numa thread de fundo, com *Aplicar* para a seleção de áudio.
+    fn vst3_probe_view(&mut self, ui: &mut egui::Ui, bin: &Path) {
+        let key = egui::Id::new("plugin_manager_vst3_probes");
+        let probes: ProbeMap<Vst3ClassInfo> = ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<ProbeMap<Vst3ClassInfo>>(key)
+                .clone()
+        });
+        let state = probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(bin)
+            .cloned();
+        let muted = |t: String| egui::RichText::new(t).small().color(self.theme.text_muted);
+        match state {
+            None => {
+                if ui
+                    .small_button("Listar plug-ins")
+                    .on_hover_text("Carrega o módulo num processo isolado e lista os efeitos dele")
+                    .clicked()
+                {
+                    start_probe(
+                        &probes,
+                        bin.to_path_buf(),
+                        ui.ctx().clone(),
+                        probe_vst3_isolated,
+                    );
+                }
+            }
+            Some(ProbeState::Running) => {
+                ui.label(muted("Consultando o plug-in em processo isolado…".into()));
+            }
+            Some(ProbeState::Done(Err(e))) => {
+                ui.label(muted(format!("Erro: {e}")));
+            }
+            Some(ProbeState::Done(Ok(list))) => {
+                if list.is_empty() {
+                    ui.label(muted("Nenhum efeito de áudio neste módulo.".into()));
+                }
+                let can_apply = self.audio_fx_target().is_some();
+                for info in list.iter() {
+                    ui.horizontal(|ui| {
+                        let instrument = info.is_instrument();
+                        if ui
+                            .add_enabled(
+                                can_apply && !instrument,
+                                egui::Button::new("Aplicar").small(),
+                            )
+                            .on_hover_text(
+                                "Aplicar aos eventos de áudio selecionados (ou à trilha de \
+                                 áudio selecionada)",
+                            )
+                            .on_disabled_hover_text(if instrument {
+                                "Instrumentos precisam de MIDI, que ainda não é suportado"
+                            } else {
+                                "Selecione eventos ou uma trilha de áudio na timeline"
+                            })
+                            .clicked()
+                        {
+                            self.apply_vst3_to_selection(bin, info);
+                        }
+                        ui.label(egui::RichText::new(&info.name).small())
+                            .on_hover_text(format!(
+                                "{}\nVersão {}\nClasse {}",
+                                info.sub_categories, info.version, info.class_id
+                            ));
+                    });
+                }
             }
         }
     }
@@ -604,6 +827,62 @@ impl App {
             "Efeito OFX \"{label}\" aplicado a {} evento(s)",
             ids.len()
         ));
+    }
+
+    /// Onde um efeito de áudio externo entra: nos eventos de áudio
+    /// selecionados ou, sem eles, na trilha de áudio selecionada.
+    fn audio_fx_target(&self) -> Option<Result<Vec<crate::model::Id>, usize>> {
+        let ids: Vec<crate::model::Id> = self
+            .sel_events
+            .iter()
+            .filter(|id| {
+                self.project
+                    .find_event(**id)
+                    .and_then(|(t, _)| self.project.tracks.get(t))
+                    .is_some_and(|t| t.kind == TrackKind::Audio)
+            })
+            .copied()
+            .collect();
+        if !ids.is_empty() {
+            return Some(Ok(ids));
+        }
+        self.sel_track
+            .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(TrackKind::Audio))
+            .map(Err)
+    }
+
+    /// Aplica o efeito VST3 à seleção de áudio (um passo de Desfazer).
+    pub(crate) fn apply_vst3_to_selection(&mut self, bin: &Path, info: &Vst3ClassInfo) {
+        let Some(target) = self.audio_fx_target() else {
+            return;
+        };
+        let bin = bin.display().to_string();
+        let make = || crate::model::FxInstance::new_vst3(&bin, &info.class_id, &info.name);
+        self.checkpoint();
+        let what = match target {
+            Ok(ids) => {
+                for id in &ids {
+                    if let Some(ev) = self.project.event_mut(*id) {
+                        ev.fx.push(make());
+                    }
+                }
+                if let Some(first) = ids.first() {
+                    self.dlg.fx_target = Some(super::FxTarget::Event(*first));
+                }
+                format!("{} evento(s)", ids.len())
+            }
+            Err(ti) => {
+                let Some(t) = self.project.tracks.get_mut(ti) else {
+                    return;
+                };
+                t.fx.push(make());
+                let (id, name) = (t.id, t.name.clone());
+                self.dlg.fx_target = Some(super::FxTarget::Track(id));
+                format!("trilha \"{name}\"")
+            }
+        };
+        self.changed();
+        self.set_status(format!("Efeito VST3 \"{}\" aplicado a {what}", info.name));
     }
 
     /// Índice da trilha de vídeo selecionada, se houver.

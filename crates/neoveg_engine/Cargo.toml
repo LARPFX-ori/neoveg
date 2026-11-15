@@ -30,6 +30,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
 ] }
+vst3.workspace = true
 
 [lints.rust]
 # AGENTS.md §0.3: unsafe proibido em todo o crate, exceto nos módulos de
