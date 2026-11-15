@@ -5,7 +5,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::{luma, smoothstep, Frame};
-use crate::model::{FxInstance, FxKind};
+use crate::model::{FrameRate, FxInstance, FxKind};
 use rayon::prelude::*;
 
 /// Aplica uma função de cor (em RGB não pré-multiplicado) a todos os pixels.
@@ -156,12 +156,9 @@ fn hash(x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
-/// Taxa usada para converter o tempo local em quadros OFX.
-const OFX_TIME_FPS: f64 = 30.0;
-
 /// Aplica um efeito OFX pelo host isolado. Em erro o quadro fica intacto e a
 /// falha vai uma vez para o log (por efeito), sem travar a renderização.
-fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
+fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameRate) {
     use std::sync::{Mutex, OnceLock, PoisonError};
     static LOGGED: OnceLock<Mutex<std::collections::HashSet<crate::model::Id>>> = OnceLock::new();
     let Some(r) = fx.ofx.as_ref() else {
@@ -173,9 +170,14 @@ fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
     let Some(host) = crate::plugin_host::default_host_exe() else {
         return;
     };
-    let time = t.0 as f64 / crate::model::TICKS_PER_SEC as f64 * OFX_TIME_FPS;
+    let (time, rate) = ofx_time(t, fps);
+    // keyframes avaliados no tempo local deste quadro
+    let at_t = crate::model::OfxFxRef {
+        params: r.params_at(t),
+        ..r.clone()
+    };
     let mut px: Vec<f32> = f.px.iter().flatten().copied().collect();
-    match crate::plugin_host::ofx_render(&host, r, w, h, time, OFX_TIME_FPS, &mut px) {
+    match crate::plugin_host::ofx_render(&host, &at_t, w, h, time, rate, &mut px) {
         Ok(()) => {
             for (dst, src) in f.px.iter_mut().zip(px.as_chunks::<4>().0) {
                 *dst = *src;
@@ -194,14 +196,27 @@ fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
     }
 }
 
+/// Tempo local em quadros OFX e a taxa do projeto. A conta é exata em
+/// inteiros; só o resultado vira `f64`, que é o tipo da API do OFX.
+fn ofx_time(t: crate::model::Ticks, fps: FrameRate) -> (f64, f64) {
+    let (num, den) = (i128::from(fps.num.max(1)), i128::from(fps.den.max(1)));
+    let tps = i128::from(crate::model::TICKS_PER_SEC);
+    let scaled = i128::from(t.0).saturating_mul(num);
+    let whole = scaled / (tps * den);
+    let rem = scaled % (tps * den);
+    let frames = whole as f64 + rem as f64 / (tps * den) as f64;
+    (frames, num as f64 / den as f64)
+}
+
 /// Aplica um efeito de vídeo. `t` é o tempo local (em ticks) usado para os
-/// keyframes dos parâmetros.
-pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
+/// keyframes dos parâmetros; `fps` é a taxa do projeto (tempo dos efeitos
+/// OFX).
+pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameRate) {
     if !fx.enabled || fx.kind.is_audio() {
         return;
     }
     if fx.kind == FxKind::Ofx {
-        apply_ofx(fx, f, t);
+        apply_ofx(fx, f, t, fps);
         return;
     }
     let v = fx.values(t);
@@ -470,5 +485,30 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
             });
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Ticks;
+
+    /// O tempo enviado ao OFX segue a taxa do projeto (antes era 30 fixo).
+    #[test]
+    fn ofx_time_uses_project_rate_exactly() {
+        for fps in [FrameRate::FPS_25, FrameRate::FPS_29_97, FrameRate::FPS_60] {
+            for n in [0i64, 1, 100, 107_892] {
+                let (frames, rate) = ofx_time(fps.frame_to_ticks(n), fps);
+                assert!((frames - n as f64).abs() < 1e-6, "{fps:?} {n}: {frames}");
+                assert!((rate - fps.as_f64()).abs() < 1e-12);
+            }
+        }
+        // 1 s a 29,97 fps = 30000/1001 quadros
+        let (frames, _) = ofx_time(Ticks::from_secs_i64(1), FrameRate::FPS_29_97);
+        assert!((frames - 30000.0 / 1001.0).abs() < 1e-9);
+        // entrada hostil: taxa zerada e tempo extremo não travam
+        let zero = FrameRate { num: 0, den: 0 };
+        assert!(ofx_time(Ticks(i64::MAX), zero).0.is_finite());
+        assert!(ofx_time(Ticks(i64::MIN), FrameRate::FPS_60).0.is_finite());
     }
 }

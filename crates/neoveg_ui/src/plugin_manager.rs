@@ -171,6 +171,8 @@ pub(crate) fn ofx_params_editor(
     ui: &mut egui::Ui,
     fx: &mut crate::model::FxInstance,
     theme: &crate::theme::ThemeColors,
+    local_t: crate::model::Ticks,
+    tol: crate::model::Ticks,
 ) -> bool {
     let Some(r) = fx.ofx.as_mut() else {
         return false;
@@ -217,7 +219,7 @@ pub(crate) fn ofx_params_editor(
     };
     let mut changed = false;
     egui::Grid::new(("ofx_params", fx.id))
-        .num_columns(2)
+        .num_columns(3)
         .striped(true)
         .show(ui, |ui| {
             for info in infos.iter() {
@@ -229,7 +231,7 @@ pub(crate) fn ofx_params_editor(
                     .params
                     .iter()
                     .find(|p| p.name == info.name)
-                    .map(|p| p.values.clone())
+                    .map(|p| p.values_at(local_t))
                     .unwrap_or_else(|| info.default.clone());
                 vals.resize(n, 0.0);
                 ui.label(&info.label);
@@ -273,15 +275,79 @@ pub(crate) fn ofx_params_editor(
                         }
                     }
                 });
+                // keyframes: mesmo comportamento dos parâmetros nativos
+                let mut key_op: Option<bool> = None; // Some(true) cria, Some(false) remove
+                let (has_keys, key_here) = r
+                    .params
+                    .iter()
+                    .find(|p| p.name == info.name)
+                    .map(|p| {
+                        (
+                            p.keys.len(),
+                            p.keys.iter().any(|k| k.0.abs_diff(local_t) <= tol),
+                        )
+                    })
+                    .unwrap_or((0, false));
+                ui.horizontal(|ui| {
+                    if icons::small_icon_button(
+                        ui,
+                        if key_here {
+                            Icon::KeyframeFilled
+                        } else {
+                            Icon::KeyframeEmpty
+                        },
+                        None,
+                        key_here,
+                        theme,
+                    )
+                    .on_hover_text("Criar keyframe neste tempo")
+                    .clicked()
+                    {
+                        key_op = Some(true);
+                    }
+                    if has_keys > 0 {
+                        ui.label(egui::RichText::new(format!("{has_keys}")).small());
+                        if icons::small_icon_button(ui, Icon::Backspace, None, false, theme)
+                            .on_hover_text("Remover keyframes")
+                            .clicked()
+                        {
+                            key_op = Some(false);
+                        }
+                    }
+                });
                 ui.end_row();
-                if edited {
+                if edited || key_op.is_some() {
                     changed = true;
-                    match r.params.iter_mut().find(|p| p.name == info.name) {
-                        Some(p) => p.values = vals,
-                        None => r.params.push(crate::model::OfxParamValue {
-                            name: info.name.clone(),
-                            values: vals,
-                        }),
+                    let idx = match r.params.iter().position(|p| p.name == info.name) {
+                        Some(i) => i,
+                        None => {
+                            r.params.push(crate::model::OfxParamValue {
+                                name: info.name.clone(),
+                                values: info.default.clone(),
+                                ..Default::default()
+                            });
+                            r.params.len() - 1
+                        }
+                    };
+                    let Some(p) = r.params.get_mut(idx) else {
+                        continue;
+                    };
+                    // como interpolar entre keyframes depende do tipo
+                    p.hold = matches!(info.kind.as_str(), "Boolean" | "Choice" | "String");
+                    p.integer = info.kind.starts_with("Integer");
+                    match key_op {
+                        Some(true) => {
+                            if p.keys.is_empty() && local_t > tol {
+                                p.keys.push((crate::model::Ticks::ZERO, p.values.clone()));
+                            }
+                            p.set_key(local_t, vals, tol);
+                        }
+                        Some(false) => {
+                            p.values = vals;
+                            p.keys.clear();
+                        }
+                        None if p.keys.is_empty() => p.values = vals,
+                        None => p.set_key(local_t, vals, tol),
                     }
                 }
             }

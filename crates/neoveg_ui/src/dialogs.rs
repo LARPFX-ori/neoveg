@@ -1496,6 +1496,8 @@ impl App {
                                         ui,
                                         fx,
                                         &self.theme,
+                                        local_t,
+                                        tol,
                                     );
                                 }
                                 if fx.kind == FxKind::Vst3 {
