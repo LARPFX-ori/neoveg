@@ -22,6 +22,17 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** Especificação pública **Apple Final Cut Pro XML Format Reference / FCPXML DTD 1.8–1.11** (elementos `<fcpxml>`, `<resources>`, `<format>`, `<asset>`, `<media-rep>`, `<effect>`, `<library>`, `<event>`, `<project>`, `<sequence>`, `<spine>`, `<asset-clip>`, `<clip>`, `<ref-clip>`, `<sync-clip>`, `<gap>`, `<title>`, `<transition>`, `<marker>`, `<chapter-marker>`, `<timeMap>`).
 - **Método de implementação:** Parser XML limitado próprio em sala limpa sem `unsafe` (máximo `16 MiB`, profundidade `48`, `100_000` nós), conversão racional exata `"N/Ds"` em `i128` para `Ticks` e rejeição segura de XML malformado ou cíclico (`fuzz_fcpxml`).
 
+### Final Cut Pro 7 XML (`.xml`, `xmeml`) — `src/fcp7xml.rs`
+
+- **Edição de referência:** Documento público **Apple *Final Cut Pro XML Interchange Format*** (edição para Final Cut Pro 7, `xmeml` versão 5; também lê a versão 4): elementos `<xmeml>`, `<sequence>`, `<rate>` (`<timebase>` + `<ntsc>`), `<timecode>`/`<displayformat>`, `<media>`/`<video>`/`<audio>`, `<format>`/`<samplecharacteristics>`, `<track>`, `<clipitem>` (`<start>`, `<end>`, `<in>`, `<out>`, `-1` em bordas de transição), `<transitionitem>`, `<file>` (`<pathurl>`, definição única + referências por `id`), `<link>`/`<linkclipref>` e `<marker>`.
+- **Método de implementação:** Reusa o parser XML limitado de `fcpxml.rs`; quadros inteiros limitados a `50 000 000` e convertidos para `Ticks` exatos; até `20 000` clipes e `64` trilhas. Na exportação, eventos sobrepostos de uma trilha vão para trilhas extras (o FCP7 não admite sobreposição numa trilha). Fuzzing por mutação em `fcp7xml::tests`.
+
+### AAF (`.aaf`, importação) — `src/aaf.rs`
+
+- **Edição de referência:** Especificações públicas da AAF Association / AMWA — **AAF Low-Level Container Specification** (stream `properties`: ordem de bytes, contagem, entradas `pid/forma/tamanho`; formas de dado, referência forte, vetor e conjunto de referências fortes com stream `index`; referência fraca por chave) e **AAF Object Specification v1.1** (Header → ContentStorage → Mobs; CompositionMob, MasterMob, SourceMob; TimelineMobSlot com EditRate; Sequence, SourceClip, Filler, Transition; EssenceDescriptor → NetworkLocator `URLString`; definições de dados *Picture*/*Sound*).
+- **Método de implementação:** Contêiner Compound File lido pelo crate `cfb` (MIT); só os streams de metadados são lidos (até `4 MiB` cada, `200 000` objetos, profundidade `32`, `20 000` clipes) e toda a leitura roda sob `catch_unwind`. Transições viram sobreposição com crossfade. A exportação AAF ainda não existe.
+- **Fixtures:** `tools/gen_aaf_fixtures.py` gera `target/fixtures/oracle_*.aaf` com o pacote externo `pyaaf2` (MIT), usado só como gerador (como o `ffmpeg`): `PYTHONPATH=<pasta do pyaaf2> python tools/gen_aaf_fixtures.py target/fixtures`. Sem as fixtures, os testes que dependem delas pulam.
+
 ### EDL CMX 3600 (`.edl`) — `src/edl.rs`
 
 - **Edição de referência:** Especificação pública **CMX 3600 Edit Decision List (SMPTE 258M / ASCII EDL)**: cabeçalhos `TITLE:` e `FCM: DROP FRAME | NON-DROP FRAME`, registros `<NUM> <REEL> <CANAL> <MODO> [DUR_QUADROS] <SRC_IN> <SRC_OUT> <REC_IN> <REC_OUT>`, `M2` (*motion/speed*), rolo preto `BL` e comentários `* FROM CLIP NAME:`, `* SOURCE FILE:`, `* LOC:`.

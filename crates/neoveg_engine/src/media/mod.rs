@@ -1011,6 +1011,10 @@ fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
     }
 }
 
+// TODO(roadmap fase 4): backends nativos fora do Windows. Linux via VA-API
+// (sem GStreamer, que é LGPL — AGENTS.md §2.3) e macOS via VideoToolbox/
+// AVFoundation, ambos em fronteira FFI isolada, mais decodificador fallback em
+// Rust puro. Até lá, este caminho devolve erro recuperável.
 #[cfg(not(windows))]
 fn load_system_container(_p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
     bail!(

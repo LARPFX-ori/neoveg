@@ -31,26 +31,26 @@ const DEFAULT_FCPXML_MS: i64 = 5_000;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
-struct XmlNode {
-    tag: String,
-    attrs: Vec<(String, String)>,
-    text: String,
-    children: Vec<XmlNode>,
+pub(crate) struct XmlNode {
+    pub(crate) tag: String,
+    pub(crate) attrs: Vec<(String, String)>,
+    pub(crate) text: String,
+    pub(crate) children: Vec<XmlNode>,
 }
 
 impl XmlNode {
-    fn attr(&self, key: &str) -> Option<&str> {
+    pub(crate) fn attr(&self, key: &str) -> Option<&str> {
         self.attrs
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
 
-    fn child(&self, tag: &str) -> Option<&XmlNode> {
+    pub(crate) fn child(&self, tag: &str) -> Option<&XmlNode> {
         self.children.iter().find(|c| c.tag == tag)
     }
 
-    fn find_descendant(&self, tag: &str) -> Option<&XmlNode> {
+    pub(crate) fn find_descendant(&self, tag: &str) -> Option<&XmlNode> {
         if self.tag == tag {
             return Some(self);
         }
@@ -115,7 +115,7 @@ fn decode_xml_entities(raw: &str) -> String {
     out
 }
 
-fn escape_xml(raw: &str) -> String {
+pub(crate) fn escape_xml(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
         match ch {
@@ -206,7 +206,7 @@ fn read_name<'a>(s: &'a str, b: &[u8], pos: &mut usize) -> Result<&'a str, Neove
         .ok_or_else(|| NeovegError::InvalidInput("fronteira UTF-8 inválida em tag XML".into()))
 }
 
-fn parse_xml_document(raw: &str) -> Result<XmlNode, NeovegError> {
+pub(crate) fn parse_xml_document(raw: &str) -> Result<XmlNode, NeovegError> {
     let text = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
     let b = text.as_bytes();
     let mut pos = 0usize;
@@ -963,7 +963,7 @@ fn import_clip_node(
     collect_markers_and_children(node, tl_start, src_start, ctx);
 }
 
-fn parse_transition_kind_name(name: &str) -> TransitionKind {
+pub(crate) fn parse_transition_kind_name(name: &str) -> TransitionKind {
     let lower = name.to_ascii_lowercase();
     if lower.contains("dip") || lower.contains("fade to color") {
         TransitionKind::FadeThroughBlack

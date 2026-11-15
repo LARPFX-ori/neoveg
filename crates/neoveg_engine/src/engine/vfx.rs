@@ -156,10 +156,52 @@ fn hash(x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
+/// Taxa usada para converter o tempo local em quadros OFX.
+const OFX_TIME_FPS: f64 = 30.0;
+
+/// Aplica um efeito OFX pelo host isolado. Em erro o quadro fica intacto e a
+/// falha vai uma vez para o log (por efeito), sem travar a renderização.
+fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static LOGGED: OnceLock<Mutex<std::collections::HashSet<crate::model::Id>>> = OnceLock::new();
+    let Some(r) = fx.ofx.as_ref() else {
+        return;
+    };
+    let (Ok(w), Ok(h)) = (u32::try_from(f.w), u32::try_from(f.h)) else {
+        return;
+    };
+    let Some(host) = crate::plugin_host::default_host_exe() else {
+        return;
+    };
+    let time = t.0 as f64 / crate::model::TICKS_PER_SEC as f64 * OFX_TIME_FPS;
+    let mut px: Vec<f32> = f.px.iter().flatten().copied().collect();
+    match crate::plugin_host::ofx_render(&host, r, w, h, time, OFX_TIME_FPS, &mut px) {
+        Ok(()) => {
+            for (dst, src) in f.px.iter_mut().zip(px.as_chunks::<4>().0) {
+                *dst = *src;
+            }
+        }
+        Err(e) => {
+            let set = LOGGED.get_or_init(|| Mutex::new(Default::default()));
+            if set
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(fx.id)
+            {
+                crate::util::log_error(&format!("efeito OFX '{}' falhou: {e}", r.plugin_id));
+            }
+        }
+    }
+}
+
 /// Aplica um efeito de vídeo. `t` é o tempo local (em ticks) usado para os
 /// keyframes dos parâmetros.
 pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks) {
     if !fx.enabled || fx.kind.is_audio() {
+        return;
+    }
+    if fx.kind == FxKind::Ofx {
+        apply_ofx(fx, f, t);
         return;
     }
     let v = fx.values(t);

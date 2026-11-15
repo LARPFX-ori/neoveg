@@ -310,6 +310,25 @@ impl EditorSession {
         idx
     }
 
+    /// Insere uma trilha de ajuste (*Adjustment Track*) de vídeo, na mesma
+    /// posição em que `insert_track(TrackKind::Video)` colocaria uma trilha.
+    pub fn insert_adjustment_track(&mut self) -> usize {
+        let n = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.is_adjustment())
+            .count()
+            + 1;
+        let idx = self.insert_track(TrackKind::Video);
+        if let Some(t) = self.project.tracks.get_mut(idx) {
+            t.adjustment = true;
+            t.name = format!("Ajuste {n}");
+        }
+        self.changed();
+        idx
+    }
+
     pub fn add_audio_bus(&mut self) -> Option<Id> {
         if self.project.audio_buses.len() >= MAX_AUDIO_BUSES {
             return None;
@@ -503,7 +522,7 @@ impl EditorSession {
             self.project
                 .tracks
                 .get(i)
-                .map(|t| t.kind == kind)
+                .map(|t| t.accepts(kind))
                 .unwrap_or(false)
         })
     }
@@ -1500,6 +1519,28 @@ mod tests {
             info: String::new(),
             proxy_path: None,
         }
+    }
+
+    #[test]
+    fn colar_pula_trilha_de_ajuste() {
+        let mut p = Project::default();
+        let mut adj = Track::new(TrackKind::Video, "Ajuste 1");
+        adj.adjustment = true;
+        p.tracks.push(adj);
+        p.tracks.push(Track::new(TrackKind::Video, "Vídeo 1"));
+        let m = sample_media(new_id(), 1920, 1080, Some(FrameRate::FPS_30));
+        let ev = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(1));
+        let ev_id = ev.id;
+        p.media.push(m);
+        p.tracks[1].events.push(ev);
+        let mut s = EditorSession::new(p);
+        s.sel_events.insert(ev_id);
+        s.copy_selection();
+        // colar com a trilha de ajuste selecionada cai na próxima trilha de vídeo
+        s.sel_track = Some(0);
+        s.paste(false);
+        assert!(s.project.tracks[0].events.is_empty());
+        assert_eq!(s.project.tracks[1].events.len(), 2);
     }
 
     #[test]

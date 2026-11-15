@@ -285,12 +285,15 @@ pub enum DockPanel {
     Generators,
     Mixer,
     Loudness,
+    SurroundPanner,
+    PluginManager,
+    Compositors,
     Scopes,
     Notes,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 13] = [
+    pub const ALL: [DockPanel; 16] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -302,6 +305,9 @@ impl DockPanel {
         DockPanel::Generators,
         DockPanel::Mixer,
         DockPanel::Loudness,
+        DockPanel::SurroundPanner,
+        DockPanel::PluginManager,
+        DockPanel::Compositors,
         DockPanel::Scopes,
         DockPanel::Notes,
     ];
@@ -319,6 +325,9 @@ impl DockPanel {
             DockPanel::Generators => "Geradores de Mídia",
             DockPanel::Mixer => "Mixer",
             DockPanel::Loudness => "Medidores de Loudness",
+            DockPanel::SurroundPanner => "Surround Panner",
+            DockPanel::PluginManager => "Plug-In Manager",
+            DockPanel::Compositors => "Compositores",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
         }
@@ -337,6 +346,9 @@ impl DockPanel {
             DockPanel::Generators => "view.tab.generators",
             DockPanel::Mixer => "view.tab.mixer",
             DockPanel::Loudness => "view.tab.loudness",
+            DockPanel::SurroundPanner => "view.tab.surround_panner",
+            DockPanel::PluginManager => "view.tab.plugin_manager",
+            DockPanel::Compositors => "view.tab.compositors",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
         }
@@ -361,6 +373,9 @@ pub enum UiAction {
     ExportEdlDialog,
     ImportFcpxmlDialog,
     ExportFcpxmlDialog,
+    ImportFcp7Dialog,
+    ExportFcp7Dialog,
+    ImportAafDialog,
     OpenRenderDialog,
     SnapshotDialog,
     OpenProjectProps,
@@ -753,6 +768,42 @@ pub static COMMANDS: &[CommandDef] = &[
                 "fcpxml",
                 "FCPXML",
                 |sess, p| crate::fcpxml::export_fcpxml_file(&sess.project, p, None),
+            )
+        },
+    },
+    CommandDef {
+        id: "file.import_aaf",
+        label: "Importar AAF (.aaf)...",
+        menu_path: "Arquivo/Importar AAF (.aaf)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportAafDialog, h),
+    },
+    CommandDef {
+        id: "file.import_fcp7",
+        label: "Importar Final Cut Pro 7 XML (.xml)...",
+        menu_path: "Arquivo/Importar Final Cut Pro 7 XML (.xml)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportFcp7Dialog, h),
+    },
+    CommandDef {
+        id: "file.export_fcp7",
+        label: "Exportar Final Cut Pro 7 XML (.xml)...",
+        menu_path: "Arquivo/Exportar Final Cut Pro 7 XML (.xml)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(
+                s,
+                h,
+                UiAction::ExportFcp7Dialog,
+                "xml",
+                "FCP7 XML",
+                |sess, p| crate::fcp7xml::export_fcp7_file(&sess.project, p, None),
             )
         },
     },
@@ -1203,6 +1254,33 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Loudness), h),
     },
     CommandDef {
+        id: "view.tab.surround_panner",
+        label: "Surround Panner",
+        menu_path: "Exibir/Surround Panner",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::SurroundPanner), h),
+    },
+    CommandDef {
+        id: "view.tab.plugin_manager",
+        label: "Plug-In Manager",
+        menu_path: "Exibir/Plug-In Manager",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num1)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::PluginManager), h),
+    },
+    CommandDef {
+        id: "view.tab.compositors",
+        label: "Compositores",
+        menu_path: "Exibir/Compositores",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Compositors), h),
+    },
+    CommandDef {
         id: "view.bus_tracks",
         label: "Mostrar trilhas de barramentos",
         menu_path: "Exibir/Mostrar trilhas de barramentos",
@@ -1322,6 +1400,19 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |s, h| {
             s.checkpoint();
             s.insert_track(TrackKind::Audio);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.track_adjustment",
+        label: "Trilha de ajuste",
+        menu_path: "Inserir/Trilha de ajuste",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.checkpoint();
+            s.insert_adjustment_track();
             ok_mutated(s, h)
         },
     },

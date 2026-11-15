@@ -495,6 +495,17 @@ impl App {
                             }
                         });
                     ui.end_row();
+                    ui.label("Modo do Master (áudio)");
+                    egui::ComboBox::from_id_salt("master_layout")
+                        .selected_text(s.channel_layout.name())
+                        .show_ui(ui, |ui| {
+                            for l in crate::model::ChannelLayout::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.channel_layout, l, l.name())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
                     ui.label("Cor de fundo");
                     changed |= ui.color_edit_button_rgb(&mut s.background).changed();
                     ui.end_row();
@@ -1423,7 +1434,7 @@ impl App {
                                         .checkbox(&mut fx.enabled, "")
                                         .on_hover_text("Ativar/ignorar (bypass)")
                                         .changed();
-                                    ui.label(egui::RichText::new(fx.kind.name()).strong());
+                                    ui.label(egui::RichText::new(fx.display_name()).strong());
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
@@ -1480,6 +1491,13 @@ impl App {
                                         },
                                     );
                                 });
+                                if fx.kind == FxKind::Ofx {
+                                    changed |= crate::plugin_manager::ofx_params_editor(
+                                        ui,
+                                        fx,
+                                        &self.theme,
+                                    );
+                                }
                                 let specs = fx.kind.params();
                                 egui::Grid::new("params").num_columns(3).show(ui, |ui| {
                                     for (pi, spec) in specs.iter().enumerate() {
@@ -1580,8 +1598,14 @@ impl App {
                 "down" => chain_copy.swap(i, i + 1),
                 "reset" => {
                     let id = chain_copy[i].id;
+                    // OFX: mantém o plug-in e volta só os valores ao padrão dele
+                    let ofx = chain_copy[i].ofx.take().map(|mut o| {
+                        o.params.clear();
+                        o
+                    });
                     chain_copy[i] = FxInstance::new(chain_copy[i].kind);
                     chain_copy[i].id = id;
+                    chain_copy[i].ofx = ofx;
                 }
                 _ => {}
             }

@@ -27,6 +27,79 @@ pub struct ProjectSettings {
     /// Indica se o formato do projeto foi escolhido explicitamente pelo usuário (§3.1).
     #[serde(default)]
     pub manually_configured: bool,
+    /// Layout de canais da mixagem (estéreo ou 5.1 surround).
+    #[serde(default)]
+    pub channel_layout: ChannelLayout,
+}
+
+/// Layout de canais do projeto (*Project Properties → Audio → Master bus mode*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ChannelLayout {
+    #[default]
+    Stereo,
+    /// 5.1 na ordem FL, FR, C, LFE, BL, BR (ver `engine::surround`).
+    Surround51,
+}
+
+impl ChannelLayout {
+    pub const ALL: [ChannelLayout; 2] = [ChannelLayout::Stereo, ChannelLayout::Surround51];
+
+    pub fn channels(self) -> usize {
+        match self {
+            ChannelLayout::Stereo => 2,
+            ChannelLayout::Surround51 => 6,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ChannelLayout::Stereo => "Estéreo",
+            ChannelLayout::Surround51 => "5.1 Surround",
+        }
+    }
+}
+
+/// Posição no *Surround Panner* 5.1. `x`: -1 esquerda .. 1 direita;
+/// `y`: -1 frente .. 1 trás. `lfe`: nível linear 0..1 enviado ao LFE.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SurroundPan {
+    #[serde(default)]
+    pub x: f32,
+    #[serde(default = "minus_one")]
+    pub y: f32,
+    /// Usa o alto-falante central; sem ele, a frente vira um par fantasma L/R.
+    #[serde(default = "yes")]
+    pub use_center: bool,
+    #[serde(default)]
+    pub lfe: f32,
+}
+
+impl Default for SurroundPan {
+    fn default() -> Self {
+        SurroundPan {
+            x: 0.0,
+            y: -1.0,
+            use_center: true,
+            lfe: 0.0,
+        }
+    }
+}
+
+impl SurroundPan {
+    /// Valores finitos e dentro da faixa (entrada hostil, §0.4).
+    pub fn sanitized(self) -> Self {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        SurroundPan {
+            x: fin(self.x, 0.0).clamp(-1.0, 1.0),
+            y: fin(self.y, -1.0).clamp(-1.0, 1.0),
+            use_center: self.use_center,
+            lfe: fin(self.lfe, 0.0).clamp(0.0, 1.0),
+        }
+    }
+}
+
+fn minus_one() -> f32 {
+    -1.0
 }
 
 fn default_bg() -> [f32; 3] {
@@ -43,6 +116,7 @@ impl Default for ProjectSettings {
             sample_rate: 48000,
             background: default_bg(),
             manually_configured: false,
+            channel_layout: ChannelLayout::Stereo,
         }
     }
 }
@@ -347,6 +421,7 @@ impl Project {
             t.height = clampf(fin32(t.height, 72.0), 28.0, 400.0);
             t.volume_db = clampf(fin32(t.volume_db, 0.0), -120.0, 24.0);
             t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
+            t.surround = t.surround.sanitized();
             t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
             for k in &mut t.motion.keys {
                 k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
@@ -438,6 +513,7 @@ impl Project {
             }
             b.volume_db = clampf(fin32(b.volume_db, 0.0), -120.0, 24.0);
             b.pan = clampf(fin32(b.pan, 0.0), -1.0, 1.0);
+            b.surround = b.surround.sanitized();
             for f in &mut b.fx {
                 sanitize_fx(f);
             }
@@ -521,6 +597,15 @@ fn sanitize_envelopes(envelopes: &mut Vec<Envelope>, allowed: &[EnvKind]) {
 }
 
 fn sanitize_fx(f: &mut FxInstance) {
+    // a referência OFX só vale em efeitos OFX; sem ela o efeito vira inofensivo
+    if f.kind == FxKind::Ofx {
+        match f.ofx.as_mut() {
+            Some(o) => o.sanitize(),
+            None => f.enabled = false,
+        }
+    } else {
+        f.ofx = None;
+    }
     let specs = f.kind.params();
     f.params.truncate(specs.len());
     while f.params.len() < specs.len() {
@@ -1144,9 +1229,12 @@ pub struct Track {
     /// Áudio: volume em dB.
     #[serde(default)]
     pub volume_db: f32,
-    /// Áudio: pan -1..1.
+    /// Áudio: pan -1..1 (modo estéreo).
     #[serde(default)]
     pub pan: f32,
+    /// Áudio: posição no *Surround Panner* (modo 5.1; substitui `pan`).
+    #[serde(default)]
+    pub surround: SurroundPan,
     /// Vídeo: nível de composição 0..1.
     #[serde(default = "one")]
     pub opacity: f32,
@@ -1166,6 +1254,11 @@ pub struct Track {
     /// Envios auxiliares para barramentos de áudio (`sends`).
     #[serde(default)]
     pub sends: Vec<AudioSend>,
+    /// Vídeo: trilha de ajuste (*Adjustment Track*). Não desenha eventos; aplica
+    /// os FX da trilha sobre a composição das trilhas abaixo dela, com a
+    /// intensidade dada por opacidade × envelope de opacidade. Ignorado em áudio.
+    #[serde(default)]
+    pub adjustment: bool,
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1194,6 +1287,9 @@ pub struct AudioBus {
     pub volume_db: f32,
     #[serde(default)]
     pub pan: f32,
+    /// Posição no *Surround Panner* quando o barramento sai para o Master em 5.1.
+    #[serde(default)]
+    pub surround: SurroundPan,
     /// Saída do barramento (`None` = Master Bus, `Some(id)` = outro barramento acíclico).
     #[serde(default)]
     pub output_bus: Option<Id>,
@@ -1212,6 +1308,7 @@ impl AudioBus {
             solo: false,
             volume_db: 0.0,
             pan: 0.0,
+            surround: SurroundPan::default(),
             output_bus: None,
             fx: vec![],
             envelopes: vec![],
@@ -1259,6 +1356,7 @@ impl Track {
             height: default_track_height(),
             volume_db: 0.0,
             pan: 0.0,
+            surround: SurroundPan::default(),
             opacity: 1.0,
             blend: BlendMode::SourceAlpha,
             motion: Keyframes::default(),
@@ -1267,7 +1365,19 @@ impl Track {
             color: TRACK_COLORS[(id as usize) % TRACK_COLORS.len()],
             output_bus: None,
             sends: vec![],
+            adjustment: false,
         }
+    }
+
+    /// Verdadeiro para trilha de vídeo marcada como trilha de ajuste.
+    pub fn is_adjustment(&self) -> bool {
+        self.kind == TrackKind::Video && self.adjustment
+    }
+
+    /// Verdadeiro se a trilha pode receber eventos do tipo `kind`. Trilhas de
+    /// ajuste não recebem eventos: o compositor os ignoraria.
+    pub fn accepts(&self, kind: TrackKind) -> bool {
+        self.kind == kind && !self.is_adjustment()
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
@@ -1524,6 +1634,8 @@ impl Event {
 // Efeitos
 // ---------------------------------------------------------------------------
 
+// TODO(roadmap fase 4): efeitos externos VST3 e OpenFX (OFX) em host isolado
+// (fronteira FFI §0.3, com catch_unwind §0.6). Hoje só há DSP/efeitos nativos.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum FxKind {
     // vídeo
@@ -1557,6 +1669,59 @@ pub enum FxKind {
     Chorus,
     Distortion,
     Limiter,
+    /// Efeito de vídeo OpenFX de terceiros (ver `FxInstance::ofx`), processado
+    /// no host isolado `neoveg --plugin-host`.
+    Ofx,
+}
+
+/// Valor de um parâmetro de plug-in OFX, pelo nome do parâmetro.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfxParamValue {
+    pub name: String,
+    #[serde(default)]
+    pub values: Vec<f64>,
+}
+
+/// Referência a um efeito OFX: binário, identificador e valores dos parâmetros.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfxFxRef {
+    pub binary: String,
+    pub plugin_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub params: Vec<OfxParamValue>,
+}
+
+const MAX_OFX_REF_TEXT: usize = 4096;
+const MAX_OFX_REF_PARAMS: usize = 1024;
+
+impl OfxFxRef {
+    /// Saneia textos, contagens e valores vindos de arquivo (§0.4).
+    pub fn sanitize(&mut self) {
+        let cut = |s: &mut String| {
+            if s.len() > MAX_OFX_REF_TEXT {
+                let mut end = MAX_OFX_REF_TEXT;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        };
+        cut(&mut self.binary);
+        cut(&mut self.plugin_id);
+        cut(&mut self.label);
+        self.params.truncate(MAX_OFX_REF_PARAMS);
+        for p in &mut self.params {
+            cut(&mut p.name);
+            p.values.truncate(4);
+            for v in &mut p.values {
+                if !v.is_finite() {
+                    *v = 0.0;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1658,11 +1823,14 @@ impl FxKind {
             FxKind::Chorus => "Chorus",
             FxKind::Distortion => "Distorção",
             FxKind::Limiter => "Limiter",
+            FxKind::Ofx => "Plug-in OFX",
         }
     }
 
     pub fn params(self) -> &'static [ParamSpec] {
         match self {
+            // os parâmetros de um plug-in OFX vêm dele, em `FxInstance::ofx`
+            FxKind::Ofx => &[],
             FxKind::BrightnessContrast => {
                 const { &[p("Brilho", -1.0, 1.0, 0.0), p("Contraste", -1.0, 1.0, 0.0)] }
             }
@@ -1893,6 +2061,9 @@ pub struct FxInstance {
     #[serde(default = "yes")]
     pub enabled: bool,
     pub params: Vec<AnimParam>,
+    /// Só em `FxKind::Ofx`: o plug-in OFX e os valores dos parâmetros dele.
+    #[serde(default)]
+    pub ofx: Option<OfxFxRef>,
 }
 
 impl FxInstance {
@@ -1909,6 +2080,28 @@ impl FxInstance {
                     keys: vec![],
                 })
                 .collect(),
+            ofx: None,
+        }
+    }
+
+    /// Efeito OFX de terceiros (`binary` + `plugin_id`), com os parâmetros padrão.
+    pub fn new_ofx(binary: &str, plugin_id: &str, label: &str) -> Self {
+        let mut f = FxInstance::new(FxKind::Ofx);
+        f.ofx = Some(OfxFxRef {
+            binary: binary.into(),
+            plugin_id: plugin_id.into(),
+            label: label.into(),
+            params: vec![],
+        });
+        f
+    }
+
+    /// Nome para exibição (rótulo do plug-in OFX ou nome nativo).
+    pub fn display_name(&self) -> String {
+        match (&self.ofx, self.kind) {
+            (Some(o), FxKind::Ofx) if !o.label.is_empty() => o.label.clone(),
+            (Some(o), FxKind::Ofx) => o.plugin_id.clone(),
+            _ => self.kind.name().to_string(),
         }
     }
     /// Valores de todos os parâmetros no tempo local `t`, sempre dentro da

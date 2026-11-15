@@ -16,11 +16,15 @@
 pub use neoveg_common::{curve, error, prefs, time, util};
 
 #[forbid(unsafe_code)]
+pub mod aaf;
+#[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;
 #[forbid(unsafe_code)]
 pub mod engine;
+#[forbid(unsafe_code)]
+pub mod fcp7xml;
 #[forbid(unsafe_code)]
 pub mod fcpxml;
 pub mod media;
@@ -30,6 +34,10 @@ pub mod model;
 pub mod otio;
 #[forbid(unsafe_code)]
 pub mod playback;
+/// Fronteira FFI isolada de plug-ins externos (`AGENTS.md` §0.3).
+pub mod plugin_host;
+#[forbid(unsafe_code)]
+pub mod plugins;
 #[forbid(unsafe_code)]
 pub mod recovery;
 #[forbid(unsafe_code)]

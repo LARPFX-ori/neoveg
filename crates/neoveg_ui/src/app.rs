@@ -35,6 +35,50 @@ pub use crate::dialogs::Dialogs;
 pub use crate::timeline::TimelineState;
 pub use neoveg_engine::commands::DockPanel as DockTab;
 
+/// Comandos do menu `More (...)` da barra de transporte, em grupos separados
+/// por divisória. Só ids da Tabela Única (§3.3); o teste abaixo garante isso.
+pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
+    &[
+        "edit.trim_to_selection",
+        "edit.trim_start",
+        "edit.trim_end",
+        "edit.delete_range_ripple",
+        "edit.insert_time",
+        "edit.close_gaps",
+    ],
+    &["edit.group", "edit.ungroup", "edit.select_group"],
+    &["tools.reverse", "tools.freeze_frame", "tools.event_props"],
+    &[
+        "insert.marker",
+        "insert.region",
+        "transport.jump_prev_marker",
+        "transport.jump_next_marker",
+    ],
+];
+
+#[cfg(test)]
+mod more_tools_tests {
+    use super::MORE_TOOLS_COMMANDS;
+
+    #[test]
+    fn more_tools_ids_exist_in_command_table() {
+        for id in MORE_TOOLS_COMMANDS.iter().flat_map(|g| g.iter()) {
+            assert!(
+                neoveg_engine::commands::find_command(id).is_some(),
+                "id ausente na Tabela Única: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_tools_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for id in MORE_TOOLS_COMMANDS.iter().flat_map(|g| g.iter()) {
+            assert!(seen.insert(*id), "id repetido no menu More: {id}");
+        }
+    }
+}
+
 /// Itens arrastáveis entre janelas (drag and drop).
 #[derive(Clone, Debug)]
 pub enum DndPayload {
@@ -640,8 +684,12 @@ impl App {
                     self.import_edl_path(&path);
                     return;
                 }
-                "fcpxml" => {
+                "fcpxml" | "xml" => {
                     self.import_fcpxml_path(&path);
+                    return;
+                }
+                "aaf" => {
+                    self.import_aaf_path(&path);
                     return;
                 }
                 "srt" | "vtt" => {
@@ -853,8 +901,70 @@ impl App {
     }
 
     pub fn import_fcpxml_path(&mut self, path: &std::path::Path) {
+        // `.xml` pode ser FCPXML ou FCP7 (`xmeml`): decide pelo elemento raiz.
+        if Self::is_fcp7_file(path) {
+            self.import_fcp7_path(path);
+            return;
+        }
         let res = neoveg_engine::fcpxml::import_fcpxml_file(path);
         self.apply_imported_project("FCPXML", path, res);
+    }
+
+    /// Lê só o começo do arquivo para reconhecer um documento `xmeml`.
+    fn is_fcp7_file(path: &std::path::Path) -> bool {
+        use std::io::Read;
+        let Ok(f) = std::fs::File::open(path) else {
+            return false;
+        };
+        let mut head = Vec::with_capacity(4096);
+        if f.take(4096).read_to_end(&mut head).is_err() {
+            return false;
+        }
+        neoveg_engine::fcp7xml::looks_like_fcp7(&String::from_utf8_lossy(&head))
+    }
+
+    pub fn import_aaf_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Advanced Authoring Format", &["aaf"])
+            .pick_file()
+        {
+            self.import_aaf_path(&p);
+        }
+    }
+
+    pub fn import_aaf_path(&mut self, path: &std::path::Path) {
+        let res = neoveg_engine::aaf::import_aaf_file(path);
+        self.apply_imported_project("AAF", path, res);
+    }
+
+    pub fn import_fcp7_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Final Cut Pro 7 XML", &["xml"])
+            .pick_file()
+        {
+            self.import_fcp7_path(&p);
+        }
+    }
+
+    pub fn import_fcp7_path(&mut self, path: &std::path::Path) {
+        let res = neoveg_engine::fcp7xml::import_fcp7_file(path);
+        self.apply_imported_project("FCP7 XML", path, res);
+    }
+
+    pub fn export_fcp7_dialog(&mut self) {
+        let default_name = self.export_interchange_path("xml");
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Final Cut Pro 7 XML", &["xml"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::fcp7xml::export_fcp7_file(&self.session.project, &p, None) {
+            Ok(()) => self.set_status(format!("FCP7 XML exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar FCP7 XML: {e}")),
+        }
     }
 
     pub fn export_fcpxml_dialog(&mut self) {
@@ -1125,17 +1235,17 @@ impl App {
     pub fn find_or_create_track(&mut self, kind: TrackKind, hint: Option<usize>) -> usize {
         if let Some(h) = hint {
             if let Some(t) = self.project.tracks.get(h) {
-                if t.kind == kind {
+                if t.accepts(kind) {
                     return h;
                 }
             }
             if let Some(i) =
-                (h..self.project.tracks.len()).find(|&i| self.project.tracks[i].kind == kind)
+                (h..self.project.tracks.len()).find(|&i| self.project.tracks[i].accepts(kind))
             {
                 return i;
             }
         }
-        if let Some(i) = self.project.tracks.iter().position(|t| t.kind == kind) {
+        if let Some(i) = self.project.tracks.iter().position(|t| t.accepts(kind)) {
             return i;
         }
         self.insert_track(kind)
@@ -1305,6 +1415,9 @@ impl App {
             UiAction::ExportEdlDialog => self.export_edl_dialog(),
             UiAction::ImportFcpxmlDialog => self.import_fcpxml_dialog(),
             UiAction::ExportFcpxmlDialog => self.export_fcpxml_dialog(),
+            UiAction::ImportFcp7Dialog => self.import_fcp7_dialog(),
+            UiAction::ExportFcp7Dialog => self.export_fcp7_dialog(),
+            UiAction::ImportAafDialog => self.import_aaf_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -1512,6 +1625,29 @@ impl App {
         }
     }
 
+    /// Conteúdo do menu `More (...)` da barra de transporte. Em barras estreitas,
+    /// mostra também as caixas In/Fim/Tam que foram ocultadas por falta de espaço.
+    fn more_tools_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        (sel_start, sel_end, sel_len): (Ticks, Ticks, Ticks),
+        avail_w: f32,
+    ) {
+        if avail_w < 430.0 {
+            let label = if self.time_sel.is_some() { "In" } else { "Pos" };
+            ui.label(format!("{label}: {}", self.fmt_time(sel_start)));
+            ui.label(format!("Fim: {}", self.fmt_time(sel_end)));
+            ui.label(format!("Tam: {}", self.fmt_time(sel_len)));
+            ui.separator();
+        }
+        for group in MORE_TOOLS_COMMANDS {
+            for id in *group {
+                self.cmd_menu_btn(ui, id);
+            }
+            ui.separator();
+        }
+    }
+
     fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
         let label = menu_label(id, &self.prefs.shortcuts);
         if ui.checkbox(&mut value, label).changed() {
@@ -1535,6 +1671,9 @@ impl App {
                 ui.menu_button("Intercâmbio & Legendas", |ui| {
                     self.cmd_menu_btn(ui, "file.import_fcpxml");
                     self.cmd_menu_btn(ui, "file.export_fcpxml");
+                    self.cmd_menu_btn(ui, "file.import_fcp7");
+                    self.cmd_menu_btn(ui, "file.export_fcp7");
+                    self.cmd_menu_btn(ui, "file.import_aaf");
                     ui.separator();
                     self.cmd_menu_btn(ui, "file.import_edl");
                     self.cmd_menu_btn(ui, "file.export_edl");
@@ -1760,6 +1899,7 @@ impl App {
             ui.menu_button("Inserir", |ui| {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
+                self.cmd_menu_btn(ui, "insert.track_adjustment");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
@@ -2014,6 +2154,13 @@ impl App {
                         Some((a, b)) if b >= a => (a, b, b - a),
                         _ => (self.view_time(), Ticks::ZERO, Ticks::ZERO),
                     };
+                    // Botão `More (...)`: ferramentas de edição que não cabem na
+                    // barra, despachadas pelo id da Tabela Única (§3.3).
+                    ui.menu_button("…", |ui| {
+                        self.more_tools_menu(ui, (sel_start, sel_end, sel_len), avail_w);
+                    })
+                    .response
+                    .on_hover_text("Mais ferramentas de edição (More)");
                     if avail_w >= 430.0 {
                         self.time_readout_chip(
                             ui,
@@ -2291,7 +2438,7 @@ impl App {
                     || p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                         matches!(
                             e.to_ascii_lowercase().as_str(),
-                            "otio" | "edl" | "fcpxml" | "srt" | "vtt"
+                            "otio" | "edl" | "fcpxml" | "xml" | "aaf" | "srt" | "vtt"
                         )
                     })
             })
