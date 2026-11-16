@@ -1659,7 +1659,7 @@ impl App {
     // Barras de menu e ferramentas (despachadas pela Tabela Única)
     // -----------------------------------------------------------------
 
-    fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
         let label = menu_label(id, &self.prefs.shortcuts);
         if ui
             .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
@@ -1747,6 +1747,11 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.delete");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.split");
+                ui.menu_button("Take", |ui| {
+                    self.cmd_menu_btn(ui, "event.next_take");
+                    self.cmd_menu_btn(ui, "event.prev_take");
+                    self.cmd_menu_btn(ui, "event.delete_active_take");
+                });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
                 self.cmd_menu_btn(ui, "edit.insert_time");
@@ -1978,6 +1983,7 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
+                self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
                 ui.separator();
                 ui.label(format!(

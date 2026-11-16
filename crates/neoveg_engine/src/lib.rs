@@ -49,6 +49,8 @@ pub mod session;
 #[forbid(unsafe_code)]
 pub mod subtitles;
 #[forbid(unsafe_code)]
+pub mod takes;
+#[forbid(unsafe_code)]
 pub mod track_keyframes;
 
 #[cfg(test)]

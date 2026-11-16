@@ -2650,6 +2650,13 @@ impl App {
             }
             Drag::Slip { origin_t, orig } => {
                 let dt = t - origin_t;
+                let slip_all_takes = self.opts.slip_all_takes;
+                let durations: std::collections::HashMap<Id, Option<Ticks>> = self
+                    .project
+                    .media
+                    .iter()
+                    .map(|m| (m.id, m.duration))
+                    .collect();
                 for (id, off) in orig {
                     let dur = self
                         .project
@@ -2657,6 +2664,7 @@ impl App {
                         .and_then(|e| self.project.media(e.media_id))
                         .and_then(|m| m.duration);
                     if let Some(e) = self.project.event_mut(id) {
+                        let before = e.offset;
                         let mut o = off - e.rate.scale_ticks(dt);
                         if let (Some(d), false) = (dur, e.looped) {
                             let max_o = (d - e.rate.scale_ticks(e.length)).max(Ticks::ZERO);
@@ -2669,6 +2677,12 @@ impl App {
                                     e.offset = e.offset.rem_euclid(d);
                                 }
                             }
+                        }
+                        if slip_all_takes {
+                            let delta = e.offset - before;
+                            neoveg_engine::takes::slip_alt_takes(e, delta, |m| {
+                                durations.get(&m).copied().flatten()
+                            });
                         }
                     }
                 }
@@ -2716,18 +2730,34 @@ impl App {
                         }
                     }
                 }
+                let slip_all_takes = self.opts.slip_all_takes;
+                let durations: std::collections::HashMap<Id, Option<Ticks>> = self
+                    .project
+                    .media
+                    .iter()
+                    .map(|m| (m.id, m.duration))
+                    .collect();
                 for &(id, st, len, off) in &orig {
                     if let Some(e) = self.project.event_mut(id) {
                         if is_left {
                             e.start = st + dt;
                             e.length = (len - dt).max(fd);
                             if !slip && !e.reverse {
-                                e.offset = off + e.rate.scale_ticks(dt);
+                                // todos os takes acompanham o início do evento
+                                let delta = off + e.rate.scale_ticks(dt) - e.offset;
+                                e.shift_offsets(delta);
                             }
                         } else {
                             e.length = (len + dt).max(fd);
                             if slip {
-                                e.offset = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                                let new_off = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                                let delta = new_off - e.offset;
+                                e.offset = new_off;
+                                if slip_all_takes {
+                                    neoveg_engine::takes::slip_alt_takes(e, delta, |m| {
+                                        durations.get(&m).copied().flatten()
+                                    });
+                                }
                             }
                         }
                         e.fade_in.len = e.fade_in.len.min(e.length);
@@ -3081,6 +3111,39 @@ impl App {
         }
     }
 
+    /// Submenu Take (manual do VEGAS Pro 21, p. 347): escolher o take ativo,
+    /// próximo/anterior e excluir o ativo. Escolher pela lista substitui o
+    /// diálogo Take Chooser (que pré-visualiza) por enquanto.
+    fn take_submenu(&mut self, ui: &mut egui::Ui, e: &Event) {
+        use neoveg_engine::takes;
+        let list = takes::takes(e);
+        let active = takes::active_index(e);
+        let id = e.id;
+        ui.menu_button(format!("Take ({} de {})", active + 1, list.len()), |ui| {
+            for (k, t) in list.iter().enumerate() {
+                let name =
+                    takes::display_name(t, |m| self.project.media(m).map(|x| x.name.clone()));
+                if ui
+                    .radio(k == active, format!("{}. {name}", k + 1))
+                    .clicked()
+                {
+                    if !self.session.set_active_take(id, k) && k != active {
+                        self.set_status("Evento travado: o take não foi trocado.");
+                    }
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.cmd_menu_btn(ui, "event.next_take");
+            self.cmd_menu_btn(ui, "event.prev_take");
+            self.cmd_menu_btn(ui, "event.delete_active_take");
+        });
+    }
+
     fn event_context_menu(&mut self, ui: &mut egui::Ui, id: Id) {
         let Some((ti, ei)) = self.project.find_event(id) else {
             ui.close_menu();
@@ -3115,6 +3178,7 @@ impl App {
             self.tl.rename = Some((id, e.name.clone()));
             ui.close_menu();
         }
+        self.take_submenu(ui, &e);
         ui.separator();
         if ui.button("Dividir no cursor (S)").clicked() {
             self.split_at_cursor();

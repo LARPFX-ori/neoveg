@@ -951,6 +951,43 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "event.next_take",
+        label: "Próximo take",
+        menu_path: "Editar/Take/Próximo take",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::T)),
+        needs_ui: false,
+        enabled: |s, _| s.selection_has_takes(),
+        run: |s, h| {
+            s.next_take_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.prev_take",
+        label: "Take anterior",
+        menu_path: "Editar/Take/Take anterior",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::T)),
+        needs_ui: false,
+        enabled: |s, _| s.selection_has_takes(),
+        run: |s, h| {
+            s.prev_take_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.delete_active_take",
+        label: "Excluir take ativo",
+        menu_path: "Editar/Take/Excluir take ativo",
+        default_shortcut: None,
+        needs_ui: false,
+        // nunca deixa um evento sem take: só com mais de um
+        enabled: |s, _| s.selection_has_takes(),
+        run: |s, h| {
+            s.delete_active_take_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "edit.trim_to_selection",
         label: "Aparar para a seleção",
         menu_path: "Editar/Aparar para a seleção",
@@ -1723,6 +1760,18 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.opts.ignore_grouping = !s.opts.ignore_grouping;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.slip_all_takes",
+        label: "Slip em todos os takes",
+        menu_path: "Opções/Slip em todos os takes",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.slip_all_takes = !s.opts.slip_all_takes;
             ok_mutated(s, h)
         },
     },
