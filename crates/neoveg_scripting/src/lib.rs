@@ -1152,4 +1152,99 @@ public class EntryPoint
             assert!(ctx.session.undo.is_empty(), "{tag}");
         }
     }
+
+    /// WAV PCM 16 bits mono de `ms` milissegundos a 48 kHz, para o script
+    /// importar (mídia gerada aqui, nunca commitada).
+    fn grava_wav(tag: &str, ms: u32) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("neoveg_addmedia_{}_{tag}.wav", std::process::id()));
+        let n = 48 * ms;
+        let data = n * 2;
+        let mut b = Vec::with_capacity(44 + data as usize);
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&48_000u32.to_le_bytes());
+        b.extend_from_slice(&96_000u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        b.resize(44 + data as usize, 0);
+        std::fs::write(&path, b).expect("grava wav");
+        path
+    }
+
+    /// MediaPool.AddMedia e new Media(path) com um arquivo fora do projeto:
+    /// o Neoveg abre o arquivo durante o script, e a mídia entra no projeto
+    /// junto com o evento, num passo só de Desfazer.
+    #[test]
+    fn script_importa_midia_com_add_media() {
+        let wav = grava_wav("importa", 1000);
+        let caminho = wav.display().to_string();
+        let corpo = format!(
+            r#"
+        var m = vegas.Project.MediaPool.AddMedia(@"{caminho}");
+        if (!m.HasAudio() || m.HasVideo()) throw new System.Exception("streams");
+        var au = (AudioTrack)vegas.Project.Tracks[1];
+        var ae = au.AddAudioEvent(Timecode.FromSeconds(20), m.Length);
+        ae.AddTake(m.GetAudioStreamByIndex(0));
+        var de_novo = new Media(@"{caminho}");
+        vegas.ShowMessage(vegas.Project.MediaPool.Count + "|" + (de_novo == m));"#
+        );
+        let p = projeto_com_takes();
+        let Some((ctx, r)) = roda_script("add_media_ok", &corpo, p) else {
+            let _ = std::fs::remove_file(&wav);
+            return;
+        };
+        let _ = std::fs::remove_file(&wav);
+        r.unwrap();
+        let pr = &ctx.session.project;
+        assert_eq!(pr.media.len(), 4, "a mídia importada entrou no projeto");
+        let nova = pr.media.last().expect("mídia");
+        assert!(nova.has_audio && !nova.has_video);
+        let ev = pr.tracks[1]
+            .events
+            .iter()
+            .find(|e| e.start == neoveg_engine::time::Ticks::from_secs_i64(20))
+            .expect("evento novo");
+        assert_eq!(ev.media_id, nova.id);
+        assert_eq!(Some(ev.length), nova.duration);
+        assert_eq!(ctx.messages.last().map(String::as_str), Some("4|True"));
+        assert_eq!(ctx.session.undo.len(), 1, "um passo de Desfazer");
+        assert_eq!(
+            ctx.session.undo[0].media.len(),
+            3,
+            "o Desfazer volta ao projeto sem a mídia"
+        );
+    }
+
+    /// Um script que importa mídia e depois falha não deixa a mídia no
+    /// projeto (§0: nada muda num script que falha). Só importar, sem usar,
+    /// põe a mídia no projeto, como no VEGAS.
+    #[test]
+    fn script_que_falha_depois_de_importar_nao_deixa_midia() {
+        let wav = grava_wav("falha", 200);
+        let caminho = wav.display().to_string();
+        let falha = format!(
+            r#"vegas.Project.MediaPool.AddMedia(@"{caminho}");
+        throw new System.Exception("depois");"#
+        );
+        let so_importa = format!(r#"vegas.Project.MediaPool.AddMedia(@"{caminho}");"#);
+        let r1 = roda_script("add_media_falha", &falha, projeto_com_takes());
+        let r2 = roda_script("add_media_so", &so_importa, projeto_com_takes());
+        let _ = std::fs::remove_file(&wav);
+        let (Some((c1, r1)), Some((c2, r2))) = (r1, r2) else {
+            return;
+        };
+        assert!(r1.is_err(), "o script falhou");
+        assert_eq!(c1.session.project.media.len(), 3, "nada foi importado");
+        assert!(c1.session.undo.is_empty());
+        r2.unwrap();
+        assert_eq!(c2.session.project.media.len(), 4);
+        assert_eq!(c2.session.undo.len(), 1);
+    }
 }

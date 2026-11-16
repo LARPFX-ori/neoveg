@@ -298,6 +298,61 @@ fn call_component_entry(
     })
 }
 
+/// Assinatura de [`media_probe_entry`], igual ao `MediaProbeFn` da ponte C#.
+type MediaProbeFn = extern "C" fn(u64, *const u8, i32, *mut u8, i32) -> i32;
+
+/// Ponto de entrada que a ponte C# chama para importar mídia durante o
+/// script (`MediaPool.AddMedia`). Grava em `out_ptr` a resposta JSON e
+/// devolve o tamanho; se não couber, devolve o tamanho pedido negativo; em
+/// argumentos inválidos ou falha interna, `i32::MIN`. Nunca deixa um pânico
+/// atravessar a fronteira (§0.6).
+#[allow(unsafe_code)]
+extern "C" fn media_probe_entry(
+    token: u64,
+    path_ptr: *const u8,
+    path_len: i32,
+    out_ptr: *mut u8,
+    out_cap: i32,
+) -> i32 {
+    neoveg_common::util::catch_isolated(|| {
+        let (Ok(plen), Ok(cap)) = (usize::try_from(path_len), usize::try_from(out_cap)) else {
+            return i32::MIN;
+        };
+        if path_ptr.is_null()
+            || out_ptr.is_null()
+            || plen > crate::vegas_cs::MAX_PROBE_PATH_BYTES
+            || cap == 0
+        {
+            return i32::MIN;
+        }
+        // SAFETY: a ponte C# (`Project.ImportMedia`) passa em `path_ptr` um
+        // bloco de `path_len` bytes alocado com `Marshal.AllocHGlobal` e só o
+        // libera depois que esta chamada síncrona retorna; o tamanho foi
+        // validado acima e o ponteiro não é nulo.
+        let path = unsafe { std::slice::from_raw_parts(path_ptr, plen) };
+        let reply = crate::vegas_cs::probe_media_for_script(token, path);
+        let Ok(n) = i32::try_from(reply.len()) else {
+            return i32::MIN;
+        };
+        if reply.len() > cap {
+            return -n;
+        }
+        // SAFETY: `out_ptr` é um bloco de `out_cap` bytes gravável, alocado
+        // pela ponte C# e vivo durante a chamada; `reply.len() <= cap` foi
+        // verificado acima, e os dois blocos não se sobrepõem (`reply` é um
+        // `Vec` novo do Rust).
+        unsafe { std::ptr::copy_nonoverlapping(reply.as_ptr(), out_ptr, reply.len()) };
+        n
+    })
+    .unwrap_or(i32::MIN)
+}
+
+/// Endereço de [`media_probe_entry`], passado à ponte C# no snapshot.
+pub fn media_probe_fn_addr() -> u64 {
+    let f: MediaProbeFn = media_probe_entry;
+    f as usize as u64
+}
+
 fn execute_on_host_thread(
     state: &mut Option<HostfxrContext<InitializedForRuntimeConfig>>,
     job: &HostJob,
