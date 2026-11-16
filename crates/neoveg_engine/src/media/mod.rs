@@ -7,6 +7,8 @@ pub mod avi;
 #[forbid(unsafe_code)]
 pub mod convert;
 #[forbid(unsafe_code)]
+pub mod demux;
+#[forbid(unsafe_code)]
 pub mod generate;
 #[cfg(windows)]
 mod mf;

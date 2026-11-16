@@ -648,3 +648,32 @@ fn fuzz_fcpxml() {
         });
     }
 }
+
+#[test]
+fn fuzz_demux_mp4_e_mkv() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+        .join("fixtures");
+    for (label, name) in [
+        ("demux MP4", "mf_smoke.mp4"),
+        ("demux fMP4", "demux_frag.mp4"),
+        ("demux MOV", "demux_bframes.mov"),
+        ("demux MKV", "demux_sample.mkv"),
+        ("demux WEBM", "demux_sample.webm"),
+    ] {
+        let p = dir.join(name);
+        let Ok(base) = std::fs::read(&p) else {
+            continue;
+        };
+        for (i, m) in mutations(&base, 120, 0x4458 + name.len() as u64)
+            .iter()
+            .enumerate()
+        {
+            assert_no_panic(label, i, || {
+                let _ = media::demux::demux_bytes(m);
+            });
+        }
+    }
+}

@@ -41,6 +41,44 @@ VIDEO = [
     "-c:a", "aac", "-b:a", "96k", "-shortest", "-movflags", "+faststart",
 ]
 
+DEMUX = [
+    (
+        "demux_frag.mp4",
+        [
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bf", "2",
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+frag_keyframe+empty_moov",
+        ],
+    ),
+    (
+        "demux_bframes.mov",
+        [
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bf", "2",
+            "-c:a", "aac", "-b:a", "96k",
+        ],
+    ),
+    (
+        "demux_sample.mkv",
+        [
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bf", "0",
+            "-c:a", "aac", "-b:a", "96k",
+        ],
+    ),
+    (
+        "demux_sample.webm",
+        [
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v", "libvpx", "-c:a", "libvorbis",
+        ],
+    ),
+]
+
 
 def run(ffmpeg, args, out):
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args, out]
@@ -59,6 +97,7 @@ def main() -> int:
     status = 0
     jobs = [(name, [*TONE, *STEREO, *codec]) for name, codec in AUDIO]
     jobs.append(("mf_smoke.mp4", VIDEO))
+    jobs.extend(DEMUX)
     for name, args in jobs:
         path = os.path.join(out_dir, name)
         if run(ffmpeg, args, path):
