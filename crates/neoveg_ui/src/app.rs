@@ -1547,7 +1547,10 @@ impl App {
                 let c = self.cursor;
                 self.tl.center_on(c);
             }
-            UiAction::ZoomBy(f) => self.tl.zoom_by(f, None),
+            UiAction::ZoomBy(f) => {
+                let c = self.cursor;
+                self.tl.zoom_around_playhead(f, c);
+            }
             UiAction::JumpMarker(forward) => self.jump_marker(forward),
             UiAction::JumpMarkerIndex(idx) => {
                 if let Some(t) = self.session.jump_to_marker_index(idx) {

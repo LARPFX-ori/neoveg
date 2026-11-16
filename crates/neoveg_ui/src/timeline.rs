@@ -229,6 +229,18 @@ impl TimelineState {
         self.scroll_x = (anchor - self.dx_to_ticks(ax)).max(Ticks::ZERO);
     }
 
+    /// Zoom a partir da agulha de reprodução: se ela está na tela, fica no
+    /// mesmo pixel; se não, o zoom acontece e a agulha vai para o centro.
+    pub fn zoom_around_playhead(&mut self, f: f32, playhead: Ticks) {
+        let vis_end = self.scroll_x + self.dx_to_ticks(self.width);
+        if playhead >= self.scroll_x && playhead <= vis_end {
+            self.zoom_by(f, Some(playhead));
+        } else {
+            self.zoom_by(f, None);
+            self.center_on(playhead);
+        }
+    }
+
     pub fn center_on(&mut self, t: Ticks) {
         self.scroll_x = (t - self.dx_to_ticks(self.width / 2.0)).max(Ticks::ZERO);
     }
@@ -644,15 +656,6 @@ impl App {
         self.rename_popup(ui);
     }
 
-    fn timeline_zoom_anchor(&self) -> Option<Ticks> {
-        let vis_end = self.tl.scroll_x + self.tl.dx_to_ticks(self.tl.width);
-        if self.cursor >= self.tl.scroll_x && self.cursor <= vis_end {
-            Some(self.cursor)
-        } else {
-            None
-        }
-    }
-
     fn fit_project_to_timeline(&mut self, lanes_width: f32) {
         let mut target_secs = self.project.duration().as_secs_f64() as f32;
         if target_secs <= 0.05 {
@@ -872,7 +875,7 @@ impl App {
                 pos2(zoom_left + btn_w, inner.top()),
                 pos2(inner.right(), inner.bottom()),
             );
-            let anchor = self.timeline_zoom_anchor();
+            let playhead = self.cursor;
             let can_out = self.tl.px_per_sec > TimelineState::MIN_PX_PER_SEC * 1.0001;
             let can_in = self.tl.px_per_sec < TimelineState::MAX_PX_PER_SEC * 0.9999;
 
@@ -900,15 +903,15 @@ impl App {
             );
 
             if dec_click {
-                self.tl.zoom_by(0.8, anchor);
+                self.tl.zoom_around_playhead(0.8, playhead);
             }
             if inc_click {
-                self.tl.zoom_by(1.25, anchor);
+                self.tl.zoom_around_playhead(1.25, playhead);
             }
             let drag = dec_drag + inc_drag;
             if drag.abs() > 0.01 {
                 let factor = (1.0 + drag * 0.012).clamp(0.5, 2.0);
-                self.tl.zoom_by(factor, anchor);
+                self.tl.zoom_around_playhead(factor, playhead);
             }
         }
 
@@ -2235,8 +2238,9 @@ impl App {
                     == neoveg_common::prefs::TimelineMouseScroll::HorizontalScroll;
                 if horiz_mode {
                     if mods.command {
-                        let t = self.tl.x2t(p.x, left);
-                        self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                        let c = self.cursor;
+                        self.tl
+                            .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                     } else if mods.shift {
                         self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                     } else {
@@ -2248,8 +2252,10 @@ impl App {
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                 } else {
-                    let t = self.tl.x2t(p.x, left);
-                    self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                    // como os botões e as setas: a partir da agulha de reprodução
+                    let c = self.cursor;
+                    self.tl
+                        .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                 }
             }
             // botão do meio: pan
@@ -4008,5 +4014,29 @@ mod zoom_tests {
         }
         assert_eq!(tl.px_per_sec, TimelineState::MIN_PX_PER_SEC);
         assert!(tl.scroll_x >= Ticks::ZERO);
+    }
+
+    #[test]
+    fn zoom_parte_da_agulha_de_reproducao() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            px_per_sec: 100.0,
+            scroll_x: Ticks::from_secs_i64(10),
+            ..Default::default()
+        };
+        // agulha visível, a 2 s do início da tela (200 px): fica no mesmo pixel
+        let agulha = Ticks::from_secs_i64(12);
+        for f in [4.0, 0.3, 50.0, 0.01] {
+            tl.zoom_around_playhead(f, agulha);
+            let px = (agulha - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+            assert!((px - 200.0).abs() < 1.0, "zoom {f}: agulha em {px} px");
+        }
+        // agulha fora da tela: vai para o centro
+        tl.px_per_sec = 100.0;
+        tl.scroll_x = Ticks::ZERO;
+        let longe = Ticks::from_secs_i64(600);
+        tl.zoom_around_playhead(2.0, longe);
+        let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+        assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
     }
 }
