@@ -733,4 +733,203 @@ public class EntryPoint
         assert_eq!(ctx.session.project.tracks.len(), 3);
         assert_eq!(ctx.session.project.markers.len(), 3);
     }
+
+    /// Projeto com V1 (eventos a 0 s e 5 s), A1 (evento a 0 s) e V2 vazia.
+    fn projeto_com_eventos() -> Project {
+        use neoveg_engine::model::{Event, MediaItem, MediaSource, Track, TrackKind};
+        use neoveg_engine::time::Ticks;
+        let media = MediaItem {
+            id: neoveg_engine::model::new_id(),
+            name: "m".into(),
+            source: MediaSource::File {
+                path: "m.avi".into(),
+            },
+            duration: Some(Ticks::from_secs_i64(60)),
+            has_video: true,
+            has_audio: true,
+            width: 64,
+            height: 36,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        v1.events = vec![
+            Event::new(&media, Ticks::ZERO, Ticks::from_secs_i64(4)),
+            Event::new(&media, Ticks::from_secs_i64(5), Ticks::from_secs_i64(3)),
+        ];
+        let mut a1 = Track::new(TrackKind::Audio, "A1");
+        a1.events = vec![Event::new(&media, Ticks::ZERO, Ticks::from_secs_i64(4))];
+        let mut p = Project::new_default();
+        p.media = vec![media];
+        p.tracks = vec![v1, a1, Track::new(TrackKind::Video, "V2")];
+        p
+    }
+
+    /// Eventos, cursor e seleção pela API (Scripting API Summary: TrackEvent,
+    /// TransportControl, Vegas.Cursor): mover dentro da trilha e para outra
+    /// trilha do mesmo tipo, apagar, mudar duração e fades, com tempo exato.
+    #[test]
+    fn script_edita_eventos_com_tempo_exato() {
+        let p = projeto_com_eventos();
+        let (e0, e1) = (p.tracks[0].events[0].id, p.tracks[0].events[1].id);
+        let a0 = p.tracks[1].events[0].id;
+        let corpo = r#"
+        var v1 = vegas.Project.Tracks[0];
+        var v2 = vegas.Project.Tracks[2];
+        var ev = v1.Events[0];
+        ev.Start = ev.Start + Timecode.FromFrames(10);
+        ev.Length = Timecode.FromSeconds(2);
+        ev.FadeIn.Length = Timecode.FromMilliseconds(500);
+        ev.Name = "Abertura";
+        v1.Events[1].Track = v2;
+        vegas.Project.Tracks[1].Events.Clear();"#;
+        let Some((ctx, r)) = roda_script("eventos", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let pr = &ctx.session.project;
+        let fps = pr.settings.fps;
+        let ev = pr.tracks[0].events.iter().find(|e| e.id == e0).expect("e0");
+        assert_eq!(ev.start, fps.frame_to_ticks(10), "10 quadros exatos");
+        assert_eq!(ev.length, neoveg_engine::time::Ticks::from_secs_i64(2));
+        assert_eq!(
+            ev.fade_in.len,
+            neoveg_engine::time::Ticks::from_millis_i64(500)
+        );
+        assert_eq!(ev.name, "Abertura");
+        assert_eq!(pr.tracks[0].events.len(), 1);
+        assert!(
+            pr.tracks[2].events.iter().any(|e| e.id == e1),
+            "e1 foi para V2"
+        );
+        assert!(
+            pr.tracks[1].events.iter().all(|e| e.id != a0),
+            "evento de áudio apagado"
+        );
+        assert_eq!(ctx.session.undo.len(), 1, "um passo de Desfazer");
+    }
+
+    #[test]
+    fn script_evento_em_trilha_de_outro_tipo_e_recusado() {
+        let p = projeto_com_eventos();
+        let antes = p.tracks[0].events.len();
+        let corpo = r#"
+        vegas.Project.Tracks[0].Events[0].Track = vegas.Project.Tracks[1];"#;
+        let Some((ctx, r)) = roda_script("tipo", corpo, p) else {
+            return;
+        };
+        assert!(r.is_err());
+        assert_eq!(ctx.session.project.tracks[0].events.len(), antes);
+        assert!(ctx.session.undo.is_empty());
+    }
+
+    #[test]
+    fn script_evento_repetido_ou_duracao_zero_e_recusado() {
+        for (tag, corpo) in [
+            (
+                "repetido",
+                "        vegas.Project.Tracks[2].Events.Add(vegas.Project.Tracks[0].Events[0]);",
+            ),
+            (
+                "zero",
+                "        vegas.Project.Tracks[0].Events[0].Length = new Timecode();",
+            ),
+            (
+                "negativo",
+                "        vegas.Project.Tracks[0].Events[0].Start = Timecode.FromSeconds(-1);",
+            ),
+        ] {
+            let p = projeto_com_eventos();
+            let antes: Vec<_> = p.tracks.iter().map(|t| t.events.len()).collect();
+            let Some((ctx, r)) = roda_script(tag, corpo, p) else {
+                return;
+            };
+            assert!(r.is_err(), "{tag} devia ser recusado");
+            let depois: Vec<_> = ctx
+                .session
+                .project
+                .tracks
+                .iter()
+                .map(|t| t.events.len())
+                .collect();
+            assert_eq!(depois, antes, "{tag}: projeto mudou");
+        }
+    }
+
+    /// Seleção e cursor não são edição do projeto: sem passo de Desfazer.
+    #[test]
+    fn script_seleciona_e_move_cursor_sem_desfazer() {
+        let p = projeto_com_eventos();
+        let e1 = p.tracks[0].events[1].id;
+        let corpo = r#"
+        vegas.Project.Tracks[0].Events[1].Selected = true;
+        vegas.Project.Tracks[2].Selected = true;
+        vegas.Cursor = Timecode.FromSeconds(3);
+        vegas.Transport.SelectionStart = Timecode.FromSeconds(1);
+        vegas.Transport.SelectionLength = Timecode.FromSeconds(2);"#;
+        let Some((ctx, r)) = roda_script("selecao", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let s = &ctx.session;
+        assert!(s.undo.is_empty(), "seleção não cria passo de Desfazer");
+        assert!(s.sel_events.contains(&e1) && s.sel_events.len() == 1);
+        assert_eq!(s.sel_track, Some(2));
+        assert_eq!(s.cursor, neoveg_engine::time::Ticks::from_secs_i64(3));
+        assert_eq!(
+            s.time_sel,
+            Some((
+                neoveg_engine::time::Ticks::from_secs_i64(1),
+                neoveg_engine::time::Ticks::from_secs_i64(3)
+            ))
+        );
+    }
+
+    /// O Neoveg seleciona uma trilha por vez: com várias, fica a primeira e
+    /// o script recebe uma mensagem (não some em silêncio).
+    #[test]
+    fn script_com_varias_trilhas_selecionadas_avisa() {
+        let p = projeto_com_eventos();
+        let corpo = r#"
+        foreach (var t in vegas.Project.Tracks) { t.Selected = true; }"#;
+        let env = match find_dotnet_env() {
+            Ok(e) if e.has_sdk => e,
+            _ => return,
+        };
+        let _ = env;
+        let path = temp_cs_path("varias");
+        let src = format!(
+            "using ScriptPortal.Vegas;\npublic class EntryPoint {{ public void FromVegas(Vegas vegas) {{ {corpo} }} }}"
+        );
+        std::fs::write(&path, src).unwrap();
+        let mut session = neoveg_engine::session::EditorSession::new(p);
+        let msgs = run_cs_script_on_session(&path, &mut session).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(session.sel_track, Some(0));
+        assert!(
+            msgs.iter().any(|m| m.contains("uma trilha por vez")),
+            "{msgs:?}"
+        );
+    }
+
+    /// Eventos sem nenhuma mudança mantêm os ticks exatos (sem passar por
+    /// milissegundos em ponto flutuante).
+    #[test]
+    fn script_que_le_eventos_nao_muda_tempo() {
+        let mut p = projeto_com_eventos();
+        // um início que não é múltiplo de milissegundo
+        p.tracks[0].events[0].start = neoveg_engine::time::Ticks::from_raw(1_234_567);
+        let antes = p.tracks[0].events[0].start;
+        let corpo = r#"
+        var total = new Timecode();
+        foreach (var ev in vegas.Project.Tracks[0].Events) { total = total + ev.Length; }
+        vegas.ShowMessage(total.ToString());"#;
+        let Some((ctx, r)) = roda_script("leitura_eventos", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ctx.session.undo.is_empty());
+        assert_eq!(ctx.session.project.tracks[0].events[0].start, antes);
+    }
 }
