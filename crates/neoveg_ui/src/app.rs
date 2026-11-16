@@ -155,6 +155,10 @@ pub(crate) struct ScriptJob {
     started: std::time::Instant,
     media_before: std::collections::HashSet<u64>,
     rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+    /// Pedidos de janela da camada de Forms própria (Linux, macOS).
+    ui_rx: std::sync::mpsc::Receiver<crate::script_forms::UiCall>,
+    /// Janela do script aberta agora.
+    active: Option<crate::script_forms::Active>,
 }
 
 pub struct App {
@@ -2501,9 +2505,17 @@ impl App {
         let mut work = self.session.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let script = p.clone();
+        // janelas da camada de Forms própria são desenhadas por esta interface
+        let (ui, ui_rx) = crate::script_forms::bridge();
+        let options = neoveg_scripting::ScriptRunOptions {
+            ui: Some(ui),
+            // só para testar a camada própria no Windows
+            force_forms_shim: std::env::var_os("NEOVEG_SCRIPTS_FORMS_PROPRIA")
+                .is_some_and(|v| v == "1"),
+        };
         let spawned = crate::util::spawn("script-net", move || {
             let outcome = match crate::util::catch_isolated(|| {
-                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+                neoveg_scripting::run_cs_script_on_session_with(&script, &mut work, &options)
             }) {
                 Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
                 Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
@@ -2519,6 +2531,8 @@ impl App {
                     started: std::time::Instant::now(),
                     media_before,
                     rx,
+                    ui_rx,
+                    active: None,
                 });
             }
             Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
@@ -2528,15 +2542,28 @@ impl App {
     /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
     /// modal; ao terminar, aplica a sessão do script (ou só o erro).
     fn poll_script_job(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.script_job else {
+        let theme = self.theme.clone();
+        let Some(job) = &mut self.script_job else {
             return;
         };
         let (outcome, done) = match job.rx.try_recv() {
             Ok(r) => r,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // janela pedida pelo script (camada de Forms própria)
+                if job.active.is_none() {
+                    if let Ok(call) = job.ui_rx.try_recv() {
+                        job.active = crate::script_forms::Active::start(call);
+                    }
+                }
+                if let Some(active) = &mut job.active {
+                    if active.show(ctx) {
+                        job.active = None;
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    return;
+                }
                 let el = job.started.elapsed().as_secs_f64();
                 let path = job.path.display().to_string();
-                let theme = self.theme.clone();
                 egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         crate::splash::spinner_inline(ui, 20.0, el, &theme);

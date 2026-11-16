@@ -23,6 +23,7 @@ mod icons;
 pub mod layout;
 mod panels;
 mod plugin_manager;
+mod script_forms;
 mod scrollbars;
 mod splash;
 mod surround_panel;
