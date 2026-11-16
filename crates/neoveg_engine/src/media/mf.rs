@@ -256,7 +256,9 @@ fn decode_rgb32_sample(sample: &IMFSample, w: u32, h: u32, stride: i32) -> Resul
 enum DecodeReq {
     FrameAt {
         hns: i64,
-        reply: SyncSender<Result<RgbaImage>>,
+        /// `(quadro, novo)`: `novo` é falso quando o stream já terminou e o
+        /// último quadro válido foi repetido.
+        reply: SyncSender<Result<(RgbaImage, bool)>>,
     },
     Shutdown,
 }
@@ -315,7 +317,7 @@ impl MfVideoReader {
                             let target = hns.max(0);
                             if let (Some(ch), Some(img)) = (cur_hns, &last_img) {
                                 if (target - ch).abs() <= frame_hns / 2 {
-                                    let _ = reply.send(Ok((**img).clone()));
+                                    let _ = reply.send(Ok(((**img).clone(), true)));
                                     continue;
                                 }
                             }
@@ -397,10 +399,10 @@ impl MfVideoReader {
 
                             let res = if let Some(img) = decoded {
                                 last_img = Some(Arc::new(img.clone()));
-                                Ok(img)
+                                Ok((img, true))
                             } else if let Some(img) = &last_img {
                                 // Após o último quadro (EOF suave), devolve último quadro válido.
-                                Ok((**img).clone())
+                                Ok(((**img).clone(), false))
                             } else {
                                 Err(read_err
                                     .unwrap_or_else(|| anyhow!("nenhum quadro decodificado")))
@@ -432,6 +434,14 @@ impl MfVideoReader {
     }
 
     pub fn decode_at(&self, t: Ticks) -> Result<RgbaImage> {
+        self.decode_frame_at(t).map(|(img, _)| img)
+    }
+
+    /// Como [`Self::decode_at`], mas informa se o quadro é novo. Falso
+    /// significa que o stream terminou antes de `t` e o último quadro
+    /// válido foi repetido (usado pela conversão para não gravar
+    /// quadros duplicados sem avisar).
+    pub fn decode_frame_at(&self, t: Ticks) -> Result<(RgbaImage, bool)> {
         let tx = {
             let guard = self
                 .tx
@@ -470,7 +480,9 @@ impl Drop for MfVideoReader {
     }
 }
 
-fn read_audio_stream(reader: &IMFSourceReader) -> Option<AudioData> {
+/// Devolve o áudio decodificado e se ele foi cortado pelo limite de
+/// amostras em memória (`MAX_SAMPLES`, §0.4).
+fn read_audio_stream(reader: &IMFSourceReader) -> Option<(AudioData, bool)> {
     let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
     // SAFETY: verifica se o arquivo possui faixa de áudio.
     let _native = unsafe { reader.GetNativeMediaType(stream, 0) }.ok()?;
@@ -546,7 +558,7 @@ fn read_audio_stream(reader: &IMFSourceReader) -> Option<AudioData> {
         if use_float {
             for &chunk in locked.bytes.as_chunks::<4>().0 {
                 if samples.len() >= max_in_samples {
-                    return Some(AudioData::from_interleaved(sr, ch, &samples));
+                    return Some((AudioData::from_interleaved(sr, ch, &samples), true));
                 }
                 let v = f32::from_le_bytes(chunk);
                 samples.push(if v.is_finite() { v } else { 0.0 });
@@ -554,7 +566,7 @@ fn read_audio_stream(reader: &IMFSourceReader) -> Option<AudioData> {
         } else {
             for &chunk in locked.bytes.as_chunks::<2>().0 {
                 if samples.len() >= max_in_samples {
-                    return Some(AudioData::from_interleaved(sr, ch, &samples));
+                    return Some((AudioData::from_interleaved(sr, ch, &samples), true));
                 }
                 let v = i16::from_le_bytes(chunk) as f32 / 32768.0;
                 samples.push(v);
@@ -565,7 +577,7 @@ fn read_audio_stream(reader: &IMFSourceReader) -> Option<AudioData> {
     if samples.is_empty() {
         None
     } else {
-        Some(AudioData::from_interleaved(sr, ch, &samples))
+        Some((AudioData::from_interleaved(sr, ch, &samples), false))
     }
 }
 
@@ -574,6 +586,8 @@ pub struct MfLoaded {
     pub duration: Option<Ticks>,
     pub video: Option<MfVideoReader>,
     pub audio: Option<AudioData>,
+    /// O áudio foi cortado pelo limite de memória (`MAX_SAMPLES`).
+    pub audio_truncated: bool,
 }
 
 /// Abre um arquivo de mídia com Windows Media Foundation sob isolamento de
@@ -583,7 +597,10 @@ pub fn open_media(path: &Path) -> Result<MfLoaded> {
     let reader = open_source_reader(path)?;
     let duration = read_duration(&reader);
     let video_info = configure_video_stream(&reader);
-    let audio = read_audio_stream(&reader);
+    let (audio, audio_truncated) = match read_audio_stream(&reader) {
+        Some((a, cut)) => (Some(a), cut),
+        None => (None, false),
+    };
     drop(reader);
 
     let video = if let Some(info) = video_info {
@@ -600,5 +617,6 @@ pub fn open_media(path: &Path) -> Result<MfLoaded> {
         duration,
         video,
         audio,
+        audio_truncated,
     })
 }
