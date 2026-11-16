@@ -45,26 +45,29 @@ struct ScriptInputPayload {
     audio_buses: Vec<String>,
 }
 
+/// Versão do formato de saída da ponte. Uma saída sem ela veio de uma ponte
+/// antiga (só "adicionados"): é recusada, nunca lida como "apagar tudo".
+const SCRIPT_OUTPUT_PROTOCOL: u32 = 2;
+
+/// Trilha na lista final devolvida pelo script: `orig` é o índice original
+/// (ou negativo se é nova); `None` = não mudou.
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct ScriptTrackPatch {
-    index: usize,
+struct ScriptTrackOut {
+    orig: i64,
+    is_video: bool,
+    name: Option<String>,
     mute: Option<bool>,
     solo: Option<bool>,
 }
 
+/// Marcador na lista final devolvida pelo script (mesma convenção).
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct NewTrackSpec {
-    is_video: bool,
-    name: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct NewMarkerSpec {
-    seconds: f64,
-    label: String,
+struct ScriptMarkerOut {
+    orig: i64,
+    seconds: Option<f64>,
+    label: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -72,12 +75,12 @@ struct NewMarkerSpec {
 struct ScriptOutputPayload {
     ok: bool,
     error: Option<String>,
+    protocol: u32,
     messages: Vec<String>,
     commands: Vec<String>,
-    added_tracks: Vec<NewTrackSpec>,
+    tracks: Vec<ScriptTrackOut>,
     added_buses: Vec<Option<String>>,
-    added_markers: Vec<NewMarkerSpec>,
-    track_patches: Vec<ScriptTrackPatch>,
+    markers: Vec<ScriptMarkerOut>,
     cursor_ms: Option<f64>,
 }
 
@@ -156,7 +159,7 @@ namespace ScriptPortal.Vegas
 
     public class Marker
     {
-        internal bool _isOrig;
+        internal int _origIndex = -1;
         public Timecode Position { get; set; } = new Timecode(0.0);
         public string Label { get; set; } = "";
         public Marker() { }
@@ -253,11 +256,12 @@ namespace ScriptPortal.Vegas
             }
             if (snap.markers != null)
             {
-                foreach (var m in snap.markers)
+                for (int i = 0; i < snap.markers.Count; i++)
                 {
+                    var m = snap.markers[i];
                     var mk = new Marker(Timecode.FromMilliseconds(m.position_ms), m.label)
                     {
-                        _isOrig = true
+                        _origIndex = i
                     };
                     Project.Markers.Add(mk);
                 }
@@ -293,22 +297,31 @@ namespace ScriptPortal.Vegas
             }
         }
 
+        // Devolve a lista FINAL de trilhas e marcadores: cada item diz de qual
+        // item original veio (ou -1 se é novo) e só o que mudou. Assim
+        // renomear, mover, apagar, reordenar e inserir no meio chegam ao
+        // Neoveg em vez de se perderem em silêncio (AGENTS.md §0).
         internal OutputSnap BuildResult(InputSnap orig)
         {
-            var patches = new List<TrackPatchOut>();
-            var addedTracks = new List<NewTrackOut>();
-            var addedMarkers = new List<NewMarkerOut>();
+            var tracksOut = new List<TrackOut>();
+            var markersOut = new List<MarkerOut>();
             var addedBuses = new List<string>();
 
-            var origTracks = orig.tracks;
+            var origTracks = orig.tracks ?? new List<TrackSnap>();
+            var seenTracks = new HashSet<int>();
             foreach (var cur in Project.Tracks)
             {
                 if (cur == null)
                 {
                     continue;
                 }
-                if (cur._origIndex >= 0 && origTracks != null)
+                if (cur._origIndex >= 0)
                 {
+                    if (!seenTracks.Add(cur._origIndex))
+                    {
+                        throw new InvalidOperationException(
+                            "a mesma trilha aparece mais de uma vez em Project.Tracks");
+                    }
                     TrackSnap old = null;
                     for (int j = 0; j < origTracks.Count; j++)
                     {
@@ -318,35 +331,64 @@ namespace ScriptPortal.Vegas
                             break;
                         }
                     }
-                    if (old != null && (cur.Mute != old.mute || cur.Solo != old.solo))
+                    if (old == null)
                     {
-                        patches.Add(new TrackPatchOut
-                        {
-                            index = old.index,
-                            mute = cur.Mute != old.mute ? cur.Mute : (bool?)null,
-                            solo = cur.Solo != old.solo ? cur.Solo : (bool?)null
-                        });
+                        throw new InvalidOperationException("trilha original desconhecida");
                     }
+                    tracksOut.Add(new TrackOut
+                    {
+                        orig = cur._origIndex,
+                        is_video = cur.IsVideo(),
+                        name = (cur.Name ?? "") != (old.name ?? "") ? (cur.Name ?? "") : null,
+                        mute = cur.Mute != old.mute ? cur.Mute : (bool?)null,
+                        solo = cur.Solo != old.solo ? cur.Solo : (bool?)null
+                    });
                 }
                 else
                 {
-                    addedTracks.Add(new NewTrackOut
+                    tracksOut.Add(new TrackOut
                     {
+                        orig = -1,
                         is_video = cur.IsVideo(),
-                        name = string.IsNullOrWhiteSpace(cur.Name) ? null : cur.Name
+                        name = string.IsNullOrWhiteSpace(cur.Name) ? null : cur.Name,
+                        mute = cur.Mute ? true : (bool?)null,
+                        solo = cur.Solo ? true : (bool?)null
                     });
                 }
             }
 
+            var origMarkers = orig.markers ?? new List<MarkerSnap>();
+            var seenMarkers = new HashSet<int>();
             foreach (var mk in Project.Markers)
             {
-                if (mk != null && !mk._isOrig)
+                if (mk == null)
                 {
-                    double ms = mk.Position != null ? mk.Position.Milliseconds : 0.0;
-                    addedMarkers.Add(new NewMarkerOut
+                    continue;
+                }
+                double ms = mk.Position != null ? mk.Position.Milliseconds : 0.0;
+                string label = mk.Label ?? "";
+                if (mk._origIndex >= 0 && mk._origIndex < origMarkers.Count)
+                {
+                    if (!seenMarkers.Add(mk._origIndex))
                     {
+                        throw new InvalidOperationException(
+                            "o mesmo marcador aparece mais de uma vez em Project.Markers");
+                    }
+                    var old = origMarkers[mk._origIndex];
+                    markersOut.Add(new MarkerOut
+                    {
+                        orig = mk._origIndex,
+                        seconds = ms != old.position_ms ? ms / 1000.0 : (double?)null,
+                        label = label != (old.label ?? "") ? label : null
+                    });
+                }
+                else
+                {
+                    markersOut.Add(new MarkerOut
+                    {
+                        orig = -1,
                         seconds = ms / 1000.0,
-                        label = string.IsNullOrEmpty(mk.Label) ? "Marcador" : mk.Label
+                        label = label
                     });
                 }
             }
@@ -363,12 +405,12 @@ namespace ScriptPortal.Vegas
             return new OutputSnap
             {
                 ok = true,
+                protocol = 2,
                 messages = _messages,
                 commands = _commands,
-                added_tracks = addedTracks,
+                tracks = tracksOut,
                 added_buses = addedBuses,
-                added_markers = addedMarkers,
-                track_patches = patches,
+                markers = markersOut,
                 cursor_ms = newCursor
             };
         }
@@ -399,23 +441,20 @@ namespace ScriptPortal.Vegas
         public List<string> audio_buses { get; set; }
     }
 
-    internal sealed class NewTrackOut
+    internal sealed class TrackOut
     {
+        public int orig { get; set; }
         public bool is_video { get; set; }
         public string name { get; set; }
-    }
-
-    internal sealed class NewMarkerOut
-    {
-        public double seconds { get; set; }
-        public string label { get; set; }
-    }
-
-    internal sealed class TrackPatchOut
-    {
-        public int index { get; set; }
         public bool? mute { get; set; }
         public bool? solo { get; set; }
+    }
+
+    internal sealed class MarkerOut
+    {
+        public int orig { get; set; }
+        public double? seconds { get; set; }
+        public string label { get; set; }
     }
 
     internal sealed class OutputSnap
@@ -424,10 +463,10 @@ namespace ScriptPortal.Vegas
         public string error { get; set; }
         public List<string> messages { get; set; } = new List<string>();
         public List<string> commands { get; set; } = new List<string>();
-        public List<NewTrackOut> added_tracks { get; set; } = new List<NewTrackOut>();
+        public int protocol { get; set; }
+        public List<TrackOut> tracks { get; set; } = new List<TrackOut>();
         public List<string> added_buses { get; set; } = new List<string>();
-        public List<NewMarkerOut> added_markers { get; set; } = new List<NewMarkerOut>();
-        public List<TrackPatchOut> track_patches { get; set; } = new List<TrackPatchOut>();
+        public List<MarkerOut> markers { get; set; } = new List<MarkerOut>();
         public double? cursor_ms { get; set; }
     }
 
@@ -904,6 +943,143 @@ fn ensure_bridge_dll(env: &DotnetEnv) -> Result<PathBuf, NeovegError> {
     }
 }
 
+/// A lista final é a original, na mesma ordem e sem mudanças?
+fn tracks_unchanged(out: &[ScriptTrackOut], n: usize) -> bool {
+    out.len() == n
+        && out.iter().enumerate().all(|(i, t)| {
+            usize::try_from(t.orig).ok() == Some(i)
+                && t.name.is_none()
+                && t.mute.is_none()
+                && t.solo.is_none()
+        })
+}
+
+fn markers_unchanged(out: &[ScriptMarkerOut], n: usize) -> bool {
+    out.len() == n
+        && out.iter().enumerate().all(|(i, m)| {
+            usize::try_from(m.orig).ok() == Some(i) && m.seconds.is_none() && m.label.is_none()
+        })
+}
+
+/// Índice original válido e ainda não usado (§3.1: cada identidade uma vez).
+fn take_orig(orig: i64, used: &mut [bool], what: &str) -> Result<Option<usize>, NeovegError> {
+    let Ok(i) = usize::try_from(orig) else {
+        return Ok(None);
+    };
+    match used.get_mut(i) {
+        None => Err(NeovegError::InvalidInput(format!(
+            "script .NET referenciou {what} original inexistente: {i}"
+        ))),
+        Some(true) => Err(NeovegError::InvalidInput(format!(
+            "script .NET repetiu {what} {i} na lista final"
+        ))),
+        Some(u) => {
+            *u = true;
+            Ok(Some(i))
+        }
+    }
+}
+
+/// Remonta as trilhas na ordem final do script. Trilhas que ficaram de fora
+/// foram apagadas pelo script; trilhas existentes mantêm id, eventos e tudo
+/// o que o script não mudou.
+fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>, NeovegError> {
+    let mut used = vec![false; old.len()];
+    let mut tracks: Vec<Track> = Vec::with_capacity(out.len());
+    for t in out {
+        let mut tr = match take_orig(t.orig, &mut used, "trilha")? {
+            Some(i) => {
+                let Some(src) = old.get(i) else {
+                    return Err(NeovegError::Internal(
+                        "índice de trilha fora da lista".into(),
+                    ));
+                };
+                let mut tr = src.clone();
+                if let Some(name) = t.name {
+                    tr.name = truncate_str(name.trim(), 128);
+                }
+                tr
+            }
+            None => {
+                let kind = if t.is_video {
+                    TrackKind::Video
+                } else {
+                    TrackKind::Audio
+                };
+                let n = tracks.iter().filter(|x| x.kind == kind).count() + 1;
+                let name = t
+                    .name
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| match kind {
+                        TrackKind::Video => format!("Vídeo {n}"),
+                        TrackKind::Audio => format!("Áudio {n}"),
+                    });
+                Track::new(kind, &truncate_str(&name, 128))
+            }
+        };
+        if let Some(m) = t.mute {
+            tr.mute = m;
+        }
+        if let Some(s) = t.solo {
+            tr.solo = s;
+        }
+        tracks.push(tr);
+    }
+    Ok(tracks)
+}
+
+fn marker_ticks(seconds: f64) -> Result<Ticks, NeovegError> {
+    if !seconds.is_finite() {
+        return Err(NeovegError::InvalidInput(
+            "script .NET informou tempo não finito para marcador".into(),
+        ));
+    }
+    let secs = seconds.clamp(0.0, 48.0 * 3600.0);
+    let ticks_i = (secs * 1_411_200_000.0).round() as i64;
+    Ok(Ticks::from_raw(ticks_i).clamp_safe(Ticks::ZERO, Ticks::MAX))
+}
+
+fn marker_label(label: &str) -> String {
+    if label.trim().is_empty() {
+        "Marcador".into()
+    } else {
+        truncate_str(label.trim(), 128)
+    }
+}
+
+/// Remonta os marcadores na ordem final do script (mesmas regras das
+/// trilhas). Um marcador que não mudou mantém id e tempo exatos.
+fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Marker>, NeovegError> {
+    let mut used = vec![false; old.len()];
+    let mut markers: Vec<Marker> = Vec::with_capacity(out.len());
+    for m in out {
+        match take_orig(m.orig, &mut used, "marcador")? {
+            Some(i) => {
+                let Some(src) = old.get(i) else {
+                    return Err(NeovegError::Internal(
+                        "índice de marcador fora da lista".into(),
+                    ));
+                };
+                let mut mk = src.clone();
+                if let Some(s) = m.seconds {
+                    mk.t = marker_ticks(s)?;
+                }
+                if let Some(l) = m.label {
+                    mk.label = marker_label(&l);
+                }
+                markers.push(mk);
+            }
+            None => markers.push(Marker {
+                id: neoveg_engine::model::new_id(),
+                t: marker_ticks(m.seconds.unwrap_or(0.0))?,
+                label: marker_label(m.label.as_deref().unwrap_or("")),
+            }),
+        }
+    }
+    Ok(markers)
+}
+
 fn apply_script_output(
     out: ScriptOutputPayload,
     session: &mut EditorSession,
@@ -919,10 +1095,18 @@ fn apply_script_output(
         )));
     }
 
-    if out.added_tracks.len() > MAX_SCRIPT_ITEMS
+    if out.protocol != SCRIPT_OUTPUT_PROTOCOL {
+        return Err(NeovegError::Unsupported(
+            "o assembly '.dll' foi gerado com uma versão antiga da ponte ScriptPortal.Vegas \
+             do Neoveg; recompile o script"
+                .into(),
+        ));
+    }
+    let n_tracks = session.project.tracks.len();
+    let n_markers = session.project.markers.len();
+    if out.tracks.len() > n_tracks.saturating_add(MAX_SCRIPT_ITEMS)
         || out.added_buses.len() > MAX_SCRIPT_ITEMS
-        || out.added_markers.len() > MAX_SCRIPT_ITEMS
-        || out.track_patches.len() > MAX_SCRIPT_ITEMS
+        || out.markers.len() > n_markers.saturating_add(MAX_SCRIPT_ITEMS)
         || out.commands.len() > MAX_SCRIPT_ITEMS
         || out.messages.len() > MAX_SCRIPT_ITEMS
     {
@@ -931,10 +1115,9 @@ fn apply_script_output(
         )));
     }
 
-    let has_project_mutations = !out.added_tracks.is_empty()
-        || !out.added_buses.is_empty()
-        || !out.added_markers.is_empty()
-        || !out.track_patches.is_empty();
+    let tracks_changed = !tracks_unchanged(&out.tracks, n_tracks);
+    let markers_changed = !markers_unchanged(&out.markers, n_markers);
+    let has_project_mutations = tracks_changed || !out.added_buses.is_empty() || markers_changed;
     let had_history_cmd = out
         .commands
         .iter()
@@ -951,28 +1134,8 @@ fn apply_script_output(
         Vec::new()
     };
 
-    for tr in out.added_tracks {
-        let kind = if tr.is_video {
-            TrackKind::Video
-        } else {
-            TrackKind::Audio
-        };
-        let n = staged
-            .project
-            .tracks
-            .iter()
-            .filter(|t| t.kind == kind)
-            .count()
-            + 1;
-        let name = tr
-            .name
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| match kind {
-                TrackKind::Video => format!("Vídeo {n}"),
-                TrackKind::Audio => format!("Áudio {n}"),
-            });
-        staged.project.tracks.push(Track::new(kind, &name));
+    if tracks_changed {
+        staged.project.tracks = rebuild_tracks(&staged.project.tracks, out.tracks)?;
     }
 
     for bus_name in out.added_buses {
@@ -984,38 +1147,8 @@ fn apply_script_output(
         }
     }
 
-    for mk in out.added_markers {
-        if !mk.seconds.is_finite() {
-            return Err(NeovegError::InvalidInput(
-                "script .NET informou tempo não finito para marcador".into(),
-            ));
-        }
-        let secs = mk.seconds.clamp(0.0, 48.0 * 3600.0);
-        let ticks_i = (secs * 1_411_200_000.0).round() as i64;
-        staged.project.markers.push(Marker {
-            id: neoveg_engine::model::new_id(),
-            t: Ticks::from_raw(ticks_i).clamp_safe(Ticks::ZERO, Ticks::MAX),
-            label: if mk.label.trim().is_empty() {
-                "Marcador".into()
-            } else {
-                truncate_str(mk.label.trim(), 128)
-            },
-        });
-    }
-
-    for patch in out.track_patches {
-        let Some(t) = staged.project.tracks.get_mut(patch.index) else {
-            return Err(NeovegError::InvalidInput(format!(
-                "script .NET referenciou índice de trilha inexistente: {}",
-                patch.index
-            )));
-        };
-        if let Some(m) = patch.mute {
-            t.mute = m;
-        }
-        if let Some(s) = patch.solo {
-            t.solo = s;
-        }
+    if markers_changed {
+        staged.project.markers = rebuild_markers(&staged.project.markers, out.markers)?;
     }
 
     let cursor_changed = if let Some(ms) = out.cursor_ms {
