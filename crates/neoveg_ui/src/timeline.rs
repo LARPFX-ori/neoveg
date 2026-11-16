@@ -13,6 +13,7 @@ use std::collections::HashSet;
 
 mod keyframes;
 use keyframes::KfArea;
+use neoveg_engine::media::audio::WaveChannel;
 use neoveg_engine::track_keyframes::KfRowKind;
 
 /// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
@@ -3546,38 +3547,105 @@ impl App {
                             .media(e.media_id)
                             .and_then(|m| m.duration)
                             .or(Some(a.duration()));
-                        let mid = content.center().y;
-                        let amp = content.height() * 0.48 * db_to_lin(e.gain_db).min(4.0);
+                        let gain = db_to_lin(e.gain_db).min(4.0);
                         let alpha = if e.mute { 70 } else { 185 };
-                        let col = if body_light {
+                        let gray = if body_light {
                             Color32::from_rgba_unmultiplied(22, 30, 42, alpha)
                         } else {
                             Color32::from_rgba_unmultiplied(220, 230, 240, alpha)
                         };
-                        let mut x = vis.left().floor();
-                        let mut segs = Vec::with_capacity(vis.width() as usize * 2);
-                        let min_span = Ticks::from_raw(TICKS_PER_MS / 10);
+                        // VEGAS: a forma de onda usa a cor da faixa (Track Display
+                        // Color); cinza quando mudo, em alto contraste ou sem contraste
+                        let tinted = shade(track.color, if body_light { 0.45 } else { 1.35 });
+                        let col = if e.mute
+                            || muted
+                            || self.theme.high_contrast
+                            || crate::theme::contrast_ratio(tinted, body) < 3.0
+                        {
+                            gray
+                        } else {
+                            tinted.gamma_multiply(f32::from(alpha) / 255.0)
+                        };
+                        let center_col = col.gamma_multiply(0.45);
+                        // como no VEGAS: fonte estéreo mostra L em cima e R embaixo,
+                        // cada um com sua linha central; evento baixo ou mono, um traço só
+                        let chans: Vec<(WaveChannel, Rect)> =
+                            if !a.mono_source && content.height() >= 30.0 {
+                                let my = content.center().y;
+                                vec![
+                                    (
+                                        WaveChannel::Left,
+                                        Rect::from_min_max(content.min, pos2(content.right(), my)),
+                                    ),
+                                    (
+                                        WaveChannel::Right,
+                                        Rect::from_min_max(pos2(content.left(), my), content.max),
+                                    ),
+                                ]
+                            } else {
+                                vec![(WaveChannel::Mix, content)]
+                            };
                         let last_t = (e.end() - Ticks::from_raw(1)).max(e.start);
-                        while x < vis.right() {
-                            let t0 = self.tl.x2t(x, left);
-                            let t1 = self.tl.x2t(x + 1.0, left);
-                            if let (Some(m0), Some(m1)) =
-                                (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
-                            {
-                                let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
-                                let (lo, hi) = a.peak_range(m0, m1.max(m0 + min_span));
+                        let x_first = vis.left().floor();
+                        // menos de uma amostra por pixel: curva amostra a amostra
+                        let one_sample = Ticks::from_samples(1, a.sample_rate).0.max(1);
+                        let sample_mode = match (
+                            e.media_time(self.tl.x2t(x_first, left), dur),
+                            e.media_time(self.tl.x2t(x_first + 1.0, left).min(last_t), dur),
+                        ) {
+                            (Some(m0), Some(m1)) => (m1 - m0).0.abs() < one_sample,
+                            _ => false,
+                        };
+                        let stroke = Stroke::new(1.0_f32, col);
+                        let curve = Stroke::new(1.2_f32, col);
+                        let mut shapes = Vec::with_capacity(vis.width() as usize * chans.len() + 4);
+                        for (ch, cr) in &chans {
+                            let (ya, yb) = (cr.top().min(cr.bottom()), cr.top().max(cr.bottom()));
+                            let mid = cr.center().y;
+                            let amp = cr.height() * 0.46 * gain;
+                            let y_of = |v: f32| (mid - v * amp).clamp(ya, yb);
+                            shapes.push(Shape::line_segment(
+                                [pos2(vis.left(), mid), pos2(vis.right(), mid)],
+                                Stroke::new(1.0_f32, center_col),
+                            ));
+                            let mut pts: Vec<Pos2> = Vec::new();
+                            let mut x = x_first;
+                            while x < vis.right() {
+                                let t0 = self.tl.x2t(x, left);
                                 let fg = e.fade_gain(t0);
-                                segs.push(Shape::line_segment(
-                                    [
-                                        pos2(x, mid - hi * amp * fg),
-                                        pos2(x, mid - lo * amp * fg + 0.5),
-                                    ],
-                                    Stroke::new(1.0_f32, col),
-                                ));
+                                if sample_mode {
+                                    let tc = self.tl.x2t(x + 0.5, left).min(last_t);
+                                    if let Some(m) = e.media_time(tc, dur) {
+                                        let v = a.sample_channel(*ch, m) * fg;
+                                        pts.push(pos2(x + 0.5, y_of(v)));
+                                    } else if pts.len() > 1 {
+                                        shapes.push(Shape::line(std::mem::take(&mut pts), curve));
+                                    } else {
+                                        pts.clear();
+                                    }
+                                } else {
+                                    let t1 = self.tl.x2t(x + 1.0, left);
+                                    if let (Some(m0), Some(m1)) =
+                                        (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
+                                    {
+                                        let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
+                                        let (lo, hi) = a.channel_range(*ch, m0, m1);
+                                        shapes.push(Shape::line_segment(
+                                            [
+                                                pos2(x + 0.5, y_of(hi * fg)),
+                                                pos2(x + 0.5, y_of(lo * fg) + 0.5),
+                                            ],
+                                            stroke,
+                                        ));
+                                    }
+                                }
+                                x += 1.0;
                             }
-                            x += 1.0;
+                            if pts.len() > 1 {
+                                shapes.push(Shape::line(pts, curve));
+                            }
                         }
-                        painter.with_clip_rect(vis).extend(segs);
+                        painter.with_clip_rect(vis).extend(shapes);
                     }
                 }
                 // nome e indicadores
