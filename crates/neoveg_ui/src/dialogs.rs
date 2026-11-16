@@ -1498,6 +1498,13 @@ impl App {
                                         &self.theme,
                                     );
                                 }
+                                if fx.kind == FxKind::Vst3 {
+                                    changed |= crate::plugin_manager::vst3_params_editor(
+                                        ui,
+                                        fx,
+                                        &self.theme,
+                                    );
+                                }
                                 let specs = fx.kind.params();
                                 egui::Grid::new("params").num_columns(3).show(ui, |ui| {
                                     for (pi, spec) in specs.iter().enumerate() {
@@ -1598,14 +1605,19 @@ impl App {
                 "down" => chain_copy.swap(i, i + 1),
                 "reset" => {
                     let id = chain_copy[i].id;
-                    // OFX: mantém o plug-in e volta só os valores ao padrão dele
+                    // OFX/VST3: mantém o plug-in e volta só os valores ao padrão dele
                     let ofx = chain_copy[i].ofx.take().map(|mut o| {
                         o.params.clear();
                         o
                     });
+                    let vst3 = chain_copy[i].vst3.take().map(|mut v| {
+                        v.params.clear();
+                        v
+                    });
                     chain_copy[i] = FxInstance::new(chain_copy[i].kind);
                     chain_copy[i].id = id;
                     chain_copy[i].ofx = ofx;
+                    chain_copy[i].vst3 = vst3;
                 }
                 _ => {}
             }

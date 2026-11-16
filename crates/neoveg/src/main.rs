@@ -114,35 +114,40 @@ const HELP: &str = "Uso:
   neoveg --command <id> [projeto [saida]]   executa comando da Tabela Única sem interface
   neoveg --list-commands                    lista os comandos e atalhos disponíveis";
 
+/// Imprime o resultado de uma sondagem em JSON e devolve o código de saída.
+fn print_probe<T: serde::Serialize>(res: Result<T, String>) -> i32 {
+    match res.and_then(|list| serde_json::to_string(&list).map_err(|e| e.to_string())) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            3
+        }
+    }
+}
+
 /// Modo host de plug-ins (`neoveg --plugin-host probe-ofx <binário>`): roda
 /// num subprocesso descartável, carrega o binário de terceiros e responde em
 /// JSON no stdout. Fica antes de preferências e logs para não tocar no estado
 /// do usuário.
 fn plugin_host_mode(args: &[String]) -> Option<i32> {
+    use neoveg_engine::plugin_host as ph;
     let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     match rest.as_slice() {
-        ["--plugin-host", "probe-ofx", bin] => {
-            match neoveg_engine::plugin_host::probe_ofx_in_process(std::path::Path::new(bin)) {
-                Ok(list) => match serde_json::to_string(&list) {
-                    Ok(json) => {
-                        println!("{json}");
-                        Some(0)
-                    }
-                    Err(e) => {
-                        eprintln!("{e}");
-                        Some(4)
-                    }
-                },
-                Err(e) => {
-                    eprintln!("{e}");
-                    Some(3)
-                }
-            }
-        }
-        ["--plugin-host", "serve-ofx", bin, id] => Some(neoveg_engine::plugin_host::serve_ofx(
+        ["--plugin-host", "probe-ofx", bin] => Some(print_probe(ph::probe_ofx_in_process(
             std::path::Path::new(bin),
-            id,
-        )),
+        ))),
+        ["--plugin-host", "serve-ofx", bin, id] => {
+            Some(ph::serve_ofx(std::path::Path::new(bin), id))
+        }
+        ["--plugin-host", "probe-vst3", bin] => Some(print_probe(ph::probe_vst3_in_process(
+            std::path::Path::new(bin),
+        ))),
+        ["--plugin-host", "serve-vst3", bin, class_id, sr] => {
+            Some(ph::serve_vst3(std::path::Path::new(bin), class_id, sr))
+        }
         ["--plugin-host", ..] => {
             eprintln!("modo de host de plug-ins desconhecido");
             Some(2)

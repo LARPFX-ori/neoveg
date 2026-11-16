@@ -14,16 +14,19 @@
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod ofx;
+#[cfg(windows)]
+mod vst3;
 
-use crate::model::{OfxFxRef, OfxParamValue};
+use crate::model::{Id, OfxFxRef, OfxParamValue, Vst3FxRef, Vst3ParamValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Descritor de um parâmetro de plug-in OFX (para a interface).
@@ -37,6 +40,47 @@ pub struct OfxParamInfo {
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub choices: Vec<String>,
+}
+
+/// Classe de efeito de áudio declarada por um módulo VST3.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vst3ClassInfo {
+    /// `TUID` da classe em 32 dígitos hexadecimais.
+    pub class_id: String,
+    pub name: String,
+    /// Subcategorias (`Fx|Delay`, `Instrument|Synth`...), se o plug-in as declara.
+    #[serde(default)]
+    pub sub_categories: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub version: String,
+}
+
+impl Vst3ClassInfo {
+    /// Verdadeiro para instrumentos (precisam de MIDI, que o host ainda não envia).
+    pub fn is_instrument(&self) -> bool {
+        self.sub_categories
+            .split('|')
+            .any(|c| c.eq_ignore_ascii_case("Instrument"))
+    }
+}
+
+/// Descritor de um parâmetro VST3 (para a interface). Valores normalizados.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vst3ParamInfo {
+    pub id: u32,
+    pub title: String,
+    #[serde(default)]
+    pub units: String,
+    /// 0 = contínuo; n > 0 = n + 1 valores discretos.
+    #[serde(default)]
+    pub step_count: i32,
+    pub default: f64,
+    /// Valor no momento em que o plug-in foi aberto.
+    pub current: f64,
+    #[serde(default)]
+    pub bypass: bool,
 }
 
 /// Maior cabeçalho JSON trocado com o host.
@@ -167,48 +211,7 @@ pub fn probe_ofx_isolated(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o host de plug-ins: {e}"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(s) = stdout {
-            let _ = s.take(MAX_REPLY_BYTES).read_to_end(&mut out);
-        }
-        out
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(s) = stderr {
-            let _ = s.take(64 * 1024).read_to_end(&mut out);
-        }
-        out
-    });
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(25)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "plug-in não respondeu em {} s e o host foi encerrado",
-                    timeout.as_secs()
-                ));
-            }
-            Err(e) => return Err(format!("falha ao aguardar o host de plug-ins: {e}")),
-        }
-    };
-    let out = reader.join().unwrap_or_default();
-    let err = err_reader.join().unwrap_or_default();
-    if !status.success() {
-        let msg = String::from_utf8_lossy(&err).trim().to_string();
-        return Err(if msg.is_empty() {
-            format!("host de plug-ins terminou com falha ({status})")
-        } else {
-            msg
-        });
-    }
+    let out = wait_child(&mut child, timeout)?;
     serde_json::from_slice(&out).map_err(|e| format!("resposta inválida do host de plug-ins: {e}"))
 }
 
@@ -354,15 +357,20 @@ struct Worker {
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<std::io::Result<(serde_json::Value, Vec<u8>)>>,
-    params: Vec<OfxParamInfo>,
+    /// Primeira mensagem do host (`{"ok": true, ...}`), com os parâmetros.
+    hello: serde_json::Value,
 }
 
 impl Worker {
-    fn spawn(host_exe: &Path, binary: &str, plugin_id: &str) -> Result<Self, String> {
+    fn spawn_ofx(host_exe: &Path, binary: &str, plugin_id: &str) -> Result<Self, String> {
+        Self::spawn(host_exe, &["serve-ofx", binary, plugin_id])
+    }
+
+    /// Inicia `host_exe --plugin-host <args...>` e espera o `hello`.
+    fn spawn(host_exe: &Path, args: &[&str]) -> Result<Self, String> {
         let mut child = Command::new(host_exe)
-            .args(["--plugin-host", "serve-ofx"])
-            .arg(binary)
-            .arg(plugin_id)
+            .arg("--plugin-host")
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -374,7 +382,7 @@ impl Worker {
         };
         let (tx, rx) = channel();
         let spawned = std::thread::Builder::new()
-            .name("ofx-host-reader".into())
+            .name("plugin-host-reader".into())
             .spawn(move || loop {
                 let msg = read_msg(&mut stdout);
                 let end = msg.is_err();
@@ -390,9 +398,9 @@ impl Worker {
             child,
             stdin,
             rx,
-            params: vec![],
+            hello: serde_json::Value::Null,
         };
-        let (hello, _) = w.recv()?;
+        let (hello, _) = w.recv(WORKER_TIMEOUT)?;
         if hello.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
             let e = hello
                 .get("error")
@@ -402,16 +410,21 @@ impl Worker {
             w.kill();
             return Err(e);
         }
-        w.params = hello
-            .get("params")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        w.hello = hello;
         Ok(w)
     }
 
-    fn recv(&mut self) -> Result<(serde_json::Value, Vec<u8>), String> {
-        match self.rx.recv_timeout(WORKER_TIMEOUT) {
+    /// Parâmetros anunciados no `hello` (OFX ou VST3, conforme o host).
+    fn hello_params<T: serde::de::DeserializeOwned>(&self) -> Vec<T> {
+        self.hello
+            .get("params")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<(serde_json::Value, Vec<u8>), String> {
+        match self.rx.recv_timeout(timeout) {
             Ok(Ok(m)) => Ok(m),
             Ok(Err(e)) => {
                 self.kill();
@@ -420,8 +433,8 @@ impl Worker {
             Err(RecvTimeoutError::Timeout) => {
                 self.kill();
                 Err(format!(
-                    "plug-in não respondeu em {} s e o host foi encerrado",
-                    WORKER_TIMEOUT.as_secs()
+                    "plug-in não respondeu em {} ms e o host foi encerrado",
+                    timeout.as_millis()
                 ))
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -436,6 +449,30 @@ impl Worker {
         let _ = self.child.wait();
     }
 
+    fn is_dead(&mut self) -> bool {
+        self.child.try_wait().map(|s| s.is_some()).unwrap_or(true)
+    }
+
+    /// Envia um pedido e devolve a resposta, exigindo `"ok": true`.
+    fn request(
+        &mut self,
+        req: &serde_json::Value,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<(serde_json::Value, Vec<u8>), String> {
+        write_msg(&mut self.stdin, req, data)
+            .map_err(|e| format!("falha ao enviar o pedido ao host: {e}"))?;
+        let (reply, out) = self.recv(timeout)?;
+        if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(reply
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("falha no plug-in")
+                .to_string());
+        }
+        Ok((reply, out))
+    }
+
     fn render(
         &mut self,
         w: u32,
@@ -446,16 +483,7 @@ impl Worker {
         px: &mut [f32],
     ) -> Result<(), String> {
         let req = serde_json::json!({"w": w, "h": h, "time": time, "fps": fps, "values": values});
-        write_msg(&mut self.stdin, &req, &f32_to_bytes(px))
-            .map_err(|e| format!("falha ao enviar o quadro ao host: {e}"))?;
-        let (reply, data) = self.recv()?;
-        if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(reply
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("falha no plug-in")
-                .to_string());
-        }
+        let (_, data) = self.request(&req, &f32_to_bytes(px), WORKER_TIMEOUT)?;
         if bytes_to_f32(&data, px) {
             Ok(())
         } else {
@@ -490,14 +518,14 @@ fn with_worker<T>(
     );
     let mut pool = pool().lock().unwrap_or_else(PoisonError::into_inner);
     if !pool.contains_key(&k) {
-        let w = Worker::spawn(host_exe, &r.binary, &r.plugin_id)?;
+        let w = Worker::spawn_ofx(host_exe, &r.binary, &r.plugin_id)?;
         pool.insert(k.clone(), w);
     }
     let Some(w) = pool.get_mut(&k) else {
         return Err("host de plug-ins indisponível".into());
     };
     let res = f(w);
-    if res.is_err() && w.child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+    if res.is_err() && w.is_dead() {
         // host morto: sai do pool para ser recriado na próxima chamada
         pool.remove(&k);
     }
@@ -506,7 +534,7 @@ fn with_worker<T>(
 
 /// Parâmetros declarados pelo plug-in (abre o host se preciso).
 pub fn ofx_params(host_exe: &Path, r: &OfxFxRef) -> Result<Vec<OfxParamInfo>, String> {
-    with_worker(host_exe, r, |w| Ok(w.params.clone()))
+    with_worker(host_exe, r, |w| Ok(w.hello_params()))
 }
 
 /// Aplica o efeito OFX a um quadro RGBA premultiplicado (de cima para baixo),
@@ -529,6 +557,476 @@ pub fn shutdown_workers() {
     for (_, mut w) in pool.drain() {
         w.kill();
     }
+    drop(pool);
+    let drained: Vec<Vst3Slot> = lock_vst3_pool().drain().map(|(_, s)| s).collect();
+    for s in drained {
+        s.kill();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VST3
+// ---------------------------------------------------------------------------
+
+/// Tempo máximo de um bloco de áudio no host VST3. Acima disso o host é
+/// encerrado e o efeito passa o sinal seco até a próxima tentativa.
+const VST3_BLOCK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Espera antes de tentar reabrir um plug-in VST3 que falhou.
+const VST3_RETRY_AFTER: Duration = Duration::from_secs(10);
+/// Maior bloco (em quadros) enviado por pedido; igual ao do host.
+const VST3_MAX_BLOCK: usize = 8192;
+/// Dono reservado às consultas da interface (parâmetros, textos).
+const VST3_UI_OWNER: u64 = 0;
+
+/// Sonda o módulo VST3 **no processo atual**. Só no subprocesso `--plugin-host`.
+pub fn probe_vst3_in_process(binary: &Path) -> Result<Vec<Vst3ClassInfo>, String> {
+    #[cfg(windows)]
+    {
+        vst3::probe(binary)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = binary;
+        Err("host VST3 disponível só no Windows por enquanto".into())
+    }
+}
+
+/// Sonda o módulo VST3 num subprocesso `host_exe --plugin-host probe-vst3`.
+pub fn probe_vst3_isolated(
+    host_exe: &Path,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<Vec<Vst3ClassInfo>, String> {
+    let mut child = Command::new(host_exe)
+        .args(["--plugin-host", "probe-vst3"])
+        .arg(binary)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("não foi possível iniciar o host de plug-ins: {e}"))?;
+    let out = wait_child(&mut child, timeout)?;
+    serde_json::from_slice(&out).map_err(|e| format!("resposta inválida do host de plug-ins: {e}"))
+}
+
+/// Espera o subprocesso com tempo limite e devolve o `stdout` (limitado).
+fn wait_child(child: &mut Child, timeout: Duration) -> Result<Vec<u8>, String> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(s) = stdout {
+            let _ = s.take(MAX_REPLY_BYTES).read_to_end(&mut out);
+        }
+        out
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(s) = stderr {
+            let _ = s.take(64 * 1024).read_to_end(&mut out);
+        }
+        out
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "plug-in não respondeu em {} s e o host foi encerrado",
+                    timeout.as_secs()
+                ));
+            }
+            Err(e) => return Err(format!("falha ao aguardar o host de plug-ins: {e}")),
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    let err = err_reader.join().unwrap_or_default();
+    if !status.success() {
+        let msg = String::from_utf8_lossy(&err).trim().to_string();
+        return Err(if msg.is_empty() {
+            format!("host de plug-ins terminou com falha ({status})")
+        } else {
+            msg
+        });
+    }
+    Ok(out)
+}
+
+/// Laço do subprocesso `neoveg --plugin-host serve-vst3 <binário> <classe> <taxa>`:
+/// abre o efeito, responde com os parâmetros e processa blocos até o EOF.
+///
+/// Pedidos: `{"cmd":"process","values":[...]}` + amostras `f32` estéreo
+/// intercaladas; `{"cmd":"reset"}`; `{"cmd":"text","id":n,"value":v}`.
+pub fn serve_vst3(binary: &Path, class_id: &str, sample_rate: &str) -> i32 {
+    #[cfg(windows)]
+    {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut input = stdin.lock();
+        let mut output = stdout.lock();
+        let opened = sample_rate
+            .parse::<u32>()
+            .map_err(|_| format!("taxa de amostragem inválida: {sample_rate}"))
+            .and_then(|sr| vst3::HostedVst3::open(binary, class_id, sr));
+        let mut fx = match opened {
+            Ok(fx) => fx,
+            Err(e) => {
+                let _ = write_msg(
+                    &mut output,
+                    &serde_json::json!({"ok": false, "error": e}),
+                    &[],
+                );
+                return 3;
+            }
+        };
+        let hello = serde_json::json!({
+            "ok": true,
+            "params": fx.params(),
+            "latency": fx.latency(),
+        });
+        if write_msg(&mut output, &hello, &[]).is_err() {
+            return 4;
+        }
+        let mut buf: Vec<f32> = Vec::new();
+        loop {
+            let Ok((req, data)) = read_msg(&mut input) else {
+                return 0; // editor fechou o canal
+            };
+            let cmd = req
+                .get("cmd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let sent = match cmd {
+                "process" => {
+                    let values: Vec<Vst3ParamValue> = req
+                        .get("values")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default();
+                    let n = data.len() / 4;
+                    buf.resize(n, 0.0);
+                    let res =
+                        if n % 2 != 0 || n > VST3_MAX_BLOCK * 2 || !bytes_to_f32(&data, &mut buf) {
+                            Err("bloco de áudio inválido".to_string())
+                        } else {
+                            fx.process(&mut buf, &values)
+                        };
+                    match res {
+                        Ok(()) => write_msg(
+                            &mut output,
+                            &serde_json::json!({"ok": true}),
+                            &f32_to_bytes(&buf),
+                        ),
+                        Err(e) => write_msg(
+                            &mut output,
+                            &serde_json::json!({"ok": false, "error": e}),
+                            &[],
+                        ),
+                    }
+                }
+                "reset" => {
+                    let reply = match fx.reset() {
+                        Ok(()) => serde_json::json!({"ok": true}),
+                        Err(e) => serde_json::json!({"ok": false, "error": e}),
+                    };
+                    write_msg(&mut output, &reply, &[])
+                }
+                "text" => {
+                    let id = req
+                        .get("id")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok());
+                    let value = req
+                        .get("value")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let reply = match id.and_then(|id| fx.param_text(id, value)) {
+                        Some(t) => serde_json::json!({"ok": true, "text": t}),
+                        None => serde_json::json!({"ok": false, "error": "sem texto"}),
+                    };
+                    write_msg(&mut output, &reply, &[])
+                }
+                other => write_msg(
+                    &mut output,
+                    &serde_json::json!({"ok": false, "error": format!("pedido desconhecido: {other}")}),
+                    &[],
+                ),
+            };
+            if sent.is_err() {
+                return 4;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (binary, class_id, sample_rate);
+        eprintln!("host VST3 disponível só no Windows por enquanto");
+        5
+    }
+}
+
+impl Worker {
+    fn spawn_vst3(host_exe: &Path, r: &Vst3FxRef, sr: u32) -> Result<Self, String> {
+        let sr = sr.to_string();
+        Self::spawn(host_exe, &["serve-vst3", &r.binary, &r.class_id, &sr])
+    }
+
+    fn vst3_process(&mut self, buf: &mut [f32], values: &[Vst3ParamValue]) -> Result<(), String> {
+        let req = serde_json::json!({"cmd": "process", "values": values});
+        let (_, data) = self.request(&req, &f32_to_bytes(buf), VST3_BLOCK_TIMEOUT)?;
+        if bytes_to_f32(&data, buf) {
+            Ok(())
+        } else {
+            Err("bloco devolvido com tamanho errado".into())
+        }
+    }
+}
+
+/// Chave de uma instância VST3: cada mixer (`owner`) tem a sua instância de
+/// cada efeito, porque o plug-in guarda estado (caudas, envelopes).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Vst3Key {
+    owner: u64,
+    fx: Id,
+    host: PathBuf,
+    binary: String,
+    class_id: String,
+    sr: u32,
+}
+
+enum Vst3Slot {
+    Loading,
+    Ready(Arc<Mutex<Worker>>),
+    Failed(Instant, String),
+}
+
+impl Vst3Slot {
+    fn kill(self) {
+        if let Vst3Slot::Ready(w) = self {
+            w.lock().unwrap_or_else(PoisonError::into_inner).kill();
+        }
+    }
+}
+
+type Vst3Pool = Mutex<HashMap<Vst3Key, Vst3Slot>>;
+
+fn lock_vst3_pool() -> std::sync::MutexGuard<'static, HashMap<Vst3Key, Vst3Slot>> {
+    static POOL: OnceLock<Vst3Pool> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Novo identificador de dono de instâncias VST3 (um por mixer).
+pub fn new_vst3_owner() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Abre o host da chave e grava o resultado no pool. Se a chave saiu do pool
+/// enquanto abria (dono liberado), o host recém-aberto é encerrado.
+fn open_vst3_slot(key: &Vst3Key, r: &Vst3FxRef) {
+    let res = Worker::spawn_vst3(&key.host, r, key.sr);
+    let mut pool = lock_vst3_pool();
+    match (pool.get(key), res) {
+        (Some(Vst3Slot::Loading), Ok(w)) => {
+            pool.insert(key.clone(), Vst3Slot::Ready(Arc::new(Mutex::new(w))));
+        }
+        (Some(Vst3Slot::Loading), Err(e)) => {
+            pool.insert(key.clone(), Vst3Slot::Failed(Instant::now(), e));
+        }
+        (_, Ok(mut w)) => w.kill(),
+        (_, Err(_)) => {}
+    }
+}
+
+/// Resultado de [`vst3_process`] quando o bloco não passou pelo plug-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Vst3Skip {
+    /// O host ainda está abrindo o plug-in (só sem `wait`).
+    Loading,
+    /// O plug-in falhou há pouco; nova tentativa depois de um intervalo.
+    CoolingDown(String),
+}
+
+/// Processa `buf` (estéreo intercalado) pelo efeito VST3 `fx` do mixer
+/// `owner`, no host isolado. Sem `wait`, a primeira chamada só dispara a
+/// abertura numa thread e devolve [`Vst3Skip::Loading`]: a thread de áudio
+/// nunca espera o plug-in carregar. Em qualquer falha `buf` fica intacto.
+pub fn vst3_process(
+    host_exe: &Path,
+    owner: u64,
+    fx: Id,
+    r: &Vst3FxRef,
+    sr: u32,
+    buf: &mut [f32],
+    wait: bool,
+) -> Result<Result<(), Vst3Skip>, String> {
+    let key = Vst3Key {
+        owner,
+        fx,
+        host: host_exe.to_path_buf(),
+        binary: r.binary.clone(),
+        class_id: r.class_id.clone(),
+        sr,
+    };
+    let worker = {
+        let mut pool = lock_vst3_pool();
+        match pool.get(&key) {
+            Some(Vst3Slot::Ready(w)) => Some(w.clone()),
+            Some(Vst3Slot::Loading) if !wait => return Ok(Err(Vst3Skip::Loading)),
+            Some(Vst3Slot::Failed(t, e)) if t.elapsed() < VST3_RETRY_AFTER => {
+                return Ok(Err(Vst3Skip::CoolingDown(e.clone())));
+            }
+            _ => {
+                pool.insert(key.clone(), Vst3Slot::Loading);
+                None
+            }
+        }
+    };
+    let worker = match worker {
+        Some(w) => w,
+        None if wait => {
+            open_vst3_slot(&key, r);
+            match lock_vst3_pool().get(&key) {
+                Some(Vst3Slot::Ready(w)) => w.clone(),
+                Some(Vst3Slot::Failed(_, e)) => return Err(e.clone()),
+                _ => return Err("host VST3 indisponível".into()),
+            }
+        }
+        None => {
+            let (k2, r2) = (key.clone(), r.clone());
+            let spawned = std::thread::Builder::new()
+                .name("vst3-open".into())
+                .spawn(move || open_vst3_slot(&k2, &r2));
+            if spawned.is_err() {
+                lock_vst3_pool().remove(&key);
+                return Err("não foi possível criar a thread do host VST3".into());
+            }
+            return Ok(Err(Vst3Skip::Loading));
+        }
+    };
+    let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
+    // trabalha numa cópia: se um bloco falhar no meio, `buf` fica intacto
+    let mut out = buf.to_vec();
+    let mut res = Ok(());
+    for chunk in out.chunks_mut(VST3_MAX_BLOCK * 2) {
+        res = w.vst3_process(chunk, &r.params);
+        if res.is_err() {
+            break;
+        }
+    }
+    match res {
+        Ok(()) => {
+            buf.copy_from_slice(&out);
+            Ok(Ok(()))
+        }
+        Err(e) => {
+            if w.is_dead() {
+                drop(w);
+                lock_vst3_pool().insert(key, Vst3Slot::Failed(Instant::now(), e.clone()));
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Zera o estado dos efeitos VST3 do mixer `owner` (após salto de posição).
+pub fn vst3_reset_owner(owner: u64) {
+    let workers: Vec<Arc<Mutex<Worker>>> = lock_vst3_pool()
+        .iter()
+        .filter(|(k, _)| k.owner == owner)
+        .filter_map(|(_, s)| match s {
+            Vst3Slot::Ready(w) => Some(w.clone()),
+            _ => None,
+        })
+        .collect();
+    for w in workers {
+        let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = w.request(
+            &serde_json::json!({"cmd": "reset"}),
+            &[],
+            VST3_BLOCK_TIMEOUT,
+        );
+    }
+}
+
+/// Encerra os hosts VST3 do mixer `owner` (o mixer foi descartado).
+pub fn vst3_release_owner(owner: u64) {
+    let slots: Vec<Vst3Slot> = {
+        let mut pool = lock_vst3_pool();
+        let keys: Vec<Vst3Key> = pool.keys().filter(|k| k.owner == owner).cloned().collect();
+        keys.iter().filter_map(|k| pool.remove(k)).collect()
+    };
+    for s in slots {
+        s.kill();
+    }
+}
+
+/// Instância da interface para o plug-in de `r` (abre o host se preciso).
+fn vst3_ui_worker(host_exe: &Path, r: &Vst3FxRef) -> Result<Arc<Mutex<Worker>>, String> {
+    let ui_ref = Vst3FxRef {
+        params: vec![],
+        ..r.clone()
+    };
+    let mut silence = [0f32; 2];
+    vst3_process(
+        host_exe,
+        VST3_UI_OWNER,
+        0,
+        &ui_ref,
+        48_000,
+        &mut silence,
+        true,
+    )?
+    .map_err(|s| match s {
+        Vst3Skip::Loading => "plug-in ainda abrindo".to_string(),
+        Vst3Skip::CoolingDown(e) => e,
+    })?;
+    let key = Vst3Key {
+        owner: VST3_UI_OWNER,
+        fx: 0,
+        host: host_exe.to_path_buf(),
+        binary: r.binary.clone(),
+        class_id: r.class_id.clone(),
+        sr: 48_000,
+    };
+    match lock_vst3_pool().get(&key) {
+        Some(Vst3Slot::Ready(w)) => Ok(w.clone()),
+        _ => Err("host VST3 indisponível".into()),
+    }
+}
+
+/// Parâmetros declarados pelo plug-in VST3 (para a interface).
+pub fn vst3_params(host_exe: &Path, r: &Vst3FxRef) -> Result<Vec<Vst3ParamInfo>, String> {
+    let w = vst3_ui_worker(host_exe, r)?;
+    let w = w.lock().unwrap_or_else(PoisonError::into_inner);
+    Ok(w.hello_params())
+}
+
+/// Texto do plug-in para um valor normalizado (ex.: "-6.0 dB").
+pub fn vst3_param_text(
+    host_exe: &Path,
+    r: &Vst3FxRef,
+    id: u32,
+    value: f64,
+) -> Result<String, String> {
+    let w = vst3_ui_worker(host_exe, r)?;
+    let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
+    let (reply, _) = w.request(
+        &serde_json::json!({"cmd": "text", "id": id, "value": value}),
+        &[],
+        VST3_BLOCK_TIMEOUT,
+    )?;
+    Ok(reply
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string())
 }
 
 #[cfg(test)]

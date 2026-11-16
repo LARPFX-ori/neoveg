@@ -167,3 +167,207 @@ fn host_lists_installed_ofx_plugins() {
     }
     assert!(any, "nenhum pacote OFX instalado respondeu com plug-ins");
 }
+
+// ---------------------------------------------------------------------------
+// VST3
+// ---------------------------------------------------------------------------
+
+/// Módulo VST3 instalado com este nome, se houver (os testes com plug-in real
+/// pulam sem ele).
+fn installed_vst3(name: &str) -> Option<std::path::PathBuf> {
+    scan_default()
+        .into_iter()
+        .find(|p| p.kind == ExternalKind::Vst3 && p.name.eq_ignore_ascii_case(name))
+        .and_then(|p| p.binary)
+}
+
+fn vst3_ref(bin: &Path, class_id: &str, label: &str) -> neoveg_engine::model::Vst3FxRef {
+    neoveg_engine::model::Vst3FxRef {
+        binary: bin.display().to_string(),
+        class_id: class_id.into(),
+        label: label.into(),
+        params: vec![],
+    }
+}
+
+#[test]
+fn vst3_host_rejects_bad_modules_and_keeps_the_block_dry() {
+    use neoveg_engine::plugin_host::{new_vst3_owner, probe_vst3_isolated, vst3_process};
+    let r = probe_vst3_isolated(
+        host(),
+        Path::new("nao-existe.vst3"),
+        Duration::from_secs(20),
+    );
+    assert!(r.is_err());
+    #[cfg(windows)]
+    {
+        let e = probe_vst3_isolated(host(), Path::new("kernel32.dll"), Duration::from_secs(20))
+            .expect_err("kernel32 não é VST3");
+        assert!(e.contains("VST3"), "{e}");
+    }
+    // efeito apontando para um módulo inexistente: erro, bloco intacto
+    let fx = vst3_ref(Path::new("nao-existe.vst3"), &"0".repeat(32), "fantasma");
+    let mut buf = vec![0.25f32; 512];
+    let res = vst3_process(host(), new_vst3_owner(), 1, &fx, 48_000, &mut buf, true);
+    assert!(res.is_err(), "{res:?}");
+    assert!(buf.iter().all(|s| *s == 0.25));
+    // classe com id hostil
+    let fx = vst3_ref(Path::new("x.vst3"), "não-hex", "ruim");
+    let res = vst3_process(host(), new_vst3_owner(), 2, &fx, 48_000, &mut buf, true);
+    assert!(res.is_err(), "{res:?}");
+    assert!(buf.iter().all(|s| *s == 0.25));
+}
+
+/// Caminho completo com um plug-in real: sondagem, parâmetros, texto de
+/// valor, processamento síncrono e assíncrono (a primeira chamada sem
+/// espera só dispara a abertura) e reset.
+#[test]
+fn vst3_generator_processes_audio_in_isolated_host() {
+    use neoveg_engine::plugin_host::{
+        new_vst3_owner, probe_vst3_isolated, vst3_param_text, vst3_params, vst3_process,
+        vst3_release_owner, vst3_reset_owner, Vst3Skip,
+    };
+    let Some(bin) = installed_vst3("MOscillator") else {
+        eprintln!("MOscillator (MeldaProduction) não instalado; teste pulado");
+        return;
+    };
+    let classes =
+        probe_vst3_isolated(host(), &bin, Duration::from_secs(60)).expect("sondagem VST3");
+    let class = classes.first().expect("ao menos uma classe de efeito");
+    assert!(!class.is_instrument());
+    let fx = vst3_ref(&bin, &class.class_id, &class.name);
+
+    let params = vst3_params(host(), &fx).expect("parâmetros");
+    eprintln!("{}: {} parâmetro(s)", class.name, params.len());
+    assert!(!params.is_empty());
+    assert!(params.iter().all(|p| (0.0..=1.0).contains(&p.default)));
+    let p0 = &params[0];
+    let txt = vst3_param_text(host(), &fx, p0.id, p0.current).expect("texto do valor");
+    eprintln!("  {} = {txt:?} {}", p0.title, p0.units);
+
+    // síncrono: o oscilador gera sinal a partir de silêncio
+    let owner = new_vst3_owner();
+    let mut buf = vec![0f32; 2048 * 2];
+    vst3_process(host(), owner, 7, &fx, 48_000, &mut buf, true)
+        .expect("processa")
+        .expect("sem pulo no modo síncrono");
+    let peak = buf.iter().fold(0f32, |m, s| m.max(s.abs()));
+    eprintln!("  pico do oscilador: {peak}");
+    assert!(buf.iter().all(|s| s.is_finite()));
+    assert!(peak > 1e-4, "o oscilador não gerou sinal");
+    vst3_reset_owner(owner);
+    vst3_release_owner(owner);
+
+    // assíncrono: primeiro bloco seco (abrindo), depois processado
+    let owner = new_vst3_owner();
+    let mut dry = vec![0f32; 256 * 2];
+    let first = vst3_process(host(), owner, 7, &fx, 48_000, &mut dry, false).expect("dispara");
+    assert_eq!(first, Err(Vst3Skip::Loading));
+    assert!(dry.iter().all(|s| *s == 0.0));
+    let start = std::time::Instant::now();
+    loop {
+        let mut b = vec![0f32; 256 * 2];
+        match vst3_process(host(), owner, 7, &fx, 48_000, &mut b, false).expect("processa") {
+            Ok(()) => {
+                assert!(b.iter().any(|s| *s != 0.0));
+                break;
+            }
+            Err(Vst3Skip::Loading) if start.elapsed() < Duration::from_secs(60) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("plug-in não abriu: {e:?}"),
+        }
+    }
+    vst3_release_owner(owner);
+    shutdown_workers();
+}
+
+/// O FX VST3 no Master entra na mixagem offline (render) de um projeto.
+#[test]
+fn vst3_master_fx_reaches_offline_mix() {
+    use neoveg_engine::engine::audio::Mixer;
+    use neoveg_engine::model::{FxInstance, Project};
+    let Some(bin) = installed_vst3("MOscillator") else {
+        eprintln!("MOscillator (MeldaProduction) não instalado; teste pulado");
+        return;
+    };
+    let classes =
+        neoveg_engine::plugin_host::probe_vst3_isolated(host(), &bin, Duration::from_secs(60))
+            .expect("sondagem VST3");
+    let class = classes.first().expect("classe");
+    // o mixer chama o host pelo executável indicado nesta variável
+    std::env::set_var("NEOVEG_PLUGIN_HOST", host());
+    let mut p = Project::new_default();
+    p.master.fx.push(FxInstance::new_vst3(
+        &bin.display().to_string(),
+        &class.class_id,
+        &class.name,
+    ));
+    let audio = std::collections::HashMap::new();
+    let mut out = vec![0f32; 1024 * 2];
+    {
+        let mut mixer = Mixer::new_offline(48_000);
+        mixer.process(&p, &audio, 0, &mut out);
+    } // o drop do mixer encerra o host dele
+    assert!(out.iter().all(|s| s.is_finite()));
+    assert!(
+        out.iter().any(|s| s.abs() > 1e-4),
+        "o FX VST3 do Master não entrou na mixagem"
+    );
+    shutdown_workers();
+}
+
+/// Um efeito de verdade recebe a entrada: senoide entra, sinal sai, e um
+/// parâmetro alterado chega ao plug-in sem derrubar o host.
+#[test]
+fn vst3_effect_processes_its_input() {
+    use neoveg_engine::plugin_host::{
+        new_vst3_owner, probe_vst3_isolated, vst3_params, vst3_process, vst3_release_owner,
+    };
+    let Some(bin) = installed_vst3("MCompressor") else {
+        eprintln!("MCompressor (MeldaProduction) não instalado; teste pulado");
+        return;
+    };
+    let classes =
+        probe_vst3_isolated(host(), &bin, Duration::from_secs(60)).expect("sondagem VST3");
+    let class = classes.first().expect("classe");
+    let mut fx = vst3_ref(&bin, &class.class_id, &class.name);
+    let params = vst3_params(host(), &fx).expect("parâmetros");
+    let owner = new_vst3_owner();
+    let sine = |n: usize| -> Vec<f32> {
+        (0..n)
+            .flat_map(|i| {
+                let s = 0.5 * (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin();
+                [s, s]
+            })
+            .collect()
+    };
+    // alguns blocos para passar pela latência do plug-in
+    let mut energy = 0f32;
+    for _ in 0..8 {
+        let mut buf = sine(1024);
+        vst3_process(host(), owner, 9, &fx, 48_000, &mut buf, true)
+            .expect("processa")
+            .expect("sem pulo");
+        assert!(buf.iter().all(|s| s.is_finite()));
+        energy += buf.iter().map(|s| s * s).sum::<f32>();
+    }
+    assert!(
+        energy > 1.0,
+        "o efeito não devolveu a entrada processada ({energy})"
+    );
+    // muda o primeiro parâmetro contínuo para o extremo e segue processando
+    if let Some(p) = params.iter().find(|p| p.step_count == 0 && !p.bypass) {
+        fx.params.push(neoveg_engine::model::Vst3ParamValue {
+            id: p.id,
+            value: 1.0,
+        });
+        let mut buf = sine(1024);
+        vst3_process(host(), owner, 9, &fx, 48_000, &mut buf, true)
+            .expect("processa com parâmetro")
+            .expect("sem pulo");
+        assert!(buf.iter().all(|s| s.is_finite()));
+    }
+    vst3_release_owner(owner);
+    shutdown_workers();
+}

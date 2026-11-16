@@ -282,7 +282,7 @@ pub fn analyze_project_loudness(
 
     let audio_map = media.audio_map();
 
-    let mut mixer = Mixer::new(sr);
+    let mut mixer = Mixer::new_offline(sr);
     let mut analyzer = LoudnessAnalyzer::try_new(sr)?;
     let mut buf = vec![0.0_f32; ANALYZE_CHUNK_FRAMES * 2];
     let mut max_m = -f64::INFINITY;

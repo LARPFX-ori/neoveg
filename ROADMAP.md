@@ -49,6 +49,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e importação de **AAF** (`aaf.rs`);
   - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores*;
   - Descoberta de plug-ins VST3/OFX nas pastas padrão (`plugins.rs`) e efeitos de vídeo OFX aplicados a eventos pelo host isolado `neoveg --plugin-host` (`plugin_host.rs`, `plugin_host/ofx.rs`);
+  - **Host VST3 para efeitos de áudio** (`plugin_host/vst3.rs`, VST 3 SDK 3.8 sob MIT pelos bindings `vst3`): efeitos aplicados a eventos, trilhas, barramentos e Master pelo subprocesso `neoveg --plugin-host serve-vst3`, uma instância por mixer e por efeito, abertura assíncrona na reprodução (o sinal passa seco até o plug-in abrir) e síncrona no render, tempo limite de 2 s por bloco com recriação do host, e editor de parâmetros normalizados no diálogo de FX;
 - **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
 - **Intercâmbio aberto restante:** exportação AAF a partir da especificação pública.
-- **Hospedagem de plug-ins externos:** OFX com keyframes de parâmetros, tiles e contexto General completo; host VST3 para áudio no mesmo processo isolado.
+- **Hospedagem de plug-ins externos:** OFX com keyframes de parâmetros, tiles e contexto General completo; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros, instrumentos (MIDI), estado completo salvo no projeto e compensação de latência.

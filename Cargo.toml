@@ -40,6 +40,8 @@ lewton = "0.10.2"
 puremp3 = "0.1.0"
 cfb = "0.16"
 libloading = "0.8"
+# Bindings da API VST 3 (SDK 3.8, MIT), usados só no host isolado de plug-ins.
+vst3 = "0.3"
 
 [workspace.lints.rust]
 # AGENTS.md §0.3: unsafe proibido fora de módulos de fronteira FFI nomeados.
