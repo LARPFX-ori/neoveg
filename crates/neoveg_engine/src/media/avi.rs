@@ -743,13 +743,19 @@ impl AviWriter {
     /// Bytes que ainda serão gravados no fim do segmento atual (índices
     /// `ix##` e, no primeiro, `idx1`), contando um chunk a mais em `extra`.
     fn pending_index_bytes(&self, extra: usize) -> u64 {
-        let mut total = 0u64;
-        for s in 0..2 {
-            let n = self.seg_index[s].len() as u64 + u64::from(s == extra);
-            if n > 0 {
-                total += 8 + INDEX_HEADER_BYTES + 8 * n;
-            }
-        }
+        let mut total: u64 = self
+            .seg_index
+            .iter()
+            .enumerate()
+            .map(|(s, chunks)| {
+                let n = chunks.len() as u64 + u64::from(s == extra);
+                if n > 0 {
+                    8 + INDEX_HEADER_BYTES + 8 * n
+                } else {
+                    0
+                }
+            })
+            .sum();
         if self.first_segment {
             total += 8 + 16 * (self.first_idx1.len() as u64 + 1);
         }
