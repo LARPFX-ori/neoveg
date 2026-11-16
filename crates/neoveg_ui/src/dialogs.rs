@@ -250,6 +250,10 @@ pub struct Dialogs {
     pub tm_animate: bool,
     tm_lock_aspect: bool,
     edit_in_progress: bool,
+    /// Arquivos aguardando confirmação para conversão.
+    pub convert_offer: Option<crate::convert_dialog::ConvertOffer>,
+    /// Conversão em andamento.
+    pub convert_job: Option<crate::convert_dialog::ConvertJob>,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -410,6 +414,7 @@ impl App {
         self.gen_editor_window(ctx);
         self.render_window(ctx);
         self.render_progress_window(ctx);
+        self.convert_windows(ctx);
         self.misc_windows(ctx);
     }
 

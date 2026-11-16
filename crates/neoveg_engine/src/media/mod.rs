@@ -5,6 +5,8 @@ pub mod audio;
 #[forbid(unsafe_code)]
 pub mod avi;
 #[forbid(unsafe_code)]
+pub mod convert;
+#[forbid(unsafe_code)]
 pub mod generate;
 #[cfg(windows)]
 mod mf;
@@ -549,15 +551,7 @@ impl MediaCache {
                     }
                 })
                 .unwrap_or_else(|| RgbaImage::new(pw, ph));
-            let rgb = image::DynamicImage::ImageRgba8(frame).into_rgb8();
-            let mut jpg = Vec::with_capacity((pw * ph / 4) as usize);
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 75).encode(
-                &rgb,
-                pw,
-                ph,
-                image::ExtendedColorType::Rgb8,
-            )?;
-            w.write_video_jpeg(&jpg)?;
+            w.write_video_jpeg(&convert::encode_jpeg(&frame, 75)?)?;
         }
         w.finish()?;
         Ok(())

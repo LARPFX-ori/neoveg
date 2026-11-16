@@ -364,6 +364,7 @@ pub enum UiAction {
     SaveVersion,
     ImportMediaDialog,
     ImportSequenceDialog,
+    ConvertMediaDialog,
     ImportOtioDialog,
     ExportOtioDialog,
     ImportSubtitlesDialog,
@@ -654,6 +655,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::ImportSequenceDialog, h),
+    },
+    CommandDef {
+        id: "file.convert_media",
+        label: "Converter mídia para formato compatível...",
+        menu_path: "Arquivo/Converter mídia para formato compatível...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ConvertMediaDialog, h),
     },
     CommandDef {
         id: "file.import_otio",

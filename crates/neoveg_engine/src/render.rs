@@ -226,7 +226,7 @@ impl WavWriter {
     }
 }
 
-fn to_i16(s: &[f32]) -> Vec<i16> {
+pub(crate) fn to_i16(s: &[f32]) -> Vec<i16> {
     s.iter()
         .map(|v| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16)
         .collect()

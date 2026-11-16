@@ -13,6 +13,7 @@
 
 pub mod app;
 mod color_grading;
+mod convert_dialog;
 mod dialogs;
 mod dock;
 mod edit;

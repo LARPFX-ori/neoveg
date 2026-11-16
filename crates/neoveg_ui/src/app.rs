@@ -113,6 +113,18 @@ pub enum LoadMsg {
         result: Result<PathBuf, String>,
     },
     LoudnessAnalyzed(Result<LoudnessReport, String>),
+    /// A importação de um arquivo falhou (pode ser oferecida a conversão).
+    ImportFailed {
+        path: PathBuf,
+        error: String,
+        place: Option<PlaceTarget>,
+    },
+    /// Um arquivo da fila de conversão terminou (com sucesso ou não).
+    Converted {
+        src: PathBuf,
+        result: Result<media::convert::Converted, String>,
+        place: Option<PlaceTarget>,
+    },
     Error(String),
 }
 
@@ -1094,28 +1106,41 @@ impl App {
         let mut t = place_at.map(PlaceTarget::At);
         for p in paths {
             if !media::is_supported(&p) {
-                self.set_status(format!("Formato não suportado: {}", p.display()));
+                // o formato não é aberto diretamente: oferece converter
+                self.set_status(format!(
+                    "Formato não suportado diretamente: {}",
+                    p.display()
+                ));
+                self.offer_conversion(p, t, "formato não suportado diretamente");
                 continue;
             }
-            let tx = self.loader_tx.clone();
-            self.loading += 1;
-            let place = t;
-            let spawned = crate::util::spawn("importar", move || match media::import_file(&p) {
-                Ok(i) => {
-                    let _ = tx.send(LoadMsg::Imported(i, place));
-                }
-                Err(e) => {
-                    let _ = tx.send(LoadMsg::Error(format!("{}: {e:#}", p.display())));
-                }
-            });
-            if let Err(e) = spawned {
-                self.loading = self.loading.saturating_sub(1);
-                self.set_status(e);
-            }
+            self.spawn_import(p, t);
             // arquivos múltiplos são colocados em sequência quando chegarem
             if t.is_some() {
                 t = Some(PlaceTarget::EndOfTrack);
             }
+        }
+    }
+
+    /// Importa um arquivo em segundo plano; a falha volta como `ImportFailed`.
+    pub(crate) fn spawn_import(&mut self, p: PathBuf, place: Option<PlaceTarget>) {
+        let tx = self.loader_tx.clone();
+        self.loading += 1;
+        let spawned = crate::util::spawn("importar", move || match media::import_file(&p) {
+            Ok(i) => {
+                let _ = tx.send(LoadMsg::Imported(i, place));
+            }
+            Err(e) => {
+                let _ = tx.send(LoadMsg::ImportFailed {
+                    error: format!("{e:#}"),
+                    path: p,
+                    place,
+                });
+            }
+        });
+        if let Err(e) = spawned {
+            self.loading = self.loading.saturating_sub(1);
+            self.set_status(e);
         }
     }
 
@@ -1196,6 +1221,16 @@ impl App {
                         }
                         Err(e) => self.set_status(format!("Análise de loudness: {e}")),
                     }
+                }
+                LoadMsg::ImportFailed { path, error, place } => {
+                    self.set_status(format!("Erro de importação: {}: {error}", path.display()));
+                    // um arquivo que existe mas não abriu pode ter um decodificador no sistema
+                    if path.is_file() {
+                        self.offer_conversion(path, place, format!("não abriu: {error}"));
+                    }
+                }
+                LoadMsg::Converted { src, result, place } => {
+                    self.on_converted(&src, result, place);
                 }
                 LoadMsg::Error(e) => self.set_status(format!("Erro de importação: {e}")),
             }
@@ -1402,6 +1437,7 @@ impl App {
             UiAction::SaveVersion => self.save_version(),
             UiAction::ImportMediaDialog => self.import_dialog(),
             UiAction::ImportSequenceDialog => self.import_sequence_dialog(),
+            UiAction::ConvertMediaDialog => self.convert_media_dialog(),
             UiAction::ImportOtioDialog => self.import_otio_dialog(),
             UiAction::ExportOtioDialog => self.export_otio_dialog(),
             UiAction::ImportSubtitlesDialog => self.import_subtitles_dialog(),
@@ -1666,6 +1702,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.import_media");
                 self.cmd_menu_btn(ui, "file.import_sequence");
+                self.cmd_menu_btn(ui, "file.convert_media");
                 self.cmd_menu_btn(ui, "file.import_otio");
                 self.cmd_menu_btn(ui, "file.export_otio");
                 ui.menu_button("Intercâmbio & Legendas", |ui| {
