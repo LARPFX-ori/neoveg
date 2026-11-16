@@ -2100,7 +2100,7 @@ impl App {
                         if r.format == RenderFormat::AviMjpeg {
                             ui.label(
                                 egui::RichText::new(
-                                    "AVI Motion-JPEG é compatível com VLC e editores externos (limite de 4 GB).",
+                                    "AVI Motion-JPEG é compatível com VLC e editores externos (acima de 1 GB usa as extensões OpenDML).",
                                 )
                                 .small()
                                 .weak(),

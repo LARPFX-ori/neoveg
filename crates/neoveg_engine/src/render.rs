@@ -279,18 +279,19 @@ pub fn run(
     let has_audio = s.include_audio && !audio_map.is_empty();
 
     enum Sink {
-        Avi(AviWriter),
+        // encaixotado: o gravador OpenDML guarda índices e é bem maior que as outras variantes
+        Avi(Box<AviWriter>),
         Png(PathBuf, String),
         Y4m(Y4mWriter),
     }
     let mut sink = match s.format {
-        RenderFormat::AviMjpeg => Sink::Avi(AviWriter::create(
+        RenderFormat::AviMjpeg => Sink::Avi(Box::new(AviWriter::create(
             &s.path,
             w as u32,
             h as u32,
             fps,
             if has_audio { Some(sr) } else { None },
-        )?),
+        )?)),
         RenderFormat::PngSequence => {
             let dir = s
                 .path
@@ -382,7 +383,7 @@ pub fn run(
         i = b_end;
     }
     match sink {
-        Sink::Avi(wr) => wr.finish()?,
+        Sink::Avi(wr) => (*wr).finish()?,
         Sink::Y4m(wr) => wr.finish()?,
         Sink::Png(..) => {}
     }
