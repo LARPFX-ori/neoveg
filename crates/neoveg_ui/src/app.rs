@@ -139,6 +139,24 @@ pub struct RenderJob {
     pub settings: RenderSettings,
 }
 
+/// Resultado de um script .NET que rodou em segundo plano.
+enum ScriptOutcome {
+    Done(Result<Vec<String>, String>),
+    /// Pânico isolado na ponte (§0.6); a sessão da interface não mudou.
+    Panicked,
+}
+
+/// Script .NET em execução. Ele roda numa thread própria, sobre uma cópia da
+/// sessão: a interface continua viva (e atende as janelas do WinForms que o
+/// script abre, que travariam com a interface parada), mas a edição fica
+/// bloqueada até o fim, quando a cópia vira a sessão (§0, nada pela metade).
+pub(crate) struct ScriptJob {
+    path: PathBuf,
+    started: std::time::Instant,
+    media_before: std::collections::HashSet<u64>,
+    rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+}
+
 pub struct App {
     pub session: EditorSession,
     pub prefs: Preferences,
@@ -178,6 +196,7 @@ pub struct App {
     pub explorer_dir: PathBuf,
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
+    pub(crate) script_job: Option<ScriptJob>,
     pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
@@ -323,6 +342,7 @@ impl App {
             explorer_dir,
             explorer_filter: String::new(),
             render_job: None,
+            script_job: None,
             prerender_job: None,
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
@@ -1565,7 +1585,12 @@ impl App {
     // -----------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.splash.active || self.welcome_open || ctx.wants_keyboard_input() {
+        // com um script rodando, a sessão é dele até o fim
+        if self.splash.active
+            || self.welcome_open
+            || self.script_job.is_some()
+            || ctx.wants_keyboard_input()
+        {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
@@ -2457,42 +2482,114 @@ impl App {
     }
 
     pub(crate) fn run_script_dialog(&mut self) {
+        if self.script_job.is_some() {
+            self.set_status("Já há um script em execução.");
+            return;
+        }
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Scripts VEGAS / .NET", &["cs", "dll"])
             .pick_file()
         else {
             return;
         };
-        let before: std::collections::HashSet<u64> =
-            self.session.project.media.iter().map(|m| m.id).collect();
-        let res = crate::util::catch_isolated(|| {
-            neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
-        });
-        self.sync_after_session();
-        // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
-        let novas: Vec<MediaItem> = self
-            .session
-            .project
-            .media
-            .iter()
-            .filter(|m| !before.contains(&m.id) && !self.media.contains(m.id))
-            .cloned()
-            .collect();
-        for m in novas {
-            self.spawn_media_load(m);
+        // o script trabalha sobre uma cópia: a reprodução não pode mexer no cursor
+        if self.is_playing() {
+            self.stop(true);
         }
-        match res {
-            Ok(Ok(msgs)) => {
+        let media_before: std::collections::HashSet<u64> =
+            self.session.project.media.iter().map(|m| m.id).collect();
+        let mut work = self.session.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let script = p.clone();
+        let spawned = crate::util::spawn("script-net", move || {
+            let outcome = match crate::util::catch_isolated(|| {
+                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+            }) {
+                Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
+                Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
+                Err(_) => ScriptOutcome::Panicked,
+            };
+            let _ = tx.send((outcome, work));
+        });
+        match spawned {
+            Ok(()) => {
+                self.set_status(format!("Executando script: {}", p.display()));
+                self.script_job = Some(ScriptJob {
+                    path: p,
+                    started: std::time::Instant::now(),
+                    media_before,
+                    rx,
+                });
+            }
+            Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
+        }
+    }
+
+    /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
+    /// modal; ao terminar, aplica a sessão do script (ou só o erro).
+    fn poll_script_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.script_job else {
+            return;
+        };
+        let (outcome, done) = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                let el = job.started.elapsed().as_secs_f64();
+                let path = job.path.display().to_string();
+                let theme = self.theme.clone();
+                egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        crate::splash::spinner_inline(ui, 20.0, el, &theme);
+                        ui.strong("Executando script...");
+                    });
+                    ui.label(path);
+                    ui.label(
+                        egui::RichText::new(
+                            "A edição volta quando o script terminar. Se o script abriu uma \
+                             janela, ela pode estar atrás do Neoveg.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.script_job = None;
+                self.set_status("Erro interno: o script terminou sem resposta.");
+                return;
+            }
+        };
+        let Some(job) = self.script_job.take() else {
+            return;
+        };
+        match outcome {
+            ScriptOutcome::Done(Ok(msgs)) => {
+                self.session = done;
+                self.sync_after_session();
+                // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
+                let novas: Vec<MediaItem> = self
+                    .session
+                    .project
+                    .media
+                    .iter()
+                    .filter(|m| !job.media_before.contains(&m.id) && !self.media.contains(m.id))
+                    .cloned()
+                    .collect();
+                for m in novas {
+                    self.spawn_media_load(m);
+                }
                 if let Some(last) = msgs.last() {
                     self.set_status(format!("Script executado: {last}"));
                 } else {
-                    self.set_status(format!("Script executado: {}", p.display()));
+                    self.set_status(format!("Script executado: {}", job.path.display()));
                 }
             }
-            Ok(Err(e)) => self.set_status(format!("Erro no script: {e}")),
-            Err(_) => {
-                let _ = self.session.project.sanitize();
-                self.set_status("Erro interno isolado ao executar script .NET/C#.");
+            // a sessão da interface não foi tocada: nada a desfazer
+            ScriptOutcome::Done(Err(e)) => self.set_status(format!("Erro no script: {e}")),
+            ScriptOutcome::Panicked => {
+                self.set_status("Erro interno isolado ao executar script .NET/C#.")
             }
         }
     }
@@ -2521,6 +2618,10 @@ impl App {
                 .collect()
         });
         if files.is_empty() {
+            return;
+        }
+        if self.script_job.is_some() {
+            self.set_status("Aguarde o script terminar para soltar arquivos.");
             return;
         }
         let t = self.cursor;
@@ -2636,6 +2737,7 @@ impl App {
         self.last_frame = Instant::now();
         self.audio.tick_without_device(dt);
         self.poll_loader();
+        self.poll_script_job(ctx);
         self.poll_render();
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
