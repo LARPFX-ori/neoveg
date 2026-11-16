@@ -206,7 +206,13 @@ fn truncate_str(s: &str, max_bytes: usize) -> String {
     format!("{}...", &s[..end])
 }
 
-fn cs_project_xml(tfm: &str) -> String {
+fn cs_project_xml(tfm: &str, winforms: bool) -> String {
+    // System.Windows.Forms real no Windows (com o runtime WindowsDesktop)
+    let winforms = if winforms {
+        "\n    <UseWindowsForms>true</UseWindowsForms>"
+    } else {
+        ""
+    };
     format!(
         r#"<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -216,7 +222,7 @@ fn cs_project_xml(tfm: &str) -> String {
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <UseSharedCompilation>false</UseSharedCompilation>
+    <UseSharedCompilation>false</UseSharedCompilation>{winforms}
   </PropertyGroup>
 </Project>
 "#
@@ -229,6 +235,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
@@ -1533,7 +1540,38 @@ namespace ScriptPortal.Vegas
             }
         }
 
+        // No Windows o script roda numa thread STA, como no VEGAS: os diálogos
+        // do WinForms (OpenFileDialog, FolderBrowserDialog...) exigem STA. A
+        // exceção do script é relançada igual, com a pilha original.
         private static bool InvokeUserEntryPoint(Assembly asm, Vegas vegas)
+        {
+            if (!OperatingSystem.IsWindows()
+                || System.Threading.Thread.CurrentThread.GetApartmentState() == System.Threading.ApartmentState.STA)
+            {
+                return InvokeUserEntryPointCore(asm, vegas);
+            }
+            bool invoked = false;
+            ExceptionDispatchInfo failure = null;
+            var sta = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    invoked = InvokeUserEntryPointCore(asm, vegas);
+                }
+                catch (Exception ex)
+                {
+                    failure = ExceptionDispatchInfo.Capture(ex);
+                }
+            });
+            sta.SetApartmentState(System.Threading.ApartmentState.STA);
+            sta.IsBackground = true;
+            sta.Start();
+            sta.Join();
+            failure?.Throw();
+            return invoked;
+        }
+
+        private static bool InvokeUserEntryPointCore(Assembly asm, Vegas vegas)
         {
             Type[] types;
             try
@@ -2000,7 +2038,7 @@ fn compile_cs_project(
 
     std::fs::write(
         src_dir.join("NeovegScript.csproj"),
-        cs_project_xml(&env.tfm),
+        cs_project_xml(&env.tfm, env.use_winforms()),
     )
     .map_err(|e| NeovegError::Io(format!("erro ao gravar .csproj: {e}")))?;
     std::fs::write(src_dir.join("ScriptPortalVegas.cs"), SCRIPT_PORTAL_VEGAS_CS)
