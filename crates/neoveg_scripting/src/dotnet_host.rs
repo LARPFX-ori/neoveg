@@ -11,7 +11,6 @@ use netcorehost::hostfxr::{
 };
 use netcorehost::pdcstring::PdCString;
 use std::ffi::OsStr;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, OnceLock};
 
@@ -286,14 +285,14 @@ fn call_component_entry(
     } else {
         payload.as_ptr().cast()
     };
-    catch_unwind(AssertUnwindSafe(|| {
+    neoveg_common::util::catch_isolated(|| {
         // SAFETY: `func` é um ponteiro de função gerenciada carregado via
         // `Hostfxr` com assinatura padrão `ComponentEntryPoint(IntPtr args,
         // int sizeBytes) -> int` (`unsafe extern "system" fn(*const c_void, i32)
         // -> i32`); `ptr` aponta para `payload` válido e imutável durante toda
         // a chamada síncrona (ou nulo se `len_i32 == 0`).
         unsafe { func(ptr, len_i32) }
-    }))
+    })
     .map_err(|_| {
         NeovegError::Internal("falha inesperada (unwind) ao executar assembly .NET".into())
     })

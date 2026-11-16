@@ -195,6 +195,8 @@ pub struct App {
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
+    /// Sessões anteriores que não fecharam normalmente (janela de relatório).
+    pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
@@ -270,7 +272,8 @@ impl App {
         );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let recovery_offer = recovery::find_existing_recovery().is_some();
+        let recovery_offer = recovery::find_existing_recovery().is_some()
+            && !neoveg_engine::session_marker::other_instance_active();
         let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
         let want_welcome = prefs.show_welcome && open.is_none() && !recovery_offer;
         let welcome_open = want_welcome && !splash.active;
@@ -337,6 +340,7 @@ impl App {
             gen_fonts: vec![],
             last_autosave: Instant::now(),
             recovery_offer,
+            crash_reports: Vec::new(),
             splash,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
@@ -413,7 +417,8 @@ impl App {
 
     /// Salvamento automático para recuperação após falha (§0.7).
     fn autosave(&mut self) {
-        if !self.prefs.autosave_enabled
+        if self.recovery_offer
+            || !self.prefs.autosave_enabled
             || !self.dirty
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
@@ -426,7 +431,8 @@ impl App {
     }
 
     fn recovery_window(&mut self, ctx: &egui::Context) {
-        if !self.recovery_offer {
+        // com relatório de travamento, a recuperação é oferecida na janela dele
+        if !self.recovery_offer || !self.crash_reports.is_empty() {
             return;
         }
         let mut choice = None;
@@ -445,21 +451,24 @@ impl App {
                     }
                 });
             });
-        match choice {
-            Some(true) => {
-                self.recovery_offer = false;
-                if let Some(p) = recovery::find_existing_recovery() {
-                    self.open_project_path(p);
-                    self.path = None;
-                    self.dirty = true;
-                    self.set_status("Projeto recuperado. Salve-o com Salvar como...");
-                }
+        if let Some(recover) = choice {
+            self.resolve_recovery(recover);
+        }
+    }
+
+    /// Recupera (`true`) ou descarta (`false`) a cópia automática da sessão
+    /// anterior.
+    pub(crate) fn resolve_recovery(&mut self, recover: bool) {
+        self.recovery_offer = false;
+        if recover {
+            if let Some(p) = recovery::find_existing_recovery() {
+                self.open_project_path(p);
+                self.path = None;
+                self.dirty = true;
+                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
             }
-            Some(false) => {
-                self.recovery_offer = false;
-                recovery::clear_recovery();
-            }
-            None => {}
+        } else {
+            recovery::clear_recovery();
         }
     }
 
@@ -2421,9 +2430,9 @@ impl App {
         else {
             return;
         };
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let res = crate::util::catch_isolated(|| {
             neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
-        }));
+        });
         self.sync_after_session();
         match res {
             Ok(Ok(msgs)) => {
@@ -2631,6 +2640,7 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.crash_report_window(ctx);
         self.recovery_window(ctx);
         self.show_welcome_overlay(ctx);
         self.show_splash_overlay(ctx);

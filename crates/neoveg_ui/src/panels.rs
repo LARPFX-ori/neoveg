@@ -1574,7 +1574,7 @@ impl App {
         });
         self.set_status("Analisando loudness EBU R128 do projeto...");
         if let Err(e) = util::spawn("loudness-scan", move || {
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let res = crate::util::catch_isolated(|| {
                 analyze_project_loudness(
                     &proj,
                     &media,
@@ -1583,7 +1583,7 @@ impl App {
                     &cancel_bg,
                     Some((&done_bg, &total_bg)),
                 )
-            }));
+            });
             let msg = match res {
                 Ok(r) => r,
                 Err(_) => Err("falha interna isolada ao analisar loudness".into()),
