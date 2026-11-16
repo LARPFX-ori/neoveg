@@ -581,6 +581,28 @@ fn read_audio_stream(reader: &IMFSourceReader) -> Option<(AudioData, bool)> {
     }
 }
 
+impl super::system::SystemVideoReader for MfVideoReader {
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn fps(&self) -> FrameRate {
+        self.fps
+    }
+
+    fn decode_at(&self, t: Ticks) -> Result<RgbaImage> {
+        MfVideoReader::decode_at(self, t)
+    }
+
+    fn decode_frame_at(&self, t: Ticks) -> Result<(RgbaImage, bool)> {
+        MfVideoReader::decode_frame_at(self, t)
+    }
+}
+
 /// Resultado da abertura de um contêiner via Windows Media Foundation.
 pub struct MfLoaded {
     pub duration: Option<Ticks>,

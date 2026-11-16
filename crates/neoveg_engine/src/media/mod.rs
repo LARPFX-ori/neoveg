@@ -11,6 +11,8 @@ pub mod generate;
 #[cfg(windows)]
 mod mf;
 #[forbid(unsafe_code)]
+mod system;
+#[forbid(unsafe_code)]
 pub mod wav;
 #[forbid(unsafe_code)]
 pub mod y4m;
@@ -29,7 +31,7 @@ pub const AUDIO_EXTS: [&str; 9] = [
 ];
 pub const VIDEO_EXTS: [&str; 2] = ["avi", "y4m"];
 /// Contêineres de mídia decodificados via API nativa do sistema operacional
-/// (Windows Media Foundation via módulo FFI isolado `media::mf`).
+/// (`media::system`, p. ex. Windows Media Foundation via `media::mf`).
 pub const SYSTEM_CONTAINER_EXTS: [&str; 9] = [
     "mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac", "wmv", "asf",
 ];
@@ -120,8 +122,7 @@ pub enum VideoSource {
     Frames(Vec<Arc<RgbaImage>>, Vec<Ticks>),
     Avi(Mutex<avi::AviReader>, Mutex<FrameCache>),
     Y4m(Mutex<y4m::Y4mReader>, Mutex<FrameCache>),
-    #[cfg(windows)]
-    Mf(Arc<mf::MfVideoReader>, Mutex<FrameCache>),
+    System(Arc<dyn system::SystemVideoReader>, Mutex<FrameCache>),
     Sequence(Vec<String>, FrameRate, Mutex<FrameCache>),
     Generated,
 }
@@ -129,13 +130,10 @@ pub enum VideoSource {
 impl VideoSource {
     fn set_cache_budget(&self, cap: usize, max_bytes: usize) {
         match self {
-            VideoSource::Avi(_, c) | VideoSource::Y4m(_, c) | VideoSource::Sequence(_, _, c) => {
-                c.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set_budget(cap, max_bytes);
-            }
-            #[cfg(windows)]
-            VideoSource::Mf(_, c) => {
+            VideoSource::Avi(_, c)
+            | VideoSource::Y4m(_, c)
+            | VideoSource::System(_, c)
+            | VideoSource::Sequence(_, _, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .set_budget(cap, max_bytes);
@@ -149,13 +147,10 @@ impl VideoSource {
 
     fn clear_cache(&self) {
         match self {
-            VideoSource::Avi(_, c) | VideoSource::Y4m(_, c) | VideoSource::Sequence(_, _, c) => {
-                c.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clear();
-            }
-            #[cfg(windows)]
-            VideoSource::Mf(_, c) => {
+            VideoSource::Avi(_, c)
+            | VideoSource::Y4m(_, c)
+            | VideoSource::System(_, c)
+            | VideoSource::Sequence(_, _, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clear();
@@ -403,10 +398,6 @@ impl MediaCache {
         item: &MediaItem,
         t: Ticks,
     ) -> Option<Arc<RgbaImage>> {
-        // `item` só é lido pelo leitor do Media Foundation (Windows); sem
-        // isto, o build fora do Windows falha com `-D warnings`.
-        #[cfg(not(windows))]
-        let _ = item;
         match source {
             VideoSource::None | VideoSource::Generated => None,
             VideoSource::Still(img) => Some(img.clone()),
@@ -461,9 +452,8 @@ impl MediaCache {
                     .put(idx, img.clone());
                 Some(img)
             }
-            #[cfg(windows)]
-            VideoSource::Mf(reader, cache) => {
-                let fps = item.fps.unwrap_or(reader.fps);
+            VideoSource::System(reader, cache) => {
+                let fps = item.fps.unwrap_or_else(|| reader.fps());
                 let max_idx = item
                     .duration
                     .map(|d| fps.ticks_to_frame_floor(d).max(0))
@@ -478,7 +468,7 @@ impl MediaCache {
                 }
                 let frame_time = fps.frame_to_ticks(idx as i64);
                 let img = Arc::new(
-                    crate::util::guard("decodificação Media Foundation", || {
+                    crate::util::guard("decodificação de vídeo do sistema", || {
                         reader.decode_at(frame_time)
                     })
                     .ok()?
@@ -960,40 +950,40 @@ pub fn import_sequence(first: &Path, fps: FrameRate) -> Result<Imported> {
     Ok(imp)
 }
 
-#[cfg(windows)]
 fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
-    let loaded = mf::open_media(p)?;
+    let loaded = system::open_media(p)?;
+    let backend = loaded.backend;
     let audio = loaded.audio.map(Arc::new);
     item.has_audio = audio.is_some();
     if let Some(vr) = loaded.video {
-        let vr = Arc::new(vr);
+        let w = vr.width();
+        let h = vr.height();
+        let fps = vr.fps();
         item.has_video = true;
-        item.width = vr.width;
-        item.height = vr.height;
-        item.fps = Some(vr.fps);
+        item.width = w;
+        item.height = h;
+        item.fps = Some(fps);
         let dur = loaded
             .duration
             .or_else(|| audio.as_ref().map(|a| a.duration()));
         item.duration = dur;
         item.info = format!(
-            "Media Foundation {}x{} {}{}",
-            vr.width,
-            vr.height,
-            vr.fps.label(),
+            "{backend} {w}x{h} {}{}",
+            fps.label(),
             audio
                 .as_ref()
                 .map(|a| format!(", áudio {} Hz", a.sample_rate))
                 .unwrap_or_default()
         );
         Ok(MediaEntry {
-            video: VideoSource::Mf(vr, Mutex::new(FrameCache::new(16))),
+            video: VideoSource::System(vr, Mutex::new(FrameCache::new(16))),
             audio,
         })
     } else if let Some(a) = audio {
         let dur = loaded.duration.unwrap_or_else(|| a.duration());
         item.duration = Some(dur);
         item.info = format!(
-            "Áudio (Media Foundation) {} Hz, {:.2} s",
+            "Áudio ({backend}) {} Hz, {:.2} s",
             a.sample_rate,
             dur.as_secs_f64()
         );
@@ -1002,22 +992,96 @@ fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
             audio: Some(a),
         })
     } else {
-        bail!(
-            "{}: contêiner sem fluxos legíveis via Media Foundation",
-            item.name
-        )
+        bail!("{}: contêiner sem fluxos legíveis via {backend}", item.name)
     }
 }
 
-// TODO(roadmap fase 4): backends nativos fora do Windows. Linux via VA-API
-// (sem GStreamer, que é LGPL — AGENTS.md §2.3) e macOS via VideoToolbox/
-// AVFoundation, ambos em fronteira FFI isolada, mais decodificador fallback em
-// Rust puro. Até lá, este caminho devolve erro recuperável.
-#[cfg(not(windows))]
-fn load_system_container(_p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
-    bail!(
-        "{}: contêineres MP4/MOV/MKV/WEBM/M4V/M4A/AAC usam API nativa do sistema operacional \
-         (Media Foundation no Windows); em outras plataformas utilize AVI (MJPEG/PCM), Y4M, GIF ou WAV/AIFF/FLAC/OGG/MP3",
-        item.name
-    )
+#[cfg(test)]
+mod system_contract_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockSystemReader {
+        calls: Arc<AtomicUsize>,
+        panic_on_decode: bool,
+    }
+
+    impl system::SystemVideoReader for MockSystemReader {
+        fn width(&self) -> u32 {
+            16
+        }
+        fn height(&self) -> u32 {
+            16
+        }
+        fn fps(&self) -> FrameRate {
+            FrameRate::FPS_25
+        }
+        fn decode_at(&self, t: Ticks) -> Result<RgbaImage> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.panic_on_decode {
+                panic!("falha simulada no decodificador do sistema");
+            }
+            let lum = ((t.0 / 1_000_000) % 255) as u8;
+            Ok(RgbaImage::from_pixel(
+                16,
+                16,
+                image::Rgba([lum, 10, 20, 255]),
+            ))
+        }
+    }
+
+    #[test]
+    fn system_video_source_caches_budgets_and_guards_panics() {
+        let cache = MediaCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reader: Arc<dyn system::SystemVideoReader> = Arc::new(MockSystemReader {
+            calls: calls.clone(),
+            panic_on_decode: false,
+        });
+        let id = new_id();
+        cache.insert(
+            id,
+            MediaEntry {
+                video: VideoSource::System(reader, Mutex::new(FrameCache::new(4))),
+                audio: None,
+            },
+        );
+        let item = MediaItem {
+            id,
+            name: "mock.mp4".into(),
+            source: MediaSource::File {
+                path: "mock.mp4".into(),
+            },
+            duration: Some(FrameRate::FPS_25.frame_to_ticks(10)),
+            has_video: true,
+            has_audio: false,
+            width: 16,
+            height: 16,
+            fps: Some(FrameRate::FPS_25),
+            info: String::new(),
+            proxy_path: None,
+        };
+        assert!(cache.video_frame(&item, Ticks::ZERO, 16, 16).is_some());
+        assert!(cache.video_frame(&item, Ticks::ZERO, 16, 16).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        cache.configure_limits(2, 0);
+        cache.clear_frame_caches();
+
+        let bad_id = new_id();
+        let bad_reader: Arc<dyn system::SystemVideoReader> = Arc::new(MockSystemReader {
+            calls: Arc::new(AtomicUsize::new(0)),
+            panic_on_decode: true,
+        });
+        cache.insert(
+            bad_id,
+            MediaEntry {
+                video: VideoSource::System(bad_reader, Mutex::new(FrameCache::new(4))),
+                audio: None,
+            },
+        );
+        let mut bad_item = item;
+        bad_item.id = bad_id;
+        assert!(cache.video_frame(&bad_item, Ticks::ZERO, 16, 16).is_none());
+    }
 }
