@@ -1,0 +1,52 @@
+# Portões de build e teste no macOS (AGENTS.md §3.4.2 e §3.4.3), em todo pull
+# request e push em main.
+#
+# Por que num workflow à parte e não em ci.yml: os runners macOS arm64 do
+# GitHub ficam sem capacidade com frequência, e o job falha sem nem começar
+# ("not acquired by Runner"). `continue-on-error` não cobre essa falha, então,
+# dentro de ci.yml, ela reprovaria PRs corretos por fila. Aqui ela aparece como
+# check próprio, informativo, sem mudar o resultado de "CI". Leve de volta para
+# ci.yml quando a fila deixar de ser problema.
+#
+# Provisório, pelo mesmo motivo de ci.yml (neoveg/common-actions ainda não existe).
+
+name: CI (macOS, informativo)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gates-macos:
+    name: Portões (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # §3.4.2 e §0.9.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # §3.4.3. --test-threads=1 pelo mesmo motivo do job do Windows em ci.yml.
+      - name: cargo test
+        run: cargo test --workspace -- --test-threads=1

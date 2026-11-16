@@ -8,10 +8,10 @@
 # `neoveg/common-actions`. Esse repositório ainda não existe; quando existir,
 # troque estes passos pelos workflows reutilizáveis de lá.
 #
-# Windows, macOS e Linux: o editor precisa compilar e passar nos testes nas três
-# plataformas. Os backends nativos de vídeo fora do Windows estão em
-# planejamento (issue #11); até lá, os testes que dependem deles não existem
-# nessas plataformas.
+# Windows e Linux reprovam aqui. O macOS roda em `ci-macos.yml`, à parte, porque
+# a falta de runner macOS no GitHub reprovaria esta execução (ver lá). Os
+# backends nativos de vídeo fora do Windows estão em planejamento (issue #11);
+# até lá, os testes que dependem deles não existem nessas plataformas.
 
 name: CI
 
@@ -71,38 +71,19 @@ jobs:
       - name: cargo test
         run: cargo test --workspace -- --test-threads=1
 
-  # Mesmos portões de build e teste em macOS e Linux. fmt e licenças não
-  # dependem da plataforma e já rodam no job do Windows.
-  gates-unix:
-    name: Portões (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+  # Mesmos portões de build e teste no Linux. fmt e licenças não dependem da
+  # plataforma e já rodam no job do Windows.
+  gates-linux:
+    name: Portões (Linux)
+    runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Só informativo onde `blocking` é false: a falha aparece no job, mas não
-    # reprova a execução. Ver o motivo no macOS abaixo.
-    continue-on-error: ${{ !matrix.blocking }}
-    strategy:
-      # Uma plataforma falhando não esconde o resultado da outra.
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux
-            os: ubuntu-latest
-            blocking: true
-          # Não bloqueia: os runners macOS arm64 do GitHub ficam sem
-          # capacidade com frequência, e o job falha sem nem começar ("not
-          # acquired by Runner"). Bloquear reprovaria PRs corretos por fila.
-          # Volte para true quando a fila deixar de ser problema.
-          - name: macOS
-            os: macos-latest
-            blocking: false
     steps:
       - uses: actions/checkout@v4
 
       # Bibliotecas de sistema que as dependências exigem para compilar no
       # Linux: ALSA (cpal), GTK 3 (diálogos de arquivo do rfd) e xkbcommon
       # (teclado do winit).
-      - name: Dependências de sistema (Linux)
-        if: runner.os == 'Linux'
+      - name: Dependências de sistema
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
