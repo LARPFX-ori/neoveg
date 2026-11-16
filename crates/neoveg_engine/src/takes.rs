@@ -53,6 +53,17 @@ fn store(e: &mut Event, mut list: Vec<Take>, active: usize) {
     e.take_index = u32::try_from(active).unwrap_or(0);
 }
 
+/// Troca a lista inteira de takes, com `active` como o ativo (ponte de
+/// scripts). Devolve `false`, sem mudar nada, se a lista está vazia, passa de
+/// [`MAX_TAKES`] ou `active` não existe.
+pub fn replace_takes(e: &mut Event, list: Vec<Take>, active: usize) -> bool {
+    if list.is_empty() || list.len() > MAX_TAKES || active >= list.len() {
+        return false;
+    }
+    store(e, list, active);
+    true
+}
+
 /// Torna ativo o take `k`. Devolve `false` se `k` não existe ou já é o ativo.
 pub fn set_active(e: &mut Event, k: usize) -> bool {
     if k >= take_count(e) || k == active_index(e) {

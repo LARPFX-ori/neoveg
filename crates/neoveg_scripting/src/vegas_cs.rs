@@ -4,8 +4,9 @@
 use crate::dotnet_host::{self, DotnetEnv};
 use neoveg_common::error::NeovegError;
 use neoveg_engine::commands::{run_command, CommandHost, HeadlessHost};
-use neoveg_engine::model::{Marker, Track, TrackKind};
+use neoveg_engine::model::{Marker, MediaItem, MediaSource, Take, Track, TrackKind};
 use neoveg_engine::session::{EditorSession, MAX_UNDO};
+use neoveg_engine::takes;
 use neoveg_engine::time::Ticks;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
@@ -30,6 +31,31 @@ struct ScriptEventSnap {
     locked: bool,
     fade_in: i64,
     fade_out: i64,
+    takes: Vec<ScriptTakeSnap>,
+    active_take: usize,
+}
+
+#[derive(Serialize)]
+struct ScriptTakeSnap {
+    media_id: u64,
+    offset: i64,
+    name: String,
+}
+
+/// Mídia do projeto como o script a vê (`Media`, `MediaPool`).
+#[derive(Serialize)]
+struct ScriptMediaSnap {
+    id: u64,
+    path: String,
+    name: String,
+    has_video: bool,
+    has_audio: bool,
+    generated: bool,
+    /// ticks; 0 = sem duração (imagem estática, mídia gerada)
+    length: i64,
+    width: u32,
+    height: u32,
+    fps: f64,
 }
 
 #[derive(Serialize)]
@@ -62,18 +88,33 @@ struct ScriptInputPayload {
     tracks: Vec<ScriptTrackSnap>,
     markers: Vec<ScriptMarkerSnap>,
     audio_buses: Vec<String>,
+    media: Vec<ScriptMediaSnap>,
 }
 
 /// Versão do formato de saída da ponte. Uma saída de outra versão veio de
 /// uma ponte antiga embutida numa `.dll`: é recusada, nunca reinterpretada.
-const SCRIPT_OUTPUT_PROTOCOL: u32 = 3;
+const SCRIPT_OUTPUT_PROTOCOL: u32 = 4;
+
+/// Take na lista final de um evento.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptTakeOut {
+    media_id: u64,
+    offset: i64,
+    name: String,
+}
 
 /// Evento na lista final de uma trilha: `id` do evento original e só o que
-/// mudou (`None` = igual). Tempos em ticks do Neoveg.
+/// mudou (`None` = igual), ou `is_new` para um evento criado pelo script
+/// (vem inteiro). Tempos em ticks do Neoveg.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ScriptEventOut {
     id: u64,
+    is_new: bool,
+    selected: bool,
+    takes: Option<Vec<ScriptTakeOut>>,
+    active_take: Option<i64>,
     name: Option<String>,
     start: Option<i64>,
     length: Option<i64>,
@@ -85,7 +126,10 @@ struct ScriptEventOut {
 
 impl ScriptEventOut {
     fn unchanged(&self) -> bool {
-        self.name.is_none()
+        !self.is_new
+            && self.takes.is_none()
+            && self.active_take.is_none()
+            && self.name.is_none()
             && self.start.is_none()
             && self.length.is_none()
             && self.mute.is_none()
@@ -173,6 +217,7 @@ fn cs_project_xml(tfm: &str) -> String {
 }
 
 const SCRIPT_PORTAL_VEGAS_CS: &str = r#"using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
@@ -310,10 +355,271 @@ namespace ScriptPortal.Vegas
         public Timecode Length { get; set; } = new Timecode();
     }
 
-    // TrackEvent / VideoEvent / AudioEvent (Scripting API Summary). Eventos
-    // novos ainda não podem ser criados por script (falta Media/Take): os
-    // construtores são internos, então isso falha na compilação em vez de
-    // criar um evento sem mídia.
+    // Media, MediaStream, VideoStream, AudioStream, MediaStreams, MediaPool,
+    // Take e Takes (Scripting API Summary). Só a mídia que já está no
+    // projeto: importar um arquivo novo pelo script (MediaPool.AddMedia)
+    // ainda não existe e falha com NotSupportedException, em vez de criar
+    // uma mídia sem conteúdo. O Neoveg tem no máximo um stream de vídeo e um
+    // de áudio por mídia.
+    public abstract class MediaStream
+    {
+        internal MediaStream(Media parent, int index)
+        {
+            Parent = parent;
+            Index = index;
+        }
+        public Media Parent { get; }
+        public abstract MediaType MediaType { get; }
+        public int Index { get; }
+        public Timecode Offset => new Timecode();
+        public Timecode Length => Parent == null ? new Timecode() : Parent.Length;
+        public override bool Equals(object obj) =>
+            obj is MediaStream s && s.MediaType == MediaType && Equals(s.Parent, Parent);
+        public override int GetHashCode() => (Parent?.GetHashCode() ?? 0) ^ (int)MediaType;
+        public static bool operator ==(MediaStream a, MediaStream b) =>
+            ReferenceEquals(a, b) || (a is not null && a.Equals(b));
+        public static bool operator !=(MediaStream a, MediaStream b) => !(a == b);
+    }
+
+    public sealed class VideoStream : MediaStream
+    {
+        internal VideoStream(Media parent, int index) : base(parent, index) { }
+        public override MediaType MediaType => MediaType.Video;
+        public int Width => Parent?._width ?? 0;
+        public int Height => Parent?._height ?? 0;
+        public double FrameRate => Parent?._fps ?? 0.0;
+    }
+
+    public sealed class AudioStream : MediaStream
+    {
+        internal AudioStream(Media parent, int index) : base(parent, index) { }
+        public override MediaType MediaType => MediaType.Audio;
+    }
+
+    public sealed class MediaStreams : List<MediaStream>
+    {
+        internal MediaStreams() { }
+    }
+
+    public sealed class Media
+    {
+        internal ulong _id;
+        internal int _width;
+        internal int _height;
+        internal double _fps;
+        private bool _generated;
+        private string _name = "";
+
+        internal Media(MediaSnap s)
+        {
+            Init(s?.id ?? 0, s?.path, s?.name, s != null && s.has_video, s != null && s.has_audio,
+                s != null && s.generated, Timecode.FromTicks(s?.length ?? 0));
+            _width = s?.width ?? 0;
+            _height = s?.height ?? 0;
+            _fps = s?.fps ?? 0.0;
+        }
+
+        // Media(path) e Media.CreateInstance(project, path): no Neoveg, só
+        // encontram uma mídia que já está no projeto.
+        public Media(string path) : this(Project.s_current, path) { }
+
+        private Media(Project project, string path)
+        {
+            var found = project?.MediaPool.Find(path);
+            if (found == null)
+            {
+                throw new NotSupportedException(
+                    "a mídia '" + (path ?? "") + "' não está no projeto; importar mídia por script ainda não é suportado no Neoveg");
+            }
+            Init(found._id, found.FilePath, found._name, found.HasVideo(), found.HasAudio(),
+                found._generated, found.Length);
+            _width = found._width;
+            _height = found._height;
+            _fps = found._fps;
+        }
+
+        public static Media CreateInstance(Project project, string path) => new Media(project, path);
+
+        private void Init(ulong id, string path, string name, bool video, bool audio, bool generated, Timecode length)
+        {
+            _id = id;
+            FilePath = path ?? "";
+            _name = name ?? "";
+            _generated = generated;
+            Length = length ?? new Timecode();
+            Streams = new MediaStreams();
+            if (video)
+            {
+                Streams.Add(new VideoStream(this, Streams.Count));
+            }
+            if (audio)
+            {
+                Streams.Add(new AudioStream(this, Streams.Count));
+            }
+        }
+
+        public string FilePath { get; private set; } = "";
+        public string KeyString => _generated ? _name : FilePath;
+        public Timecode Length { get; private set; } = new Timecode();
+        public MediaStreams Streams { get; private set; } = new MediaStreams();
+        public bool HasVideo() => GetVideoStreamByIndex(0) != null;
+        public bool HasAudio() => GetAudioStreamByIndex(0) != null;
+        public bool IsGenerated() => _generated;
+        public bool IsValid() => true;
+
+        public int StreamCount(MediaType type)
+        {
+            int n = 0;
+            foreach (var s in Streams)
+            {
+                if (s.MediaType == type)
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        public VideoStream GetVideoStreamByIndex(int index) => ByIndex(MediaType.Video, index) as VideoStream;
+
+        public AudioStream GetAudioStreamByIndex(int index) => ByIndex(MediaType.Audio, index) as AudioStream;
+
+        private MediaStream ByIndex(MediaType type, int index)
+        {
+            int k = 0;
+            foreach (var s in Streams)
+            {
+                if (s.MediaType == type)
+                {
+                    if (k == index)
+                    {
+                        return s;
+                    }
+                    k++;
+                }
+            }
+            return null;
+        }
+
+        // stream do tipo pedido mesmo que a mídia não o declare (snapshot
+        // inconsistente): o take continua apontando para a mesma mídia
+        internal MediaStream StreamFor(MediaType type)
+        {
+            var s = ByIndex(type, 0);
+            if (s != null)
+            {
+                return s;
+            }
+            return type == MediaType.Video ? new VideoStream(this, 0) : (MediaStream)new AudioStream(this, 0);
+        }
+
+        public override bool Equals(object that) => that is Media m && m._id == _id;
+        public override int GetHashCode() => _id.GetHashCode();
+        public static bool operator ==(Media a, Media b) => ReferenceEquals(a, b) || (a is not null && a.Equals(b));
+        public static bool operator !=(Media a, Media b) => !(a == b);
+
+        internal bool Matches(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+            {
+                return false;
+            }
+            if (_generated)
+            {
+                return string.Equals(_name, key, StringComparison.Ordinal);
+            }
+            var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return string.Equals(Normalize(FilePath), Normalize(key), cmp);
+        }
+
+        private static string Normalize(string p)
+        {
+            try
+            {
+                return Path.GetFullPath(p);
+            }
+            catch
+            {
+                return p;
+            }
+        }
+    }
+
+    public sealed class MediaPool : IEnumerable<Media>
+    {
+        private readonly List<Media> _items = new List<Media>();
+        internal MediaPool() { }
+        internal void AddInternal(Media m) => _items.Add(m);
+        internal Media ById(ulong id) => _items.Find(m => m._id == id);
+        public int Count => _items.Count;
+        public bool IsReadOnly => true;
+        public Media this[object key] => key is string s ? Find(s) : null;
+        public Media Find(string path) => _items.Find(m => m.Matches(path));
+        public bool Contains(object key) => key is string s && Find(s) != null;
+
+        public Media AddMedia(string path) => AddMedia(path, false);
+
+        public Media AddMedia(string path, bool addToSelectedBin)
+        {
+            var found = Find(path);
+            if (found != null)
+            {
+                return found;
+            }
+            throw new NotSupportedException(
+                "MediaPool.AddMedia: importar mídia por script ainda não é suportado no Neoveg ('" + (path ?? "") + "')");
+        }
+
+        public IEnumerator<Media> GetEnumerator() => _items.GetEnumerator();
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    // Take (Scripting API Summary: Take). Length é a duração do evento (o
+    // trecho usado); AvailableLength é o que resta na mídia depois de Offset.
+    public sealed class Take
+    {
+        internal TrackEvent _event;
+
+        internal Take(MediaStream stream, string name)
+        {
+            MediaStream = stream;
+            Name = name ?? "";
+        }
+
+        public Media Media => MediaStream?.Parent;
+        public MediaStream MediaStream { get; }
+        public string MediaPath => Media?.FilePath ?? "";
+        public string Name { get; set; } = "";
+        public int StreamIndex => MediaStream?.Index ?? -1;
+        public Timecode Offset { get; set; } = new Timecode();
+        public Timecode Length => _event?.Length ?? new Timecode();
+
+        public Timecode AvailableLength
+        {
+            get
+            {
+                var len = Media?.Length ?? new Timecode();
+                var off = Offset ?? new Timecode();
+                return len > off ? len - off : new Timecode();
+            }
+        }
+
+        public bool IsActive => _event != null && ReferenceEquals(_event.ActiveTake, this);
+        public int Index => _event == null ? -1 : _event.Takes.IndexOf(this);
+        public bool IsValid() => _event != null && _event.Takes.Contains(this);
+    }
+
+    // Takes (Scripting API Summary): remover um take muda o Index dos
+    // seguintes, como no VEGAS.
+    public sealed class Takes : List<Take>
+    {
+        internal Takes() { }
+    }
+
+    // TrackEvent / VideoEvent / AudioEvent (Scripting API Summary). Eventos novos
+    // nascem por VideoTrack.AddVideoEvent / AudioTrack.AddAudioEvent e
+    // precisam de um take (AddTake) com mídia do projeto: um evento sem take
+    // recusa o script. Os construtores são internos.
     public abstract class TrackEvent
     {
         internal ulong _id;
@@ -347,6 +653,55 @@ namespace ScriptPortal.Vegas
             }
         }
         internal TrackEvent() { }
+        internal bool _isNew;
+        internal Take _active;
+        public Takes Takes { get; } = new Takes();
+
+        // ActiveTake: se o take ativo saiu da lista, o primeiro que sobrou
+        // passa a ser o ativo.
+        public Take ActiveTake
+        {
+            get
+            {
+                if (_active != null && Takes.Contains(_active))
+                {
+                    return _active;
+                }
+                return Takes.Count > 0 ? Takes[0] : null;
+            }
+            set
+            {
+                if (value == null || !Takes.Contains(value))
+                {
+                    throw new ArgumentException("ActiveTake: o take não pertence a este evento");
+                }
+                _active = value;
+            }
+        }
+
+        public Take AddTake(MediaStream mediaStream) => AddTake(mediaStream, true, null);
+
+        public Take AddTake(MediaStream mediaStream, bool makeActive) => AddTake(mediaStream, makeActive, null);
+
+        public Take AddTake(MediaStream mediaStream, bool makeActive, string name)
+        {
+            if (mediaStream is null || mediaStream.Parent is null)
+            {
+                throw new ArgumentNullException(nameof(mediaStream));
+            }
+            var want = IsVideo() ? MediaType.Video : MediaType.Audio;
+            if (mediaStream.MediaType != want)
+            {
+                throw new ArgumentException("AddTake: o stream precisa ser do mesmo tipo do evento (vídeo ou áudio)");
+            }
+            var t = new Take(mediaStream, name) { _event = this };
+            Takes.Add(t);
+            if (makeActive || Takes.Count == 1)
+            {
+                _active = t;
+            }
+            return t;
+        }
         public abstract bool IsAudio();
         public abstract bool IsVideo();
         public bool IsValid() => _track != null;
@@ -391,11 +746,35 @@ namespace ScriptPortal.Vegas
     public sealed class VideoTrack : Track
     {
         public override bool IsVideo() => true;
+
+        // VideoTrack.AddVideoEvent (Scripting API Summary).
+        public VideoEvent AddVideoEvent() => AddVideoEvent(new Timecode(), new Timecode());
+
+        public VideoEvent AddVideoEvent(Timecode start, Timecode length)
+        {
+            var ev = new VideoEvent { _isNew = true, _track = this };
+            ev.Start = start ?? new Timecode();
+            ev.Length = length ?? new Timecode();
+            Events.Add(ev);
+            return ev;
+        }
     }
 
     public sealed class AudioTrack : Track
     {
         public override bool IsAudio() => true;
+
+        // AudioTrack.AddAudioEvent (Scripting API Summary).
+        public AudioEvent AddAudioEvent() => AddAudioEvent(new Timecode(), new Timecode());
+
+        public AudioEvent AddAudioEvent(Timecode start, Timecode length)
+        {
+            var ev = new AudioEvent { _isNew = true, _track = this };
+            ev.Start = start ?? new Timecode();
+            ev.Length = length ?? new Timecode();
+            Events.Add(ev);
+            return ev;
+        }
     }
 
     // TransportControl (Scripting API Summary): cursor e seleção de tempo.
@@ -411,6 +790,10 @@ namespace ScriptPortal.Vegas
         public List<Track> Tracks { get; } = new List<Track>();
         public List<Marker> Markers { get; } = new List<Marker>();
         public List<string> AudioBuses { get; } = new List<string>();
+        // Project.MediaPool (Scripting API Summary).
+        public MediaPool MediaPool { get; } = new MediaPool();
+        // projeto deste script, para Media(path) achar a mídia
+        internal static Project s_current;
 
         public VideoTrack AddVideoTrack(string name = null)
         {
@@ -466,6 +849,11 @@ namespace ScriptPortal.Vegas
             Transport.SelectionStart = Timecode.FromTicks(snap.sel_start_ticks);
             Transport.SelectionLength = Timecode.FromTicks(snap.sel_length_ticks);
             var selected = new HashSet<ulong>(snap.selected_events ?? new List<ulong>());
+            Project.s_current = Project;
+            foreach (var ms in snap.media ?? new List<MediaSnap>())
+            {
+                Project.MediaPool.AddInternal(new Media(ms));
+            }
             if (snap.tracks != null)
             {
                 foreach (var t in snap.tracks)
@@ -491,6 +879,19 @@ namespace ScriptPortal.Vegas
                         ev.Selected = selected.Contains(e.id);
                         ev.FadeIn.Length = Timecode.FromTicks(e.fade_in);
                         ev.FadeOut.Length = Timecode.FromTicks(e.fade_out);
+                        var kind = t.is_video ? MediaType.Video : MediaType.Audio;
+                        foreach (var ts in e.takes ?? new List<TakeSnap>())
+                        {
+                            var m = Project.MediaPool.ById(ts.media_id)
+                                ?? new Media(new MediaSnap { id = ts.media_id });
+                            var tk = new Take(m.StreamFor(kind), ts.name) { _event = ev };
+                            tk.Offset = Timecode.FromTicks(ts.offset);
+                            ev.Takes.Add(tk);
+                        }
+                        if (e.active_take >= 0 && e.active_take < ev.Takes.Count)
+                        {
+                            ev._active = ev.Takes[e.active_take];
+                        }
                         tr.Events.Add(ev);
                     }
                     Project.Tracks.Add(tr);
@@ -541,6 +942,44 @@ namespace ScriptPortal.Vegas
 
         private static long Ticks(Timecode t) => t == null ? 0 : t._ticks;
 
+        private static List<TakeOut> TakesOut(TrackEvent ev)
+        {
+            var list = new List<TakeOut>();
+            foreach (var t in ev.Takes)
+            {
+                if (t == null)
+                {
+                    throw new InvalidOperationException("take nulo na lista de takes");
+                }
+                list.Add(new TakeOut
+                {
+                    media_id = t.Media?._id ?? 0,
+                    offset = Ticks(t.Offset),
+                    name = t.Name ?? ""
+                });
+            }
+            return list;
+        }
+
+        private static bool SameTakes(List<TakeOut> now, List<TakeSnap> old)
+        {
+            old ??= new List<TakeSnap>();
+            if (now.Count != old.Count)
+            {
+                return false;
+            }
+            for (int i = 0; i < now.Count; i++)
+            {
+                if (now[i].media_id != old[i].media_id
+                    || now[i].offset != old[i].offset
+                    || (now[i].name ?? "") != (old[i].name ?? ""))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // Devolve a lista FINAL de trilhas (com os eventos de cada uma, por
         // id), de marcadores, a seleção e o cursor. Cada item diz de onde
         // veio e só o que mudou, para nada se perder em silêncio (§0).
@@ -562,6 +1001,7 @@ namespace ScriptPortal.Vegas
             }
             var seenTracks = new HashSet<int>();
             var seenEvents = new HashSet<ulong>();
+            var seenObjects = new HashSet<TrackEvent>(ReferenceEqualityComparer.Instance);
             foreach (var cur in Project.Tracks)
             {
                 if (cur == null)
@@ -573,6 +1013,34 @@ namespace ScriptPortal.Vegas
                 {
                     if (ev == null)
                     {
+                        continue;
+                    }
+                    if (!seenObjects.Add(ev))
+                    {
+                        throw new InvalidOperationException(
+                            "o mesmo evento aparece mais de uma vez nas trilhas");
+                    }
+                    long st = Ticks(ev.Start), ln = Ticks(ev.Length);
+                    long fi = Ticks(ev.FadeIn.Length), fo = Ticks(ev.FadeOut.Length);
+                    var takesNow = TakesOut(ev);
+                    int activeNow = ev.Takes.IndexOf(ev.ActiveTake);
+                    if (ev._isNew)
+                    {
+                        // evento criado pelo script: vai inteiro, sem id
+                        evOut.Add(new EventOut
+                        {
+                            is_new = true,
+                            selected = ev.Selected,
+                            name = string.IsNullOrWhiteSpace(ev.Name) ? null : ev.Name,
+                            start = st,
+                            length = ln,
+                            mute = ev.Mute ? true : (bool?)null,
+                            locked = ev.Locked ? true : (bool?)null,
+                            fade_in = fi != 0 ? fi : (long?)null,
+                            fade_out = fo != 0 ? fo : (long?)null,
+                            takes = takesNow,
+                            active_take = activeNow
+                        });
                         continue;
                     }
                     if (!seenEvents.Add(ev._id))
@@ -588,8 +1056,7 @@ namespace ScriptPortal.Vegas
                     {
                         selectedEvents.Add(ev._id);
                     }
-                    long st = Ticks(ev.Start), ln = Ticks(ev.Length);
-                    long fi = Ticks(ev.FadeIn.Length), fo = Ticks(ev.FadeOut.Length);
+                    bool takesChanged = !SameTakes(takesNow, oe.takes) || activeNow != oe.active_take;
                     evOut.Add(new EventOut
                     {
                         id = ev._id,
@@ -599,7 +1066,9 @@ namespace ScriptPortal.Vegas
                         mute = ev.Mute != oe.mute ? ev.Mute : (bool?)null,
                         locked = ev.Locked != oe.locked ? ev.Locked : (bool?)null,
                         fade_in = fi != oe.fade_in ? fi : (long?)null,
-                        fade_out = fo != oe.fade_out ? fo : (long?)null
+                        fade_out = fo != oe.fade_out ? fo : (long?)null,
+                        takes = takesChanged ? takesNow : null,
+                        active_take = takesChanged ? activeNow : (int?)null
                     });
                 }
                 if (cur._origIndex >= 0)
@@ -695,7 +1164,7 @@ namespace ScriptPortal.Vegas
             return new OutputSnap
             {
                 ok = true,
-                protocol = 3,
+                protocol = 4,
                 messages = _messages,
                 commands = _commands,
                 tracks = tracksOut,
@@ -709,6 +1178,34 @@ namespace ScriptPortal.Vegas
         }
     }
 
+    internal sealed class TakeSnap
+    {
+        public ulong media_id { get; set; }
+        public long offset { get; set; }
+        public string name { get; set; }
+    }
+
+    internal sealed class MediaSnap
+    {
+        public ulong id { get; set; }
+        public string path { get; set; }
+        public string name { get; set; }
+        public bool has_video { get; set; }
+        public bool has_audio { get; set; }
+        public bool generated { get; set; }
+        public long length { get; set; }
+        public int width { get; set; }
+        public int height { get; set; }
+        public double fps { get; set; }
+    }
+
+    internal sealed class TakeOut
+    {
+        public ulong media_id { get; set; }
+        public long offset { get; set; }
+        public string name { get; set; }
+    }
+
     internal sealed class EventSnap
     {
         public ulong id { get; set; }
@@ -719,6 +1216,8 @@ namespace ScriptPortal.Vegas
         public bool locked { get; set; }
         public long fade_in { get; set; }
         public long fade_out { get; set; }
+        public List<TakeSnap> takes { get; set; }
+        public int active_take { get; set; }
     }
 
     internal sealed class TrackSnap
@@ -751,6 +1250,7 @@ namespace ScriptPortal.Vegas
         public List<TrackSnap> tracks { get; set; }
         public List<MarkerSnap> markers { get; set; }
         public List<string> audio_buses { get; set; }
+        public List<MediaSnap> media { get; set; }
     }
 
     internal sealed class EventOut
@@ -763,6 +1263,10 @@ namespace ScriptPortal.Vegas
         public bool? locked { get; set; }
         public long? fade_in { get; set; }
         public long? fade_out { get; set; }
+        public bool is_new { get; set; }
+        public bool selected { get; set; }
+        public List<TakeOut> takes { get; set; }
+        public int? active_take { get; set; }
     }
 
     internal sealed class TrackOut
@@ -1020,6 +1524,30 @@ namespace ScriptPortal.Vegas
 }
 "#;
 
+fn media_snap(m: &MediaItem) -> ScriptMediaSnap {
+    let (path, generated) = match &m.source {
+        MediaSource::File { path } => (path.clone(), false),
+        MediaSource::ImageSequence { paths, .. } => {
+            (paths.first().cloned().unwrap_or_default(), false)
+        }
+        MediaSource::Generated(_) => (String::new(), true),
+    };
+    ScriptMediaSnap {
+        id: m.id,
+        path,
+        name: m.name.clone(),
+        has_video: m.has_video,
+        has_audio: m.has_audio,
+        generated,
+        length: m.duration.map_or(0, |d| d.0.max(0)),
+        width: m.width,
+        height: m.height,
+        fps: m
+            .fps
+            .map_or(0.0, |f| f64::from(f.num) / f64::from(f.den.max(1))),
+    }
+}
+
 fn build_snapshot(
     session: &EditorSession,
     result_path: &Path,
@@ -1048,10 +1576,20 @@ fn build_snapshot(
                     locked: e.locked,
                     fade_in: e.fade_in.len.0,
                     fade_out: e.fade_out.len.0,
+                    takes: takes::takes(e)
+                        .into_iter()
+                        .map(|t| ScriptTakeSnap {
+                            media_id: t.media_id,
+                            offset: t.offset.0,
+                            name: t.name,
+                        })
+                        .collect(),
+                    active_take: takes::active_index(e),
                 })
                 .collect(),
         })
         .collect();
+    let media = session.project.media.iter().map(media_snap).collect();
     let markers = session
         .project
         .markers
@@ -1089,6 +1627,7 @@ fn build_snapshot(
         tracks,
         markers,
         audio_buses,
+        media,
     };
     serde_json::to_vec(&payload)
         .map_err(|e| NeovegError::Json(format!("erro ao serializar contexto do script: {e}")))
@@ -1395,12 +1934,96 @@ fn apply_event_changes(
     Ok(())
 }
 
+/// Takes informados pelo script, validados (§0.4): a mídia existe e é do
+/// tipo da trilha, offset não negativo, no máximo [`takes::MAX_TAKES`].
+fn script_takes(
+    list: &[ScriptTakeOut],
+    kind: TrackKind,
+    media: &[MediaItem],
+) -> Result<Vec<Take>, NeovegError> {
+    if list.is_empty() {
+        return Err(bad(
+            "evento sem take: use AddTake com uma mídia que está no projeto",
+        ));
+    }
+    if list.len() > takes::MAX_TAKES {
+        return Err(bad(format!(
+            "mais de {} takes num evento",
+            takes::MAX_TAKES
+        )));
+    }
+    list.iter()
+        .map(|t| {
+            let Some(m) = media.iter().find(|m| m.id == t.media_id) else {
+                return Err(bad("take com uma mídia que não está no projeto"));
+            };
+            let fits = match kind {
+                TrackKind::Video => m.has_video,
+                TrackKind::Audio => m.has_audio,
+            };
+            if !fits {
+                return Err(bad("take de áudio em evento de vídeo, ou o contrário"));
+            }
+            Ok(Take {
+                media_id: m.id,
+                offset: script_ticks(t.offset, "offset do take")?,
+                name: truncate_str(t.name.trim(), 256),
+            })
+        })
+        .collect()
+}
+
+/// Índice do take ativo informado pelo script, dentro da lista.
+fn script_active(a: Option<i64>, n: usize) -> Result<usize, NeovegError> {
+    let a = a.unwrap_or(0);
+    usize::try_from(a)
+        .ok()
+        .filter(|&i| i < n)
+        .ok_or_else(|| bad("ActiveTake fora da lista de takes do evento"))
+}
+
+/// Cria o evento que o script adicionou (AddVideoEvent/AddAudioEvent).
+fn new_script_event(
+    eo: &ScriptEventOut,
+    kind: TrackKind,
+    media: &[MediaItem],
+) -> Result<neoveg_engine::model::Event, NeovegError> {
+    let list = script_takes(eo.takes.as_deref().unwrap_or(&[]), kind, media)?;
+    let active = script_active(eo.active_take, list.len())?;
+    let m = list
+        .get(active)
+        .and_then(|t| media.iter().find(|m| m.id == t.media_id))
+        .ok_or_else(|| NeovegError::Internal("take ativo sem mídia".into()))?;
+    let start = script_ticks(eo.start.unwrap_or(0), "início do evento")?;
+    let mut ev = neoveg_engine::model::Event::new(m, start, Ticks::from_raw(1));
+    let o = ScriptEventOut {
+        name: eo.name.clone().filter(|n| !n.trim().is_empty()),
+        length: Some(eo.length.unwrap_or(0)),
+        mute: eo.mute,
+        locked: eo.locked,
+        fade_in: eo.fade_in,
+        fade_out: eo.fade_out,
+        ..Default::default()
+    };
+    apply_event_changes(&mut ev, &o)?;
+    if !takes::replace_takes(&mut ev, list, active) {
+        return Err(NeovegError::Internal("lista de takes recusada".into()));
+    }
+    Ok(ev)
+}
+
 /// Remonta as trilhas na ordem final do script, com os eventos de cada uma.
 /// Trilhas e eventos que ficaram de fora foram apagados pelo script; um
 /// evento só pode ficar numa trilha do mesmo tipo (vídeo ou áudio) e
 /// aparecer uma vez (§3.1). Trilhas e eventos existentes mantêm id e tudo o
 /// que o script não mudou.
-fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>, NeovegError> {
+/// Devolve também os ids dos eventos criados que o script deixou
+/// selecionados.
+fn rebuild_tracks(
+    old: &[Track],
+    out: Vec<ScriptTrackOut>,
+    media: &[MediaItem],
+) -> Result<(Vec<Track>, Vec<u64>), NeovegError> {
     use std::collections::HashMap;
     let mut pool: HashMap<u64, (TrackKind, &neoveg_engine::model::Event)> = HashMap::new();
     for t in old {
@@ -1411,6 +2034,7 @@ fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>,
     let mut used_events: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut used = vec![false; old.len()];
     let mut tracks: Vec<Track> = Vec::with_capacity(out.len());
+    let mut new_selected = Vec::new();
     for t in out {
         let mut tr = match take_orig(t.orig, &mut used, "trilha")? {
             Some(i) => {
@@ -1452,6 +2076,14 @@ fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>,
         }
         let mut events = Vec::with_capacity(t.events.len());
         for eo in &t.events {
+            if eo.is_new {
+                let ev = new_script_event(eo, tr.kind, media)?;
+                if eo.selected {
+                    new_selected.push(ev.id);
+                }
+                events.push(ev);
+                continue;
+            }
             let Some((kind, src)) = pool.get(&eo.id) else {
                 return Err(bad(format!("evento desconhecido: {}", eo.id)));
             };
@@ -1463,12 +2095,22 @@ fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>,
             }
             let mut ev = (*src).clone();
             apply_event_changes(&mut ev, eo)?;
+            if let Some(list) = &eo.takes {
+                let list = script_takes(list, tr.kind, media)?;
+                let a = script_active(eo.active_take, list.len())?;
+                if !takes::replace_takes(&mut ev, list, a) {
+                    return Err(NeovegError::Internal("lista de takes recusada".into()));
+                }
+            } else if eo.active_take.is_some() {
+                let a = script_active(eo.active_take, takes::take_count(&ev))?;
+                takes::set_active(&mut ev, a);
+            }
             events.push(ev);
         }
         tr.events = events;
         tracks.push(tr);
     }
-    Ok(tracks)
+    Ok((tracks, new_selected))
 }
 
 fn marker_ticks(ticks: i64) -> Result<Ticks, NeovegError> {
@@ -1543,7 +2185,7 @@ fn apply_script_output(
     let n_events: usize = session.project.tracks.iter().map(|t| t.events.len()).sum();
     let out_events: usize = out.tracks.iter().map(|t| t.events.len()).sum();
     if out.tracks.len() > n_tracks.saturating_add(MAX_SCRIPT_ITEMS)
-        || out_events > n_events
+        || out_events > n_events.saturating_add(MAX_SCRIPT_ITEMS)
         || out.selected_events.len() > n_events
         || out.added_buses.len() > MAX_SCRIPT_ITEMS
         || out.markers.len() > n_markers.saturating_add(MAX_SCRIPT_ITEMS)
@@ -1582,8 +2224,12 @@ fn apply_script_output(
         .filter(|(_, t)| t.selected)
         .map(|(i, _)| i)
         .collect();
+    let mut new_selected = Vec::new();
     if tracks_changed {
-        staged.project.tracks = rebuild_tracks(&staged.project.tracks, out.tracks)?;
+        let (tracks, sel) =
+            rebuild_tracks(&staged.project.tracks, out.tracks, &staged.project.media)?;
+        staged.project.tracks = tracks;
+        new_selected = sel;
         staged.project.sort_events();
     }
 
@@ -1623,6 +2269,7 @@ fn apply_script_output(
         .iter()
         .copied()
         .filter(|id| existing.contains(id))
+        .chain(new_selected)
         .collect();
     if new_sel_events != staged.sel_events {
         staged.sel_events = new_sel_events;

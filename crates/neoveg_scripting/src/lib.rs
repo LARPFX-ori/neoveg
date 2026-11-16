@@ -935,4 +935,221 @@ public class EntryPoint
         assert!(ctx.session.undo.is_empty());
         assert_eq!(ctx.session.project.tracks[0].events[0].start, antes);
     }
+
+    /// Projeto com duas mídias de vídeo+áudio (`a.avi`, `b.avi`) e uma só de
+    /// áudio (`c.wav`); V1 tem um evento com dois takes (a ativa, b) e A1 um
+    /// evento de áudio.
+    fn projeto_com_takes() -> Project {
+        use neoveg_engine::model::{Event, MediaItem, MediaSource, Take, Track, TrackKind};
+        use neoveg_engine::time::Ticks;
+        let item = |name: &str, video: bool| MediaItem {
+            id: neoveg_engine::model::new_id(),
+            name: name.into(),
+            source: MediaSource::File { path: name.into() },
+            duration: Some(Ticks::from_secs_i64(60)),
+            has_video: video,
+            has_audio: true,
+            width: 64,
+            height: 36,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let (a, b, c) = (
+            item("a.avi", true),
+            item("b.avi", true),
+            item("c.wav", false),
+        );
+        let mut ev = Event::new(&a, Ticks::ZERO, Ticks::from_secs_i64(4));
+        neoveg_engine::takes::add_take(
+            &mut ev,
+            Take {
+                media_id: b.id,
+                offset: Ticks::from_secs_i64(1),
+                name: "B".into(),
+            },
+            false,
+        );
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        v1.events = vec![ev];
+        let mut a1 = Track::new(TrackKind::Audio, "A1");
+        a1.events = vec![Event::new(&c, Ticks::ZERO, Ticks::from_secs_i64(4))];
+        let mut p = Project::new_default();
+        p.media = vec![a, b, c];
+        p.tracks = vec![v1, a1];
+        p
+    }
+
+    /// Takes, ActiveTake e Take.MediaPath (Scripting API Summary), como nos
+    /// scripts que trocam o take ativo de todos os eventos.
+    #[test]
+    fn script_troca_take_ativo_e_le_a_midia() {
+        let p = projeto_com_takes();
+        let b = p.media[1].id;
+        let id = p.tracks[0].events[0].id;
+        let corpo = r#"
+        var ev = vegas.Project.Tracks[0].Events[0];
+        if (ev.Takes.Count != 2 || !ev.Takes[0].IsActive) throw new System.Exception("takes");
+        ev.ActiveTake = ev.Takes[1];
+        vegas.ShowMessage(ev.ActiveTake.MediaPath + "|" + ev.ActiveTake.Name + "|" + ev.ActiveTake.Offset.ToMilliseconds());"#;
+        let Some((ctx, r)) = roda_script("take_ativo", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let ev = ctx.session.project.event(id).expect("evento");
+        assert_eq!(ev.media_id, b, "o take B ficou ativo");
+        assert_eq!(ev.offset, neoveg_engine::time::Ticks::from_secs_i64(1));
+        assert_eq!(neoveg_engine::takes::take_count(ev), 2);
+        assert_eq!(ctx.session.undo.len(), 1, "um passo de Desfazer");
+        assert_eq!(
+            ctx.messages.last().map(String::as_str),
+            Some("b.avi|B|1000")
+        );
+    }
+
+    /// Ler mídia e takes não muda nada nem cria passo de Desfazer.
+    #[test]
+    fn script_que_so_le_media_e_takes_nao_muda_o_projeto() {
+        let p = projeto_com_takes();
+        let antes = format!("{:?}", p.tracks[0].events[0]);
+        let corpo = r#"
+        int n = 0;
+        foreach (Media m in vegas.Project.MediaPool) { if (m.HasVideo()) n++; }
+        var ev = vegas.Project.Tracks[0].Events[0];
+        foreach (Take t in ev.Takes) { n += t.Index; }
+        vegas.ShowMessage(n + "|" + vegas.Project.MediaPool.Count + "|" + ev.ActiveTake.Media.GetVideoStreamByIndex(0).Width);"#;
+        let Some((ctx, r)) = roda_script("le_takes", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ctx.session.undo.is_empty());
+        assert_eq!(
+            format!("{:?}", ctx.session.project.tracks[0].events[0]),
+            antes
+        );
+        assert_eq!(ctx.messages.last().map(String::as_str), Some("3|3|64"));
+    }
+
+    /// AddTake com uma mídia achada pelo caminho (Media(path), como nos
+    /// scripts que trocam MTS por AVI) e Offset do take ativo.
+    #[test]
+    fn script_adiciona_take_de_midia_do_projeto() {
+        let mut p = projeto_com_takes();
+        // só o take A
+        neoveg_engine::takes::delete_take(&mut p.tracks[0].events[0], 1);
+        let a = p.media[0].id;
+        let b = p.media[1].id;
+        let id = p.tracks[0].events[0].id;
+        let corpo = r#"
+        var ev = (VideoEvent)vegas.Project.Tracks[0].Events[0];
+        var old = ev.ActiveTake.Offset;
+        Media media = new Media("b.avi");
+        ev.AddTake(media.GetVideoStreamByIndex(0), true);
+        ev.ActiveTake.Offset = old + Timecode.FromSeconds(2);"#;
+        let Some((ctx, r)) = roda_script("add_take", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let ev = ctx.session.project.event(id).expect("evento");
+        let list = neoveg_engine::takes::takes(ev);
+        assert_eq!(
+            list.iter().map(|t| t.media_id).collect::<Vec<_>>(),
+            vec![a, b]
+        );
+        assert_eq!(ev.media_id, b, "o novo take é o ativo");
+        assert_eq!(ev.offset, neoveg_engine::time::Ticks::from_secs_i64(2));
+    }
+
+    /// AddVideoEvent/AddAudioEvent + AddTake criam eventos com mídia do
+    /// projeto, com tempo exato e um passo de Desfazer.
+    #[test]
+    fn script_cria_eventos_com_take() {
+        let p = projeto_com_takes();
+        let (a, c) = (p.media[0].id, p.media[2].id);
+        let corpo = r#"
+        var pool = vegas.Project.MediaPool;
+        var v = (VideoTrack)vegas.Project.Tracks[0];
+        var ev = v.AddVideoEvent(Timecode.FromSeconds(10), Timecode.FromFrames(30));
+        ev.AddTake(pool.Find("a.avi").GetVideoStreamByIndex(0));
+        ev.Name = "Novo";
+        ev.Selected = true;
+        var au = (AudioTrack)vegas.Project.Tracks[1];
+        var ae = au.AddAudioEvent();
+        ae.Start = Timecode.FromSeconds(10);
+        ae.Length = Timecode.FromSeconds(1);
+        ae.AddTake(pool.Find("c.wav").GetAudioStreamByIndex(0), true, "Som");"#;
+        let Some((ctx, r)) = roda_script("cria_evento", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let pr = &ctx.session.project;
+        let fps = pr.settings.fps;
+        let ten = neoveg_engine::time::Ticks::from_secs_i64(10);
+        let ve = pr.tracks[0]
+            .events
+            .iter()
+            .find(|e| e.start == ten)
+            .expect("vídeo");
+        assert_eq!(
+            (ve.media_id, ve.length, ve.name.as_str()),
+            (a, fps.frame_to_ticks(30), "Novo")
+        );
+        assert!(
+            ctx.session.sel_events.contains(&ve.id),
+            "o evento novo ficou selecionado"
+        );
+        let ae = pr.tracks[1]
+            .events
+            .iter()
+            .find(|e| e.start == ten)
+            .expect("áudio");
+        assert_eq!((ae.media_id, ae.take_name.as_str()), (c, "Som"));
+        assert_eq!(ctx.session.undo.len(), 1, "um passo de Desfazer");
+    }
+
+    /// Evento sem take, take do tipo errado, mídia fora do projeto e
+    /// AddMedia recusam o script inteiro, sem mudar nada (§0).
+    #[test]
+    fn script_com_take_invalido_e_recusado_sem_mudar_nada() {
+        for (tag, corpo) in [
+            (
+                "sem_take",
+                r#"((VideoTrack)vegas.Project.Tracks[0]).AddVideoEvent(Timecode.FromSeconds(9), Timecode.FromSeconds(1));"#,
+            ),
+            (
+                "tipo",
+                r#"var ev = vegas.Project.Tracks[0].Events[0];
+        ev.AddTake(vegas.Project.MediaPool.Find("c.wav").GetAudioStreamByIndex(0));"#,
+            ),
+            ("fora", r#"var m = new Media("nao_existe.avi");"#),
+            (
+                "add_media",
+                r#"vegas.Project.MediaPool.AddMedia("nao_existe.avi");"#,
+            ),
+            (
+                "offset",
+                r#"vegas.Project.Tracks[0].Events[0].ActiveTake.Offset = Timecode.FromNanos(-5);"#,
+            ),
+            (
+                "vazio",
+                r#"vegas.Project.Tracks[0].Events[0].Takes.Clear();"#,
+            ),
+        ] {
+            let p = projeto_com_takes();
+            let antes = p.tracks.clone();
+            let Some((ctx, r)) = roda_script(tag, corpo, p) else {
+                return;
+            };
+            assert!(r.is_err(), "{tag} devia falhar");
+            assert_eq!(ctx.session.project.tracks.len(), antes.len(), "{tag}");
+            for (t, o) in ctx.session.project.tracks.iter().zip(&antes) {
+                assert_eq!(
+                    format!("{:?}", t.events),
+                    format!("{:?}", o.events),
+                    "{tag}: nada muda"
+                );
+            }
+            assert!(ctx.session.undo.is_empty(), "{tag}");
+        }
+    }
 }
