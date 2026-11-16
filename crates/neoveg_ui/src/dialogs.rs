@@ -1619,6 +1619,7 @@ impl App {
                     });
                     let vst3 = chain_copy[i].vst3.take().map(|mut v| {
                         v.params.clear();
+                        v.state = None;
                         v
                     });
                     chain_copy[i] = FxInstance::new(chain_copy[i].kind);

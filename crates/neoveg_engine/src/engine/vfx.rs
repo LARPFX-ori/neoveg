@@ -171,13 +171,8 @@ fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameR
         return;
     };
     let (time, rate) = ofx_time(t, fps);
-    // keyframes avaliados no tempo local deste quadro
-    let at_t = crate::model::OfxFxRef {
-        params: r.params_at(t),
-        ..r.clone()
-    };
     let mut px: Vec<f32> = f.px.iter().flatten().copied().collect();
-    match crate::plugin_host::ofx_render(&host, &at_t, w, h, time, rate, &mut px) {
+    match crate::plugin_host::ofx_render(&host, r, w, h, time, rate, &mut px) {
         Ok(()) => {
             for (dst, src) in f.px.iter_mut().zip(px.as_chunks::<4>().0) {
                 *dst = *src;

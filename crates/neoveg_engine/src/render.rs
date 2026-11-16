@@ -249,6 +249,7 @@ pub fn run(
     let (w, h) = (s.width.max(2) as usize, s.height.max(2) as usize);
     let mut mixer = Mixer::new_offline(sr);
     let sample_at = |i: u64| (s.start + fps.frame_to_ticks(i as i64)).to_samples_round(sr);
+    let pdc = mixer.total_latency(p) as i64;
 
     if s.format == RenderFormat::Wav {
         let total = (sample_at(n_frames) - sample_at(0)).max(0) as u64;
@@ -256,20 +257,29 @@ pub fn run(
         // WAV sai no layout do projeto (estéreo ou 5.1 de 6 canais)
         let ch = p.settings.channel_layout.channels();
         let mut wav = WavWriter::create_with_channels(&s.path, sr, s.wav_bits, ch as u16)?;
-        let mut pos = sample_at(0);
+        let pos = sample_at(0);
         let end = sample_at(n_frames);
         let mut buf = vec![0f32; 8192 * ch];
         let am = media.audio_map();
-        while pos < end {
+        let mut pre = 0_i64;
+        while pre < pdc {
             if prog.cancel.load(Ordering::Relaxed) {
                 bail!("cancelado");
             }
-            let n = ((end - pos) as usize).min(8192);
-            mixer.process_multichannel(p, &am, pos, &mut buf[..n * ch]);
+            let n = ((pdc - pre) as usize).min(8192);
+            mixer.process_multichannel(p, &am, pos.saturating_add(pre), &mut buf[..n * ch]);
+            pre += n as i64;
+        }
+        let mut cur = pos;
+        while cur < end {
+            if prog.cancel.load(Ordering::Relaxed) {
+                bail!("cancelado");
+            }
+            let n = ((end - cur) as usize).min(8192);
+            mixer.process_multichannel(p, &am, cur.saturating_add(pdc), &mut buf[..n * ch]);
             wav.write(&buf[..n * ch])?;
-            pos += n as i64;
-            prog.done
-                .store((pos - sample_at(0)) as u64, Ordering::Relaxed);
+            cur += n as i64;
+            prog.done.store((cur - pos) as u64, Ordering::Relaxed);
         }
         return wav.finish();
     }
@@ -320,6 +330,21 @@ pub fn run(
     };
 
     let batch = rayon::current_num_threads().clamp(1, 8) as u64;
+    if has_audio && pdc > 0 {
+        let mut pre = 0_i64;
+        let base = sample_at(0);
+        let mut prime_buf = vec![0f32; 8192 * 2];
+        while pre < pdc {
+            let n = ((pdc - pre) as usize).min(8192);
+            mixer.process(
+                p,
+                &audio_map,
+                base.saturating_add(pre),
+                &mut prime_buf[..n * 2],
+            );
+            pre += n as i64;
+        }
+    }
     let mut i = 0u64;
     let quality = s.jpeg_quality.clamp(10, 100);
     while i < n_frames {
@@ -371,7 +396,7 @@ pub fn run(
                 let a1 = sample_at(fi + 1);
                 let n = (a1 - a0).max(0) as usize;
                 let mut buf = vec![0f32; n * 2];
-                mixer.process(p, &audio_map, a0, &mut buf);
+                mixer.process(p, &audio_map, a0.saturating_add(pdc), &mut buf);
                 match (&mut sink, &mut side_wav) {
                     (Sink::Avi(wr), _) => wr.write_audio(&to_i16(&buf))?,
                     (_, Some(wav)) => wav.write(&buf)?,
