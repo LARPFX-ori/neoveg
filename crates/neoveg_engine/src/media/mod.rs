@@ -401,6 +401,10 @@ impl MediaCache {
         item: &MediaItem,
         t: Ticks,
     ) -> Option<Arc<RgbaImage>> {
+        // `item` só é lido pelo leitor do Media Foundation (Windows); sem
+        // isto, o build fora do Windows falha com `-D warnings`.
+        #[cfg(not(windows))]
+        let _ = item;
         match source {
             VideoSource::None | VideoSource::Generated => None,
             VideoSource::Still(img) => Some(img.clone()),
