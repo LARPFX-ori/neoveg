@@ -21,17 +21,30 @@ static RUN_SEQ: AtomicU64 = AtomicU64::new(1);
 static BRIDGE_DLL: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 #[derive(Serialize)]
+struct ScriptEventSnap {
+    id: u64,
+    name: String,
+    start: i64,
+    length: i64,
+    mute: bool,
+    locked: bool,
+    fade_in: i64,
+    fade_out: i64,
+}
+
+#[derive(Serialize)]
 struct ScriptTrackSnap {
     index: usize,
     name: String,
     is_video: bool,
     mute: bool,
     solo: bool,
+    events: Vec<ScriptEventSnap>,
 }
 
 #[derive(Serialize)]
 struct ScriptMarkerSnap {
-    position_ms: f64,
+    position_ticks: i64,
     label: String,
 }
 
@@ -39,18 +52,52 @@ struct ScriptMarkerSnap {
 struct ScriptInputPayload {
     result_path: String,
     target_assembly_path: Option<String>,
-    cursor_ms: f64,
+    fps_num: i64,
+    fps_den: i64,
+    cursor_ticks: i64,
+    sel_start_ticks: i64,
+    sel_length_ticks: i64,
+    selected_track: i64,
+    selected_events: Vec<u64>,
     tracks: Vec<ScriptTrackSnap>,
     markers: Vec<ScriptMarkerSnap>,
     audio_buses: Vec<String>,
 }
 
-/// Versão do formato de saída da ponte. Uma saída sem ela veio de uma ponte
-/// antiga (só "adicionados"): é recusada, nunca lida como "apagar tudo".
-const SCRIPT_OUTPUT_PROTOCOL: u32 = 2;
+/// Versão do formato de saída da ponte. Uma saída de outra versão veio de
+/// uma ponte antiga embutida numa `.dll`: é recusada, nunca reinterpretada.
+const SCRIPT_OUTPUT_PROTOCOL: u32 = 3;
+
+/// Evento na lista final de uma trilha: `id` do evento original e só o que
+/// mudou (`None` = igual). Tempos em ticks do Neoveg.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptEventOut {
+    id: u64,
+    name: Option<String>,
+    start: Option<i64>,
+    length: Option<i64>,
+    mute: Option<bool>,
+    locked: Option<bool>,
+    fade_in: Option<i64>,
+    fade_out: Option<i64>,
+}
+
+impl ScriptEventOut {
+    fn unchanged(&self) -> bool {
+        self.name.is_none()
+            && self.start.is_none()
+            && self.length.is_none()
+            && self.mute.is_none()
+            && self.locked.is_none()
+            && self.fade_in.is_none()
+            && self.fade_out.is_none()
+    }
+}
 
 /// Trilha na lista final devolvida pelo script: `orig` é o índice original
-/// (ou negativo se é nova); `None` = não mudou.
+/// (ou negativo se é nova); `None` = não mudou; `events` é a lista final de
+/// eventos da trilha.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ScriptTrackOut {
@@ -59,6 +106,8 @@ struct ScriptTrackOut {
     name: Option<String>,
     mute: Option<bool>,
     solo: Option<bool>,
+    selected: bool,
+    events: Vec<ScriptEventOut>,
 }
 
 /// Marcador na lista final devolvida pelo script (mesma convenção).
@@ -66,7 +115,7 @@ struct ScriptTrackOut {
 #[serde(default)]
 struct ScriptMarkerOut {
     orig: i64,
-    seconds: Option<f64>,
+    ticks: Option<i64>,
     label: Option<String>,
 }
 
@@ -81,7 +130,10 @@ struct ScriptOutputPayload {
     tracks: Vec<ScriptTrackOut>,
     added_buses: Vec<Option<String>>,
     markers: Vec<ScriptMarkerOut>,
-    cursor_ms: Option<f64>,
+    selected_events: Vec<u64>,
+    cursor_ticks: Option<i64>,
+    sel_start_ticks: Option<i64>,
+    sel_length_ticks: Option<i64>,
 }
 
 struct TempDirGuard(PathBuf);
@@ -123,6 +175,7 @@ fn cs_project_xml(tfm: &str) -> String {
 const SCRIPT_PORTAL_VEGAS_CS: &str = r#"using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Numerics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
@@ -147,27 +200,176 @@ namespace ScriptPortal.Vegas
         Audio
     }
 
-    public sealed class Timecode
+    // Nomes e assinaturas desta ponte seguem a documentação pública da
+    // MAGIX: "VEGAS Pro Scripting API Summary" (revisão de 28/08/2024,
+    // help.magix-hub.com/video/vegas/sdk) e o FAQ de scripting do manual do
+    // VEGAS Pro 21 (p. 1038). A implementação é própria (sala limpa).
+
+    // Timecode (Scripting API Summary: Timecode). Guarda ticks inteiros do
+    // Neoveg (1_411_200_000 por segundo) para a aritmética de edição ser
+    // exata (AGENTS.md, Regras Rust 5); Nanos (unidades de 100 ns) é uma
+    // conversão arredondada.
+    public sealed class Timecode : IComparable
     {
-        public double Milliseconds { get; set; }
+        internal const long TicksPerSecond = 1_411_200_000L;
+        internal static long FpsNum = 30;
+        internal static long FpsDen = 1;
+        internal long _ticks;
+
         public Timecode() { }
-        public Timecode(double ms) { Milliseconds = double.IsFinite(ms) ? ms : 0.0; }
-        public static Timecode FromMilliseconds(double ms) => new Timecode(ms);
-        public static Timecode FromSeconds(double s) => new Timecode(s * 1000.0);
+
+        [Obsolete("Use Timecode.FromMilliseconds")]
+        public Timecode(double milliseconds) { _ticks = MsToTicks(milliseconds); }
+
+        internal static Timecode FromTicks(long ticks) => new Timecode { _ticks = ticks };
+
+        internal static long MsToTicks(double ms)
+        {
+            if (!double.IsFinite(ms))
+            {
+                throw new ArgumentException("tempo não finito");
+            }
+            double t = Math.Round(ms * (TicksPerSecond / 1000.0));
+            if (t > long.MaxValue / 2 || t < long.MinValue / 2)
+            {
+                throw new OverflowException("tempo fora do limite");
+            }
+            return (long)t;
+        }
+
+        public static Timecode FromMilliseconds(double milliseconds) => FromTicks(MsToTicks(milliseconds));
+        public static Timecode FromSeconds(double seconds) => FromTicks(MsToTicks(seconds * 1000.0));
+        public static Timecode FromNanos(long nanos) => FromTicks((long)((BigInteger)nanos * 14112 / 100));
+
+        public static Timecode FromFrames(long frames)
+        {
+            BigInteger t = (BigInteger)frames * TicksPerSecond * FpsDen / FpsNum;
+            return FromTicks((long)t);
+        }
+
+        public double Milliseconds
+        {
+            get => _ticks / (TicksPerSecond / 1000.0);
+            set => _ticks = MsToTicks(value);
+        }
+
+        public long Nanos
+        {
+            get => (long)(((BigInteger)_ticks * 100 + 7056) / 14112);
+            set => _ticks = FromNanos(value)._ticks;
+        }
+
+        public long FrameCount
+        {
+            get => (long)((BigInteger)_ticks * FpsNum / ((BigInteger)TicksPerSecond * FpsDen));
+            set => _ticks = FromFrames(value)._ticks;
+        }
+
+        public double FrameRate => (double)FpsNum / FpsDen;
         public double ToMilliseconds() => Milliseconds;
+
+        public int CompareTo(object obj) => obj is Timecode o ? _ticks.CompareTo(o._ticks) : 1;
+        public override bool Equals(object obj) => obj is Timecode o && o._ticks == _ticks;
+        public override int GetHashCode() => _ticks.GetHashCode();
+
+        public override string ToString()
+        {
+            long ms = (long)Math.Round(Milliseconds);
+            var sign = ms < 0 ? "-" : "";
+            ms = Math.Abs(ms);
+            return string.Format("{0}{1:00}:{2:00}:{3:00}.{4:000}", sign, ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000);
+        }
+
+        private static long T(Timecode t) => t is null ? throw new ArgumentNullException(nameof(t)) : t._ticks;
+        public static bool operator ==(Timecode a, Timecode b) => a is null ? b is null : b is not null && a._ticks == b._ticks;
+        public static bool operator !=(Timecode a, Timecode b) => !(a == b);
+        public static bool operator <(Timecode a, Timecode b) => T(a) < T(b);
+        public static bool operator >(Timecode a, Timecode b) => T(a) > T(b);
+        public static bool operator <=(Timecode a, Timecode b) => T(a) <= T(b);
+        public static bool operator >=(Timecode a, Timecode b) => T(a) >= T(b);
+        public static Timecode operator +(Timecode a, Timecode b) => FromTicks(checked(T(a) + T(b)));
+        public static Timecode operator -(Timecode a, Timecode b) => FromTicks(checked(T(a) - T(b)));
     }
 
     public class Marker
     {
         internal int _origIndex = -1;
-        public Timecode Position { get; set; } = new Timecode(0.0);
+        public Timecode Position { get; set; } = new Timecode();
         public string Label { get; set; } = "";
         public Marker() { }
         public Marker(Timecode pos, string label)
         {
-            Position = pos ?? new Timecode(0.0);
+            Position = pos ?? new Timecode();
             Label = label ?? "";
         }
+    }
+
+    // Fade (Scripting API Summary: Fade; FAQ p. 1038: FadeIn.Length).
+    public sealed class Fade
+    {
+        public Timecode Length { get; set; } = new Timecode();
+    }
+
+    // TrackEvent / VideoEvent / AudioEvent (Scripting API Summary). Eventos
+    // novos ainda não podem ser criados por script (falta Media/Take): os
+    // construtores são internos, então isso falha na compilação em vez de
+    // criar um evento sem mídia.
+    public abstract class TrackEvent
+    {
+        internal ulong _id;
+        internal Track _track;
+        public string Name { get; set; } = "";
+        public Timecode Start { get; set; } = new Timecode();
+        public Timecode Length { get; set; } = new Timecode();
+        public Timecode End
+        {
+            get => Start + Length;
+            set => Length = value - Start;
+        }
+        public bool Mute { get; set; }
+        public bool Locked { get; set; }
+        public bool Selected { get; set; }
+        public Fade FadeIn { get; } = new Fade();
+        public Fade FadeOut { get; } = new Fade();
+        public int Index => _track == null ? -1 : _track.Events.IndexOf(this);
+        public Track Track
+        {
+            get => _track;
+            set
+            {
+                if (ReferenceEquals(value, _track))
+                {
+                    return;
+                }
+                _track?.Events.Remove(this);
+                value?.Events.Add(this);
+                _track = value;
+            }
+        }
+        internal TrackEvent() { }
+        public abstract bool IsAudio();
+        public abstract bool IsVideo();
+        public bool IsValid() => _track != null;
+    }
+
+    public sealed class VideoEvent : TrackEvent
+    {
+        internal VideoEvent() { }
+        public override bool IsAudio() => false;
+        public override bool IsVideo() => true;
+    }
+
+    public sealed class AudioEvent : TrackEvent
+    {
+        internal AudioEvent() { }
+        public override bool IsAudio() => true;
+        public override bool IsVideo() => false;
+    }
+
+    // TrackEvents (Scripting API Summary: coleção de eventos da trilha).
+    public sealed class TrackEvents : List<TrackEvent>
+    {
+        internal TrackEvents() { }
     }
 
     public class Track
@@ -177,8 +379,13 @@ namespace ScriptPortal.Vegas
         public string Name { get; set; } = "";
         public bool Mute { get; set; }
         public bool Solo { get; set; }
+        public bool Selected { get; set; }
+        public TrackEvents Events { get; } = new TrackEvents();
         public virtual bool IsVideo() => false;
         public virtual bool IsAudio() => false;
+        // Track.IsValid (Scripting API Summary: Track): está no projeto.
+        internal Project _project;
+        public bool IsValid() => _project != null && _project.Tracks.Contains(this);
     }
 
     public sealed class VideoTrack : Track
@@ -191,9 +398,12 @@ namespace ScriptPortal.Vegas
         public override bool IsAudio() => true;
     }
 
+    // TransportControl (Scripting API Summary): cursor e seleção de tempo.
     public sealed class TransportControl
     {
-        public Timecode CursorPosition { get; set; } = new Timecode(0.0);
+        public Timecode CursorPosition { get; set; } = new Timecode();
+        public Timecode SelectionStart { get; set; } = new Timecode();
+        public Timecode SelectionLength { get; set; } = new Timecode();
     }
 
     public sealed class Project
@@ -204,14 +414,14 @@ namespace ScriptPortal.Vegas
 
         public VideoTrack AddVideoTrack(string name = null)
         {
-            var t = new VideoTrack { Index = Tracks.Count, Name = name ?? "" };
+            var t = new VideoTrack { Index = Tracks.Count, Name = name ?? "", _project = this };
             Tracks.Add(t);
             return t;
         }
 
         public AudioTrack AddAudioTrack(string name = null)
         {
-            var t = new AudioTrack { Index = Tracks.Count, Name = name ?? "" };
+            var t = new AudioTrack { Index = Tracks.Count, Name = name ?? "", _project = this };
             Tracks.Add(t);
             return t;
         }
@@ -238,19 +448,51 @@ namespace ScriptPortal.Vegas
         public Project Project { get; } = new Project();
         public TransportControl Transport { get; } = new TransportControl();
 
+        // Vegas.Cursor (Scripting API Summary: Vegas).
+        public Timecode Cursor
+        {
+            get => Transport.CursorPosition;
+            set => Transport.CursorPosition = value;
+        }
+
         internal Vegas(InputSnap snap)
         {
-            Transport.CursorPosition = Timecode.FromMilliseconds(snap.cursor_ms);
+            if (snap.fps_num > 0 && snap.fps_den > 0)
+            {
+                Timecode.FpsNum = snap.fps_num;
+                Timecode.FpsDen = snap.fps_den;
+            }
+            Transport.CursorPosition = Timecode.FromTicks(snap.cursor_ticks);
+            Transport.SelectionStart = Timecode.FromTicks(snap.sel_start_ticks);
+            Transport.SelectionLength = Timecode.FromTicks(snap.sel_length_ticks);
+            var selected = new HashSet<ulong>(snap.selected_events ?? new List<ulong>());
             if (snap.tracks != null)
             {
                 foreach (var t in snap.tracks)
                 {
                     Track tr = t.is_video ? new VideoTrack() : new AudioTrack();
                     tr._origIndex = t.index;
+                    tr._project = Project;
                     tr.Index = t.index;
                     tr.Name = t.name ?? "";
                     tr.Mute = t.mute;
                     tr.Solo = t.solo;
+                    tr.Selected = snap.selected_track == t.index;
+                    foreach (var e in t.events ?? new List<EventSnap>())
+                    {
+                        TrackEvent ev = t.is_video ? new VideoEvent() : new AudioEvent();
+                        ev._id = e.id;
+                        ev._track = tr;
+                        ev.Name = e.name ?? "";
+                        ev.Start = Timecode.FromTicks(e.start);
+                        ev.Length = Timecode.FromTicks(e.length);
+                        ev.Mute = e.mute;
+                        ev.Locked = e.locked;
+                        ev.Selected = selected.Contains(e.id);
+                        ev.FadeIn.Length = Timecode.FromTicks(e.fade_in);
+                        ev.FadeOut.Length = Timecode.FromTicks(e.fade_out);
+                        tr.Events.Add(ev);
+                    }
                     Project.Tracks.Add(tr);
                 }
             }
@@ -259,7 +501,7 @@ namespace ScriptPortal.Vegas
                 for (int i = 0; i < snap.markers.Count; i++)
                 {
                     var m = snap.markers[i];
-                    var mk = new Marker(Timecode.FromMilliseconds(m.position_ms), m.label)
+                    var mk = new Marker(Timecode.FromTicks(m.position_ticks), m.label)
                     {
                         _origIndex = i
                     };
@@ -297,23 +539,68 @@ namespace ScriptPortal.Vegas
             }
         }
 
-        // Devolve a lista FINAL de trilhas e marcadores: cada item diz de qual
-        // item original veio (ou -1 se é novo) e só o que mudou. Assim
-        // renomear, mover, apagar, reordenar e inserir no meio chegam ao
-        // Neoveg em vez de se perderem em silêncio (AGENTS.md §0).
+        private static long Ticks(Timecode t) => t == null ? 0 : t._ticks;
+
+        // Devolve a lista FINAL de trilhas (com os eventos de cada uma, por
+        // id), de marcadores, a seleção e o cursor. Cada item diz de onde
+        // veio e só o que mudou, para nada se perder em silêncio (§0).
         internal OutputSnap BuildResult(InputSnap orig)
         {
             var tracksOut = new List<TrackOut>();
             var markersOut = new List<MarkerOut>();
             var addedBuses = new List<string>();
+            var selectedEvents = new List<ulong>();
 
             var origTracks = orig.tracks ?? new List<TrackSnap>();
+            var origEvents = new Dictionary<ulong, EventSnap>();
+            foreach (var t in origTracks)
+            {
+                foreach (var e in t.events ?? new List<EventSnap>())
+                {
+                    origEvents[e.id] = e;
+                }
+            }
             var seenTracks = new HashSet<int>();
+            var seenEvents = new HashSet<ulong>();
             foreach (var cur in Project.Tracks)
             {
                 if (cur == null)
                 {
                     continue;
+                }
+                var evOut = new List<EventOut>();
+                foreach (var ev in cur.Events)
+                {
+                    if (ev == null)
+                    {
+                        continue;
+                    }
+                    if (!seenEvents.Add(ev._id))
+                    {
+                        throw new InvalidOperationException(
+                            "o mesmo evento aparece mais de uma vez nas trilhas");
+                    }
+                    if (!origEvents.TryGetValue(ev._id, out var oe))
+                    {
+                        throw new InvalidOperationException("evento desconhecido");
+                    }
+                    if (ev.Selected)
+                    {
+                        selectedEvents.Add(ev._id);
+                    }
+                    long st = Ticks(ev.Start), ln = Ticks(ev.Length);
+                    long fi = Ticks(ev.FadeIn.Length), fo = Ticks(ev.FadeOut.Length);
+                    evOut.Add(new EventOut
+                    {
+                        id = ev._id,
+                        name = (ev.Name ?? "") != (oe.name ?? "") ? (ev.Name ?? "") : null,
+                        start = st != oe.start ? st : (long?)null,
+                        length = ln != oe.length ? ln : (long?)null,
+                        mute = ev.Mute != oe.mute ? ev.Mute : (bool?)null,
+                        locked = ev.Locked != oe.locked ? ev.Locked : (bool?)null,
+                        fade_in = fi != oe.fade_in ? fi : (long?)null,
+                        fade_out = fo != oe.fade_out ? fo : (long?)null
+                    });
                 }
                 if (cur._origIndex >= 0)
                 {
@@ -341,7 +628,9 @@ namespace ScriptPortal.Vegas
                         is_video = cur.IsVideo(),
                         name = (cur.Name ?? "") != (old.name ?? "") ? (cur.Name ?? "") : null,
                         mute = cur.Mute != old.mute ? cur.Mute : (bool?)null,
-                        solo = cur.Solo != old.solo ? cur.Solo : (bool?)null
+                        solo = cur.Solo != old.solo ? cur.Solo : (bool?)null,
+                        selected = cur.Selected,
+                        events = evOut
                     });
                 }
                 else
@@ -352,7 +641,9 @@ namespace ScriptPortal.Vegas
                         is_video = cur.IsVideo(),
                         name = string.IsNullOrWhiteSpace(cur.Name) ? null : cur.Name,
                         mute = cur.Mute ? true : (bool?)null,
-                        solo = cur.Solo ? true : (bool?)null
+                        solo = cur.Solo ? true : (bool?)null,
+                        selected = cur.Selected,
+                        events = evOut
                     });
                 }
             }
@@ -365,7 +656,7 @@ namespace ScriptPortal.Vegas
                 {
                     continue;
                 }
-                double ms = mk.Position != null ? mk.Position.Milliseconds : 0.0;
+                long ticks = Ticks(mk.Position);
                 string label = mk.Label ?? "";
                 if (mk._origIndex >= 0 && mk._origIndex < origMarkers.Count)
                 {
@@ -378,7 +669,7 @@ namespace ScriptPortal.Vegas
                     markersOut.Add(new MarkerOut
                     {
                         orig = mk._origIndex,
-                        seconds = ms != old.position_ms ? ms / 1000.0 : (double?)null,
+                        ticks = ticks != old.position_ticks ? ticks : (long?)null,
                         label = label != (old.label ?? "") ? label : null
                     });
                 }
@@ -387,7 +678,7 @@ namespace ScriptPortal.Vegas
                     markersOut.Add(new MarkerOut
                     {
                         orig = -1,
-                        seconds = ms / 1000.0,
+                        ticks = ticks,
                         label = label
                     });
                 }
@@ -399,21 +690,35 @@ namespace ScriptPortal.Vegas
                 addedBuses.Add(string.IsNullOrWhiteSpace(bus) ? null : bus);
             }
 
-            double? newCursor = Math.Abs(Transport.CursorPosition.Milliseconds - orig.cursor_ms) > 1e-6
-                ? Transport.CursorPosition.Milliseconds
-                : (double?)null;
+            long cur_t = Ticks(Transport.CursorPosition);
+            long sel_s = Ticks(Transport.SelectionStart), sel_l = Ticks(Transport.SelectionLength);
             return new OutputSnap
             {
                 ok = true,
-                protocol = 2,
+                protocol = 3,
                 messages = _messages,
                 commands = _commands,
                 tracks = tracksOut,
                 added_buses = addedBuses,
                 markers = markersOut,
-                cursor_ms = newCursor
+                selected_events = selectedEvents,
+                cursor_ticks = cur_t != orig.cursor_ticks ? cur_t : (long?)null,
+                sel_start_ticks = sel_s != orig.sel_start_ticks || sel_l != orig.sel_length_ticks ? sel_s : (long?)null,
+                sel_length_ticks = sel_s != orig.sel_start_ticks || sel_l != orig.sel_length_ticks ? sel_l : (long?)null
             };
         }
+    }
+
+    internal sealed class EventSnap
+    {
+        public ulong id { get; set; }
+        public string name { get; set; }
+        public long start { get; set; }
+        public long length { get; set; }
+        public bool mute { get; set; }
+        public bool locked { get; set; }
+        public long fade_in { get; set; }
+        public long fade_out { get; set; }
     }
 
     internal sealed class TrackSnap
@@ -423,11 +728,12 @@ namespace ScriptPortal.Vegas
         public bool is_video { get; set; }
         public bool mute { get; set; }
         public bool solo { get; set; }
+        public List<EventSnap> events { get; set; }
     }
 
     internal sealed class MarkerSnap
     {
-        public double position_ms { get; set; }
+        public long position_ticks { get; set; }
         public string label { get; set; }
     }
 
@@ -435,10 +741,28 @@ namespace ScriptPortal.Vegas
     {
         public string result_path { get; set; }
         public string target_assembly_path { get; set; }
-        public double cursor_ms { get; set; }
+        public long fps_num { get; set; }
+        public long fps_den { get; set; }
+        public long cursor_ticks { get; set; }
+        public long sel_start_ticks { get; set; }
+        public long sel_length_ticks { get; set; }
+        public int selected_track { get; set; } = -1;
+        public List<ulong> selected_events { get; set; }
         public List<TrackSnap> tracks { get; set; }
         public List<MarkerSnap> markers { get; set; }
         public List<string> audio_buses { get; set; }
+    }
+
+    internal sealed class EventOut
+    {
+        public ulong id { get; set; }
+        public string name { get; set; }
+        public long? start { get; set; }
+        public long? length { get; set; }
+        public bool? mute { get; set; }
+        public bool? locked { get; set; }
+        public long? fade_in { get; set; }
+        public long? fade_out { get; set; }
     }
 
     internal sealed class TrackOut
@@ -448,12 +772,14 @@ namespace ScriptPortal.Vegas
         public string name { get; set; }
         public bool? mute { get; set; }
         public bool? solo { get; set; }
+        public bool selected { get; set; }
+        public List<EventOut> events { get; set; } = new List<EventOut>();
     }
 
     internal sealed class MarkerOut
     {
         public int orig { get; set; }
-        public double? seconds { get; set; }
+        public long? ticks { get; set; }
         public string label { get; set; }
     }
 
@@ -467,7 +793,10 @@ namespace ScriptPortal.Vegas
         public List<TrackOut> tracks { get; set; } = new List<TrackOut>();
         public List<string> added_buses { get; set; } = new List<string>();
         public List<MarkerOut> markers { get; set; } = new List<MarkerOut>();
-        public double? cursor_ms { get; set; }
+        public List<ulong> selected_events { get; set; } = new List<ulong>();
+        public long? cursor_ticks { get; set; }
+        public long? sel_start_ticks { get; set; }
+        public long? sel_length_ticks { get; set; }
     }
 
     internal sealed class NeovegScriptLoadContext : AssemblyLoadContext
@@ -707,6 +1036,20 @@ fn build_snapshot(
             is_video: t.kind == TrackKind::Video,
             mute: t.mute,
             solo: t.solo,
+            events: t
+                .events
+                .iter()
+                .map(|e| ScriptEventSnap {
+                    id: e.id,
+                    name: e.name.clone(),
+                    start: e.start.0,
+                    length: e.length.0,
+                    mute: e.mute,
+                    locked: e.locked,
+                    fade_in: e.fade_in.len.0,
+                    fade_out: e.fade_out.len.0,
+                })
+                .collect(),
         })
         .collect();
     let markers = session
@@ -714,7 +1057,7 @@ fn build_snapshot(
         .markers
         .iter()
         .map(|m| ScriptMarkerSnap {
-            position_ms: (m.t.0 as f64) / 1_411_200.0,
+            position_ticks: m.t.0,
             label: m.label.clone(),
         })
         .collect();
@@ -724,10 +1067,25 @@ fn build_snapshot(
         .iter()
         .map(|b| b.name.clone())
         .collect();
+    let (sel_start, sel_len) = session
+        .time_sel
+        .map_or((0, 0), |(a, b)| (a.0, (b - a).0.max(0)));
+    let mut selected_events: Vec<u64> = session.sel_events.iter().copied().collect();
+    selected_events.sort_unstable();
+    let fps = session.project.settings.fps;
     let payload = ScriptInputPayload {
         result_path: result_path.to_string_lossy().to_string(),
         target_assembly_path: target_assembly.map(|p| p.to_string_lossy().to_string()),
-        cursor_ms: (session.cursor.0 as f64) / 1_411_200.0,
+        fps_num: i64::from(fps.num.max(1)),
+        fps_den: i64::from(fps.den.max(1)),
+        cursor_ticks: session.cursor.0,
+        sel_start_ticks: sel_start,
+        sel_length_ticks: sel_len,
+        selected_track: session
+            .sel_track
+            .and_then(|i| i64::try_from(i).ok())
+            .unwrap_or(-1),
+        selected_events,
         tracks,
         markers,
         audio_buses,
@@ -943,21 +1301,27 @@ fn ensure_bridge_dll(env: &DotnetEnv) -> Result<PathBuf, NeovegError> {
     }
 }
 
-/// A lista final é a original, na mesma ordem e sem mudanças?
-fn tracks_unchanged(out: &[ScriptTrackOut], n: usize) -> bool {
-    out.len() == n
-        && out.iter().enumerate().all(|(i, t)| {
+/// A lista final é a original, na mesma ordem, com os mesmos eventos e sem
+/// mudanças?
+fn tracks_unchanged(out: &[ScriptTrackOut], old: &[Track]) -> bool {
+    out.len() == old.len()
+        && out.iter().zip(old).enumerate().all(|(i, (t, o))| {
             usize::try_from(t.orig).ok() == Some(i)
                 && t.name.is_none()
                 && t.mute.is_none()
                 && t.solo.is_none()
+                && t.events.len() == o.events.len()
+                && t.events
+                    .iter()
+                    .zip(&o.events)
+                    .all(|(e, oe)| e.id == oe.id && e.unchanged())
         })
 }
 
 fn markers_unchanged(out: &[ScriptMarkerOut], n: usize) -> bool {
     out.len() == n
         && out.iter().enumerate().all(|(i, m)| {
-            usize::try_from(m.orig).ok() == Some(i) && m.seconds.is_none() && m.label.is_none()
+            usize::try_from(m.orig).ok() == Some(i) && m.ticks.is_none() && m.label.is_none()
         })
 }
 
@@ -980,10 +1344,71 @@ fn take_orig(orig: i64, used: &mut [bool], what: &str) -> Result<Option<usize>, 
     }
 }
 
-/// Remonta as trilhas na ordem final do script. Trilhas que ficaram de fora
-/// foram apagadas pelo script; trilhas existentes mantêm id, eventos e tudo
-/// o que o script não mudou.
+fn bad(msg: impl Into<String>) -> NeovegError {
+    NeovegError::InvalidInput(format!("script .NET: {}", msg.into()))
+}
+
+/// Ticks informados pelo script, sem valor negativo.
+fn script_ticks(v: i64, what: &str) -> Result<Ticks, NeovegError> {
+    if v < 0 {
+        return Err(bad(format!("{what} negativo")));
+    }
+    Ok(Ticks::from_raw(v))
+}
+
+/// Aplica as mudanças do script num evento, validando os valores (§0.4):
+/// nada é cortado em silêncio; um valor inválido recusa o script inteiro.
+fn apply_event_changes(
+    ev: &mut neoveg_engine::model::Event,
+    o: &ScriptEventOut,
+) -> Result<(), NeovegError> {
+    if let Some(n) = &o.name {
+        ev.name = truncate_str(n.trim(), 256);
+    }
+    if let Some(s) = o.start {
+        ev.start = script_ticks(s, "início do evento")?;
+    }
+    if let Some(l) = o.length {
+        if l <= 0 {
+            return Err(bad("evento com duração zero ou negativa"));
+        }
+        ev.length = Ticks::from_raw(l);
+    }
+    if ev.start.0.checked_add(ev.length.0).is_none() {
+        return Err(bad("fim do evento fora do limite"));
+    }
+    if let Some(m) = o.mute {
+        ev.mute = m;
+    }
+    if let Some(k) = o.locked {
+        ev.locked = k;
+    }
+    if let Some(f) = o.fade_in {
+        ev.fade_in.len = script_ticks(f, "fade in")?;
+    }
+    if let Some(f) = o.fade_out {
+        ev.fade_out.len = script_ticks(f, "fade out")?;
+    }
+    if ev.fade_in.len > ev.length || ev.fade_out.len > ev.length {
+        return Err(bad("fade maior que o evento"));
+    }
+    Ok(())
+}
+
+/// Remonta as trilhas na ordem final do script, com os eventos de cada uma.
+/// Trilhas e eventos que ficaram de fora foram apagados pelo script; um
+/// evento só pode ficar numa trilha do mesmo tipo (vídeo ou áudio) e
+/// aparecer uma vez (§3.1). Trilhas e eventos existentes mantêm id e tudo o
+/// que o script não mudou.
 fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>, NeovegError> {
+    use std::collections::HashMap;
+    let mut pool: HashMap<u64, (TrackKind, &neoveg_engine::model::Event)> = HashMap::new();
+    for t in old {
+        for e in &t.events {
+            pool.insert(e.id, (t.kind, e));
+        }
+    }
+    let mut used_events: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut used = vec![false; old.len()];
     let mut tracks: Vec<Track> = Vec::with_capacity(out.len());
     for t in out {
@@ -995,7 +1420,7 @@ fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>,
                     ));
                 };
                 let mut tr = src.clone();
-                if let Some(name) = t.name {
+                if let Some(name) = &t.name {
                     tr.name = truncate_str(name.trim(), 128);
                 }
                 tr
@@ -1009,6 +1434,7 @@ fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>,
                 let n = tracks.iter().filter(|x| x.kind == kind).count() + 1;
                 let name = t
                     .name
+                    .as_deref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| match kind {
@@ -1024,20 +1450,30 @@ fn rebuild_tracks(old: &[Track], out: Vec<ScriptTrackOut>) -> Result<Vec<Track>,
         if let Some(s) = t.solo {
             tr.solo = s;
         }
+        let mut events = Vec::with_capacity(t.events.len());
+        for eo in &t.events {
+            let Some((kind, src)) = pool.get(&eo.id) else {
+                return Err(bad(format!("evento desconhecido: {}", eo.id)));
+            };
+            if !used_events.insert(eo.id) {
+                return Err(bad(format!("o evento {} aparece mais de uma vez", eo.id)));
+            }
+            if *kind != tr.kind {
+                return Err(bad("evento de vídeo em trilha de áudio, ou o contrário"));
+            }
+            let mut ev = (*src).clone();
+            apply_event_changes(&mut ev, eo)?;
+            events.push(ev);
+        }
+        tr.events = events;
         tracks.push(tr);
     }
     Ok(tracks)
 }
 
-fn marker_ticks(seconds: f64) -> Result<Ticks, NeovegError> {
-    if !seconds.is_finite() {
-        return Err(NeovegError::InvalidInput(
-            "script .NET informou tempo não finito para marcador".into(),
-        ));
-    }
-    let secs = seconds.clamp(0.0, 48.0 * 3600.0);
-    let ticks_i = (secs * 1_411_200_000.0).round() as i64;
-    Ok(Ticks::from_raw(ticks_i).clamp_safe(Ticks::ZERO, Ticks::MAX))
+fn marker_ticks(ticks: i64) -> Result<Ticks, NeovegError> {
+    let t = script_ticks(ticks, "tempo do marcador")?;
+    Ok(t.clamp_safe(Ticks::ZERO, Ticks::from_secs_i64(48 * 3600)))
 }
 
 fn marker_label(label: &str) -> String {
@@ -1062,8 +1498,8 @@ fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Mark
                     ));
                 };
                 let mut mk = src.clone();
-                if let Some(s) = m.seconds {
-                    mk.t = marker_ticks(s)?;
+                if let Some(t) = m.ticks {
+                    mk.t = marker_ticks(t)?;
                 }
                 if let Some(l) = m.label {
                     mk.label = marker_label(&l);
@@ -1072,7 +1508,7 @@ fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Mark
             }
             None => markers.push(Marker {
                 id: neoveg_engine::model::new_id(),
-                t: marker_ticks(m.seconds.unwrap_or(0.0))?,
+                t: marker_ticks(m.ticks.unwrap_or(0))?,
                 label: marker_label(m.label.as_deref().unwrap_or("")),
             }),
         }
@@ -1104,7 +1540,11 @@ fn apply_script_output(
     }
     let n_tracks = session.project.tracks.len();
     let n_markers = session.project.markers.len();
+    let n_events: usize = session.project.tracks.iter().map(|t| t.events.len()).sum();
+    let out_events: usize = out.tracks.iter().map(|t| t.events.len()).sum();
     if out.tracks.len() > n_tracks.saturating_add(MAX_SCRIPT_ITEMS)
+        || out_events > n_events
+        || out.selected_events.len() > n_events
         || out.added_buses.len() > MAX_SCRIPT_ITEMS
         || out.markers.len() > n_markers.saturating_add(MAX_SCRIPT_ITEMS)
         || out.commands.len() > MAX_SCRIPT_ITEMS
@@ -1115,7 +1555,7 @@ fn apply_script_output(
         )));
     }
 
-    let tracks_changed = !tracks_unchanged(&out.tracks, n_tracks);
+    let tracks_changed = !tracks_unchanged(&out.tracks, &session.project.tracks);
     let markers_changed = !markers_unchanged(&out.markers, n_markers);
     let has_project_mutations = tracks_changed || !out.added_buses.is_empty() || markers_changed;
     let had_history_cmd = out
@@ -1134,8 +1574,17 @@ fn apply_script_output(
         Vec::new()
     };
 
+    // seleção de trilha: o Neoveg seleciona uma por vez
+    let selected_tracks: Vec<usize> = out
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.selected)
+        .map(|(i, _)| i)
+        .collect();
     if tracks_changed {
         staged.project.tracks = rebuild_tracks(&staged.project.tracks, out.tracks)?;
+        staged.project.sort_events();
     }
 
     for bus_name in out.added_buses {
@@ -1151,15 +1600,53 @@ fn apply_script_output(
         staged.project.markers = rebuild_markers(&staged.project.markers, out.markers)?;
     }
 
-    let cursor_changed = if let Some(ms) = out.cursor_ms {
-        if !ms.is_finite() {
-            return Err(NeovegError::InvalidInput(
-                "script .NET informou posição de cursor não finita".into(),
-            ));
+    let mut selection_changed = false;
+    let new_sel_track = selected_tracks.first().copied();
+    if new_sel_track != staged.sel_track {
+        staged.sel_track = new_sel_track;
+        selection_changed = true;
+    }
+    if selected_tracks.len() > 1 {
+        let n = selected_tracks.first().map_or(0, |i| i + 1);
+        messages_out.push(format!(
+            "O Neoveg seleciona uma trilha por vez; ficou selecionada a trilha {n}."
+        ));
+    }
+    let existing: std::collections::HashSet<u64> = staged
+        .project
+        .tracks
+        .iter()
+        .flat_map(|t| t.events.iter().map(|e| e.id))
+        .collect();
+    let new_sel_events: std::collections::HashSet<u64> = out
+        .selected_events
+        .iter()
+        .copied()
+        .filter(|id| existing.contains(id))
+        .collect();
+    if new_sel_events != staged.sel_events {
+        staged.sel_events = new_sel_events;
+        selection_changed = true;
+    }
+    if let (Some(s), Some(l)) = (out.sel_start_ticks, out.sel_length_ticks) {
+        let s = script_ticks(s, "início da seleção")?;
+        let l = script_ticks(l, "duração da seleção")?;
+        let end = Ticks::from_raw(
+            s.0.checked_add(l.0)
+                .ok_or_else(|| bad("fim da seleção fora do limite"))?,
+        );
+        // como na linha do tempo: a seleção de tempo e a região de loop andam juntas
+        if l > Ticks::ZERO {
+            staged.time_sel = Some((s, end));
+            staged.project.loop_region = Some((s, end));
+        } else {
+            staged.time_sel = None;
         }
-        let clamped = ms.clamp(0.0, (48.0 * 3600.0) * 1000.0);
-        staged.cursor = Ticks::from_raw((clamped * 1_411_200.0).round() as i64)
-            .clamp_safe(Ticks::ZERO, Ticks::MAX);
+        selection_changed = true;
+    }
+
+    let cursor_changed = if let Some(t) = out.cursor_ticks {
+        staged.cursor = script_ticks(t, "cursor")?.clamp_safe(Ticks::ZERO, Ticks::MAX);
         true
     } else {
         false
@@ -1192,7 +1679,7 @@ fn apply_script_output(
     if has_project_mutations || cmd_checkpointed {
         let _ = staged.project.sanitize();
         staged.changed();
-    } else if cursor_changed {
+    } else if cursor_changed || selection_changed {
         staged.generation += 1;
     }
 
