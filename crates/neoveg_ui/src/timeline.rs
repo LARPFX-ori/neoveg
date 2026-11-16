@@ -11,6 +11,13 @@ use egui::{
 };
 use std::collections::HashSet;
 
+mod keyframes;
+use keyframes::KfArea;
+use neoveg_engine::track_keyframes::KfRowKind;
+
+/// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
+const KF_ROW_H: f32 = 18.0;
+
 const HEADER_W: f32 = 250.0;
 const LOOP_H: f32 = 12.0;
 const MARKER_H: f32 = 18.0;
@@ -28,7 +35,13 @@ enum EnvOwner {
 }
 
 struct TimelineRows {
+    /// Área dos eventos de cada trilha (sem as linhas de quadros-chave).
     track_rects: Vec<(f32, f32)>,
+    /// Trilha inteira, com as linhas de quadros-chave: para saber em que
+    /// trilha o ponteiro está (soltar mídia, mover entre trilhas).
+    track_spans: Vec<(f32, f32)>,
+    /// Linhas de quadros-chave abaixo de cada trilha, se houver.
+    kf_areas: Vec<Option<KfArea>>,
     bus_rects: Vec<(f32, f32)>,
 }
 
@@ -129,6 +142,12 @@ enum Drag {
     Pan {
         last: Pos2,
     },
+    Keyframe {
+        track: Id,
+        row: KfRowKind,
+        at: Ticks,
+        moved: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -141,6 +160,13 @@ enum CtxTarget {
     Lane(usize, Ticks),
     Marker(Id),
     Region(Id),
+    Keyframe {
+        track: Id,
+        row: KfRowKind,
+        key: Option<Ticks>,
+        t: Ticks,
+        has_curve: bool,
+    },
 }
 
 pub struct TimelineState {
@@ -153,6 +179,8 @@ pub struct TimelineState {
     rename: Option<(Id, String)>,
     snap_line: Option<Ticks>,
     drop_hint: Option<(usize, Ticks)>,
+    /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
+    pub kf_collapsed: HashSet<Id>,
 }
 
 impl Default for TimelineState {
@@ -167,6 +195,7 @@ impl Default for TimelineState {
             rename: None,
             snap_line: None,
             drop_hint: None,
+            kf_collapsed: HashSet::new(),
         }
     }
 }
@@ -262,16 +291,25 @@ const BUS_TRACK_H: f32 = 58.0;
 impl App {
     fn timeline_rows(&self, lanes_top: f32) -> TimelineRows {
         let mut y = lanes_top - self.tl.scroll_y;
-        let track_rects = self
-            .project
-            .tracks
-            .iter()
-            .map(|t| {
-                let r = (y, t.height);
-                y += t.height;
-                r
-            })
-            .collect();
+        let n = self.project.tracks.len();
+        let mut track_rects = Vec::with_capacity(n);
+        let mut track_spans = Vec::with_capacity(n);
+        let mut kf_areas = Vec::with_capacity(n);
+        for t in &self.project.tracks {
+            let kf = self.kf_visible_rows(t);
+            let kf_h = kf.len() as f32 * KF_ROW_H;
+            track_rects.push((y, t.height));
+            track_spans.push((y, t.height + kf_h));
+            kf_areas.push(if kf.is_empty() {
+                None
+            } else {
+                Some(KfArea {
+                    top: y + t.height,
+                    rows: kf,
+                })
+            });
+            y += t.height + kf_h;
+        }
         let bus_rects = if self.opts.show_bus_tracks {
             self.project
                 .audio_buses
@@ -287,6 +325,8 @@ impl App {
         };
         TimelineRows {
             track_rects,
+            track_spans,
+            kf_areas,
             bus_rects,
         }
     }
@@ -513,7 +553,13 @@ impl App {
         } else {
             0.0
         };
-        let total_h: f32 = self.project.tracks.iter().map(|t| t.height).sum::<f32>() + bus_h;
+        let total_h: f32 = self
+            .project
+            .tracks
+            .iter()
+            .map(|t| t.height + self.kf_visible_rows(t).len() as f32 * KF_ROW_H)
+            .sum::<f32>()
+            + bus_h;
         self.tl.scroll_y = self
             .tl
             .scroll_y
@@ -540,7 +586,9 @@ impl App {
         self.lanes_interact(ui, lanes, &rows);
         let rows = self.timeline_rows(lanes.top());
         self.draw_lanes(ui, lanes, &rows);
+        self.draw_keyframe_rows(ui, lanes, &rows);
         self.headers_ui(ui, headers, &rows);
+        self.draw_keyframe_labels(ui, headers, &rows);
 
         if show_v_col {
             let v_col = Rect::from_min_max(
@@ -1621,6 +1669,12 @@ impl App {
             let kind = self.project.tracks[ti].kind;
             let mut changed_track = false;
             let mut want_checkpoint = false;
+            let kf_has = kind == TrackKind::Video
+                && self.project.tracks.get(ti).is_some_and(|t| {
+                    !neoveg_engine::track_keyframes::track_rows(t, self.kf_tol()).is_empty()
+                });
+            let kf_open = !self.tl.kf_collapsed.contains(&tid);
+            let mut kf_toggle = false;
             child.horizontal(|ui| {
                 let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
                 let num_bg = if selected {
@@ -1707,7 +1761,27 @@ impl App {
                 {
                     self.dlg.track_motion = Some(tid);
                 }
+                if kf_has
+                    && icons::small_icon_button(
+                        ui,
+                        if kf_open {
+                            Icon::KeyframeFilled
+                        } else {
+                            Icon::KeyframeEmpty
+                        },
+                        None,
+                        kf_open,
+                        &self.theme,
+                    )
+                    .on_hover_text("Expandir/recolher os quadros-chave da trilha")
+                    .clicked()
+                {
+                    kf_toggle = true;
+                }
             });
+            if kf_toggle && !self.tl.kf_collapsed.remove(&tid) {
+                self.tl.kf_collapsed.insert(tid);
+            }
             if h >= 50.0 {
                 child.horizontal(|ui| {
                     let t = &mut self.project.tracks[ti];
@@ -2166,7 +2240,7 @@ impl App {
         if let Some(p) = pointer.filter(|p| lanes.contains(*p)) {
             if egui::DragAndDrop::has_any_payload(ui.ctx()) {
                 let ti = self
-                    .track_at(p.y, layout)
+                    .track_at(p.y, &rows.track_spans)
                     .unwrap_or(self.project.tracks.len());
                 let t = self.snap(self.tl.x2t(p.x, left), &HashSet::new(), mods.shift);
                 self.tl.drop_hint = Some((ti, t));
@@ -2175,7 +2249,7 @@ impl App {
                         let hit = self.hit_event(p, left, layout);
                         self.handle_drop(
                             (*payload).clone(),
-                            self.track_at(p.y, layout),
+                            self.track_at(p.y, &rows.track_spans),
                             t,
                             hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id),
                         );
@@ -2211,6 +2285,12 @@ impl App {
                 }
             } else if self.hit_envelope(p, left, rows).is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+        }
+
+        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
+            if matches!(self.hit_keyframe(p, left, rows), Some((_, _, Some(_), _))) {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
         }
 
@@ -2283,26 +2363,27 @@ impl App {
         if resp.secondary_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let t = self.tl.x2t(p.x, left);
-                self.tl.ctx_target =
-                    if let Some((owner, k, idx, t)) = self.hit_envelope(p, left, rows) {
-                        match idx {
-                            Some(i) => CtxTarget::EnvPoint(owner, k, i),
-                            None => CtxTarget::EnvLine(owner, k, t),
-                        }
-                    } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
-                        let id = self.project.tracks[ti].events[ei].id;
-                        if !self.sel_events.contains(&id) {
-                            self.sel_events.clear();
-                            self.sel_events.insert(id);
-                        }
-                        self.sel_track = Some(ti);
-                        CtxTarget::Event(id)
-                    } else if let Some(ti) = self.track_at(p.y, layout) {
-                        self.sel_track = Some(ti);
-                        CtxTarget::Lane(ti, t)
-                    } else {
-                        CtxTarget::None
-                    };
+                self.tl.ctx_target = if let Some(kf) = self.keyframe_ctx(p, left, rows) {
+                    kf
+                } else if let Some((owner, k, idx, t)) = self.hit_envelope(p, left, rows) {
+                    match idx {
+                        Some(i) => CtxTarget::EnvPoint(owner, k, i),
+                        None => CtxTarget::EnvLine(owner, k, t),
+                    }
+                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
+                    let id = self.project.tracks[ti].events[ei].id;
+                    if !self.sel_events.contains(&id) {
+                        self.sel_events.clear();
+                        self.sel_events.insert(id);
+                    }
+                    self.sel_track = Some(ti);
+                    CtxTarget::Event(id)
+                } else if let Some(ti) = self.track_at(p.y, layout) {
+                    self.sel_track = Some(ti);
+                    CtxTarget::Lane(ti, t)
+                } else {
+                    CtxTarget::None
+                };
             }
         }
         resp.context_menu(|ui| self.lane_context_menu(ui));
@@ -2317,6 +2398,17 @@ impl App {
     ) {
         let layout = &rows.track_rects;
         let ot = self.tl.x2t(origin.x, left);
+        if let Some((ti, row, Some(key), _)) = self.hit_keyframe(origin, left, rows) {
+            if let Some(tr) = self.project.tracks.get(ti).filter(|tr| !tr.locked) {
+                self.tl.drag = Drag::Keyframe {
+                    track: tr.id,
+                    row: row.kind,
+                    at: key,
+                    moved: false,
+                };
+            }
+            return;
+        }
         if let Some((owner, kind, Some(idx), _)) = self.hit_envelope(origin, left, rows) {
             self.checkpoint();
             self.tl.drag = Drag::EnvPoint { owner, kind, idx };
@@ -2457,16 +2549,31 @@ impl App {
         }
         // área vazia: seleção de tempo
         let s = self.snap(ot, &HashSet::new(), mods.shift);
-        if let Some(ti) = self.track_at(origin.y, layout) {
+        if let Some(ti) = self.track_at(origin.y, &rows.track_spans) {
             self.sel_track = Some(ti);
         }
         self.tl.drag = Drag::TimeSel { anchor: s };
     }
 
     fn update_lane_drag(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
-        let layout = &rows.track_rects;
         let t = self.tl.x2t(p.x, left);
         match self.tl.drag.clone() {
+            Drag::Keyframe {
+                track,
+                row,
+                at,
+                moved,
+            } => {
+                let target = self.snap(t, &HashSet::new(), mods.shift);
+                if let Some(new_at) = self.drag_keyframe(track, &row, at, moved, target) {
+                    self.tl.drag = Drag::Keyframe {
+                        track,
+                        row,
+                        at: new_at,
+                        moved: true,
+                    };
+                }
+            }
             Drag::TimeSel { anchor } => {
                 let s = self.snap(t, &HashSet::new(), mods.shift);
                 let sel = (anchor.min(s), anchor.max(s));
@@ -2662,7 +2769,9 @@ impl App {
                 let min_start = orig.iter().map(|o| o.1).fold(Ticks::MAX, Ticks::min);
                 let dt = (ns - anchor_start).max(Ticks::ZERO - min_start);
                 // deslocamento vertical entre trilhas do mesmo tipo
-                let target = self.track_at(p.y, layout).unwrap_or(origin_track);
+                let target = self
+                    .track_at(p.y, &rows.track_spans)
+                    .unwrap_or(origin_track);
                 let dtrack = target as isize - origin_track as isize;
                 let n = self.project.tracks.len() as isize;
                 let valid = orig.iter().all(|&(id, _, ti)| {
@@ -2705,7 +2814,7 @@ impl App {
     fn lane_click(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
         let layout = &rows.track_rects;
         let t = self.tl.x2t(p.x, left);
-        if let Some(ti) = self.track_at(p.y, layout) {
+        if let Some(ti) = self.track_at(p.y, &rows.track_spans) {
             self.sel_track = Some(ti);
         }
         if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
@@ -2832,6 +2941,13 @@ impl App {
     fn lane_context_menu(&mut self, ui: &mut egui::Ui) {
         match self.tl.ctx_target.clone() {
             CtxTarget::Event(id) => self.event_context_menu(ui, id),
+            CtxTarget::Keyframe {
+                track,
+                row,
+                key,
+                t,
+                has_curve,
+            } => self.keyframe_context_menu(ui, track, row, key, t, has_curve),
             CtxTarget::EnvPoint(owner, kind, idx) => {
                 ui.label(
                     egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong(),
