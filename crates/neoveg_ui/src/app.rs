@@ -272,7 +272,8 @@ impl App {
         );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let recovery_offer = recovery::find_existing_recovery().is_some();
+        let recovery_offer = recovery::find_existing_recovery().is_some()
+            && !neoveg_engine::session_marker::other_instance_active();
         let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
         let want_welcome = prefs.show_welcome && open.is_none() && !recovery_offer;
         let welcome_open = want_welcome && !splash.active;
@@ -416,7 +417,8 @@ impl App {
 
     /// Salvamento automático para recuperação após falha (§0.7).
     fn autosave(&mut self) {
-        if !self.prefs.autosave_enabled
+        if self.recovery_offer
+            || !self.prefs.autosave_enabled
             || !self.dirty
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
@@ -2428,9 +2430,9 @@ impl App {
         else {
             return;
         };
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let res = crate::util::catch_isolated(|| {
             neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
-        }));
+        });
         self.sync_after_session();
         match res {
             Ok(Ok(msgs)) => {

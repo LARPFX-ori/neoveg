@@ -672,3 +672,58 @@ fn kittest_timeline_barras_rolagem_setas_e_zoom() {
         "Ajustar projeto à timeline deve reposicionar scroll_x no início"
     );
 }
+
+#[test]
+fn kittest_crash_report_janela_e_acoes() {
+    use neoveg_engine::session_marker::{CrashReport, PanicNote};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_eframe(|cc| {
+            let mut app = build_ready_app(cc);
+            app.welcome_open = true;
+            app.recovery_offer = true;
+            app.set_crash_reports(vec![CrashReport {
+                started: "2026-11-16 10:00:00".into(),
+                version: "0.1.0".into(),
+                pid: "4242".into(),
+                panics: vec![
+                    PanicNote {
+                        time: "10:01:00".into(),
+                        thread: "decode".into(),
+                        location: "media.rs:12".into(),
+                        message: "isolado".into(),
+                        isolated: true,
+                    },
+                    PanicNote {
+                        time: "10:02:00".into(),
+                        thread: "main".into(),
+                        location: "ui.rs:99".into(),
+                        message: "falha fatal simulada".into(),
+                        isolated: false,
+                    },
+                ],
+            }]);
+            app
+        });
+    harness.run_steps(2);
+
+    assert!(!harness.state().is_welcome_open());
+    assert!(!harness.state().is_splash_open());
+    assert!(harness
+        .query_by_label_contains("falha fatal simulada")
+        .is_some());
+    assert!(harness
+        .query_by_label_contains("Erros internos isolados nesta sessão (1)")
+        .is_some());
+
+    harness.get_by_label("Copiar relatório").click();
+    harness.run_steps(2);
+    assert!(harness.state().status.contains("Relatório copiado"));
+
+    // Fechar o relatório mantém recovery_offer para a janela de recuperação padrão.
+    harness.get_by_label("Fechar").click();
+    harness.run_steps(2);
+    assert!(harness.state().crash_reports.is_empty());
+    assert!(harness.state().recovery_offer);
+}

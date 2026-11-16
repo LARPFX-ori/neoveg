@@ -19,7 +19,7 @@
 
 use crate::util;
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -40,13 +40,17 @@ pub struct PanicNote {
     pub thread: String,
     pub location: String,
     pub message: String,
+    /// Verdadeiro quando `catch_unwind` / `util::guard` conteve este pânico e
+    /// a sessão continuou normalmente.
+    pub isolated: bool,
 }
 
 impl PanicNote {
-    /// Pânico na thread principal: derruba o laço da interface. Pânicos em
-    /// threads de trabalho são isolados (`catch_unwind`) e a sessão segue.
+    /// Pânico não isolado na thread principal: derruba o laço da interface.
+    /// Pânicos contidos por `catch_unwind` ou em threads de trabalho não
+    /// fecham o programa.
     pub fn is_fatal(&self) -> bool {
-        self.thread == "main"
+        !self.isolated && self.thread == "main"
     }
 }
 
@@ -159,6 +163,45 @@ pub fn record_panic(thread: &str, location: &str, message: &str) {
     }
 }
 
+/// Marca o último pânico desta thread como isolado (`catch_unwind` conteve a
+/// falha e a sessão seguiu).
+pub fn mark_isolated() {
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("<sem nome>");
+    if let Some(m) = util::lock(&ACTIVE).as_mut() {
+        let _ = write_isolated(m, name);
+    }
+}
+
+/// Verdadeiro se existe outra instância da interface com marcador travado.
+pub fn other_instance_active() -> bool {
+    let own = util::lock(&ACTIVE).as_ref().map(|m| m.path.clone());
+    other_instance_active_in(&sessions_dir(), own.as_deref())
+}
+
+pub(crate) fn other_instance_active_in(dir: &Path, own: Option<&Path>) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for path in entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(MARKER_EXT))
+        .take(MAX_MARKERS)
+    {
+        if own.is_some_and(|o| o == path) {
+            continue;
+        }
+        let Ok(f) = OpenOptions::new().read(true).write(true).open(&path) else {
+            continue;
+        };
+        if matches!(f.try_lock(), Err(TryLockError::WouldBlock)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn now() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -220,6 +263,14 @@ pub(crate) fn write_panic(
     m.file.flush()
 }
 
+pub(crate) fn write_isolated(m: &mut Marker, thread: &str) -> std::io::Result<()> {
+    let line = format!("isolado\t{}\n", field(thread));
+    m.file.write_all(line.as_bytes())?;
+    m.file.flush()
+}
+
+const CONSUMED_MARKER: &[u8] = b"consumido\n";
+
 /// Examina os marcadores de `dir`: os que dá para travar são de sessões que
 /// não terminaram normalmente (viram relatório e são apagados); os que
 /// continuam travados são de instâncias abertas e ficam.
@@ -241,11 +292,18 @@ pub(crate) fn scan_stale(dir: &Path) -> Vec<CrashReport> {
         };
         match f.try_lock() {
             Ok(()) => {
-                // a trava fica com este processo enquanto lê e apaga: duas
-                // instâncias abrindo juntas geram um relatório só
+                // a trava fica com este processo enquanto lê, marca como
+                // consumido e apaga: evita relatório duplicado se outra
+                // instância já abriu o arquivo antes do remove_file
                 let mut bytes = Vec::new();
                 let _ = (&mut f).take(MAX_MARKER_BYTES).read_to_end(&mut bytes);
-                out.push(parse_marker(&String::from_utf8_lossy(&bytes)));
+                if bytes != CONSUMED_MARKER {
+                    out.push(parse_marker(&String::from_utf8_lossy(&bytes)));
+                    let _ = f.set_len(0);
+                    let _ = f.rewind();
+                    let _ = f.write_all(CONSUMED_MARKER);
+                    let _ = f.flush();
+                }
                 drop(f);
                 let _ = std::fs::remove_file(&path);
             }
@@ -291,7 +349,24 @@ pub(crate) fn parse_marker(text: &str) -> CrashReport {
                     thread,
                     location,
                     message,
+                    isolated: false,
                 });
+            }
+            Some("isolado") => {
+                let thread: String = parts
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(MAX_FIELD_CHARS)
+                    .collect();
+                if let Some(p) = r
+                    .panics
+                    .iter_mut()
+                    .rev()
+                    .find(|p| p.thread == thread && !p.isolated)
+                {
+                    p.isolated = true;
+                }
             }
             _ => {}
         }
@@ -381,5 +456,48 @@ mod tests {
     #[test]
     fn missing_dir_is_not_an_error() {
         assert!(scan_stale(&tmp("inexistente")).is_empty());
+    }
+
+    #[test]
+    fn isolated_panic_on_main_thread_is_not_fatal() {
+        let d = tmp("isolado_main");
+        let mut m = create_marker(&d, "0.1.0").expect("marcador");
+        // pânico na thread principal contido por catch_unwind: não pode culpar
+        // um fechamento forçado posterior
+        write_panic(&mut m, "12:00:00", "main", "a.rs:1", "contido").expect("grava");
+        write_isolated(&mut m, "main").expect("marca isolado");
+        drop(m);
+        let r = scan_stale(&d).pop().expect("relatório");
+        assert!(r.fatal_panic().is_none());
+        assert_eq!(r.isolated_panics().count(), 1);
+        assert!(!r.summary().contains("erro interno"));
+
+        // se houver um segundo pânico na thread principal sem isolamento, este
+        // sim é o fatal
+        let mut m2 = create_marker(&d, "0.1.0").expect("marcador");
+        write_panic(&mut m2, "12:00:00", "main", "a.rs:1", "contido").expect("grava");
+        write_isolated(&mut m2, "main").expect("marca isolado");
+        write_panic(&mut m2, "12:00:10", "main", "b.rs:2", "fatal").expect("grava");
+        drop(m2);
+        let r2 = scan_stale(&d).pop().expect("relatório");
+        let fatal = r2.fatal_panic().expect("fatal");
+        assert_eq!(fatal.message, "fatal");
+        assert_eq!(r2.isolated_panics().count(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn consumed_marker_is_not_reported_again_and_live_sibling_is_detected() {
+        let d = tmp("consumido");
+        std::fs::create_dir_all(&d).expect("pasta");
+        std::fs::write(d.join("1-1.lock"), CONSUMED_MARKER).expect("grava");
+        assert!(scan_stale(&d).is_empty());
+        assert!(!d.join("1-1.lock").exists());
+
+        let m = create_marker(&d, "0.1.0").expect("marcador");
+        assert!(!other_instance_active_in(&d, Some(&m.path)));
+        assert!(other_instance_active_in(&d, None));
+        drop(m);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

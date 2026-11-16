@@ -1,9 +1,9 @@
 //! Janela "O Neoveg não foi fechado normalmente", mostrada na abertura
 //! seguinte a uma sessão que caiu (pedido do usuário; não está nos manuais).
 //!
-//! A detecção fica em `neoveg_common::session`: cada sessão da interface
-//! mantém um marcador travado, e o gancho de pânico grava nele. Aqui só se
-//! mostra o que se sabe, oferece a recuperação do projeto (se houver) e
+//! A detecção fica em `neoveg_common::session_marker`: cada sessão da
+//! interface mantém um marcador travado, e o gancho de pânico grava nele. Aqui
+//! só se mostra o que se sabe, oferece a recuperação do projeto (se houver) e
 //! permite copiar o relatório ou abrir a pasta de logs.
 
 use crate::app::App;
@@ -28,6 +28,10 @@ impl App {
             ));
         }
         self.crash_reports = reports;
+        if neoveg_engine::session_marker::other_instance_active() {
+            // outra instância aberta pode estar gravando em autosave/recuperacao.neoveg
+            self.recovery_offer = false;
+        }
         self.splash.dismiss();
         self.welcome_open = false;
         self.pending_welcome_after_splash = false;
