@@ -795,48 +795,70 @@ impl AviWriter {
         Ok(())
     }
 
-    /// Grava os índices `ix##` do segmento, fecha `movi` (e, no primeiro
-    /// segmento, grava `idx1`) e agenda a correção dos tamanhos.
-    fn close_segment(&mut self) -> Result<()> {
-        for s in 0..2 {
-            let entries = std::mem::take(&mut self.seg_index[s]);
-            let duration = std::mem::take(&mut self.seg_duration[s]);
-            if entries.is_empty() {
-                continue;
-            }
-            if self.super_index[s].len() >= self.super_capacity {
-                bail!(
-                    "o AVI passou do limite de {} segmentos de índice",
-                    self.super_capacity
-                );
-            }
-            let base = self.seg_start;
-            let cb = INDEX_HEADER_BYTES + 8 * entries.len() as u64;
-            let cb32 = u32::try_from(cb).map_err(|_| anyhow!("índice AVI grande demais"))?;
-            let at = self.pos;
-            let mut ix = Vec::with_capacity(8 + cb as usize);
-            ix.extend_from_slice(&IX_IDS[s]);
-            ix.extend_from_slice(&cb32.to_le_bytes());
-            ix.extend_from_slice(&2u16.to_le_bytes()); // wLongsPerEntry
-            ix.push(0); // bIndexSubType
-            ix.push(1); // bIndexType = AVI_INDEX_OF_CHUNKS
-            ix.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-            ix.extend_from_slice(&DATA_IDS[s]);
-            ix.extend_from_slice(&base.to_le_bytes()); // qwBaseOffset
-            ix.extend_from_slice(&0u32.to_le_bytes()); // dwReserved3
-            for (data_at, size) in &entries {
-                let rel = u32::try_from(data_at - base)
-                    .map_err(|_| anyhow!("offset do índice AVI fora do limite"))?;
-                ix.extend_from_slice(&rel.to_le_bytes());
-                // bit 31 zerado: todo quadro MJPEG e todo bloco PCM é chave
-                ix.extend_from_slice(&size.to_le_bytes());
-            }
-            self.put(&ix)?;
-            self.super_index[s].push(SuperEntry {
+    /// Grava o índice padrão `ix##` do stream `s` para o segmento atual e
+    /// registra a entrada correspondente no super-índice. Não grava nada se
+    /// o stream não teve chunks no segmento.
+    fn write_stream_index(&mut self, s: usize) -> Result<()> {
+        let (Some(ix_id), Some(data_id)) = (IX_IDS.get(s), DATA_IDS.get(s)) else {
+            bail!("stream AVI inexistente: {s}");
+        };
+        let entries = self
+            .seg_index
+            .get_mut(s)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let duration = self
+            .seg_duration
+            .get_mut(s)
+            .map(std::mem::take)
+            .unwrap_or(0);
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let used = self.super_index.get(s).map_or(0, Vec::len);
+        if used >= self.super_capacity {
+            bail!(
+                "o AVI passou do limite de {} segmentos de índice",
+                self.super_capacity
+            );
+        }
+        let base = self.seg_start;
+        let cb = INDEX_HEADER_BYTES + 8 * entries.len() as u64;
+        let cb32 = u32::try_from(cb).map_err(|_| anyhow!("índice AVI grande demais"))?;
+        let at = self.pos;
+        let mut ix = Vec::with_capacity(8 + cb as usize);
+        ix.extend_from_slice(ix_id);
+        ix.extend_from_slice(&cb32.to_le_bytes());
+        ix.extend_from_slice(&2u16.to_le_bytes()); // wLongsPerEntry
+        ix.push(0); // bIndexSubType
+        ix.push(1); // bIndexType = AVI_INDEX_OF_CHUNKS
+        ix.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        ix.extend_from_slice(data_id);
+        ix.extend_from_slice(&base.to_le_bytes()); // qwBaseOffset
+        ix.extend_from_slice(&0u32.to_le_bytes()); // dwReserved3
+        for (data_at, size) in &entries {
+            let rel = u32::try_from(data_at - base)
+                .map_err(|_| anyhow!("offset do índice AVI fora do limite"))?;
+            ix.extend_from_slice(&rel.to_le_bytes());
+            // bit 31 zerado: todo quadro MJPEG e todo bloco PCM é chave
+            ix.extend_from_slice(&size.to_le_bytes());
+        }
+        self.put(&ix)?;
+        if let Some(sup) = self.super_index.get_mut(s) {
+            sup.push(SuperEntry {
                 offset: at,
                 size: cb32 + 8,
                 duration: u32::try_from(duration).unwrap_or(u32::MAX),
             });
+        }
+        Ok(())
+    }
+
+    /// Grava os índices `ix##` do segmento, fecha `movi` (e, no primeiro
+    /// segmento, grava `idx1`) e agenda a correção dos tamanhos.
+    fn close_segment(&mut self) -> Result<()> {
+        for s in 0..2 {
+            self.write_stream_index(s)?;
         }
         let movi_size = u32::try_from(self.pos - self.seg_movi_fourcc)
             .map_err(|_| anyhow!("lista movi grande demais"))?;
