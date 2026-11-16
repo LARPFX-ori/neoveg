@@ -159,6 +159,9 @@ pub fn install_panic_hook() {
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))
             .unwrap_or_default();
+        // liga o pânico à sessão da interface que o sofreu (relatório na
+        // próxima abertura); não faz nada fora do modo de interface
+        crate::session_marker::record_panic(&name, &loc, &msg);
         let bt = std::backtrace::Backtrace::force_capture();
         append(
             "crash.log",

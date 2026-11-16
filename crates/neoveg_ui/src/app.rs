@@ -195,6 +195,8 @@ pub struct App {
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
+    /// Sessões anteriores que não fecharam normalmente (janela de relatório).
+    pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
@@ -337,6 +339,7 @@ impl App {
             gen_fonts: vec![],
             last_autosave: Instant::now(),
             recovery_offer,
+            crash_reports: Vec::new(),
             splash,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
@@ -426,7 +429,8 @@ impl App {
     }
 
     fn recovery_window(&mut self, ctx: &egui::Context) {
-        if !self.recovery_offer {
+        // com relatório de travamento, a recuperação é oferecida na janela dele
+        if !self.recovery_offer || !self.crash_reports.is_empty() {
             return;
         }
         let mut choice = None;
@@ -445,21 +449,24 @@ impl App {
                     }
                 });
             });
-        match choice {
-            Some(true) => {
-                self.recovery_offer = false;
-                if let Some(p) = recovery::find_existing_recovery() {
-                    self.open_project_path(p);
-                    self.path = None;
-                    self.dirty = true;
-                    self.set_status("Projeto recuperado. Salve-o com Salvar como...");
-                }
+        if let Some(recover) = choice {
+            self.resolve_recovery(recover);
+        }
+    }
+
+    /// Recupera (`true`) ou descarta (`false`) a cópia automática da sessão
+    /// anterior.
+    pub(crate) fn resolve_recovery(&mut self, recover: bool) {
+        self.recovery_offer = false;
+        if recover {
+            if let Some(p) = recovery::find_existing_recovery() {
+                self.open_project_path(p);
+                self.path = None;
+                self.dirty = true;
+                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
             }
-            Some(false) => {
-                self.recovery_offer = false;
-                recovery::clear_recovery();
-            }
-            None => {}
+        } else {
+            recovery::clear_recovery();
         }
     }
 
@@ -2631,6 +2638,7 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.crash_report_window(ctx);
         self.recovery_window(ctx);
         self.show_welcome_overlay(ctx);
         self.show_splash_overlay(ctx);
