@@ -192,8 +192,8 @@ impl App {
                 });
                 ui.label(
                     egui::RichText::new(
-                        "O AVI MJPEG ocupa bastante espaço (centenas de MB por minuto em HD; \
-                         limite de 4 GB por arquivo). Evite pastas sincronizadas na nuvem.",
+                        "O AVI MJPEG ocupa bastante espaço (centenas de MB por minuto em HD). \
+                         Evite pastas sincronizadas na nuvem.",
                     )
                     .small()
                     .weak(),

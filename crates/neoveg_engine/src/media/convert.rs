@@ -10,7 +10,7 @@
 //! Nada é inventado nem perdido em silêncio: duração desconhecida, quadro que
 //! falha ao decodificar e áudio cortado pelo limite de memória são erros; um
 //! stream que termina antes da duração anunciada é encurtado e relatado; a
-//! qualidade JPEG escolhida para caber no limite de 4 GB do AVI é relatada. O
+//! qualidade JPEG escolhida para caber no limite do AVI OpenDML é relatada. O
 //! arquivo é gravado como `.part` e só é renomeado quando termina sem erro.
 
 // Fora do Windows só o erro de "não suportado" é compilado; o resto fica
@@ -28,8 +28,9 @@ use std::sync::Mutex;
 
 /// Qualidades JPEG tentadas, da melhor para a menor, até o vídeo caber no AVI.
 const QUALITIES: [u8; 5] = [90, 80, 70, 60, 50];
-/// Limite do AVI 1.0 gravado pelo `AviWriter`, com folga para índice e áudio.
-const AVI_BUDGET_BYTES: u64 = 3_900_000_000;
+/// Capacidade do AVI OpenDML gravado pelo `AviWriter` (256 segmentos de
+/// 1 GB), com folga para índices e áudio.
+const AVI_BUDGET_BYTES: u64 = 250 << 30;
 /// Maior duração convertida (12 h): limita o laço de quadros (§0.5).
 const MAX_CONVERT_SECS: i64 = 12 * 3600;
 /// Tentativas de nome único no destino.
@@ -316,7 +317,7 @@ fn convert_video(
     }
     let Some(quality) = pick_quality(&samples, n, audio_bytes)? else {
         bail!(
-            "o vídeo é longo demais para o formato intermediário AVI (limite de 4 GB) \
+            "o vídeo é longo demais para o formato intermediário AVI (limite de ~250 GB) \
              mesmo na qualidade {}; nada foi gravado",
             QUALITIES.last().copied().unwrap_or(50)
         );
@@ -374,7 +375,7 @@ fn convert_video(
     let mut warnings = vec![];
     if quality < QUALITIES.first().copied().unwrap_or(90) {
         warnings.push(format!(
-            "qualidade JPEG reduzida para {quality} para caber no limite de 4 GB do AVI"
+            "qualidade JPEG reduzida para {quality} para caber no limite do AVI (~250 GB)"
         ));
     }
     if short_by > 0 {
