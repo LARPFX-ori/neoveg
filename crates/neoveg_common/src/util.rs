@@ -36,10 +36,20 @@ pub fn panic_message(p: &(dyn Any + Send)) -> String {
     }
 }
 
+/// Executa `f` sob `catch_unwind` e, se houver pânico, marca-o como isolado no
+/// marcador da sessão para não ser apontado como queda fatal.
+pub fn catch_isolated<T>(f: impl FnOnce() -> T) -> std::thread::Result<T> {
+    let r = std::panic::catch_unwind(AssertUnwindSafe(f));
+    if r.is_err() {
+        crate::session_marker::mark_isolated();
+    }
+    r
+}
+
 /// Executa `f` isolando pânicos (§0.6): um pânico vira `Err` com contexto e é
 /// registrado no log, em vez de matar a thread silenciosamente.
 pub fn guard<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|p| {
+    catch_isolated(f).map_err(|p| {
         let msg = format!(
             "{what}: falha interna isolada ({})",
             panic_message(p.as_ref())
@@ -103,6 +113,10 @@ pub fn redact(s: &str) -> String {
         if let Ok(home) = std::env::var(var) {
             if home.len() > 3 {
                 out = out.replace(&home, "~");
+                let slash = home.replace('\\', "/");
+                if slash != home {
+                    out = out.replace(&slash, "~");
+                }
             }
         }
     }
@@ -159,6 +173,9 @@ pub fn install_panic_hook() {
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))
             .unwrap_or_default();
+        // liga o pânico à sessão da interface que o sofreu (relatório na
+        // próxima abertura); não faz nada fora do modo de interface
+        crate::session_marker::record_panic(&name, &loc, &msg);
         let bt = std::backtrace::Backtrace::force_capture();
         append(
             "crash.log",
