@@ -6,6 +6,8 @@ use crate::model::*;
 use eframe::egui::Key;
 use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2};
 
+pub(super) static PREFS_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 fn raw(events: Vec<Event>, modifiers: Modifiers, t: f64) -> egui::RawInput {
     egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1500.0, 920.0))),
@@ -45,7 +47,7 @@ fn press(p: Pos2, down: bool) -> Event {
 }
 
 fn make_avi() -> PathBuf {
-    let path = std::env::temp_dir().join("nvov_ui_smoke.avi");
+    let path = std::env::temp_dir().join(format!("nvov_ui_smoke_{}.avi", std::process::id()));
     let mut w =
         crate::media::avi::AviWriter::create(&path, 160, 90, FrameRate::FPS_25, Some(48000))
             .unwrap();
@@ -85,6 +87,9 @@ fn ui_smoke() {
             }
         }
     }
+    let _prefs_lock = PREFS_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let prefs_path = crate::Preferences::file_path();
     let _prefs_guard = PrefsGuard {
         prev: std::fs::read(&prefs_path).ok(),
@@ -255,7 +260,7 @@ fn ui_smoke() {
     frame(&mut app, vec![], Modifiers::NONE);
 
     // salvar / abrir projeto (.neoveg e retrocompatibilidade .nvp)
-    let pp = std::env::temp_dir().join("neoveg_ui_smoke.neoveg");
+    let pp = std::env::temp_dir().join(format!("neoveg_ui_smoke_{}.neoveg", std::process::id()));
     assert!(app.write_project(&pp));
     app.open_project_path(pp.clone());
     for _ in 0..100 {

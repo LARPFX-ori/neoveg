@@ -6,7 +6,12 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
-    let mut app = App::new(cc, None);
+    let mut app = {
+        let _prefs_read = crate::tests::PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::new(cc, None)
+    };
     app.splash.active = false;
     app.pending_welcome_after_splash = false;
     app.dismiss_welcome();
@@ -125,7 +130,10 @@ fn kittest_layout_salvo_e_preferencias_navegacao() {
     // Salva e recarrega `.neoveglayout` preservando a árvore do egui_tiles.
     let snap = harness.state().current_window_layout("Teste Kittest");
     assert!(snap.tile_tree.is_some());
-    let path = std::env::temp_dir().join("neoveg_kittest_layout.neoveglayout");
+    let path = std::env::temp_dir().join(format!(
+        "neoveg_kittest_layout_{}.neoveglayout",
+        std::process::id()
+    ));
     crate::layout::save_layout_file(&snap, &path).expect("gravação do layout de teste");
     let loaded = crate::layout::load_layout_file(&path).expect("leitura do layout de teste");
     let _ = std::fs::remove_file(&path);
