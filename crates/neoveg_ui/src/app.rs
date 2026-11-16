@@ -1547,7 +1547,10 @@ impl App {
                 let c = self.cursor;
                 self.tl.center_on(c);
             }
-            UiAction::ZoomBy(f) => self.tl.zoom_by(f, None),
+            UiAction::ZoomBy(f) => {
+                let c = self.cursor;
+                self.tl.zoom_around_playhead(f, c);
+            }
             UiAction::JumpMarker(forward) => self.jump_marker(forward),
             UiAction::JumpMarkerIndex(idx) => {
                 if let Some(t) = self.session.jump_to_marker_index(idx) {
@@ -1598,15 +1601,27 @@ impl App {
         // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
         if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                    .max(Ticks::from_raw(1));
+                let dt = Ticks::from_secs_f64_clamped(
+                    1.0 / self
+                        .tl
+                        .px_per_sec
+                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+                        as f64,
+                )
+                .max(Ticks::from_raw(1));
                 let c = self.cursor;
                 self.set_cursor(c - dt);
                 return;
             }
             if pressed(Key::ArrowRight) {
-                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                    .max(Ticks::from_raw(1));
+                let dt = Ticks::from_secs_f64_clamped(
+                    1.0 / self
+                        .tl
+                        .px_per_sec
+                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+                        as f64,
+                )
+                .max(Ticks::from_raw(1));
                 let c = self.cursor;
                 self.set_cursor(c + dt);
                 return;
@@ -2267,13 +2282,17 @@ impl App {
                     if ui
                         .add_sized(
                             [72.0, 16.0],
-                            egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln())
-                                .show_value(false),
+                            egui::Slider::new(
+                                &mut z,
+                                crate::timeline::TimelineState::MIN_PX_PER_SEC.ln()
+                                    ..=crate::timeline::TimelineState::MAX_PX_PER_SEC.ln(),
+                            )
+                            .show_value(false),
                         )
                         .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
                         .changed()
                     {
-                        self.tl.px_per_sec = z.exp();
+                        self.tl.px_per_sec = crate::timeline::TimelineState::clamp_pps(z.exp());
                     }
                     if ui
                         .small_button("-")

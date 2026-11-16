@@ -202,15 +202,44 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    /// Zoom mínimo (afastado): as 48 h de um projeto (`MAX_SECONDS`) cabem em
+    /// cerca de 35 px.
+    pub const MIN_PX_PER_SEC: f32 = 2.0e-4;
+    /// Zoom máximo (aproximado): cerca de 4 ticks por pixel, onde o tempo
+    /// exato ainda separa cada pixel; bem além de uma amostra por pixel.
+    pub const MAX_PX_PER_SEC: f32 = (neoveg_engine::time::TICKS_PER_SEC / 4) as f32;
+
+    /// Zoom dentro dos limites; valor inválido (NaN, infinito, <= 0) volta ao
+    /// padrão (§0.4).
+    pub fn clamp_pps(v: f32) -> f32 {
+        if v.is_finite() && v > 0.0 {
+            v.clamp(Self::MIN_PX_PER_SEC, Self::MAX_PX_PER_SEC)
+        } else {
+            60.0
+        }
+    }
+
     fn dx_to_ticks(&self, dx: f32) -> Ticks {
-        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(1.0)) as f64)
+        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(Self::MIN_PX_PER_SEC)) as f64)
     }
 
     pub fn zoom_by(&mut self, f: f32, anchor: Option<Ticks>) {
         let anchor = anchor.unwrap_or(self.scroll_x + self.dx_to_ticks(self.width / 2.0));
         let ax = (anchor - self.scroll_x).as_secs_f64() as f32 * self.px_per_sec;
-        self.px_per_sec = (self.px_per_sec * f).clamp(2.0, 4000.0);
+        self.px_per_sec = Self::clamp_pps(self.px_per_sec * f);
         self.scroll_x = (anchor - self.dx_to_ticks(ax)).max(Ticks::ZERO);
+    }
+
+    /// Zoom a partir da agulha de reprodução: se ela está na tela, fica no
+    /// mesmo pixel; se não, o zoom acontece e a agulha vai para o centro.
+    pub fn zoom_around_playhead(&mut self, f: f32, playhead: Ticks) {
+        let vis_end = self.scroll_x + self.dx_to_ticks(self.width);
+        if playhead >= self.scroll_x && playhead <= vis_end {
+            self.zoom_by(f, Some(playhead));
+        } else {
+            self.zoom_by(f, None);
+            self.center_on(playhead);
+        }
     }
 
     pub fn center_on(&mut self, t: Ticks) {
@@ -254,6 +283,9 @@ fn shade(c: [u8; 3], k: f32) -> Color32 {
     )
 }
 
+/// Teto de marcas da régua e linhas da grade por quadro.
+const MAX_RULER_MARKS: u32 = 4096;
+
 fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
     let f1 = fps.ticks_per_frame();
     let steps: [(Ticks, i64); 17] = [
@@ -281,10 +313,15 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
             return (s, minor);
         }
     }
-    (
-        Ticks::from_secs_i64(7200),
-        Ticks::from_secs_i64(600).max(f1),
-    )
+    // acima de 1 h: 2 h, 4 h, 8 h... até caber (o tempo satura em 48 h)
+    let mut s = Ticks::from_secs_i64(7200);
+    for _ in 0..48 {
+        if s.as_secs_f64() * pps as f64 >= 90.0 {
+            break;
+        }
+        s = s.saturating_mul(2);
+    }
+    (s, s.div_i64(6).max(f1))
 }
 
 const BUS_TRACK_H: f32 = 58.0;
@@ -620,15 +657,6 @@ impl App {
         self.rename_popup(ui);
     }
 
-    fn timeline_zoom_anchor(&self) -> Option<Ticks> {
-        let vis_end = self.tl.scroll_x + self.tl.dx_to_ticks(self.tl.width);
-        if self.cursor >= self.tl.scroll_x && self.cursor <= vis_end {
-            Some(self.cursor)
-        } else {
-            None
-        }
-    }
-
     fn fit_project_to_timeline(&mut self, lanes_width: f32) {
         let mut target_secs = self.project.duration().as_secs_f64() as f32;
         if target_secs <= 0.05 {
@@ -639,7 +667,7 @@ impl App {
             }
         }
         if target_secs.is_finite() && target_secs > 0.05 {
-            let pps = ((lanes_width - 24.0).max(40.0) / target_secs).clamp(2.0, 4000.0);
+            let pps = TimelineState::clamp_pps((lanes_width - 24.0).max(40.0) / target_secs);
             self.tl.px_per_sec = pps;
         } else {
             self.tl.px_per_sec = 60.0;
@@ -800,7 +828,8 @@ impl App {
             ),
         );
 
-        let view_secs = (lanes_w / self.tl.px_per_sec.max(1.0)).max(0.5);
+        let view_secs =
+            (lanes_w / self.tl.px_per_sec.max(TimelineState::MIN_PX_PER_SEC)).max(1.0e-9);
         let proj_secs = self.project.duration().as_secs_f64() as f32;
         let mut max_end_secs = proj_secs.max(self.cursor.as_secs_f64() as f32);
         if let Some((a, b)) = self.time_sel {
@@ -847,9 +876,9 @@ impl App {
                 pos2(zoom_left + btn_w, inner.top()),
                 pos2(inner.right(), inner.bottom()),
             );
-            let anchor = self.timeline_zoom_anchor();
-            let can_out = self.tl.px_per_sec > 2.01;
-            let can_in = self.tl.px_per_sec < 3999.0;
+            let playhead = self.cursor;
+            let can_out = self.tl.px_per_sec > TimelineState::MIN_PX_PER_SEC * 1.0001;
+            let can_in = self.tl.px_per_sec < TimelineState::MAX_PX_PER_SEC * 0.9999;
 
             let (dec_click, dec_drag) = crate::scrollbars::zoom_button(
                 ui,
@@ -875,15 +904,15 @@ impl App {
             );
 
             if dec_click {
-                self.tl.zoom_by(0.8, anchor);
+                self.tl.zoom_around_playhead(0.8, playhead);
             }
             if inc_click {
-                self.tl.zoom_by(1.25, anchor);
+                self.tl.zoom_around_playhead(1.25, playhead);
             }
             let drag = dec_drag + inc_drag;
             if drag.abs() > 0.01 {
                 let factor = (1.0 + drag * 0.012).clamp(0.5, 2.0);
-                self.tl.zoom_by(factor, anchor);
+                self.tl.zoom_around_playhead(factor, playhead);
             }
         }
 
@@ -1223,7 +1252,13 @@ impl App {
         let t_start = self.tl.scroll_x;
         let t_end = self.tl.x2t(r.right(), left);
         let mut idx = t_start.0 / step;
+        // teto por quadro: nenhum zoom desenha marcas sem fim (§0.5)
+        let mut marks = 0u32;
         loop {
+            marks += 1;
+            if marks > MAX_RULER_MARKS {
+                break;
+            }
             let t = Ticks::from_raw(idx.saturating_mul(step));
             if t > t_end {
                 break;
@@ -2204,8 +2239,9 @@ impl App {
                     == neoveg_common::prefs::TimelineMouseScroll::HorizontalScroll;
                 if horiz_mode {
                     if mods.command {
-                        let t = self.tl.x2t(p.x, left);
-                        self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                        let c = self.cursor;
+                        self.tl
+                            .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                     } else if mods.shift {
                         self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                     } else {
@@ -2217,8 +2253,10 @@ impl App {
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                 } else {
-                    let t = self.tl.x2t(p.x, left);
-                    self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                    // como os botões e as setas: a partir da agulha de reprodução
+                    let c = self.cursor;
+                    self.tl
+                        .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                 }
             }
             // botão do meio: pan
@@ -3405,7 +3443,12 @@ impl App {
         let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
         let mut idx = self.tl.scroll_x.0 / step;
+        let mut marks = 0u32;
         loop {
+            marks += 1;
+            if marks > MAX_RULER_MARKS {
+                break;
+            }
             let gt = Ticks::from_raw(idx.saturating_mul(step));
             if gt > t_end {
                 break;
@@ -3978,5 +4021,90 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
             pos2(x0 + w, r.bottom()),
         );
         painter.rect_filled(bar, 0.0, col);
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    #[test]
+    fn zoom_aceita_extremos_e_recusa_valores_hostis() {
+        type S = TimelineState;
+        assert_eq!(S::clamp_pps(f32::NAN), 60.0);
+        assert_eq!(S::clamp_pps(f32::INFINITY), 60.0);
+        assert_eq!(S::clamp_pps(-3.0), 60.0);
+        assert_eq!(S::clamp_pps(0.0), 60.0);
+        assert_eq!(S::clamp_pps(1.0e-30), S::MIN_PX_PER_SEC);
+        assert_eq!(S::clamp_pps(1.0e30), S::MAX_PX_PER_SEC);
+        // o antigo teto (4000 px/s) e o antigo piso (2 px/s) ficaram para trás
+        assert_eq!(S::clamp_pps(1.0e6), 1.0e6);
+        assert_eq!(S::clamp_pps(0.01), 0.01);
+    }
+
+    // no zoom máximo, uma amostra a 48 kHz ocupa milhares de pixels
+    const _: () = assert!(TimelineState::MAX_PX_PER_SEC / 48_000.0 > 1000.0);
+
+    #[test]
+    fn regua_cabe_nos_dois_extremos() {
+        let fps = FrameRate::FPS_25;
+        for pps in [
+            TimelineState::MIN_PX_PER_SEC,
+            1.0e-3,
+            0.01,
+            0.5,
+            60.0,
+            1.0e5,
+            TimelineState::MAX_PX_PER_SEC,
+        ] {
+            let (major, minor) = nice_step(pps, fps);
+            assert!(minor.0 > 0 && major >= minor, "{pps}");
+            // tela de 4000 px (o tempo para em 48 h): marcas abaixo do teto
+            let view_secs = (4000.0 / f64::from(pps)).min(neoveg_engine::time::MAX_SECONDS as f64);
+            let marks = view_secs / minor.as_secs_f64();
+            assert!(marks <= f64::from(MAX_RULER_MARKS), "{pps}: {marks} marcas");
+        }
+    }
+
+    #[test]
+    fn zoom_ida_e_volta_mantem_a_ancora() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            ..Default::default()
+        };
+        let anchor = Ticks::from_secs_i64(90);
+        for _ in 0..200 {
+            tl.zoom_by(2.0, Some(anchor));
+        }
+        assert_eq!(tl.px_per_sec, TimelineState::MAX_PX_PER_SEC);
+        for _ in 0..400 {
+            tl.zoom_by(0.5, Some(anchor));
+        }
+        assert_eq!(tl.px_per_sec, TimelineState::MIN_PX_PER_SEC);
+        assert!(tl.scroll_x >= Ticks::ZERO);
+    }
+
+    #[test]
+    fn zoom_parte_da_agulha_de_reproducao() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            px_per_sec: 100.0,
+            scroll_x: Ticks::from_secs_i64(10),
+            ..Default::default()
+        };
+        // agulha visível, a 2 s do início da tela (200 px): fica no mesmo pixel
+        let agulha = Ticks::from_secs_i64(12);
+        for f in [4.0, 0.3, 50.0, 0.01] {
+            tl.zoom_around_playhead(f, agulha);
+            let px = (agulha - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+            assert!((px - 200.0).abs() < 1.0, "zoom {f}: agulha em {px} px");
+        }
+        // agulha fora da tela: vai para o centro
+        tl.px_per_sec = 100.0;
+        tl.scroll_x = Ticks::ZERO;
+        let longe = Ticks::from_secs_i64(600);
+        tl.zoom_around_playhead(2.0, longe);
+        let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+        assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
     }
 }
