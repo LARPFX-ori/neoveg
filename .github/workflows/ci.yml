@@ -60,6 +60,21 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Fixtures de mídia e de AAF em target/fixtures/ (§3.4: geradas, nunca
+      # commitadas). Por quê: sem elas, os testes que as usam (conversão de
+      # MP4, oráculo ffprobe de áudio, importação de AAF) pulam e passam sem
+      # testar nada. ffmpeg/ffprobe e pyaaf2 são só geradores e oráculos
+      # externos de teste (§2.3): não são linkados nem empacotados.
+      - name: Ferramentas das fixtures
+        run: |
+          choco install ffmpeg -y --no-progress
+          python -m pip install pyaaf2==1.7.1
+
+      - name: Gerar fixtures
+        run: |
+          python tools/gen_media_fixtures.py target/fixtures
+          python tools/gen_aaf_fixtures.py target/fixtures
+
       # §3.4.3. Os testes do host .NET pulam sozinhos quando o runtime não existe.
       # --test-threads=1: os testes de janela do neoveg_ui (egui_kittest) derrubam
       # o processo com STATUS_ACCESS_VIOLATION quando rodam em paralelo no runner;
