@@ -864,6 +864,9 @@ public class EntryPoint
         let e1 = p.tracks[0].events[1].id;
         let corpo = r#"
         vegas.Project.Tracks[0].Events[1].Selected = true;
+        // como no FAQ do manual (InsertFileAt): limpa a seleção de trilhas
+        // antes de escolher uma, porque marcar uma não desmarca as outras
+        foreach (var t in vegas.Project.Tracks) { t.Selected = false; }
         vegas.Project.Tracks[2].Selected = true;
         vegas.Cursor = Timecode.FromSeconds(3);
         vegas.Transport.SelectionStart = Timecode.FromSeconds(1);
