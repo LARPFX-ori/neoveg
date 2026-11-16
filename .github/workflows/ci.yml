@@ -8,7 +8,10 @@
 # `neoveg/common-actions`. Esse repositório ainda não existe; quando existir,
 # troque estes passos pelos workflows reutilizáveis de lá.
 #
-# Windows primeiro: Linux/macOS entram junto com os backends nativos (ROADMAP, Fase 4).
+# Windows, macOS e Linux: o editor precisa compilar e passar nos testes nas três
+# plataformas. Os backends nativos de vídeo fora do Windows estão em
+# planejamento (issue #11); até lá, os testes que dependem deles não existem
+# nessas plataformas.
 
 name: CI
 
@@ -65,5 +68,47 @@ jobs:
       # o processo com STATUS_ACCESS_VIOLATION quando rodam em paralelo no runner;
       # um por vez é também como o projeto roda localmente. Não remova sem
       # resolver essa falha em paralelo.
+      - name: cargo test
+        run: cargo test --workspace -- --test-threads=1
+
+  # Mesmos portões de build e teste em macOS e Linux. fmt e licenças não
+  # dependem da plataforma e já rodam no job do Windows.
+  gates-unix:
+    name: Portões (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      # Uma plataforma falhando não esconde o resultado da outra.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bibliotecas de sistema que as dependências exigem para compilar no
+      # Linux: ALSA (cpal), GTK 3 (diálogos de arquivo do rfd) e xkbcommon
+      # (teclado do winit).
+      - name: Dependências de sistema (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libgtk-3-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # §3.4.2 e §0.9.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # §3.4.3. --test-threads=1 pelo mesmo motivo do job do Windows.
       - name: cargo test
         run: cargo test --workspace -- --test-threads=1
