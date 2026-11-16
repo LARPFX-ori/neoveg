@@ -247,7 +247,7 @@ fn event_layer_opts(
     let key = e.pan_crop.eval(local);
     let mut f = draw_source(&src, w, h, &key, e.maintain_aspect);
     for fx in &e.fx {
-        vfx::apply(fx, &mut f, local);
+        vfx::apply(fx, &mut f, local, p.settings.fps);
     }
     Some(f)
 }
@@ -339,7 +339,7 @@ fn render_track(
 
 /// Trilha de ajuste: aplica os FX da trilha sobre a composição acumulada das
 /// trilhas abaixo e mistura o resultado pela opacidade × envelope (0..1).
-fn apply_adjustment(track: &Track, out: &mut Frame, t: Ticks) {
+fn apply_adjustment(track: &Track, out: &mut Frame, t: Ticks, fps: FrameRate) {
     let op = track.opacity * track.env_value(EnvKind::Opacity, t);
     // NaN ou intensidade nula não aplica nada (§0.4).
     if op.is_nan() || op <= 1e-4 || !track.fx.iter().any(|fx| fx.enabled) {
@@ -348,7 +348,7 @@ fn apply_adjustment(track: &Track, out: &mut Frame, t: Ticks) {
     let op = op.min(1.0);
     let mut adj = out.clone();
     for fx in &track.fx {
-        vfx::apply(fx, &mut adj, t);
+        vfx::apply(fx, &mut adj, t, fps);
     }
     if op >= 1.0 {
         *out = adj;
@@ -386,14 +386,14 @@ pub fn render_frame_preview(
             continue;
         }
         if track.is_adjustment() {
-            apply_adjustment(track, &mut out, t);
+            apply_adjustment(track, &mut out, t, p.settings.fps);
             continue;
         }
         let Some(mut layer) = render_track(p, media, track, t, w, h, prefer_proxy) else {
             continue;
         };
         for fx in &track.fx {
-            vfx::apply(fx, &mut layer, t);
+            vfx::apply(fx, &mut layer, t, p.settings.fps);
         }
         let ftc = track.env_value(EnvKind::FadeToColor, t);
         if ftc.abs() > 1e-4 {
@@ -413,7 +413,7 @@ pub fn render_frame_preview(
         blend(&mut out, &layer, track.blend, op);
     }
     for fx in &p.master.video_fx {
-        vfx::apply(fx, &mut out, t);
+        vfx::apply(fx, &mut out, t, p.settings.fps);
     }
     // garante saída opaca
     out.px.par_iter_mut().for_each(|px| {

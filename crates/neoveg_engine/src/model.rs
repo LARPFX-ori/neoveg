@@ -1686,12 +1686,77 @@ pub enum FxKind {
     Vst3,
 }
 
-/// Valor de um parâmetro de plug-in OFX, pelo nome do parâmetro.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Valor de um parâmetro de plug-in OFX, pelo nome do parâmetro. Sem
+/// keyframes vale `values`; com eles, o valor no tempo local do efeito.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OfxParamValue {
     pub name: String,
     #[serde(default)]
     pub values: Vec<f64>,
+    /// Keyframes (tempo local do efeito, valores), em ordem de tempo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<(Ticks, Vec<f64>)>,
+    /// Entre keyframes segura o valor anterior (Boolean, Choice) em vez de
+    /// interpolar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hold: bool,
+    /// Interpola e arredonda para inteiro (parâmetros Integer).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integer: bool,
+}
+
+/// Máximo de keyframes por parâmetro OFX (entrada hostil, §0.4).
+const MAX_OFX_KEYS: usize = 4096;
+
+impl OfxParamValue {
+    /// Valores no tempo local `t`: antes do primeiro keyframe vale o
+    /// primeiro, depois do último vale o último; entre dois, interpolação
+    /// linear (ou o anterior, com `hold`).
+    pub fn values_at(&self, t: Ticks) -> Vec<f64> {
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
+            return self.values.clone();
+        };
+        if t <= first.0 {
+            return first.1.clone();
+        }
+        if t >= last.0 {
+            return last.1.clone();
+        }
+        for w in self.keys.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            if t >= a.0 && t < b.0 {
+                if self.hold {
+                    return a.1.clone();
+                }
+                let x = f64::from(Ticks::lerp_factor(t, a.0, b.0));
+                return a
+                    .1
+                    .iter()
+                    .enumerate()
+                    .map(|(i, va)| {
+                        let vb = b.1.get(i).copied().unwrap_or(*va);
+                        let v = va + (vb - va) * x;
+                        if self.integer {
+                            v.round()
+                        } else {
+                            v
+                        }
+                    })
+                    .collect();
+            }
+        }
+        last.1.clone()
+    }
+
+    /// Grava `v` como keyframe em `t` (substitui um keyframe a até `tol`).
+    pub fn set_key(&mut self, t: Ticks, v: Vec<f64>, tol: Ticks) {
+        if let Some(k) = self.keys.iter_mut().find(|k| k.0.abs_diff(t) <= tol) {
+            k.1 = v;
+        } else if self.keys.len() < MAX_OFX_KEYS {
+            self.keys.push((t, v));
+            self.keys.sort_by_key(|k| k.0);
+        }
+    }
 }
 
 /// Referência a um efeito OFX: binário, identificador e valores dos parâmetros.
@@ -1709,6 +1774,19 @@ const MAX_OFX_REF_TEXT: usize = 4096;
 const MAX_OFX_REF_PARAMS: usize = 1024;
 
 impl OfxFxRef {
+    /// Valores de todos os parâmetros no tempo local `t` (keyframes
+    /// avaliados), prontos para o host.
+    pub fn params_at(&self, t: Ticks) -> Vec<OfxParamValue> {
+        self.params
+            .iter()
+            .map(|p| OfxParamValue {
+                name: p.name.clone(),
+                values: p.values_at(t),
+                ..Default::default()
+            })
+            .collect()
+    }
+
     /// Saneia textos, contagens e valores vindos de arquivo (§0.4).
     pub fn sanitize(&mut self) {
         let cut = |s: &mut String| {
@@ -1724,14 +1802,24 @@ impl OfxFxRef {
         cut(&mut self.plugin_id);
         cut(&mut self.label);
         self.params.truncate(MAX_OFX_REF_PARAMS);
-        for p in &mut self.params {
-            cut(&mut p.name);
-            p.values.truncate(4);
-            for v in &mut p.values {
+        let clean = |vals: &mut Vec<f64>| {
+            vals.truncate(4);
+            for v in vals.iter_mut() {
                 if !v.is_finite() {
                     *v = 0.0;
                 }
             }
+        };
+        for p in &mut self.params {
+            cut(&mut p.name);
+            clean(&mut p.values);
+            p.keys.truncate(MAX_OFX_KEYS);
+            p.keys.retain(|k| k.0 >= Ticks::ZERO);
+            for k in &mut p.keys {
+                clean(&mut k.1);
+            }
+            p.keys.sort_by_key(|k| k.0);
+            p.keys.dedup_by_key(|k| k.0);
         }
     }
 }
@@ -2275,6 +2363,69 @@ pub fn lin_to_db(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keyframes de parâmetros OFX: interpolação linear, `hold` para Boolean
+    /// e Choice, arredondamento para Integer, e saneamento de entrada hostil.
+    #[test]
+    fn ofx_param_keyframes_interpolate_and_sanitize() {
+        let s = Ticks::from_secs_i64;
+        let mut p = OfxParamValue {
+            name: "amount".into(),
+            values: vec![9.0],
+            ..Default::default()
+        };
+        assert_eq!(p.values_at(s(3)), vec![9.0], "sem keyframes vale `values`");
+        let tol = Ticks::ZERO;
+        p.set_key(s(2), vec![10.0, 0.0], tol);
+        p.set_key(s(0), vec![0.0, 4.0], tol);
+        assert_eq!(p.values_at(Ticks(-5)), vec![0.0, 4.0]);
+        assert_eq!(p.values_at(s(1)), vec![5.0, 2.0]);
+        assert_eq!(p.values_at(s(7)), vec![10.0, 0.0]);
+        p.integer = true;
+        assert_eq!(p.values_at(Ticks::from_millis_i64(250)), vec![1.0, 4.0]);
+        p.hold = true;
+        assert_eq!(p.values_at(Ticks::from_millis_i64(1999)), vec![0.0, 4.0]);
+        // substituir dentro da tolerância não duplica
+        p.set_key(s(2), vec![1.0, 1.0], Ticks::from_millis_i64(1));
+        assert_eq!(p.keys.len(), 2);
+
+        // vindo de arquivo: fora de ordem, tempo negativo, NaN, duplicado
+        let mut r = OfxFxRef {
+            binary: "b".into(),
+            plugin_id: "p".into(),
+            label: String::new(),
+            params: vec![OfxParamValue {
+                name: "x".into(),
+                values: vec![1.0],
+                keys: vec![
+                    (s(4), vec![f64::NAN; 9]),
+                    (Ticks(-1), vec![1.0]),
+                    (s(1), vec![2.0]),
+                    (s(4), vec![3.0]),
+                ],
+                ..Default::default()
+            }],
+        };
+        r.sanitize();
+        let k = &r.params[0].keys;
+        assert_eq!(k.len(), 2);
+        assert_eq!(k[0], (s(1), vec![2.0]));
+        assert_eq!(k[1].0, s(4));
+        assert_eq!(k[1].1, vec![0.0; 4]);
+        // `params_at` entrega só valores estáticos ao host
+        let at = r.params_at(Ticks::from_millis_i64(2500));
+        // entre 2.0 e 0.0: metade; componentes ausentes ficam para o host (zero)
+        assert_eq!(at[0].values, vec![1.0]);
+        assert!(at[0].keys.is_empty());
+        // parâmetro sem keyframes não grava os campos novos (formato antigo)
+        let json = serde_json::to_value(OfxParamValue {
+            name: "y".into(),
+            values: vec![0.5],
+            ..Default::default()
+        })
+        .expect("grava");
+        assert_eq!(json, serde_json::json!({"name": "y", "values": [0.5]}));
+    }
 
     /// Referência VST3 vinda de arquivo é hostil (§0.4): valores fora de
     /// 0..1, NaN, ids repetidos e textos enormes são saneados; um FX VST3 sem
