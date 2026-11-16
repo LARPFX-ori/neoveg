@@ -2,6 +2,14 @@
 
 Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa em português (`eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
 
+## Visão Geral da Interface
+
+![Área de trabalho principal do Neoveg](docs/screenshots/workspace.png)
+
+| Escopos de Vídeo (Histograma e Forma de Onda) | Tela de Boas-Vindas |
+| :---: | :---: |
+| ![Escopos de vídeo do Neoveg](docs/screenshots/scopes.png) | ![Tela de boas-vindas do Neoveg](docs/screenshots/welcome.png) |
+
 ## Arquitetura do Workspace (5 Crates)
 
 - **`neoveg_common`** (`crates/neoveg_common`): tipos fundamentais, representação exata de tempo (`Ticks`, `FrameRate`, `Rate`, *SMPTE Drop-Frame*), curvas, preferências e utilitários base.

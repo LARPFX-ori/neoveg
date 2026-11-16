@@ -1,0 +1,8 @@
+asset:        workspace.png
+title:        Captura da janela principal do Neoveg (timeline, prévia de vídeo, mídia do projeto e master bus)
+author:       Contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT / LICENSE-APACHE
+added:        2026-11-16 por blackghoust9
+notes:        Captura direta do executável Neoveg usando apenas mídia gerada proceduralmente e áudio sintético em memória.

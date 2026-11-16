@@ -1,0 +1,8 @@
+asset:        scopes.png
+title:        Captura do painel de Escopos de Vídeo (Histograma RGB + luma e Forma de onda) com prévia ao vivo
+author:       Contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT / LICENSE-APACHE
+added:        2026-11-16 por blackghoust9
+notes:        Captura direta do executável Neoveg usando apenas mídia gerada proceduralmente em memória.

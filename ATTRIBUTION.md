@@ -4,15 +4,19 @@
 repositório, conforme o `AGENTS.md` §1. Cada asset `X` tem um arquivo
 `X.attribution` ao lado.
 
-Até o momento o repositório **não contém nenhum asset**:
+Observações gerais de código e mídia:
 
-- os ícones da interface são caracteres Unicode desenhados pelas fontes padrão
-  do egui (incluídas pela dependência, não copiadas para o repositório);
 - os títulos usam fontes do sistema operacional carregadas em tempo de execução
   (`Segoe UI`/`Arial` no Windows, `DejaVu Sans` no Linux), com a fonte padrão
   do egui como alternativa;
 - a mídia de teste é gerada pelos próprios testes ou fica fora do controle de
   versão.
+
+## Capturas de tela da interface (`docs/screenshots/`)
+
+- **[`docs/screenshots/workspace.png`](docs/screenshots/workspace.png)** ([`.attribution`](docs/screenshots/workspace.png.attribution)) — Janela principal do Neoveg (timeline multifaixa, prévia de vídeo, Mídia do Projeto e Master Bus). `original work`, `MIT OR Apache-2.0`.
+- **[`docs/screenshots/scopes.png`](docs/screenshots/scopes.png)** ([`.attribution`](docs/screenshots/scopes.png.attribution)) — Painel de Escopos de Vídeo (*Histograma RGB + luma* e *Forma de onda*) ao lado da prévia e timeline. `original work`, `MIT OR Apache-2.0`.
+- **[`docs/screenshots/welcome.png`](docs/screenshots/welcome.png)** ([`.attribution`](docs/screenshots/welcome.png.attribution)) — Tela de boas-vindas com arte vetorial original e seleção de proporção e formato de projeto. `original work`, `MIT OR Apache-2.0`.
 
 ## Ícones vetoriais nativos (`crates/neoveg_ui/src/icons.rs`)
 
