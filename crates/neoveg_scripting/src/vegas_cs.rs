@@ -4,16 +4,19 @@
 use crate::dotnet_host::{self, DotnetEnv};
 use neoveg_common::error::NeovegError;
 use neoveg_engine::commands::{run_command, CommandHost, HeadlessHost};
+use neoveg_engine::media;
 use neoveg_engine::model::{Marker, MediaItem, MediaSource, Take, Track, TrackKind};
 use neoveg_engine::session::{EditorSession, MAX_UNDO};
 use neoveg_engine::takes;
 use neoveg_engine::time::Ticks;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 const MAX_SCRIPT_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CHARS: usize = 1200;
@@ -89,6 +92,10 @@ struct ScriptInputPayload {
     markers: Vec<ScriptMarkerSnap>,
     audio_buses: Vec<String>,
     media: Vec<ScriptMediaSnap>,
+    /// Endereço da função que importa mídia durante o script
+    /// (`dotnet_host::media_probe_fn_addr`) e a execução a que pertence.
+    probe_fn: u64,
+    probe_token: u64,
 }
 
 /// Versão do formato de saída da ponte. Uma saída de outra versão veio de
@@ -356,11 +363,11 @@ namespace ScriptPortal.Vegas
     }
 
     // Media, MediaStream, VideoStream, AudioStream, MediaStreams, MediaPool,
-    // Take e Takes (Scripting API Summary). Só a mídia que já está no
-    // projeto: importar um arquivo novo pelo script (MediaPool.AddMedia)
-    // ainda não existe e falha com NotSupportedException, em vez de criar
-    // uma mídia sem conteúdo. O Neoveg tem no máximo um stream de vídeo e um
-    // de áudio por mídia.
+    // Take e Takes (Scripting API Summary). MediaPool.AddMedia e
+    // new Media(path) importam um arquivo que ainda não está no projeto:
+    // o Neoveg o abre na hora (Project.ImportMedia) e ele só entra no
+    // projeto se o script terminar sem erro. O Neoveg tem no máximo um
+    // stream de vídeo e um de áudio por mídia.
     public abstract class MediaStream
     {
         internal MediaStream(Media parent, int index)
@@ -419,17 +426,16 @@ namespace ScriptPortal.Vegas
             _fps = s?.fps ?? 0.0;
         }
 
-        // Media(path) e Media.CreateInstance(project, path): no Neoveg, só
-        // encontram uma mídia que já está no projeto.
+        // Media(path) e Media.CreateInstance(project, path): acham a mídia
+        // do projeto pelo caminho ou a importam, como MediaPool.AddMedia.
         public Media(string path) : this(Project.s_current, path) { }
 
         private Media(Project project, string path)
         {
-            var found = project?.MediaPool.Find(path);
+            var found = project?.MediaPool.Find(path) ?? project?.ImportMedia(path);
             if (found == null)
             {
-                throw new NotSupportedException(
-                    "a mídia '" + (path ?? "") + "' não está no projeto; importar mídia por script ainda não é suportado no Neoveg");
+                throw new NotSupportedException("a mídia '" + (path ?? "") + "' não está no projeto");
             }
             Init(found._id, found.FilePath, found._name, found.HasVideo(), found.HasAudio(),
                 found._generated, found.Length);
@@ -548,6 +554,7 @@ namespace ScriptPortal.Vegas
     public sealed class MediaPool : IEnumerable<Media>
     {
         private readonly List<Media> _items = new List<Media>();
+        internal Project _owner;
         internal MediaPool() { }
         internal void AddInternal(Media m) => _items.Add(m);
         internal Media ById(ulong id) => _items.Find(m => m._id == id);
@@ -566,8 +573,11 @@ namespace ScriptPortal.Vegas
             {
                 return found;
             }
-            throw new NotSupportedException(
-                "MediaPool.AddMedia: importar mídia por script ainda não é suportado no Neoveg ('" + (path ?? "") + "')");
+            if (_owner == null)
+            {
+                throw new NotSupportedException("MediaPool.AddMedia: mídia sem projeto ('" + (path ?? "") + "')");
+            }
+            return _owner.ImportMedia(path);
         }
 
         public IEnumerator<Media> GetEnumerator() => _items.GetEnumerator();
@@ -795,6 +805,84 @@ namespace ScriptPortal.Vegas
         // projeto deste script, para Media(path) achar a mídia
         internal static Project s_current;
 
+        // função do Neoveg que abre um arquivo de mídia enquanto o script
+        // roda (0 = este host não importa) e a execução a que pertence
+        internal ulong _probeFn;
+        internal ulong _probeToken;
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int MediaProbeFn(ulong token, IntPtr path, int pathLen, IntPtr outBuf, int outCap);
+
+        // Abre o arquivo pelo Neoveg e põe a mídia no MediaPool deste script.
+        // A documentação não diz o que AddMedia lança numa falha: aqui é
+        // IOException, com o motivo dado pelo Neoveg.
+        internal Media ImportMedia(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ArgumentException("caminho de mídia vazio");
+            }
+            if (_probeFn == 0)
+            {
+                throw new NotSupportedException("este host do Neoveg não importa mídia por script ('" + path + "')");
+            }
+            var fn = Marshal.GetDelegateForFunctionPointer<MediaProbeFn>(new IntPtr(unchecked((long)_probeFn)));
+            byte[] raw = Encoding.UTF8.GetBytes(path);
+            IntPtr pathPtr = Marshal.AllocHGlobal(Math.Max(1, raw.Length));
+            IntPtr outPtr = IntPtr.Zero;
+            string json = null;
+            try
+            {
+                Marshal.Copy(raw, 0, pathPtr, raw.Length);
+                int cap = 16 * 1024;
+                for (int attempt = 0; attempt < 2 && json == null; attempt++)
+                {
+                    outPtr = Marshal.AllocHGlobal(cap);
+                    int n = fn(_probeToken, pathPtr, raw.Length, outPtr, cap);
+                    if (n >= 0 && n <= cap)
+                    {
+                        json = Marshal.PtrToStringUTF8(outPtr, n);
+                    }
+                    else if (n < 0 && n != int.MinValue && -n > cap && -n <= 1024 * 1024)
+                    {
+                        // resposta maior que o espaço: tenta de novo com o tamanho pedido
+                        cap = -n;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                    Marshal.FreeHGlobal(outPtr);
+                    outPtr = IntPtr.Zero;
+                }
+            }
+            finally
+            {
+                if (outPtr != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(outPtr);
+                }
+                Marshal.FreeHGlobal(pathPtr);
+            }
+            if (json == null)
+            {
+                throw new InvalidOperationException("o Neoveg não respondeu à importação de '" + path + "'");
+            }
+            var reply = JsonSerializer.Deserialize<ProbeReplySnap>(json);
+            if (reply == null || !reply.ok || reply.media == null)
+            {
+                throw new IOException("MediaPool.AddMedia: não foi possível importar '" + path + "': " + (reply?.error ?? "resposta inválida"));
+            }
+            var existing = MediaPool.ById(reply.media.id);
+            if (existing != null)
+            {
+                return existing;
+            }
+            var m = new Media(reply.media);
+            MediaPool.AddInternal(m);
+            return m;
+        }
+
         public VideoTrack AddVideoTrack(string name = null)
         {
             var t = new VideoTrack { Index = Tracks.Count, Name = name ?? "", _project = this };
@@ -850,6 +938,9 @@ namespace ScriptPortal.Vegas
             Transport.SelectionLength = Timecode.FromTicks(snap.sel_length_ticks);
             var selected = new HashSet<ulong>(snap.selected_events ?? new List<ulong>());
             Project.s_current = Project;
+            Project.MediaPool._owner = Project;
+            Project._probeFn = snap.probe_fn;
+            Project._probeToken = snap.probe_token;
             foreach (var ms in snap.media ?? new List<MediaSnap>())
             {
                 Project.MediaPool.AddInternal(new Media(ms));
@@ -1199,6 +1290,13 @@ namespace ScriptPortal.Vegas
         public double fps { get; set; }
     }
 
+    internal sealed class ProbeReplySnap
+    {
+        public bool ok { get; set; }
+        public string error { get; set; }
+        public MediaSnap media { get; set; }
+    }
+
     internal sealed class TakeOut
     {
         public ulong media_id { get; set; }
@@ -1251,6 +1349,8 @@ namespace ScriptPortal.Vegas
         public List<MarkerSnap> markers { get; set; }
         public List<string> audio_buses { get; set; }
         public List<MediaSnap> media { get; set; }
+        public ulong probe_fn { get; set; }
+        public ulong probe_token { get; set; }
     }
 
     internal sealed class EventOut
@@ -1548,10 +1648,133 @@ fn media_snap(m: &MediaItem) -> ScriptMediaSnap {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Importação de mídia durante o script (MediaPool.AddMedia, new Media(path))
+// ---------------------------------------------------------------------------
+
+/// Limite de arquivos que um script importa numa execução.
+const MAX_SCRIPT_IMPORTS: usize = 64;
+/// Limite do caminho recebido do script, em bytes.
+pub(crate) const MAX_PROBE_PATH_BYTES: usize = 32 * 1024;
+
+/// Mídia importada por execução de script. Só entra no projeto se o script
+/// terminar sem erro (§0: nada muda num script que falha).
+static PROBE_RUNS: Mutex<BTreeMap<u64, Vec<MediaItem>>> = Mutex::new(BTreeMap::new());
+
+fn probe_runs() -> MutexGuard<'static, BTreeMap<u64, Vec<MediaItem>>> {
+    PROBE_RUNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Registro de uma execução; removido ao sair, com erro ou não.
+struct ProbeRun(u64);
+
+impl ProbeRun {
+    fn start(token: u64) -> Self {
+        probe_runs().insert(token, Vec::new());
+        Self(token)
+    }
+
+    fn token(&self) -> u64 {
+        self.0
+    }
+
+    fn take(&self) -> Vec<MediaItem> {
+        probe_runs()
+            .get_mut(&self.0)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for ProbeRun {
+    fn drop(&mut self) {
+        probe_runs().remove(&self.0);
+    }
+}
+
+#[derive(Serialize)]
+struct ProbeReply {
+    ok: bool,
+    error: Option<String>,
+    media: Option<ScriptMediaSnap>,
+}
+
+/// Abre `path` como mídia para a execução `token` e responde em JSON
+/// (`ProbeReplySnap` na ponte C#). Chamado pela fronteira FFI em
+/// `dotnet_host`, na thread do host .NET, enquanto o script roda.
+pub(crate) fn probe_media_for_script(token: u64, path: &[u8]) -> Vec<u8> {
+    let reply = match probe_media_inner(token, path) {
+        Ok(snap) => ProbeReply {
+            ok: true,
+            error: None,
+            media: Some(snap),
+        },
+        Err(e) => ProbeReply {
+            ok: false,
+            error: Some(e),
+            media: None,
+        },
+    };
+    serde_json::to_vec(&reply).unwrap_or_else(|_| {
+        r#"{"ok":false,"error":"falha ao serializar a resposta da importação"}"#
+            .as_bytes()
+            .to_vec()
+    })
+}
+
+fn probe_media_inner(token: u64, raw: &[u8]) -> Result<ScriptMediaSnap, String> {
+    if raw.len() > MAX_PROBE_PATH_BYTES {
+        return Err("caminho de mídia longo demais".into());
+    }
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| "caminho de mídia não é UTF-8 válido".to_string())?
+        .trim();
+    if text.is_empty() {
+        return Err("caminho de mídia vazio".into());
+    }
+    let path = std::path::absolute(Path::new(text)).unwrap_or_else(|_| PathBuf::from(text));
+    let key = path.to_string_lossy().to_string();
+    {
+        let runs = probe_runs();
+        let Some(items) = runs.get(&token) else {
+            return Err("execução de script desconhecida".into());
+        };
+        let same = items
+            .iter()
+            .find(|m| matches!(&m.source, MediaSource::File { path: p } if *p == key));
+        if let Some(m) = same {
+            return Ok(media_snap(m));
+        }
+        if items.len() >= MAX_SCRIPT_IMPORTS {
+            return Err(format!(
+                "o script passou do limite de {MAX_SCRIPT_IMPORTS} mídias importadas"
+            ));
+        }
+    }
+    if !path.is_file() {
+        return Err(format!("arquivo não encontrado: {key}"));
+    }
+    // o lock não fica preso enquanto o arquivo é aberto
+    let imp = media::import_file(&path).map_err(|e| format!("{e:#}"))?;
+    let snap = media_snap(&imp.item);
+    let mut runs = probe_runs();
+    let Some(items) = runs.get_mut(&token) else {
+        return Err("execução de script desconhecida".into());
+    };
+    if items.len() >= MAX_SCRIPT_IMPORTS {
+        return Err(format!(
+            "o script passou do limite de {MAX_SCRIPT_IMPORTS} mídias importadas"
+        ));
+    }
+    items.push(imp.item);
+    Ok(snap)
+}
+
 fn build_snapshot(
     session: &EditorSession,
     result_path: &Path,
     target_assembly: Option<&Path>,
+    probe_token: u64,
 ) -> Result<Vec<u8>, NeovegError> {
     let tracks = session
         .project
@@ -1628,6 +1851,8 @@ fn build_snapshot(
         markers,
         audio_buses,
         media,
+        probe_fn: dotnet_host::media_probe_fn_addr(),
+        probe_token,
     };
     serde_json::to_vec(&payload)
         .map_err(|e| NeovegError::Json(format!("erro ao serializar contexto do script: {e}")))
@@ -2160,6 +2385,7 @@ fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Mark
 
 fn apply_script_output(
     out: ScriptOutputPayload,
+    imported: Vec<MediaItem>,
     session: &mut EditorSession,
     host: &mut HeadlessHost,
     messages_out: &mut Vec<String>,
@@ -2199,7 +2425,8 @@ fn apply_script_output(
 
     let tracks_changed = !tracks_unchanged(&out.tracks, &session.project.tracks);
     let markers_changed = !markers_unchanged(&out.markers, n_markers);
-    let has_project_mutations = tracks_changed || !out.added_buses.is_empty() || markers_changed;
+    let has_project_mutations =
+        tracks_changed || !out.added_buses.is_empty() || markers_changed || !imported.is_empty();
     let had_history_cmd = out
         .commands
         .iter()
@@ -2224,6 +2451,12 @@ fn apply_script_output(
         .filter(|(_, t)| t.selected)
         .map(|(i, _)| i)
         .collect();
+    // a mídia importada entra antes das trilhas, para os takes novos a acharem
+    for item in imported {
+        if !staged.project.media.iter().any(|m| m.id == item.id) {
+            staged.project.media.push(item);
+        }
+    }
     let mut new_selected = Vec::new();
     if tracks_changed {
         let (tracks, sel) =
@@ -2350,6 +2583,8 @@ pub fn run_cs_script_impl(
 
     let env = dotnet_host::find_dotnet_env()?;
     let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+    // mídia importada pelo script (AddMedia) fica aqui até o fim da execução
+    let probe = ProbeRun::start(seq);
     let stage = TempDirGuard(std::env::temp_dir().join(format!(
         "neoveg_cs_{}_{}",
         std::process::id(),
@@ -2363,7 +2598,7 @@ pub fn run_cs_script_impl(
 
     if let Some(src) = source_or_none {
         let dll_path = compile_cs_project(&env, Some(src), &stage.0)?;
-        let payload = build_snapshot(session, &result_path, None)?;
+        let payload = build_snapshot(session, &result_path, None, probe.token())?;
         last_exit_code = dotnet_host::invoke_component(
             &env,
             &dll_path,
@@ -2373,7 +2608,8 @@ pub fn run_cs_script_impl(
         )?;
     } else if env.has_sdk {
         let loader_dll = ensure_bridge_dll(&env)?;
-        let bridge_payload = build_snapshot(session, &result_path, Some(script_path))?;
+        let bridge_payload =
+            build_snapshot(session, &result_path, Some(script_path), probe.token())?;
         last_exit_code = dotnet_host::invoke_component(
             &env,
             &loader_dll,
@@ -2395,7 +2631,7 @@ pub fn run_cs_script_impl(
             ))
         })?;
 
-        let payload = build_snapshot(session, &result_path, None)?;
+        let payload = build_snapshot(session, &result_path, None, probe.token())?;
         let mut type_candidates = Vec::new();
         if let Some(stem) = script_path.file_stem().and_then(|s| s.to_str()) {
             let trimmed = stem.trim();
@@ -2450,5 +2686,5 @@ pub fn run_cs_script_impl(
     let parsed: ScriptOutputPayload = serde_json::from_str(&res_text)
         .map_err(|e| NeovegError::Json(format!("resposta JSON inválida do script C#: {e}")))?;
 
-    apply_script_output(parsed, session, host, messages_out)
+    apply_script_output(parsed, probe.take(), session, host, messages_out)
 }

@@ -679,6 +679,14 @@ impl App {
         let items = self.project.media.clone();
         for m in items {
             self.media.remove(m.id);
+            self.spawn_media_load(m);
+        }
+    }
+
+    /// Abre em segundo plano a mídia de um item do projeto; o resultado
+    /// volta como `LoadMsg::Reloaded`.
+    fn spawn_media_load(&mut self, m: MediaItem) {
+        {
             let tx = self.loader_tx.clone();
             self.loading += 1;
             let spawned = util::spawn("recarregar-midia", move || {
@@ -2436,10 +2444,24 @@ impl App {
         else {
             return;
         };
+        let before: std::collections::HashSet<u64> =
+            self.session.project.media.iter().map(|m| m.id).collect();
         let res = crate::util::catch_isolated(|| {
             neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
         });
         self.sync_after_session();
+        // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
+        let novas: Vec<MediaItem> = self
+            .session
+            .project
+            .media
+            .iter()
+            .filter(|m| !before.contains(&m.id) && !self.media.contains(m.id))
+            .cloned()
+            .collect();
+        for m in novas {
+            self.spawn_media_load(m);
+        }
         match res {
             Ok(Ok(msgs)) => {
                 if let Some(last) = msgs.last() {
