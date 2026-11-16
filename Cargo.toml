@@ -19,7 +19,9 @@ neoveg_engine = { path = "crates/neoveg_engine" }
 neoveg_scripting = { path = "crates/neoveg_scripting" }
 neoveg_ui = { path = "crates/neoveg_ui" }
 
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "glow", "accesskit"] }
+# `x11` e `wayland`: sem pelo menos um deles o winit não compila no Linux
+# (`compile_error!`); no Windows e no macOS não mudam nada.
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "glow", "accesskit", "x11", "wayland"] }
 egui_tiles = "0.12"
 fundsp = { version = "0.23", default-features = false, features = ["std", "fft"] }
 rubato = "5.1"
