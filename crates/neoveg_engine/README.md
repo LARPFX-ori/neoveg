@@ -42,3 +42,8 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 
 - **Edição de referência:** Especificações públicas **SubRip Text (`.srt`)** (`HH:MM:SS,mmm --> HH:MM:SS,mmm`) e **W3C WebVTT — *Web Video Text Tracks Format*** (cabeçalho `WEBVTT`, blocos `NOTE`/`STYLE`/`REGION`, deixas `(HH:)?MM:SS.mmm --> ...`, ajustes `align:` / `line:`).
 - **Método de implementação:** Sala limpa com aritmética exata de milissegundos em `Ticks`, sanitização linear de tags inline sem retrocesso e criação de faixas superiores `GenSpec::Text` compatíveis com Desfazer e exportação bidirecional (`fuzz_subtitles_srt_and_vtt`).
+
+### AVI (`.avi`, MJPEG + PCM) — `src/media/avi.rs`
+
+- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
+- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`). A escrita grava segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
