@@ -3590,7 +3590,8 @@ impl App {
                             .media(e.media_id)
                             .and_then(|m| m.duration)
                             .or(Some(a.duration()));
-                        let gain = db_to_lin(e.gain_db).min(4.0);
+                        // ganho do evento e zoom vertical das formas de onda (Shift+↑/↓)
+                        let gain = db_to_lin(e.gain_db).min(4.0) * self.opts.waveform_zoom();
                         let alpha = if e.mute { 70 } else { 185 };
                         let gray = if body_light {
                             Color32::from_rgba_unmultiplied(22, 30, 42, alpha)

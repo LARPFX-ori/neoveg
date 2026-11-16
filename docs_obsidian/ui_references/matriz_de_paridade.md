@@ -6,7 +6,7 @@ Registro factual dos recursos comparados à semântica e ao fluxo operacional do
 | :--- | :--- | :--- | :--- |
 | **Tempo & Régua** | Tempo exato inteiro (`Ticks`), FPS racional e SMPTE *Drop-Frame* (`;`) | Implementado | `crates/neoveg_common/src/time.rs` |
 | **Timeline** | Múltiplas trilhas A/V, cabeçalhos (`Mute`, `Solo`, `Volume`, `Pan`, `FX`, `Envelopes`, `Lock`) | Implementado | `crates/neoveg_ui/src/timeline.rs` |
-| **Timeline** | Divisão (`S`), marcador (`M`), região (`R`), loop (`Q`/`Shift+Q`), Auto Ripple (`Ctrl+L`), Encaixe (`F8`) | Implementado | `crates/neoveg_engine/src/commands.rs`, `session.rs` |
+| **Timeline** | Divisão (`S`), marcador (`M`), região (`R`), loop (`Q`/`Shift+Q`), Auto Ripple (`Ctrl+L`), Encaixe (`F8`), zoom vertical das formas de onda (`Shift+↑`/`Shift+↓`, até 64×) | Implementado | `crates/neoveg_engine/src/commands.rs`, `session.rs` |
 | **Timeline** | Auto-crossfade ao sobrepor eventos na mesma trilha e alças de fade nos cantos superiores | Implementado | `crates/neoveg_engine/src/engine/{audio,video}.rs`, `crates/neoveg_ui/src/timeline.rs` |
 | **Timeline** | Alça de ganho em dB na borda superior de eventos de áudio (`Drag::Gain`) | Implementado | `crates/neoveg_ui/src/timeline.rs` |
 | **Timeline** | Cabeçalhos numerados com retângulos delimitados nas faixas A/V e controle contínuo de *Playback Rate* (`0.25×`–`4.00×`) | Implementado | `crates/neoveg_ui/src/timeline.rs`, `app.rs` |
