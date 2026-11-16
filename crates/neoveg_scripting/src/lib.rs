@@ -587,4 +587,150 @@ public class EntryPoint
         ctx.execute("edit.undo").unwrap();
         assert_eq!(ctx.session.project.tracks.len(), 2);
     }
+
+    /// Projeto com 3 trilhas (V1, A1, V2) e 3 marcadores, para os testes de
+    /// alterações em itens existentes.
+    fn projeto_com_itens() -> Project {
+        use neoveg_engine::model::{Marker, Track, TrackKind};
+        let mut p = Project::new_default();
+        p.tracks = vec![
+            Track::new(TrackKind::Video, "V1"),
+            Track::new(TrackKind::Audio, "A1"),
+            Track::new(TrackKind::Video, "V2"),
+        ];
+        p.markers = (0..3)
+            .map(|i| Marker {
+                id: neoveg_engine::model::new_id(),
+                t: neoveg_engine::time::Ticks::from_secs_i64(i + 1),
+                label: format!("M{i}"),
+            })
+            .collect();
+        p
+    }
+
+    fn roda_script(
+        tag: &str,
+        corpo: &str,
+        p: Project,
+    ) -> Option<(ScriptContext, Result<(), NeovegError>)> {
+        let env = find_dotnet_env().ok()?;
+        if !env.has_sdk {
+            return None;
+        }
+        let path = temp_cs_path(tag);
+        let src = format!(
+            "using System.Linq;\nusing ScriptPortal.Vegas;\n\npublic class EntryPoint\n{{\n    public void FromVegas(Vegas vegas)\n    {{\n{corpo}\n    }}\n}}\n"
+        );
+        std::fs::write(&path, src).ok()?;
+        let mut ctx = ScriptContext::new(p);
+        let r = run_cs_script(&path, &mut ctx);
+        let _ = std::fs::remove_file(&path);
+        Some((ctx, r))
+    }
+
+    /// Antes: renomear trilha, mover/renomear marcador e apagar marcador
+    /// "funcionavam" no script mas eram ignorados em silêncio.
+    #[test]
+    fn script_altera_trilhas_e_marcadores_existentes() {
+        let p = projeto_com_itens();
+        let ids: Vec<_> = p.tracks.iter().map(|t| t.id).collect();
+        let m1_id = p.markers[1].id;
+        let m2_t = p.markers[2].t;
+        let corpo = r#"
+        vegas.Project.Tracks[0].Name = "Câmera";
+        vegas.Project.Markers[0].Position = Timecode.FromSeconds(10.0);
+        vegas.Project.Markers[1].Label = "Novo rótulo";
+        vegas.Project.Markers.RemoveAt(2);"#;
+        let Some((ctx, r)) = roda_script("altera", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let pr = &ctx.session.project;
+        assert_eq!(pr.tracks[0].name, "Câmera");
+        assert_eq!(
+            pr.tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            ids,
+            "ids mantidos"
+        );
+        assert_eq!(pr.markers.len(), 2, "marcador apagado");
+        assert!(pr.markers.iter().all(|m| m.t != m2_t));
+        let m0 = pr.markers.iter().find(|m| m.label == "M0").expect("M0");
+        assert_eq!(m0.t, neoveg_engine::time::Ticks::from_secs_i64(10));
+        let m1 = pr
+            .markers
+            .iter()
+            .find(|m| m.id == m1_id)
+            .expect("M1 mantém id");
+        assert_eq!(m1.label, "Novo rótulo");
+        assert_eq!(
+            m1.t,
+            neoveg_engine::time::Ticks::from_secs_i64(2),
+            "tempo exato mantido"
+        );
+    }
+
+    /// Antes: apagar e reordenar trilhas era ignorado, e trilha nova entrava
+    /// sempre no fim e sem o Mute pedido.
+    #[test]
+    fn script_apaga_reordena_e_insere_trilhas() {
+        let p = projeto_com_itens();
+        let (v1, v2) = (p.tracks[0].id, p.tracks[2].id);
+        let corpo = r#"
+        var t = vegas.Project.Tracks;
+        t.RemoveAt(1);
+        var v2 = t[1];
+        t.RemoveAt(1);
+        t.Insert(0, v2);
+        var nova = new AudioTrack { Name = "Narração", Mute = true };
+        t.Insert(1, nova);"#;
+        let Some((ctx, r)) = roda_script("reordena", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let pr = &ctx.session.project;
+        assert_eq!(pr.tracks.len(), 3);
+        assert_eq!(pr.tracks[0].id, v2);
+        assert_eq!(pr.tracks[1].name, "Narração");
+        assert!(pr.tracks[1].mute, "Mute da trilha nova aplicado");
+        assert_eq!(pr.tracks[2].id, v1);
+        assert!(pr.tracks.iter().all(|t| t.name != "A1"), "A1 apagada");
+    }
+
+    /// §3.1: a mesma trilha duas vezes na lista é recusada inteira.
+    #[test]
+    fn script_com_trilha_repetida_e_rejeitado_sem_mudar_nada() {
+        let p = projeto_com_itens();
+        let antes: Vec<_> = p.tracks.iter().map(|t| (t.id, t.name.clone())).collect();
+        let corpo = r#"
+        vegas.Project.Tracks[1].Name = "mudou";
+        vegas.Project.Tracks.Add(vegas.Project.Tracks[0]);"#;
+        let Some((ctx, r)) = roda_script("repetida", corpo, p) else {
+            return;
+        };
+        assert!(r.is_err());
+        let depois: Vec<_> = ctx
+            .session
+            .project
+            .tracks
+            .iter()
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+        assert_eq!(depois, antes);
+    }
+
+    /// Um script que só lê não cria passo de Desfazer nem muda o projeto.
+    #[test]
+    fn script_que_so_le_nao_muda_o_projeto() {
+        let p = projeto_com_itens();
+        let corpo = r#"
+        var n = vegas.Project.Tracks.Count + vegas.Project.Markers.Count;
+        vegas.ShowMessage("itens: " + n);"#;
+        let Some((ctx, r)) = roda_script("leitura", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ctx.session.undo.is_empty());
+        assert_eq!(ctx.session.project.tracks.len(), 3);
+        assert_eq!(ctx.session.project.markers.len(), 3);
+    }
 }
