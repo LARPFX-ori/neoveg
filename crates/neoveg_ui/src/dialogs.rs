@@ -27,6 +27,8 @@ pub struct RenderDialogState {
     pub quality: u8,
     pub include_audio: bool,
     pub wav_bits: WavBits,
+    pub video_bitrate_kbps: u32,
+    pub audio_bitrate_kbps: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -41,9 +43,89 @@ struct RenderTemplate {
     quality: u8,
     include_audio: bool,
     wav_bits: WavBits,
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
 }
 
 const RENDER_TEMPLATES: &[RenderTemplate] = &[
+    RenderTemplate {
+        id: "mp4.1080p",
+        format: RenderFormat::Mp4H264,
+        title: "MP4 H.264 1080p Web (12 Mbps + AAC)",
+        summary: "H.264 Main + AAC 192 kbps (Windows Media Foundation)",
+        resolution: Some((1920, 1080)),
+        half_project: false,
+        quality: 90,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 12_000,
+        audio_bitrate_kbps: 192,
+    },
+    RenderTemplate {
+        id: "mp4.project",
+        format: RenderFormat::Mp4H264,
+        title: "MP4 H.264 igual ao projeto (+ AAC)",
+        summary: "H.264 na resolução da timeline via Media Foundation",
+        resolution: None,
+        half_project: false,
+        quality: 90,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 15_000,
+        audio_bitrate_kbps: 192,
+    },
+    RenderTemplate {
+        id: "hevc.4k",
+        format: RenderFormat::Mp4Hevc,
+        title: "MP4 HEVC / H.265 4K UHD (20 Mbps)",
+        summary: "HEVC de alta eficiência para 4K/UHD + AAC 256 kbps",
+        resolution: Some((3840, 2160)),
+        half_project: false,
+        quality: 92,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 20_000,
+        audio_bitrate_kbps: 256,
+    },
+    RenderTemplate {
+        id: "mov.project",
+        format: RenderFormat::MovH264,
+        title: "QuickTime MOV H.264 igual ao projeto",
+        summary: "Contêiner .mov com H.264 + áudio AAC",
+        resolution: None,
+        half_project: false,
+        quality: 92,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 18_000,
+        audio_bitrate_kbps: 192,
+    },
+    RenderTemplate {
+        id: "3gp.mobile",
+        format: RenderFormat::ThreeGp,
+        title: "3GPP 360p (Dispositivos móveis)",
+        summary: "Contêiner 3GP compacto 640×360 H.264 + AAC",
+        resolution: Some((640, 360)),
+        half_project: false,
+        quality: 85,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 1_500,
+        audio_bitrate_kbps: 128,
+    },
+    RenderTemplate {
+        id: "wmv.1080p",
+        format: RenderFormat::Wmv,
+        title: "WMV Windows Media 1080p (+ WMA)",
+        summary: "Windows Media Video WMV3 + áudio WMA",
+        resolution: Some((1920, 1080)),
+        half_project: false,
+        quality: 90,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 10_000,
+        audio_bitrate_kbps: 192,
+    },
     RenderTemplate {
         id: "avi.project",
         format: RenderFormat::AviMjpeg,
@@ -54,6 +136,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 90,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 12_000,
+        audio_bitrate_kbps: 192,
     },
     RenderTemplate {
         id: "avi.1080p",
@@ -65,6 +149,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 92,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 12_000,
+        audio_bitrate_kbps: 192,
     },
     RenderTemplate {
         id: "avi.720p",
@@ -76,6 +162,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 88,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 8_000,
+        audio_bitrate_kbps: 192,
     },
     RenderTemplate {
         id: "avi.4k",
@@ -87,6 +175,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 94,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 24_000,
+        audio_bitrate_kbps: 192,
     },
     RenderTemplate {
         id: "avi.vertical",
@@ -98,6 +188,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 90,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 12_000,
+        audio_bitrate_kbps: 192,
     },
     RenderTemplate {
         id: "avi.draft",
@@ -109,6 +201,34 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 75,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 6_000,
+        audio_bitrate_kbps: 128,
+    },
+    RenderTemplate {
+        id: "avi.raw",
+        format: RenderFormat::AviUncompressed,
+        title: "AVI sem compactação RGB24 (Full)",
+        summary: "Quadros DIB RGB24 puros sem perdas + PCM 16 bits",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 192,
+    },
+    RenderTemplate {
+        id: "gif.half",
+        format: RenderFormat::AnimatedGif,
+        title: "GIF animado Web (1/2 projeto)",
+        summary: "Loop infinito em GIF quantizado em metade da resolução",
+        resolution: None,
+        half_project: true,
+        quality: 90,
+        include_audio: false,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
     },
     RenderTemplate {
         id: "png.project",
@@ -120,17 +240,125 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 100,
         include_audio: true,
         wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
     },
     RenderTemplate {
-        id: "png.half",
-        format: RenderFormat::PngSequence,
-        title: "Sequência PNG reduzida (1/2)",
-        summary: "Quadros PNG em metade da resolução do projeto",
+        id: "jpg.seq",
+        format: RenderFormat::JpegSequence,
+        title: "Sequência JPEG 90% (Full)",
+        summary: "Quadros JPEG enumerados + áudio WAV ao lado",
         resolution: None,
-        half_project: true,
+        half_project: false,
+        quality: 90,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "tiff.seq",
+        format: RenderFormat::TiffSequence,
+        title: "Sequência TIFF sem perdas (Full)",
+        summary: "Arquivos TIFF RGB8 + WAV para gráfica e pós-produção",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "tga.seq",
+        format: RenderFormat::TgaSequence,
+        title: "Sequência Targa TGA com canal Alfa",
+        summary: "Quadros TGA RGBA32 + WAV para composição VFX",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "bmp.seq",
+        format: RenderFormat::BmpSequence,
+        title: "Sequência BMP Windows (Full)",
+        summary: "Bitmap RGB8 puro em sequência",
+        resolution: None,
+        half_project: false,
         quality: 100,
         include_audio: false,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "webp.seq",
+        format: RenderFormat::WebpSequence,
+        title: "Sequência WebP sem perdas (Alfa)",
+        summary: "Quadros WebP RGBA sem perdas",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: false,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "ppm.seq",
+        format: RenderFormat::PnmSequence,
+        title: "Sequência PNM / PPM P6",
+        summary: "Portable Pixmap RGB bruto interoperável",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: false,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "qoi.seq",
+        format: RenderFormat::QoiSequence,
+        title: "Sequência QOI sem perdas (Alfa)",
+        summary: "Quite OK Image ultrarrápida em RGBA",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: false,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "dpx.seq",
+        format: RenderFormat::DpxSequence,
+        title: "Sequência DPX SMPTE 268M (Cinema)",
+        summary: "Quadros DPX SDPX v2.0 para cinema e color grading",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "exr.seq",
+        format: RenderFormat::ExrSequence,
+        title: "Sequência OpenEXR HDR (VFX)",
+        summary: "Quadros OpenEXR com canal alfa para pipelines HDR/VFX",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Float32,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
     },
     RenderTemplate {
         id: "y4m.master",
@@ -142,6 +370,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 100,
         include_audio: true,
         wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
     },
     RenderTemplate {
         id: "wav.16",
@@ -153,6 +383,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 100,
         include_audio: true,
         wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
     },
     RenderTemplate {
         id: "wav.24",
@@ -164,6 +396,8 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 100,
         include_audio: true,
         wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
     },
     RenderTemplate {
         id: "wav.32f",
@@ -175,6 +409,138 @@ const RENDER_TEMPLATES: &[RenderTemplate] = &[
         quality: 100,
         include_audio: true,
         wav_bits: WavBits::Float32,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "bwf.24",
+        format: RenderFormat::Bwf,
+        title: "Broadcast Wave BWF 24 bits (EBU bext)",
+        summary: "WAV profissional de radiodifusão com metadados EBU Tech 3285",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "rf64.32f",
+        format: RenderFormat::Rf64,
+        title: "EBU RF64 Float 32 bits (Sem limite 4 GB)",
+        summary: "Extensão RIFF 64 bits EBU Tech 3306 para longas metragens",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Float32,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "w64.24",
+        format: RenderFormat::Wave64,
+        title: "Sony Wave64 PCM 24 bits",
+        summary: "Contêiner WAVE de 64 bits tradicional do ecossistema VEGAS",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "aiff.24",
+        format: RenderFormat::Aiff,
+        title: "Apple AIFF PCM 24 bits",
+        summary: "Intercâmbio sem perdas big-endian para DAWs e macOS",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm24,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "au.16",
+        format: RenderFormat::Au,
+        title: "Sun / NeXT AU PCM 16 bits",
+        summary: "Áudio clássico Unix/NeXT big-endian",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "caf.32f",
+        format: RenderFormat::Caf,
+        title: "Apple Core Audio Format (.caf)",
+        summary: "Contêiner 64 bits Core Audio Format sem limite de tamanho",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Float32,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "qoa.192",
+        format: RenderFormat::Qoa,
+        title: "QOA (Quite OK Audio)",
+        summary: "Compressão temporal de áudio aberta a 3,2 bits por amostra",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 0,
+    },
+    RenderTemplate {
+        id: "m4a.aac",
+        format: RenderFormat::AacM4a,
+        title: "AAC Estéreo (.m4a, 256 kbps)",
+        summary: "Áudio AAC comprimido via Media Foundation",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 256,
+    },
+    RenderTemplate {
+        id: "wma.192",
+        format: RenderFormat::Wma,
+        title: "Windows Media Audio (.wma, 192 kbps)",
+        summary: "Áudio WMA via Media Foundation",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 192,
+    },
+    RenderTemplate {
+        id: "mp3.192",
+        format: RenderFormat::Mp3,
+        title: "MP3 Estéreo (Media Foundation)",
+        summary: "Áudio MP3 via Media Foundation (quando disponível no SO)",
+        resolution: None,
+        half_project: false,
+        quality: 100,
+        include_audio: true,
+        wav_bits: WavBits::Pcm16,
+        video_bitrate_kbps: 0,
+        audio_bitrate_kbps: 192,
     },
 ];
 
@@ -254,6 +620,9 @@ pub struct Dialogs {
     pub convert_offer: Option<crate::convert_dialog::ConvertOffer>,
     /// Conversão em andamento.
     pub convert_job: Option<crate::convert_dialog::ConvertJob>,
+    /// *Editar conjunto de botões visíveis* (botão Mais do cabeçalho de
+    /// faixa): `true` = faixas de vídeo, e o rascunho dos botões.
+    pub header_buttons: Option<(bool, neoveg_common::prefs::HeaderButtons)>,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -303,29 +672,43 @@ impl Dialogs {
                     .unwrap_or_default()
                     .join("render.avi")
             });
-        let (path, format, template_id, filter, only_favorites, quality, include_audio, wav_bits) =
-            match &self.render {
-                Some(r) => (
-                    r.path.clone(),
-                    r.format,
-                    r.template_id.clone(),
-                    r.filter.clone(),
-                    r.only_favorites,
-                    r.quality,
-                    r.include_audio,
-                    r.wav_bits,
-                ),
-                None => (
-                    base.to_string_lossy().to_string(),
-                    RenderFormat::AviMjpeg,
-                    "avi.project".to_string(),
-                    String::new(),
-                    false,
-                    90,
-                    true,
-                    WavBits::Pcm16,
-                ),
-            };
+        let (
+            path,
+            format,
+            template_id,
+            filter,
+            only_favorites,
+            quality,
+            include_audio,
+            wav_bits,
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
+        ) = match &self.render {
+            Some(r) => (
+                r.path.clone(),
+                r.format,
+                r.template_id.clone(),
+                r.filter.clone(),
+                r.only_favorites,
+                r.quality,
+                r.include_audio,
+                r.wav_bits,
+                r.video_bitrate_kbps,
+                r.audio_bitrate_kbps,
+            ),
+            None => (
+                base.to_string_lossy().to_string(),
+                RenderFormat::AviMjpeg,
+                "avi.project".to_string(),
+                String::new(),
+                false,
+                90,
+                true,
+                WavBits::Pcm16,
+                12_000,
+                192,
+            ),
+        };
         self.render = Some(RenderDialogState {
             format,
             template_id,
@@ -337,6 +720,8 @@ impl Dialogs {
             quality,
             include_audio,
             wav_bits,
+            video_bitrate_kbps,
+            audio_bitrate_kbps,
         });
         self.render_use_loop = p.loop_region.is_some() && self.render_use_loop;
     }
@@ -415,7 +800,73 @@ impl App {
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
+        self.header_buttons_window(ctx);
         self.misc_windows(ctx);
+    }
+
+    /// *Editar conjunto de botões visíveis* (manual do VEGAS Pro 21, p. 69):
+    /// quais botões aparecem no cabeçalho das faixas de vídeo ou de áudio.
+    fn header_buttons_window(&mut self, ctx: &egui::Context) {
+        use neoveg_common::prefs::HeaderButtons;
+        let Some((video, mut draft)) = self.dlg.header_buttons else {
+            return;
+        };
+        let mut open = true;
+        let mut done: Option<bool> = None;
+        let title = if video {
+            "Botões visíveis: faixas de vídeo"
+        } else {
+            "Botões visíveis: faixas de áudio"
+        };
+        egui::Window::new(title)
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.checkbox(&mut draft.mute, "Mudo");
+                ui.checkbox(&mut draft.solo, "Solo");
+                ui.checkbox(&mut draft.fx, "Efeitos da trilha (fx)");
+                if video {
+                    ui.checkbox(
+                        &mut draft.track_motion,
+                        "Movimento da trilha (Track Motion)",
+                    );
+                }
+                ui.label(
+                    egui::RichText::new("Os botões ocultos continuam no botão Mais (…).")
+                        .small()
+                        .weak(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Mostrar todos").clicked() {
+                        draft = HeaderButtons::all(true);
+                    }
+                    if ui.button("Ocultar todos").clicked() {
+                        draft = HeaderButtons::all(false);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        done = Some(true);
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        done = Some(false);
+                    }
+                });
+            });
+        match done {
+            Some(true) => {
+                self.prefs.track_header.set(video, draft);
+                let _ = self.prefs.save();
+                self.dlg.header_buttons = None;
+            }
+            Some(false) => self.dlg.header_buttons = None,
+            None if !open => self.dlg.header_buttons = None,
+            None => self.dlg.header_buttons = Some((video, draft)),
+        }
     }
 
     // -----------------------------------------------------------------
@@ -633,11 +1084,16 @@ impl App {
                     });
                     ui.end_row();
                     ui.label("Opções");
-                    ui.horizontal_wrapped(|ui| {
-                        changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
-                        changed |= ui.checkbox(&mut e.locked, "Travado").changed();
-                        changed |= ui.checkbox(&mut e.looped, "Loop").changed();
-                        changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                    // linhas fixas: `horizontal_wrapped` dentro da Grid quebra
+                    // depois de a altura da linha ser medida e invade a linha
+                    // de baixo (Transição de entrada)
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
+                            changed |= ui.checkbox(&mut e.locked, "Travado").changed();
+                            changed |= ui.checkbox(&mut e.looped, "Loop").changed();
+                            changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                        });
                         if is_video {
                             changed |= ui
                                 .checkbox(&mut e.maintain_aspect, "Manter proporção")
@@ -1666,9 +2122,13 @@ impl App {
         let fonts = self.gen_fonts.clone();
         let mut open = true;
         let before = spec.clone();
+        // centralizada: sem posição, o egui a punha no primeiro espaço livre,
+        // por cima dos cabeçalhos de faixa
         egui::Window::new("Mídia gerada")
             .open(&mut open)
             .default_width(420.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| match &mut spec {
                 GenSpec::Text(t) => {
                     ui.label("Texto:");
@@ -1956,6 +2416,12 @@ impl App {
                         r.quality = tmpl.quality;
                         r.include_audio = tmpl.include_audio;
                         r.wav_bits = tmpl.wav_bits;
+                        if tmpl.video_bitrate_kbps > 0 {
+                            r.video_bitrate_kbps = tmpl.video_bitrate_kbps;
+                        }
+                        if tmpl.audio_bitrate_kbps > 0 {
+                            r.audio_bitrate_kbps = tmpl.audio_bitrate_kbps;
+                        }
                         r.path = PathBuf::from(&r.path)
                             .with_extension(r.format.ext())
                             .to_string_lossy()
@@ -2006,7 +2472,7 @@ impl App {
                         });
                         ui.end_row();
 
-                        if r.format != RenderFormat::Wav {
+                        if !r.format.is_audio_only() {
                             ui.label("Resolução");
                             ui.horizontal(|ui| {
                                 ui.add(egui::DragValue::new(&mut r.width).range(16..=8192));
@@ -2025,25 +2491,43 @@ impl App {
                             r.height = (r.height / 2).max(8) * 2;
                             ui.end_row();
                         }
-                        if r.format == RenderFormat::AviMjpeg {
+                        if r.format.uses_jpeg_quality() {
                             ui.label("Qualidade JPEG");
                             ui.add(egui::Slider::new(&mut r.quality, 30..=100));
                             ui.end_row();
                         }
-                        if r.format != RenderFormat::Wav {
+                        if r.format.uses_video_bitrate() {
+                            ui.label("Taxa de bits vídeo");
+                            ui.add(
+                                egui::DragValue::new(&mut r.video_bitrate_kbps)
+                                    .range(500..=100_000)
+                                    .suffix(" kbps"),
+                            );
+                            ui.end_row();
+                        }
+                        if r.format.uses_audio_bitrate() {
+                            ui.label("Taxa de bits áudio");
+                            ui.add(
+                                egui::DragValue::new(&mut r.audio_bitrate_kbps)
+                                    .range(64..=512)
+                                    .suffix(" kbps"),
+                            );
+                            ui.end_row();
+                        }
+                        if !r.format.is_audio_only() {
                             ui.label("Áudio");
                             ui.checkbox(
                                 &mut r.include_audio,
-                                if r.format == RenderFormat::AviMjpeg {
-                                    "Incluir (PCM 16 bits)"
+                                if r.format.has_embedded_audio() {
+                                    "Incluir áudio no arquivo"
                                 } else {
                                     "Gerar WAV ao lado"
                                 },
                             );
                             ui.end_row();
                         }
-                        if r.format != RenderFormat::AviMjpeg {
-                            ui.label("WAV");
+                        if r.format.uses_wav_bits() {
+                            ui.label("Profundidade PCM");
                             ui.horizontal(|ui| {
                                 ui.selectable_value(&mut r.wav_bits, WavBits::Pcm16, "16 bits");
                                 ui.selectable_value(&mut r.wav_bits, WavBits::Pcm24, "24 bits");
@@ -2079,7 +2563,7 @@ impl App {
                     right.add_space(6.0);
                     right.group(|ui| {
                         ui.label(egui::RichText::new("Resumo da saída").small().strong());
-                        let video_line = if r.format == RenderFormat::Wav {
+                        let video_line = if r.format.is_audio_only() {
                             format!("Somente áudio • {sr} Hz")
                         } else {
                             format!(
@@ -2101,6 +2585,14 @@ impl App {
                             ui.label(
                                 egui::RichText::new(
                                     "AVI Motion-JPEG é compatível com VLC e editores externos (acima de 1 GB usa as extensões OpenDML).",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        } else if r.format.uses_windows_mf() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Codificação acelerada via Windows Media Foundation (IMFSinkWriter).",
                                 )
                                 .small()
                                 .weak(),
@@ -2172,6 +2664,8 @@ impl App {
                     jpeg_quality: r.quality,
                     include_audio: r.include_audio,
                     wav_bits: r.wav_bits,
+                    video_bitrate_kbps: r.video_bitrate_kbps,
+                    audio_bitrate_kbps: r.audio_bitrate_kbps,
                 };
                 self.project.sort_events();
                 let progress = crate::render::spawn(
@@ -3297,7 +3791,7 @@ fn edit_layout_checkboxes(
     changed |= ui
         .checkbox(
             &mut cfg.master_bus_docked,
-            "Exibir Master Bus acoplado à direita (padrão VEGAS Pro 21)",
+            "Exibir Master Bus acoplado à direita (padrão)",
         )
         .changed();
     if ui

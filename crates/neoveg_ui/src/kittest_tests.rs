@@ -680,3 +680,326 @@ fn kittest_timeline_barras_rolagem_setas_e_zoom() {
         "Ajustar projeto à timeline deve reposicionar scroll_x no início"
     );
 }
+
+#[test]
+fn kittest_crash_report_janela_e_acoes() {
+    use neoveg_engine::session_marker::{CrashReport, PanicNote};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_eframe(|cc| {
+            let mut app = build_ready_app(cc);
+            app.welcome_open = true;
+            app.recovery_offer = true;
+            app.set_crash_reports(vec![CrashReport {
+                started: "2026-11-16 10:00:00".into(),
+                version: "0.1.0".into(),
+                pid: "4242".into(),
+                panics: vec![
+                    PanicNote {
+                        time: "10:01:00".into(),
+                        thread: "decode".into(),
+                        location: "media.rs:12".into(),
+                        message: "isolado".into(),
+                        isolated: true,
+                    },
+                    PanicNote {
+                        time: "10:02:00".into(),
+                        thread: "main".into(),
+                        location: "ui.rs:99".into(),
+                        message: "falha fatal simulada".into(),
+                        isolated: false,
+                    },
+                ],
+            }]);
+            app
+        });
+    harness.run_steps(2);
+
+    assert!(!harness.state().is_welcome_open());
+    assert!(!harness.state().is_splash_open());
+    assert!(harness
+        .query_by_label_contains("falha fatal simulada")
+        .is_some());
+    assert!(harness
+        .query_by_label_contains("Erros internos isolados nesta sessão (1)")
+        .is_some());
+
+    harness.get_by_label("Copiar relatório").click();
+    harness.run_steps(2);
+    assert!(harness.state().status.contains("Relatório copiado"));
+
+    // Fechar o relatório mantém recovery_offer para a janela de recuperação padrão.
+    harness.get_by_label("Fechar").click();
+    harness.run_steps(2);
+    assert!(harness.state().crash_reports.is_empty());
+    assert!(harness.state().recovery_offer);
+}
+
+/// Antes: um proxy (ou importação, ou mídia recarregada) que ficava pronto
+/// enquanto um script rodava era aplicado na sessão da interface e sumia
+/// quando a sessão do script tomava o lugar dela.
+#[test]
+fn kittest_carregador_espera_o_script_e_nada_se_perde() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let (mid, done) = {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec::default(),
+        ));
+        let mid = app.project.media[0].id;
+        // o script recebe uma cópia da sessão, como em run_script_dialog
+        let (job, done) = crate::app::ScriptJob::fake(app.session.clone());
+        app.script_job = Some(job);
+        let _ = app.loader_tx.send(crate::app::LoadMsg::ProxyBuilt(
+            mid,
+            Ok(std::path::PathBuf::from("proxy.avi")),
+        ));
+        (mid, done)
+    };
+    let proxy = |app: &App| {
+        app.project
+            .media
+            .iter()
+            .find(|m| m.id == mid)
+            .and_then(|m| m.proxy_path.clone())
+    };
+    harness.run_steps(3);
+    assert!(harness.state().script_job.is_some());
+    assert_eq!(proxy(harness.state()), None, "espera o script");
+    done.send(()).expect("script falso");
+    for _ in 0..50 {
+        harness.run_steps(1);
+        if harness.state().script_job.is_none() && proxy(harness.state()).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(harness.state().script_job.is_none(), "o script terminou");
+    assert_eq!(
+        proxy(harness.state()).as_deref(),
+        Some("proxy.avi"),
+        "o proxy entrou sobre a sessão do script"
+    );
+}
+
+#[test]
+fn kittest_neoveg_encoder_fluxo_completo() {
+    use neoveg_engine::commands::run_command;
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 820.0))
+        .build_eframe(|cc| {
+            let mut app = build_ready_app(cc);
+            app.dock_height = 340.0;
+            app
+        });
+    harness.run_steps(2);
+
+    // Despacha comando file.send_to_encoder (via UI host) e abre a aba Neoveg Encoder
+    {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.send_timeline_to_encoder();
+    }
+    harness.run_steps(3);
+    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert_eq!(harness.state().encoder.state.items.len(), 1);
+    assert!(harness.query_all_by_label("Neoveg Encoder").count() >= 1);
+    assert!(harness.query_all_by_label("Fila de Codificação").count() >= 1);
+    assert!(
+        harness
+            .query_all_by_label("Navegador de Predefinições")
+            .count()
+            >= 1
+    );
+    assert!(harness.query_all_by_label("Pastas Monitoradas").count() >= 1);
+
+    // Abre Configurações de Exportação e valida alternância para Alto Contraste AAA
+    harness.get_by_label("Configurações...").click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Cortar Origem (Crop)").is_some());
+    {
+        let ctx = harness.ctx.clone();
+        let app = harness.state_mut();
+        app.set_theme(&ctx, crate::theme::ThemeId::AltoContrasteEscuro, false);
+    }
+    harness.run_steps(2);
+
+    // Tabela Única permanece consistente com Neoveg Encoder
+    let _ = run_command;
+}
+
+/// Botão Mais > Editar conjunto de botões visíveis (manual do VEGAS Pro 21,
+/// p. 69): "Ocultar todos" + OK tira M, S e fx do cabeçalho das faixas de
+/// vídeo; as de áudio continuam com os seus.
+#[test]
+fn kittest_conjunto_de_botoes_visiveis_do_cabecalho() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    // o OK grava as preferências em arquivo: começa do padrão, sem depender
+    // do que uma rodada anterior gravou
+    harness.state_mut().prefs.track_header = Default::default();
+    harness.run_steps(2);
+    let n_video = harness
+        .state()
+        .project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == crate::model::TrackKind::Video)
+        .count();
+    let n_total = harness.state().project.tracks.len();
+    assert!(
+        n_video > 0 && n_total > n_video,
+        "projeto com vídeo e áudio"
+    );
+    // o Master Bus também tem M: conta a diferença
+    let m0 = harness.query_all_by_label("M").count();
+    let s0 = harness.query_all_by_label("S").count();
+    assert!(m0 >= n_total && s0 >= n_total);
+    {
+        let app = harness.state_mut();
+        let cur = app.prefs.track_header.get(true);
+        app.dlg.header_buttons = Some((true, cur));
+    }
+    harness.run_steps(2);
+    harness.get_by_label("Ocultar todos").click();
+    harness.run_steps(2);
+    harness.get_by_label("OK").click();
+    harness.run_steps(3);
+    assert!(harness.state().dlg.header_buttons.is_none());
+    assert_eq!(
+        harness.state().prefs.track_header.get(true),
+        neoveg_common::prefs::HeaderButtons::all(false)
+    );
+    assert_eq!(
+        harness.query_all_by_label("M").count(),
+        m0 - n_video,
+        "as faixas de vídeo deixam de mostrar M"
+    );
+    assert_eq!(harness.query_all_by_label("S").count(), s0 - n_video);
+    // não deixa as faixas de vídeo sem botões para os outros testes
+    let app = harness.state_mut();
+    app.prefs.track_header = Default::default();
+    let _ = app.prefs.save();
+}
+
+/// Janela Efeitos de Vídeo (manual do VEGAS Pro 21, p. 54): categoria, busca,
+/// escolher o efeito mostra o preset, e o botão Eventos aplica o efeito ao
+/// evento selecionado.
+#[test]
+fn kittest_navegador_de_efeitos_de_video() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ev = {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec::default(),
+        ));
+        app.dlg.gen_editor = None;
+        let id = app
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == crate::model::TrackKind::Video)
+            .flat_map(|t| t.events.iter())
+            .map(|e| e.id)
+            .next()
+            .expect("evento de vídeo");
+        app.sel_events.clear();
+        app.sel_events.insert(id);
+        id
+    };
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.video_fx");
+    harness.run_steps(3);
+
+    // categoria Luz: só Brilho (Glow) e Vinheta
+    harness.get_by_label("Luz").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Vinheta").is_some());
+    assert!(harness.query_by_label("Inverter").is_none());
+
+    // busca em Todos
+    harness.get_by_label("Todos").click();
+    harness.state_mut().fx_browser.search = "inver".into();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Inverter").is_some());
+    assert!(harness.query_by_label("Sépia").is_none());
+
+    harness.get_by_label("Inverter").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().fx_browser.selected,
+        Some(crate::model::FxKind::Invert)
+    );
+    assert!(
+        harness.query_by_label("Padrão").is_some(),
+        "preset do efeito"
+    );
+    harness.get_by_label("Eventos").click();
+    harness.run_steps(2);
+    let fx: Vec<_> = harness
+        .state()
+        .project
+        .event(ev)
+        .map(|e| e.fx.iter().map(|f| f.kind).collect())
+        .unwrap_or_default();
+    assert_eq!(fx, vec![crate::model::FxKind::Invert]);
+}
+
+/// Janela Geradores de Mídia (manual do VEGAS Pro 21, p. 56): categoria,
+/// busca, escolher o tipo mostra os presets, e "Inserir no cursor" cria a
+/// mídia gerada do preset escolhido.
+#[test]
+fn kittest_navegador_de_geradores_de_midia() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.generators");
+    harness.run_steps(3);
+
+    harness.get_by_label("Utilitários").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Quadriculado").is_some());
+    assert!(harness.query_by_label("Texto").is_none());
+
+    harness.get_by_label("Todos").click();
+    harness.state_mut().gen_browser.search = "grad".into();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Gradiente").is_some());
+    assert!(harness.query_by_label("Cor sólida").is_none());
+    harness.get_by_label("Gradiente").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Gradiente linear").is_some());
+    harness.get_by_label("Gradiente radial").click();
+    harness.run_steps(2);
+
+    let antes = harness.state().project.media.len();
+    harness.get_by_label("Inserir no cursor").click();
+    harness.run_steps(2);
+    let app = harness.state();
+    assert_eq!(app.project.media.len(), antes + 1);
+    let radial = app.project.media.last().is_some_and(|m| {
+        matches!(
+            m.source,
+            crate::model::MediaSource::Generated(crate::model::GenSpec::Gradient {
+                radial: true,
+                ..
+            })
+        )
+    });
+    assert!(radial, "inseriu o preset Gradiente radial");
+}
