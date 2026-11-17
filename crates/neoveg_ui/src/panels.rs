@@ -611,6 +611,7 @@ impl App {
         let mut open_trimmer = None;
         let mut edit_gen = None;
         let mut build_proxy = None;
+        let mut open_external: Option<(neoveg_engine::integrations::ExternalApp, Id)> = None;
         egui::Grid::new("media_grid")
             .striped(true)
             .num_columns(3)
@@ -703,6 +704,17 @@ impl App {
                             edit_gen = Some(m.id);
                             ui.close_menu();
                         }
+                        ui.menu_button("Abrir em aplicativo externo", |ui| {
+                            use neoveg_engine::integrations::ExternalApp;
+                            for app in ExternalApp::ALL {
+                                let show = (m.has_video && app.can_edit_video_or_still())
+                                    || (m.has_audio && app.can_edit_audio());
+                                if show && ui.button(format!("{}...", app.name())).clicked() {
+                                    open_external = Some((app, m.id));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                         if ui.button("Remover do projeto").clicked() {
                             remove = Some(m.id);
                             ui.close_menu();
@@ -739,6 +751,9 @@ impl App {
         }
         if let Some(id) = edit_gen {
             self.dlg.gen_editor = Some(id);
+        }
+        if let Some((ext_app, id)) = open_external {
+            self.send_to_external_app(ext_app, None, Some(id));
         }
         if let Some(id) = add_as_take {
             let n = self.session.add_media_as_take_to_selected(id);

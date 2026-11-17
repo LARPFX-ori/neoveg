@@ -23,6 +23,7 @@ mod encoder_panel;
 mod fx_browser;
 mod gen_browser;
 mod icons;
+pub mod integrations_ui;
 pub mod layout;
 mod panels;
 mod plugin_manager;

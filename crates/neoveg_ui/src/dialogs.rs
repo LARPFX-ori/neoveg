@@ -556,10 +556,11 @@ pub enum PrefsCategory {
     Memory,
     AutoSave,
     Shortcuts,
+    Integrations,
 }
 
 impl PrefsCategory {
-    pub const ALL: [PrefsCategory; 8] = [
+    pub const ALL: [PrefsCategory; 9] = [
         PrefsCategory::General,
         PrefsCategory::Appearance,
         PrefsCategory::Editing,
@@ -568,6 +569,7 @@ impl PrefsCategory {
         PrefsCategory::Memory,
         PrefsCategory::AutoSave,
         PrefsCategory::Shortcuts,
+        PrefsCategory::Integrations,
     ];
 
     pub fn label(self) -> &'static str {
@@ -580,6 +582,7 @@ impl PrefsCategory {
             PrefsCategory::Memory => "Memória e Desempenho",
             PrefsCategory::AutoSave => "Salvamento Automático",
             PrefsCategory::Shortcuts => "Atalhos e Controles",
+            PrefsCategory::Integrations => "Aplicativos externos",
         }
     }
 }
@@ -3944,6 +3947,7 @@ fn render_prefs_category(
         PrefsCategory::Memory => prefs_memory(ui, cx, draft, act),
         PrefsCategory::AutoSave => prefs_autosave(ui, cx, draft),
         PrefsCategory::Shortcuts => prefs_shortcuts(ui, cx, draft, act),
+        PrefsCategory::Integrations => prefs_integrations(ui, cx, draft),
     }
 }
 
@@ -4499,4 +4503,76 @@ fn prefs_shortcuts(
             );
         },
     );
+}
+
+fn prefs_integrations(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    use neoveg_engine::integrations::{discovery::discover_app, ExternalApp};
+
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Suíte ArtCraft & Blender (Executáveis Manuais / Autodetecção)",
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Deixe vazio para detectar no PATH ou pastas padrão do sistema; defina manualmente se estiver em pasta portátil.",
+                )
+                .small()
+                .color(cx.theme.text_muted),
+            );
+            for app in ExternalApp::ALL {
+                let id = app.id();
+                let st = discover_app(app, &draft.external_apps, false);
+                let hint = if st.available() {
+                    st.desktop_exe
+                        .as_ref()
+                        .or(st.cli_exe.as_ref())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Detectado".into())
+                } else {
+                    "Automático".into()
+                };
+                if let Some(buf) = draft.external_apps.path_mut(id) {
+                    prefs_row(ui, inner_lw, &format!("{}:", app.name()), |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(buf)
+                                .desired_width(210.0)
+                                .hint_text(&hint),
+                        );
+                        if ui.small_button("...").clicked() {
+                            let mut fd = rfd::FileDialog::new();
+                            if cfg!(windows) {
+                                fd = fd.add_filter("Executável", &["exe"]);
+                            }
+                            if let Some(p) = fd.pick_file() {
+                                *buf = p.to_string_lossy().to_string();
+                            }
+                        }
+                        if !buf.is_empty() && ui.small_button("Limpar").clicked() {
+                            buf.clear();
+                        }
+                    });
+                }
+            }
+        },
+    );
+
+    prefs_group_box(ui, cx.theme, "Comportamento de Controle e Takes", |ui| {
+        prefs_row(ui, inner_lw, "Tempo limite RPC / CLI:", |ui| {
+            ui.add_sized(
+                [72.0, 20.0],
+                egui::DragValue::new(&mut draft.external_apps.rpc_timeout_secs)
+                    .range(5..=300)
+                    .speed(1),
+            );
+            ui.label("segundos (5–300 s)");
+        });
+        prefs_indented(ui, inner_lw, |ui| {
+            ui.checkbox(
+                &mut draft.external_apps.watch_edited_copies,
+                "Recarregar automaticamente cópias editadas salvas externamente",
+            );
+        });
+    });
 }

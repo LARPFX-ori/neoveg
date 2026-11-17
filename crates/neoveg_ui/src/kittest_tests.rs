@@ -1003,3 +1003,40 @@ fn kittest_navegador_de_geradores_de_midia() {
     });
     assert!(radial, "inseriu o preset Gradiente radial");
 }
+
+#[test]
+fn kittest_janela_integracoes_artcraft_e_blender() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "tools.integrations");
+    harness.run_steps(3);
+    assert!(harness.state().integrations.open);
+
+    for name in [
+        "PhotoCraft",
+        "VectorCraft",
+        "FilmCraft",
+        "EffectCraft",
+        "AniCraft",
+        "SoundCraft",
+        "Blender",
+    ] {
+        assert!(
+            harness.query_by_label(name).is_some(),
+            "app '{name}' deve aparecer na janela de Integrações"
+        );
+    }
+
+    harness.get_by_label("Configurar caminhos...").click();
+    harness.run_steps(3);
+    assert!(harness.state().dlg.prefs_open);
+    assert_eq!(
+        harness.state().dlg.prefs_tab,
+        crate::dialogs::PrefsCategory::Integrations
+    );
+}
