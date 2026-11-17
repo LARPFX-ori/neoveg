@@ -17,7 +17,7 @@ interface do próprio Neoveg em `docs/screenshots/` (seção abaixo). Fora elas:
 
 ## Ícones vetoriais nativos (`crates/neoveg_ui/src/icons.rs`)
 
-- **Recurso:** 70 ícones coloridos de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
+- **Recurso:** 73 ícones coloridos de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
 - **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, criados do zero em código Rust sem cópia ou traçado de terceiros)
 - **Licença:** `MIT OR Apache-2.0`
 - **Observações:** Nenhuma imagem ou SVG foi importada de bancos com licença restritiva/não-SPDX; os ícones se adaptam automaticamente aos 7 temas de cor (incluindo Alto Contraste WCAG AAA).

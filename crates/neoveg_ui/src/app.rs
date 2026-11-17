@@ -155,6 +155,10 @@ pub(crate) struct ScriptJob {
     started: std::time::Instant,
     media_before: std::collections::HashSet<u64>,
     rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+    /// Pedidos de janela da camada de Forms própria (Linux, macOS).
+    ui_rx: std::sync::mpsc::Receiver<crate::script_forms::UiCall>,
+    /// Janela do script aberta agora.
+    active: Option<crate::script_forms::Active>,
 }
 
 #[cfg(test)]
@@ -174,6 +178,9 @@ impl ScriptJob {
             started: std::time::Instant::now(),
             media_before: std::collections::HashSet::new(),
             rx,
+            // Sem remetente: o script de teste não abre janelas.
+            ui_rx: std::sync::mpsc::channel().1,
+            active: None,
         };
         (job, done_tx)
     }
@@ -1852,6 +1859,22 @@ impl App {
                     self.cmd_menu_btn(ui, "event.prev_take");
                     self.cmd_menu_btn(ui, "event.delete_active_take");
                 });
+                ui.menu_button("Ferramenta de edição", |ui| {
+                    for id in [
+                        "edit.tool.normal",
+                        "edit.tool.envelope",
+                        "edit.tool.selection",
+                        "edit.tool.zoom",
+                    ] {
+                        self.cmd_menu_btn(ui, id);
+                    }
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.mode.normal");
+                    self.cmd_menu_btn(ui, "edit.tool.mode.slip");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.next");
+                    self.cmd_menu_btn(ui, "edit.tool.prev");
+                });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
                 self.cmd_menu_btn(ui, "edit.insert_time");
@@ -2272,12 +2295,72 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
+            // Ferramentas de edição (manual do VEGAS Pro 21, pp. 75–76 e 236):
+            // Normal (com a seta dos modos), Envelope, Seleção e Zoom.
+            let tool = self.session.edit_tool;
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Normal,
+                Icon::NormalTool,
+                None,
+                "edit.tool.normal",
+            );
+            // A seta é desenhada em vetor: a fonte da interface não tem `▼`.
+            let arrow_btn = egui::Button::new("")
+                .min_size(egui::vec2(12.0, ui.spacing().interact_size.y))
+                .frame(false);
+            let modes = egui::menu::menu_custom_button(ui, arrow_btn, |ui| {
+                for id in ["edit.tool.mode.normal", "edit.tool.mode.slip"] {
+                    let mode = if id == "edit.tool.mode.slip" {
+                        neoveg_engine::session::EditMode::Slip
+                    } else {
+                        neoveg_engine::session::EditMode::Normal
+                    };
+                    let on = tool == neoveg_engine::session::EditTool::Normal
+                        && self.session.edit_mode == mode;
+                    let label = menu_label(id, &self.prefs.shortcuts);
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), id);
+                        ui.close_menu();
+                    }
+                }
+            });
+            crate::scrollbars::paint_arrow_glyph(
+                ui.painter(),
+                modes.response.rect,
+                crate::scrollbars::ArrowDir::Down,
+                ui.visuals().text_color(),
+            );
+            modes.response.on_hover_text("Modo da ferramenta Normal");
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Envelope,
+                Icon::EnvelopeTool,
+                None,
+                "edit.tool.envelope",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Selection,
+                Icon::SelectionTool,
+                None,
+                "edit.tool.selection",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Zoom,
+                Icon::ZoomGlass,
+                None,
+                "edit.tool.zoom",
+            );
+            ui.separator();
+
             // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
             // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
             // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
             // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
-            // sem botão porque a função não existe: Gravar, as ferramentas
-            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
+            // sem botão porque a função não existe: Gravar, os modos Shuffle,
+            // Slide, Stretch e Split Trim da ferramenta Normal, Smart Split,
             // Crossfades automáticos (sempre ligados), Travar envelopes e as
             // linhas do tempo aninhadas.
             for (icon, id) in [
@@ -2597,9 +2680,17 @@ impl App {
         let mut work = self.session.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let script = p.clone();
+        // janelas da camada de Forms própria são desenhadas por esta interface
+        let (ui, ui_rx) = crate::script_forms::bridge();
+        let options = neoveg_scripting::ScriptRunOptions {
+            ui: Some(ui),
+            // só para testar a camada própria no Windows
+            force_forms_shim: std::env::var_os("NEOVEG_SCRIPTS_FORMS_PROPRIA")
+                .is_some_and(|v| v == "1"),
+        };
         let spawned = crate::util::spawn("script-net", move || {
             let outcome = match crate::util::catch_isolated(|| {
-                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+                neoveg_scripting::run_cs_script_on_session_with(&script, &mut work, &options)
             }) {
                 Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
                 Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
@@ -2615,6 +2706,8 @@ impl App {
                     started: std::time::Instant::now(),
                     media_before,
                     rx,
+                    ui_rx,
+                    active: None,
                 });
             }
             Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
@@ -2624,15 +2717,28 @@ impl App {
     /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
     /// modal; ao terminar, aplica a sessão do script (ou só o erro).
     fn poll_script_job(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.script_job else {
+        let theme = self.theme.clone();
+        let Some(job) = &mut self.script_job else {
             return;
         };
         let (outcome, done) = match job.rx.try_recv() {
             Ok(r) => r,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // janela pedida pelo script (camada de Forms própria)
+                if job.active.is_none() {
+                    if let Ok(call) = job.ui_rx.try_recv() {
+                        job.active = crate::script_forms::Active::start(call);
+                    }
+                }
+                if let Some(active) = &mut job.active {
+                    if active.show(ctx) {
+                        job.active = None;
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    return;
+                }
                 let el = job.started.elapsed().as_secs_f64();
                 let path = job.path.display().to_string();
-                let theme = self.theme.clone();
                 egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         crate::splash::spinner_inline(ui, 20.0, el, &theme);
