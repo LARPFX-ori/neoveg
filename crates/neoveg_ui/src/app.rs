@@ -2193,17 +2193,23 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(
-                        egui::RichText::new(label)
-                            .small()
-                            .color(self.theme.text_muted),
-                    );
-                    ui.label(
-                        egui::RichText::new(txt)
-                            .monospace()
-                            .small()
-                            .color(self.theme.text_primary),
-                    );
+                    let name = egui::RichText::new(label)
+                        .small()
+                        .color(self.theme.text_muted);
+                    let value = egui::RichText::new(txt)
+                        .monospace()
+                        .small()
+                        .color(self.theme.text_primary);
+                    // a barra é desenhada da direita para a esquerda e o
+                    // `horizontal` herda isso: aí o valor entra primeiro, para
+                    // o nome ficar à esquerda dele na tela
+                    if ui.layout().prefer_right_to_left() {
+                        ui.label(value);
+                        ui.label(name);
+                    } else {
+                        ui.label(name);
+                        ui.label(value);
+                    }
                 });
             })
             .response
@@ -2236,9 +2242,27 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
-            // Bloco 2: Ferramentas de Edição da Timeline (Manual VEGAS Pro 21 §6)
-            self.cmd_tool_btn(ui, Icon::Split, None, "edit.split");
-            self.cmd_tool_btn(ui, Icon::DeleteTrash, None, "edit.delete");
+            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
+            // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
+            // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
+            // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
+            // sem botão porque a função não existe: Gravar, as ferramentas
+            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
+            // Crossfades automáticos (sempre ligados), Travar envelopes e as
+            // linhas do tempo aninhadas.
+            for (icon, id) in [
+                (Icon::DeleteTrash, "edit.delete"),
+                (Icon::TrimSelection, "edit.trim_to_selection"),
+                (Icon::TrimStart, "edit.trim_start"),
+                (Icon::TrimEnd, "edit.trim_end"),
+                (Icon::Split, "edit.split"),
+            ] {
+                self.cmd_tool_btn(ui, icon, None, id);
+            }
+            let all_locked = self.session.selection_all_locked();
+            self.cmd_tool_toggle(ui, all_locked, Icon::LockClosed, None, "event.lock");
+            self.cmd_tool_btn(ui, Icon::InsertMarker, None, "insert.marker");
+            self.cmd_tool_btn(ui, Icon::InsertRegion, None, "insert.region");
             self.cmd_tool_toggle(
                 ui,
                 self.opts.snapping,
@@ -2255,19 +2279,11 @@ impl App {
             );
             self.cmd_tool_toggle(
                 ui,
-                self.opts.show_envelopes,
-                Icon::Envelopes,
-                None,
-                "view.envelopes",
-            );
-            self.cmd_tool_toggle(
-                ui,
                 self.opts.ignore_grouping,
                 Icon::IgnoreGrouping,
                 None,
                 "options.ignore_grouping",
             );
-            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
             self.cmd_tool_toggle(
                 ui,
                 self.is_panel_open(DockTab::ColorGrading),
@@ -2275,6 +2291,16 @@ impl App {
                 None,
                 "view.tab.color_grading",
             );
+            // do Neoveg, depois dos botões do manual
+            ui.separator();
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.show_envelopes,
+                Icon::Envelopes,
+                None,
+                "view.envelopes",
+            );
+            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
 
             if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
                 ui.label(egui::RichText::new(format!("Shuttle {:+.2}x", self.shuttle)).small());

@@ -778,6 +778,61 @@ fn kittest_carregador_espera_o_script_e_nada_se_perde() {
     );
 }
 
+/// Botão Mais > Editar conjunto de botões visíveis (manual do VEGAS Pro 21,
+/// p. 69): "Ocultar todos" + OK tira M, S e fx do cabeçalho das faixas de
+/// vídeo; as de áudio continuam com os seus.
+#[test]
+fn kittest_conjunto_de_botoes_visiveis_do_cabecalho() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    // o OK grava as preferências em arquivo: começa do padrão, sem depender
+    // do que uma rodada anterior gravou
+    harness.state_mut().prefs.track_header = Default::default();
+    harness.run_steps(2);
+    let n_video = harness
+        .state()
+        .project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == crate::model::TrackKind::Video)
+        .count();
+    let n_total = harness.state().project.tracks.len();
+    assert!(
+        n_video > 0 && n_total > n_video,
+        "projeto com vídeo e áudio"
+    );
+    // o Master Bus também tem M: conta a diferença
+    let m0 = harness.query_all_by_label("M").count();
+    let s0 = harness.query_all_by_label("S").count();
+    assert!(m0 >= n_total && s0 >= n_total);
+    {
+        let app = harness.state_mut();
+        let cur = app.prefs.track_header.get(true);
+        app.dlg.header_buttons = Some((true, cur));
+    }
+    harness.run_steps(2);
+    harness.get_by_label("Ocultar todos").click();
+    harness.run_steps(2);
+    harness.get_by_label("OK").click();
+    harness.run_steps(3);
+    assert!(harness.state().dlg.header_buttons.is_none());
+    assert_eq!(
+        harness.state().prefs.track_header.get(true),
+        neoveg_common::prefs::HeaderButtons::all(false)
+    );
+    assert_eq!(
+        harness.query_all_by_label("M").count(),
+        m0 - n_video,
+        "as faixas de vídeo deixam de mostrar M"
+    );
+    assert_eq!(harness.query_all_by_label("S").count(), s0 - n_video);
+    // não deixa as faixas de vídeo sem botões para os outros testes
+    let app = harness.state_mut();
+    app.prefs.track_header = Default::default();
+    let _ = app.prefs.save();
+}
+
 /// Janela Efeitos de Vídeo (manual do VEGAS Pro 21, p. 54): categoria, busca,
 /// escolher o efeito mostra o preset, e o botão Eventos aplica o efeito ao
 /// evento selecionado.

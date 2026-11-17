@@ -975,6 +975,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "event.lock",
+        label: "Travar eventos",
+        menu_path: "Editar/Travar eventos",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.toggle_lock_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "event.delete_active_take",
         label: "Excluir take ativo",
         menu_path: "Editar/Take/Excluir take ativo",
@@ -1175,8 +1187,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sonic_foundry",
-        label: "Sonic Foundry",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sonic Foundry",
+        label: "Clássico",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Clássico",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1184,8 +1196,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sony",
-        label: "Sony",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sony",
+        label: "Intermediário",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Intermediário",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1193,8 +1205,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.magix",
-        label: "MAGIX",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/MAGIX",
+        label: "Atual",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Atual",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
