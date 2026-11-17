@@ -22,6 +22,15 @@ enum VideoCodec {
     Mjpeg,
     Rgb24,
     Rgb32,
+    Yuy2,
+    Uyvy,
+    I420,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AviVideoCodec {
+    Mjpeg,
+    UncompressedRgb24,
 }
 
 #[derive(Clone, Debug)]
@@ -185,10 +194,16 @@ impl AviReader {
                     || handler.eq_ignore_ascii_case("mjpg") && comp != [0, 0, 0, 0]
                 {
                     Some(VideoCodec::Mjpeg)
-                } else if comp == [0, 0, 0, 0] && bits == 24 {
+                } else if (comp == [0, 0, 0, 0] || up == "DIB ") && bits == 24 {
                     Some(VideoCodec::Rgb24)
-                } else if comp == [0, 0, 0, 0] && bits == 32 {
+                } else if (comp == [0, 0, 0, 0] || up == "DIB ") && bits == 32 {
                     Some(VideoCodec::Rgb32)
+                } else if up == "YUY2" || up == "YUYV" {
+                    Some(VideoCodec::Yuy2)
+                } else if up == "UYVY" {
+                    Some(VideoCodec::Uyvy)
+                } else if up == "I420" || up == "IYUV" {
+                    Some(VideoCodec::I420)
                 } else {
                     None
                 };
@@ -309,16 +324,62 @@ impl AviReader {
                 }
                 Ok(img)
             }
+            Some(VideoCodec::Yuy2) | Some(VideoCodec::Uyvy) => {
+                let uyvy = self.codec == Some(VideoCodec::Uyvy);
+                let (w, h) = (self.width as usize, self.height as usize);
+                let stride = (w * 2 + 3) & !3;
+                if data.len() < stride.saturating_mul(h) {
+                    bail!("quadro YUV 4:2:2 truncado no quadro {i}");
+                }
+                let mut img = RgbaImage::new(w as u32, h as u32);
+                for y in 0..h {
+                    let row = data.get(y * stride..y * stride + w * 2).unwrap_or(&[]);
+                    for x in (0..w.saturating_sub(1)).step_by(2) {
+                        let b = row.get(x * 2..x * 2 + 4).unwrap_or(&[0; 4]);
+                        let (y0, u, y1, v) = if uyvy {
+                            (b[1], b[0], b[3], b[2])
+                        } else {
+                            (b[0], b[1], b[2], b[3])
+                        };
+                        img.put_pixel(x as u32, y as u32, yuv_to_rgba(y0, u, v));
+                        img.put_pixel((x + 1) as u32, y as u32, yuv_to_rgba(y1, u, v));
+                    }
+                }
+                Ok(img)
+            }
+            Some(VideoCodec::I420) => {
+                let (w, h) = (self.width as usize, self.height as usize);
+                let y_sz = w * h;
+                let uv_w = w.div_ceil(2);
+                let uv_h = h.div_ceil(2);
+                let uv_sz = uv_w * uv_h;
+                if data.len() < y_sz + uv_sz * 2 {
+                    bail!("quadro I420 truncado no quadro {i}");
+                }
+                let ys = &data[..y_sz];
+                let us = &data[y_sz..y_sz + uv_sz];
+                let vs = &data[y_sz + uv_sz..y_sz + uv_sz * 2];
+                let mut img = RgbaImage::new(w as u32, h as u32);
+                for y in 0..h {
+                    for x in 0..w {
+                        let yv = ys[y * w + x];
+                        let u = us[(y / 2) * uv_w + (x / 2)];
+                        let v = vs[(y / 2) * uv_w + (x / 2)];
+                        img.put_pixel(x as u32, y as u32, yuv_to_rgba(yv, u, v));
+                    }
+                }
+                Ok(img)
+            }
             None => bail!("codec não suportado"),
         }
     }
 
-    /// Lê todo o áudio PCM, convertido para f32 intercalado (canais originais).
+    /// Lê todo o áudio PCM ou G.711, convertido para f32 intercalado (canais originais).
     pub fn read_audio(&mut self) -> Result<Option<(u32, u16, Vec<f32>)>> {
         let Some(info) = self.audio.clone() else {
             return Ok(None);
         };
-        if info.format_tag != 1 && info.format_tag != 3 {
+        if !matches!(info.format_tag, 1 | 3 | 6 | 7) {
             return Ok(None);
         }
         let mut out = Vec::new();
@@ -349,11 +410,24 @@ impl AviReader {
                         .iter()
                         .map(|c| f32::from_le_bytes(*c)),
                 ),
+                (6, _) => out.extend(data.iter().map(|&b| super::wav::alaw_to_f32(b))),
+                (7, _) => out.extend(data.iter().map(|&b| super::wav::ulaw_to_f32(b))),
                 _ => return Ok(None),
             }
         }
         Ok(Some((info.sample_rate, info.channels.max(1), out)))
     }
+}
+
+#[inline]
+fn yuv_to_rgba(y: u8, u: u8, v: u8) -> image::Rgba<u8> {
+    let c = y as i32 - 16;
+    let d = u as i32 - 128;
+    let e = v as i32 - 128;
+    let r = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
+    let g = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
+    let b = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+    image::Rgba([r, g, b, 255])
 }
 
 fn parse_hdrl(buf: &[u8], streams: &mut Vec<StreamHdr>) {
@@ -534,12 +608,24 @@ impl AviWriter {
         fps: FrameRate,
         audio_sr: Option<u32>,
     ) -> Result<Self> {
-        Self::create_with_limits(
+        Self::create_with_codec(path, width, height, fps, audio_sr, AviVideoCodec::Mjpeg)
+    }
+
+    pub fn create_with_codec(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: FrameRate,
+        audio_sr: Option<u32>,
+        codec: AviVideoCodec,
+    ) -> Result<Self> {
+        Self::create_inner(
             path,
             width,
             height,
             fps,
             audio_sr,
+            codec,
             SEGMENT_BYTES,
             SUPER_INDEX_ENTRIES,
         )
@@ -547,12 +633,36 @@ impl AviWriter {
 
     /// Como [`Self::create`], com tamanho de segmento e capacidade do
     /// super-índice escolhidos (os testes forçam vários segmentos pequenos).
+    #[cfg(test)]
     pub(crate) fn create_with_limits(
         path: &Path,
         width: u32,
         height: u32,
         fps: FrameRate,
         audio_sr: Option<u32>,
+        segment_limit: u64,
+        super_capacity: usize,
+    ) -> Result<Self> {
+        Self::create_inner(
+            path,
+            width,
+            height,
+            fps,
+            audio_sr,
+            AviVideoCodec::Mjpeg,
+            segment_limit,
+            super_capacity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_inner(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: FrameRate,
+        audio_sr: Option<u32>,
+        codec: AviVideoCodec,
         segment_limit: u64,
         super_capacity: usize,
     ) -> Result<Self> {
@@ -611,8 +721,15 @@ impl AviWriter {
         h.extend_from_slice(b"strl");
         h.extend_from_slice(b"strh");
         w32(&mut h, 56);
+        let (strh_handler, bi_comp, image_bytes): ([u8; 4], [u8; 4], u32) = match codec {
+            AviVideoCodec::Mjpeg => (*b"MJPG", *b"MJPG", width * height * 3),
+            AviVideoCodec::UncompressedRgb24 => {
+                let stride = (width * 3 + 3) & !3;
+                (*b"DIB ", [0, 0, 0, 0], stride.saturating_mul(height))
+            }
+        };
         h.extend_from_slice(b"vids");
-        h.extend_from_slice(b"MJPG");
+        h.extend_from_slice(&strh_handler);
         w32(&mut h, 0);
         w16(&mut h, 0);
         w16(&mut h, 0);
@@ -622,7 +739,7 @@ impl AviWriter {
         w32(&mut h, 0);
         let off_vlen = h.len() as u64;
         w32(&mut h, 0);
-        w32(&mut h, width * height * 3);
+        w32(&mut h, image_bytes);
         w32(&mut h, u32::MAX);
         w32(&mut h, 0);
         w16(&mut h, 0);
@@ -636,8 +753,8 @@ impl AviWriter {
         w32(&mut h, height);
         w16(&mut h, 1);
         w16(&mut h, 24);
-        h.extend_from_slice(b"MJPG");
-        w32(&mut h, width * height * 3);
+        h.extend_from_slice(&bi_comp);
+        w32(&mut h, image_bytes);
         w32(&mut h, 0);
         w32(&mut h, 0);
         w32(&mut h, 0);
@@ -916,6 +1033,27 @@ impl AviWriter {
             self.first_frames += 1;
         }
         Ok(())
+    }
+
+    /// Converte um quadro RGBA8 (topo para baixo) em BGR24 comprimido/alinhado
+    /// para AVI BI_RGB (baixo para cima, múltiplo de 4 bytes por linha).
+    pub fn rgba_to_dib_bgr24(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let (wu, hu) = (w as usize, h as usize);
+        let stride = (wu * 3 + 3) & !3;
+        let mut out = vec![0u8; stride * hu];
+        for y in 0..hu {
+            let src_y = hu - 1 - y;
+            let src_off = src_y * wu * 4;
+            let dst_off = y * stride;
+            for x in 0..wu {
+                let s = rgba.get(src_off + x * 4..src_off + x * 4 + 4);
+                let [r, g, b, _] = s.map(|p| [p[0], p[1], p[2], p[3]]).unwrap_or([0; 4]);
+                out[dst_off + x * 3] = b;
+                out[dst_off + x * 3 + 1] = g;
+                out[dst_off + x * 3 + 2] = r;
+            }
+        }
+        out
     }
 
     /// Áudio PCM 16 bits estéreo intercalado. Blocos grandes são divididos em
@@ -1223,5 +1361,122 @@ mod tests {
         assert!(stderr.trim().is_empty(), "ffprobe reclamou: {stderr}");
         let n = String::from_utf8_lossy(&out.stdout).trim().to_string();
         assert_eq!(n, frames.to_string());
+    }
+
+    #[test]
+    fn uncompressed_rgb24_round_trip() {
+        let path = tmp("uncompressed_rgb24");
+        let (w, h) = (30u32, 18u32);
+        let mut wr = AviWriter::create_with_codec(
+            &path,
+            w,
+            h,
+            FrameRate::FPS_25,
+            Some(48000),
+            AviVideoCodec::UncompressedRgb24,
+        )
+        .unwrap();
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x * 8) as u8, (y * 12) as u8, 200, 255])
+        });
+        let dib = AviWriter::rgba_to_dib_bgr24(img.as_raw(), w, h);
+        for i in 0..3 {
+            wr.write_video_jpeg(&dib).unwrap();
+            wr.write_audio(&vec![i * 500; 48000 / 25 * 2]).unwrap();
+        }
+        wr.finish().unwrap();
+
+        let mut r = AviReader::open(&path).unwrap();
+        assert_eq!(r.frame_count(), 3);
+        let dec = r.decode_frame(1).unwrap();
+        assert_eq!(dec.dimensions(), (w, h));
+        // Sem compressão JPEG, RGB24 deve preservar o pixel exato!
+        assert_eq!(dec.get_pixel(5, 7).0, [40, 84, 200, 255]);
+        let (sr, ch, audio) = r.read_audio().unwrap().unwrap();
+        assert_eq!((sr, ch, audio.len()), (48000, 2, 3 * 48000 / 25 * 2));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn decodes_yuv_i420_and_yuy2_raw_avi() {
+        // Constrói um AVI minimalista com cabeçalho strf I420 e YUY2 (4x2 = 2 blocos)
+        fn raw_yuv_avi(fourcc: &[u8; 4], bits: u16, w: u32, h: u32, frame: &[u8]) -> Vec<u8> {
+            let mut avih = vec![0u8; 56];
+            avih[0..4].copy_from_slice(&40_000u32.to_le_bytes()); // 25 fps
+            avih[16..20].copy_from_slice(&1u32.to_le_bytes()); // total frames
+            avih[24..28].copy_from_slice(&1u32.to_le_bytes()); // streams
+            avih[32..36].copy_from_slice(&w.to_le_bytes());
+            avih[36..40].copy_from_slice(&h.to_le_bytes());
+
+            let mut strh = vec![0u8; 56];
+            strh[0..4].copy_from_slice(b"vids");
+            strh[4..8].copy_from_slice(fourcc);
+            strh[20..24].copy_from_slice(&1u32.to_le_bytes()); // scale
+            strh[24..28].copy_from_slice(&25u32.to_le_bytes()); // rate
+            strh[32..36].copy_from_slice(&1u32.to_le_bytes()); // length
+
+            let mut strf = vec![0u8; 40];
+            strf[0..4].copy_from_slice(&40u32.to_le_bytes());
+            strf[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+            strf[8..12].copy_from_slice(&(h as i32).to_le_bytes());
+            strf[12..14].copy_from_slice(&1u16.to_le_bytes());
+            strf[14..16].copy_from_slice(&bits.to_le_bytes());
+            strf[16..20].copy_from_slice(fourcc);
+            strf[20..24].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+
+            let chunk = |id: &[u8; 4], body: &[u8]| {
+                let mut v = Vec::with_capacity(8 + body.len() + 1);
+                v.extend_from_slice(id);
+                v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                v.extend_from_slice(body);
+                if body.len() % 2 == 1 {
+                    v.push(0);
+                }
+                v
+            };
+            let list = |kind: &[u8; 4], inner: &[u8]| {
+                let mut v = Vec::with_capacity(12 + inner.len());
+                v.extend_from_slice(b"LIST");
+                v.extend_from_slice(&((4 + inner.len()) as u32).to_le_bytes());
+                v.extend_from_slice(kind);
+                v.extend_from_slice(inner);
+                v
+            };
+            let mut strl_inner = chunk(b"strh", &strh);
+            strl_inner.extend_from_slice(&chunk(b"strf", &strf));
+            let mut hdrl_inner = chunk(b"avih", &avih);
+            hdrl_inner.extend_from_slice(&list(b"strl", &strl_inner));
+            let hdrl = list(b"hdrl", &hdrl_inner);
+            let movi = list(b"movi", &chunk(b"00dc", frame));
+            let mut riff = b"RIFF\0\0\0\0AVI ".to_vec();
+            riff.extend_from_slice(&hdrl);
+            riff.extend_from_slice(&movi);
+            let rsz = (riff.len() - 8) as u32;
+            riff[4..8].copy_from_slice(&rsz.to_le_bytes());
+            riff
+        }
+
+        // I420 4x2: Y=8 bytes (~neutro branco/cinza Y=235, U=128, V=128)
+        let mut i420 = vec![235u8; 8];
+        i420.extend_from_slice(&[128u8; 4]);
+        let p_i420 = tmp("i420");
+        std::fs::write(&p_i420, raw_yuv_avi(b"I420", 12, 4, 2, &i420)).unwrap();
+        let mut r1 = AviReader::open(&p_i420).unwrap();
+        let f1 = r1.decode_frame(0).unwrap();
+        assert_eq!(f1.dimensions(), (4, 2));
+        assert!(f1.get_pixel(0, 0)[0] > 230);
+        let _ = std::fs::remove_file(&p_i420);
+
+        // YUY2 4x2: 16 bytes (Y0=16,U=128,Y1=16,V=128 -> preto)
+        let yuy2 = [
+            16u8, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128,
+        ];
+        let p_yuy2 = tmp("yuy2");
+        std::fs::write(&p_yuy2, raw_yuv_avi(b"YUY2", 16, 4, 2, &yuy2)).unwrap();
+        let mut r2 = AviReader::open(&p_yuy2).unwrap();
+        let f2 = r2.decode_frame(0).unwrap();
+        assert_eq!(f2.dimensions(), (4, 2));
+        assert!(f2.get_pixel(0, 0)[0] < 20);
+        let _ = std::fs::remove_file(&p_yuy2);
     }
 }

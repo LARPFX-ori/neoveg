@@ -31,6 +31,15 @@ pub struct DotnetEnv {
 }
 
 impl DotnetEnv {
+    /// O mesmo ambiente, compilando sem o WinForms real (camada de Forms
+    /// própria). Só a compilação muda: o runtime já carregado continua.
+    pub fn without_winforms(&self) -> Self {
+        let mut e = self.clone();
+        e.windows_desktop_version = None;
+        e.tfm = e.tfm.trim_end_matches("-windows").to_string();
+        e
+    }
+
     /// Scripts podem usar `System.Windows.Forms` (Windows com o runtime
     /// WindowsDesktop instalado).
     pub fn use_winforms(&self) -> bool {
@@ -331,39 +340,37 @@ fn call_component_entry(
     })
 }
 
-/// Assinatura de [`media_probe_entry`], igual ao `MediaProbeFn` da ponte C#.
+/// Assinatura das funções chamadas pela ponte C# ([`media_probe_entry`],
+/// [`ui_request_entry`]), igual ao `MediaProbeFn`/`HostFn` da ponte.
 type MediaProbeFn = extern "C" fn(u64, *const u8, i32, *mut u8, i32) -> i32;
 
-/// Ponto de entrada que a ponte C# chama para importar mídia durante o
-/// script (`MediaPool.AddMedia`). Grava em `out_ptr` a resposta JSON e
-/// devolve o tamanho; se não couber, devolve o tamanho pedido negativo; em
+/// Ida e volta pela fronteira FFI com a ponte C#: lê `in_len` bytes de
+/// `in_ptr` (no máximo `max_in`), chama `f` e grava a resposta em `out_ptr`.
+/// Devolve o tamanho gravado; se não couber, o tamanho pedido negativo; em
 /// argumentos inválidos ou falha interna, `i32::MIN`. Nunca deixa um pânico
 /// atravessar a fronteira (§0.6).
 #[allow(unsafe_code)]
-extern "C" fn media_probe_entry(
-    token: u64,
-    path_ptr: *const u8,
-    path_len: i32,
+fn ffi_round_trip(
+    in_ptr: *const u8,
+    in_len: i32,
     out_ptr: *mut u8,
     out_cap: i32,
+    max_in: usize,
+    f: impl FnOnce(&[u8]) -> Vec<u8>,
 ) -> i32 {
     neoveg_common::util::catch_isolated(|| {
-        let (Ok(plen), Ok(cap)) = (usize::try_from(path_len), usize::try_from(out_cap)) else {
+        let (Ok(len), Ok(cap)) = (usize::try_from(in_len), usize::try_from(out_cap)) else {
             return i32::MIN;
         };
-        if path_ptr.is_null()
-            || out_ptr.is_null()
-            || plen > crate::vegas_cs::MAX_PROBE_PATH_BYTES
-            || cap == 0
-        {
+        if in_ptr.is_null() || out_ptr.is_null() || len > max_in || cap == 0 {
             return i32::MIN;
         }
-        // SAFETY: a ponte C# (`Project.ImportMedia`) passa em `path_ptr` um
-        // bloco de `path_len` bytes alocado com `Marshal.AllocHGlobal` e só o
-        // libera depois que esta chamada síncrona retorna; o tamanho foi
-        // validado acima e o ponteiro não é nulo.
-        let path = unsafe { std::slice::from_raw_parts(path_ptr, plen) };
-        let reply = crate::vegas_cs::probe_media_for_script(token, path);
+        // SAFETY: a ponte C# (`Project.ImportMedia`, `NeovegHostCalls.Ui`)
+        // passa em `in_ptr` um bloco de `in_len` bytes alocado com
+        // `Marshal.AllocHGlobal` e só o libera depois que esta chamada
+        // síncrona retorna; o tamanho foi validado acima e o ponteiro não é nulo.
+        let input = unsafe { std::slice::from_raw_parts(in_ptr, len) };
+        let reply = f(input);
         let Ok(n) = i32::try_from(reply.len()) else {
             return i32::MIN;
         };
@@ -378,6 +385,51 @@ extern "C" fn media_probe_entry(
         n
     })
     .unwrap_or(i32::MIN)
+}
+
+/// Ponto de entrada que a ponte C# chama para importar mídia durante o
+/// script (`MediaPool.AddMedia`).
+extern "C" fn media_probe_entry(
+    token: u64,
+    path_ptr: *const u8,
+    path_len: i32,
+    out_ptr: *mut u8,
+    out_cap: i32,
+) -> i32 {
+    ffi_round_trip(
+        path_ptr,
+        path_len,
+        out_ptr,
+        out_cap,
+        crate::vegas_cs::MAX_PROBE_PATH_BYTES,
+        |path| crate::vegas_cs::probe_media_for_script(token, path),
+    )
+}
+
+/// Ponto de entrada que a camada de Forms própria chama para mostrar uma
+/// janela (`MessageBox`, `Form.ShowDialog`, diálogos de arquivo). Bloqueia
+/// até a interface responder.
+extern "C" fn ui_request_entry(
+    token: u64,
+    req_ptr: *const u8,
+    req_len: i32,
+    out_ptr: *mut u8,
+    out_cap: i32,
+) -> i32 {
+    ffi_round_trip(
+        req_ptr,
+        req_len,
+        out_ptr,
+        out_cap,
+        crate::script_ui::MAX_UI_REQUEST_BYTES,
+        |req| crate::vegas_cs::ui_request_for_script(token, req),
+    )
+}
+
+/// Endereço de [`ui_request_entry`], passado à ponte C# no snapshot.
+pub fn ui_request_fn_addr() -> u64 {
+    let f: MediaProbeFn = ui_request_entry;
+    f as usize as u64
 }
 
 /// Endereço de [`media_probe_entry`], passado à ponte C# no snapshot.

@@ -40,6 +40,47 @@ fn sinc_params() -> SincInterpolationParameters {
 const MIN_RUBATO_RATIO: f64 = 0.0625;
 const MAX_RUBATO_RATIO: f64 = 16.0;
 const VARISPEED_CHUNK: usize = 256;
+/// Limite de compensação automática de latência VST3 por ramo (10 s @ 48 kHz; §0.4).
+const MAX_PDC_FRAMES: usize = 480_000;
+
+/// Linha de atraso estéreo intercalada usada para alinhar caminhos paralelos
+/// na compensação automática de latência (PDC) de plug-ins VST3.
+#[derive(Default, Clone)]
+struct DelayLine {
+    ring: Vec<f32>,
+    pos: usize,
+    frames: usize,
+}
+
+impl DelayLine {
+    fn process(&mut self, delay_frames: usize, buf: &mut [f32]) {
+        let target = delay_frames.min(MAX_PDC_FRAMES);
+        if target == 0 {
+            self.frames = 0;
+            self.pos = 0;
+            return;
+        }
+        if self.frames != target {
+            self.ring.resize(target * 2, 0.0);
+            self.ring.fill(0.0);
+            self.pos = 0;
+            self.frames = target;
+        }
+        for frame in buf.as_chunks_mut::<2>().0 {
+            let idx = self.pos * 2;
+            let dl = self.ring[idx];
+            let dr = self.ring[idx + 1];
+            self.ring[idx] = frame[0];
+            self.ring[idx + 1] = frame[1];
+            frame[0] = dl;
+            frame[1] = dr;
+            self.pos += 1;
+            if self.pos == self.frames {
+                self.pos = 0;
+            }
+        }
+    }
+}
 
 /// Reamostrador estéreo contínuo baseado em `rubato::Async<f32>` (Sinc) usado
 /// tanto para `Playback Rate` contínuo / shuttle J-K-L quanto para clipes com
@@ -397,10 +438,13 @@ pub struct Mixer {
     pub meters: Meters,
     track_buf: Vec<f32>,
     ev_buf: Vec<f32>,
+    pad_buf: Vec<f32>,
     bus_bufs: Vec<Vec<f32>>,
     master_buf: Vec<f32>,
     /// Master 5.1 intercalado (FL, FR, C, LFE, BL, BR), só no modo surround.
     master6: Vec<f32>,
+    /// Linhas de atraso estéreo para compensação de latência entre ramos paralelos.
+    delay_lines: HashMap<(u8, Id, u64), DelayLine>,
     /// Dono das instâncias VST3 deste mixer no host isolado.
     vst3_owner: u64,
     /// Render/análise offline: espera o plug-in VST3 abrir em vez de passar
@@ -483,6 +527,26 @@ fn apply_volume_pan_envelopes(
     peak
 }
 
+fn chain_latency_with(fxs: &[FxInstance], lookup: &mut impl FnMut(&FxInstance) -> usize) -> usize {
+    let mut sum = 0usize;
+    for fx in fxs {
+        if fx.enabled && fx.kind == FxKind::Vst3 {
+            sum = sum.saturating_add(lookup(fx));
+        }
+    }
+    sum.min(MAX_PDC_FRAMES)
+}
+
+struct PdcPlan {
+    ev_lat: HashMap<Id, usize>,
+    track_ev_lat: Vec<usize>,
+    track_lat: Vec<usize>,
+    bus_in_lat: Vec<usize>,
+    bus_out_lat: Vec<usize>,
+    master_in_lat: usize,
+    total_latency: usize,
+}
+
 fn find_bus_index(buses: &[AudioBus], limit: usize, bus_id: Id) -> Option<usize> {
     buses[..limit].iter().position(|b| b.id == bus_id)
 }
@@ -496,9 +560,11 @@ impl Mixer {
             meters: Meters::default(),
             track_buf: vec![],
             ev_buf: vec![],
+            pad_buf: vec![],
             bus_bufs: vec![],
             master_buf: vec![],
             master6: vec![],
+            delay_lines: HashMap::new(),
             vst3_owner: crate::plugin_host::new_vst3_owner(),
             offline: false,
         }
@@ -512,11 +578,144 @@ impl Mixer {
         m
     }
 
-    /// Zera o estado dos efeitos e reamostradores (após salto de posição).
+    /// Zera o estado dos efeitos, linhas de atraso e reamostradores (após salto de posição).
     pub fn reset(&mut self) {
         self.states.clear();
         self.event_resamplers.clear();
+        self.delay_lines.clear();
         crate::plugin_host::vst3_reset_owner(self.vst3_owner);
+    }
+
+    /// Latência total do grafo de áudio (em amostras na taxa deste mixer).
+    /// No modo offline, garante a abertura dos efeitos VST3 ativos e reinicia
+    /// o estado antes de iniciar o pré-roll de compensação.
+    pub fn total_latency(&mut self, p: &Project) -> usize {
+        let host = crate::plugin_host::default_host_exe();
+        let owner = self.vst3_owner;
+        let sr = self.sr;
+        let offline = self.offline;
+        let mut cache = HashMap::<Id, usize>::new();
+        let mut lookup = |fx: &FxInstance| -> usize {
+            if let Some(&lat) = cache.get(&fx.id) {
+                return lat;
+            }
+            let lat = match (fx.enabled, fx.kind, fx.vst3.as_ref(), host.as_deref()) {
+                (true, FxKind::Vst3, Some(r), Some(h)) => {
+                    crate::plugin_host::vst3_cached_latency(h, owner, fx.id, r, sr, offline)
+                        as usize
+                }
+                _ => 0,
+            };
+            cache.insert(fx.id, lat);
+            lat
+        };
+        Self::compute_pdc_plan(p, &mut lookup).total_latency
+    }
+
+    fn compute_pdc_plan(p: &Project, lookup: &mut impl FnMut(&FxInstance) -> usize) -> PdcPlan {
+        let num_buses = p.audio_buses.len().min(MAX_AUDIO_BUSES);
+        let any_solo = p.any_solo(TrackKind::Audio);
+        let mut ev_lat = HashMap::new();
+        let mut track_ev_lat = vec![0usize; p.tracks.len()];
+        let mut track_lat = vec![0usize; p.tracks.len()];
+        let mut bus_in_lat = vec![0usize; num_buses];
+        let mut bus_out_lat = vec![0usize; num_buses];
+        let mut bus_down = vec![false; num_buses];
+
+        for (ti, track) in p.tracks.iter().enumerate() {
+            if track.kind != TrackKind::Audio || !track.is_audible(any_solo) {
+                continue;
+            }
+            let mut max_ev = 0usize;
+            for e in &track.events {
+                if e.mute {
+                    continue;
+                }
+                let el = chain_latency_with(&e.fx, lookup);
+                ev_lat.insert(e.id, el);
+                max_ev = max_ev.max(el);
+            }
+            track_ev_lat[ti] = max_ev;
+            let t_lat = max_ev
+                .saturating_add(chain_latency_with(&track.fx, lookup))
+                .min(MAX_PDC_FRAMES);
+            track_lat[ti] = t_lat;
+
+            if let Some(dst_bi) = track
+                .output_bus
+                .and_then(|bid| find_bus_index(&p.audio_buses, num_buses, bid))
+            {
+                bus_in_lat[dst_bi] = bus_in_lat[dst_bi].max(t_lat);
+            }
+            for send in &track.sends {
+                if send.mute {
+                    continue;
+                }
+                if let Some(bi) = find_bus_index(&p.audio_buses, num_buses, send.bus_id) {
+                    bus_in_lat[bi] = bus_in_lat[bi].max(t_lat);
+                }
+            }
+        }
+
+        let topo = p.topological_bus_order();
+        for pos_idx in 0..topo.len() {
+            let bi = topo[pos_idx];
+            let Some(bus) = p.audio_buses.get(bi) else {
+                continue;
+            };
+            let own = chain_latency_with(&bus.fx, lookup);
+            let out_l = bus_in_lat[bi].saturating_add(own).min(MAX_PDC_FRAMES);
+            bus_out_lat[bi] = out_l;
+            if let Some(dst_id) = bus.output_bus {
+                if let Some(dst_bi) = find_bus_index(&p.audio_buses, num_buses, dst_id) {
+                    let dst_is_later = topo[pos_idx + 1..].contains(&dst_bi);
+                    if dst_bi != bi && dst_is_later {
+                        bus_in_lat[dst_bi] = bus_in_lat[dst_bi].max(out_l);
+                        bus_down[bi] = true;
+                    }
+                }
+            }
+        }
+
+        let mut master_in_lat = 0usize;
+        for (ti, track) in p.tracks.iter().enumerate() {
+            if track.kind != TrackKind::Audio || !track.is_audible(any_solo) {
+                continue;
+            }
+            let goes_to_bus = track
+                .output_bus
+                .and_then(|bid| find_bus_index(&p.audio_buses, num_buses, bid))
+                .is_some();
+            if !goes_to_bus {
+                master_in_lat = master_in_lat.max(track_lat[ti]);
+            }
+        }
+        for &bi in &topo {
+            if !bus_down[bi] {
+                master_in_lat = master_in_lat.max(bus_out_lat[bi]);
+            }
+        }
+        let master_fx = chain_latency_with(&p.master.fx, lookup);
+        let total_latency = master_in_lat.saturating_add(master_fx).min(MAX_PDC_FRAMES);
+        PdcPlan {
+            ev_lat,
+            track_ev_lat,
+            track_lat,
+            bus_in_lat,
+            bus_out_lat,
+            master_in_lat,
+            total_latency,
+        }
+    }
+
+    fn apply_delay(&mut self, tag: u8, src: Id, dst: u64, delay_frames: usize, buf: &mut [f32]) {
+        if delay_frames == 0 {
+            return;
+        }
+        self.delay_lines
+            .entry((tag, src, dst))
+            .or_default()
+            .process(delay_frames, buf);
     }
 
     /// Efeito VST3 pelo host isolado. Em falha o bloco passa seco e o erro
@@ -711,6 +910,42 @@ impl Mixer {
         start: i64,
         n: usize,
     ) -> bool {
+        let host = crate::plugin_host::default_host_exe();
+        let owner = self.vst3_owner;
+        let sr = self.sr;
+        let offline = self.offline;
+        let mut cache = HashMap::<Id, usize>::new();
+        let mut lat_lookup = |fx: &FxInstance| -> usize {
+            if let Some(&lat) = cache.get(&fx.id) {
+                return lat;
+            }
+            let lat = match (fx.enabled, fx.kind, fx.vst3.as_ref(), host.as_deref()) {
+                (true, FxKind::Vst3, Some(r), Some(h)) => {
+                    crate::plugin_host::vst3_cached_latency(h, owner, fx.id, r, sr, offline)
+                        as usize
+                }
+                _ => 0,
+            };
+            cache.insert(fx.id, lat);
+            lat
+        };
+        let pdc = Self::compute_pdc_plan(p, &mut lat_lookup);
+        self.mix_block_inner(p, audio, start, n, &pdc, &mut |this, fx, buf, t| {
+            this.run_fx(fx, buf, t);
+        })
+    }
+
+    /// Núcleo da mixagem parametrizado pelo executor de FX e plano PDC (permite
+    /// testes determinísticos de alinhamento multi-trilha/barramento).
+    fn mix_block_inner(
+        &mut self,
+        p: &Project,
+        audio: &HashMap<Id, Arc<AudioData>>,
+        start: i64,
+        n: usize,
+        pdc: &PdcPlan,
+        exec_fx: &mut impl FnMut(&mut Self, &FxInstance, &mut [f32], Ticks),
+    ) -> bool {
         let sr = self.sr;
         let t0 = timeline_sample_time(start, sr);
         let t1 = timeline_sample_time(start.saturating_add(n as i64), sr);
@@ -734,10 +969,12 @@ impl Mixer {
         let any_solo = p.any_solo(TrackKind::Audio);
         let mut track_buf = std::mem::take(&mut self.track_buf);
         let mut ev_buf = std::mem::take(&mut self.ev_buf);
+        let mut pad_buf = std::mem::take(&mut self.pad_buf);
         track_buf.resize(n * 2, 0.0);
         ev_buf.resize(n * 2, 0.0);
+        pad_buf.resize(n * 2, 0.0);
 
-        for track in &p.tracks {
+        for (ti, track) in p.tracks.iter().enumerate() {
             if track.kind != TrackKind::Audio {
                 continue;
             }
@@ -745,6 +982,8 @@ impl Mixer {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
                 continue;
             }
+            let max_ev_lat = pdc.track_ev_lat.get(ti).copied().unwrap_or(0);
+            let t_lat = pdc.track_lat.get(ti).copied().unwrap_or(0);
             track_buf.fill(0.0);
             for (ei, e) in track.events.iter().enumerate() {
                 if e.mute || e.end() <= t0 || e.start >= t1 {
@@ -772,18 +1011,23 @@ impl Mixer {
                     ev_buf[i * 2 + 1] *= k;
                 }
                 for fx in &e.fx {
-                    self.run_fx(fx, &mut ev_buf[..n * 2], t0 - e.start);
+                    exec_fx(self, fx, &mut ev_buf[..n * 2], t0 - e.start);
+                }
+                if max_ev_lat > 0 {
+                    let ev_l = pdc.ev_lat.get(&e.id).copied().unwrap_or(0);
+                    let pad = max_ev_lat.saturating_sub(ev_l);
+                    self.apply_delay(1, e.id, 0, pad, &mut ev_buf[..n * 2]);
                 }
                 for i in 0..n * 2 {
                     track_buf[i] += ev_buf[i];
                 }
             }
             for fx in &track.fx {
-                self.run_fx(fx, &mut track_buf[..n * 2], t0);
+                exec_fx(self, fx, &mut track_buf[..n * 2], t0);
             }
 
-            // Envios auxiliares pré-fader (pre-fader sends)
-            for send in &track.sends {
+            // Envios auxiliares pré-fader (pre-fader sends) com alinhamento PDC
+            for (si, send) in track.sends.iter().enumerate() {
                 if send.mute || !send.pre_fader {
                     continue;
                 }
@@ -791,9 +1035,20 @@ impl Mixer {
                     continue;
                 };
                 let sg = db_to_lin(send.level_db);
-                let dst = &mut self.bus_bufs[bi];
-                for i in 0..n * 2 {
-                    dst[i] += track_buf[i] * sg;
+                let target_lat = pdc.bus_in_lat.get(bi).copied().unwrap_or(0);
+                let pad = target_lat.saturating_sub(t_lat);
+                if pad > 0 {
+                    pad_buf[..n * 2].copy_from_slice(&track_buf[..n * 2]);
+                    self.apply_delay(2, track.id, (si as u64) * 2, pad, &mut pad_buf[..n * 2]);
+                    let dst = &mut self.bus_bufs[bi];
+                    for i in 0..n * 2 {
+                        dst[i] += pad_buf[i] * sg;
+                    }
+                } else {
+                    let dst = &mut self.bus_bufs[bi];
+                    for i in 0..n * 2 {
+                        dst[i] += track_buf[i] * sg;
+                    }
                 }
             }
 
@@ -815,8 +1070,8 @@ impl Mixer {
             );
             self.meters.tracks.insert(track.id, peak);
 
-            // Envios auxiliares pós-fader (post-fader sends)
-            for send in &track.sends {
+            // Envios auxiliares pós-fader (post-fader sends) com alinhamento PDC
+            for (si, send) in track.sends.iter().enumerate() {
                 if send.mute || send.pre_fader {
                     continue;
                 }
@@ -824,9 +1079,20 @@ impl Mixer {
                     continue;
                 };
                 let sg = db_to_lin(send.level_db);
-                let dst = &mut self.bus_bufs[bi];
-                for i in 0..n * 2 {
-                    dst[i] += track_buf[i] * sg;
+                let target_lat = pdc.bus_in_lat.get(bi).copied().unwrap_or(0);
+                let pad = target_lat.saturating_sub(t_lat);
+                if pad > 0 {
+                    pad_buf[..n * 2].copy_from_slice(&track_buf[..n * 2]);
+                    self.apply_delay(2, track.id, (si as u64) * 2 + 1, pad, &mut pad_buf[..n * 2]);
+                    let dst = &mut self.bus_bufs[bi];
+                    for i in 0..n * 2 {
+                        dst[i] += pad_buf[i] * sg;
+                    }
+                } else {
+                    let dst = &mut self.bus_bufs[bi];
+                    for i in 0..n * 2 {
+                        dst[i] += track_buf[i] * sg;
+                    }
                 }
             }
 
@@ -835,16 +1101,27 @@ impl Mixer {
                 .output_bus
                 .and_then(|bid| find_bus_index(&p.audio_buses, num_buses, bid))
             {
+                let target_lat = pdc.bus_in_lat.get(dst_bi).copied().unwrap_or(0);
+                let pad = target_lat.saturating_sub(t_lat);
+                if pad > 0 {
+                    self.apply_delay(3, track.id, dst_bi as u64, pad, &mut track_buf[..n * 2]);
+                }
                 let dst = &mut self.bus_bufs[dst_bi];
                 for i in 0..n * 2 {
                     dst[i] += track_buf[i];
                 }
-            } else if is_surround {
-                let g = surround::gains(track.surround);
-                surround::mix_into(&mut self.master6, &track_buf[..n * 2], n, &g);
             } else {
-                for i in 0..n * 2 {
-                    self.master_buf[i] += track_buf[i];
+                let pad = pdc.master_in_lat.saturating_sub(t_lat);
+                if pad > 0 {
+                    self.apply_delay(3, track.id, u64::MAX, pad, &mut track_buf[..n * 2]);
+                }
+                if is_surround {
+                    let g = surround::gains(track.surround);
+                    surround::mix_into(&mut self.master6, &track_buf[..n * 2], n, &g);
+                } else {
+                    for i in 0..n * 2 {
+                        self.master_buf[i] += track_buf[i];
+                    }
                 }
             }
         }
@@ -857,6 +1134,7 @@ impl Mixer {
             let Some(bus) = p.audio_buses.get(bi) else {
                 continue;
             };
+            let b_lat = pdc.bus_out_lat.get(bi).copied().unwrap_or(0);
             let mut bbuf = std::mem::take(&mut self.bus_bufs[bi]);
             if !bus.is_audible(any_bus_solo) {
                 self.meters.buses.insert(bus.id, [0.0, 0.0]);
@@ -864,7 +1142,7 @@ impl Mixer {
                 continue;
             }
             for fx in &bus.fx {
-                self.run_fx(fx, &mut bbuf[..n * 2], t0);
+                exec_fx(self, fx, &mut bbuf[..n * 2], t0);
             }
             let bpeak = apply_volume_pan_envelopes(
                 &mut bbuf[..n * 2],
@@ -888,6 +1166,11 @@ impl Mixer {
                     // Evita realimentação se o projeto não foi saneado previamente.
                     let dst_is_later = topo[pos_idx + 1..].contains(&dst_bi);
                     if dst_bi != bi && dst_is_later {
+                        let target_lat = pdc.bus_in_lat.get(dst_bi).copied().unwrap_or(0);
+                        let pad = target_lat.saturating_sub(b_lat);
+                        if pad > 0 {
+                            self.apply_delay(4, bus.id, dst_bi as u64, pad, &mut bbuf[..n * 2]);
+                        }
                         let dst = &mut self.bus_bufs[dst_bi];
                         for i in 0..n * 2 {
                             dst[i] += bbuf[i];
@@ -897,6 +1180,10 @@ impl Mixer {
                 }
             }
             if !sent_to_downstream {
+                let pad = pdc.master_in_lat.saturating_sub(b_lat);
+                if pad > 0 {
+                    self.apply_delay(4, bus.id, u64::MAX, pad, &mut bbuf[..n * 2]);
+                }
                 if is_surround {
                     let g = surround::gains(bus.surround);
                     surround::mix_into(&mut self.master6, &bbuf[..n * 2], n, &g);
@@ -919,7 +1206,7 @@ impl Mixer {
             }
         }
         for fx in &p.master.fx {
-            self.run_fx(fx, &mut master[..n * 2], t0);
+            exec_fx(self, fx, &mut master[..n * 2], t0);
         }
         if is_surround && !p.master.fx.is_empty() {
             for i in 0..n {
@@ -930,6 +1217,7 @@ impl Mixer {
         self.master_buf = master;
         self.track_buf = track_buf;
         self.ev_buf = ev_buf;
+        self.pad_buf = pad_buf;
         is_surround
     }
 }
@@ -1227,5 +1515,81 @@ mod tests {
             "envelope de pan em -1.0 deve silenciar canal R do barramento: {}",
             m[1]
         );
+    }
+
+    #[test]
+    fn delay_line_and_pdc_align_parallel_tracks_and_cap_hostile_latency() {
+        let mut p = Project::new_default();
+        let mid_impulse = new_id();
+        let item = test_audio_item(mid_impulse, 1);
+        let t1_idx = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha 1");
+        let t2 = Track::new(TrackKind::Audio, "Trilha 2");
+        p.tracks.push(t2);
+        let t2_idx = p.tracks.len() - 1;
+
+        let mut fx_delayed = FxInstance::new_vst3("fake.vst3", &"0".repeat(32), "Delayed");
+        fx_delayed.id = 9001;
+        p.tracks[t1_idx].fx.push(fx_delayed);
+
+        let bus_a_id = p.add_audio_bus(Some("Bus A")).expect("bus A");
+        p.tracks[t1_idx].output_bus = Some(bus_a_id);
+        let mut fx_bus = FxInstance::new_vst3("fake.vst3", &"0".repeat(32), "BusDelay");
+        fx_bus.id = 9002;
+        p.audio_bus_mut(bus_a_id).expect("bus").fx.push(fx_bus);
+
+        p.tracks[t1_idx]
+            .events
+            .push(Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(1)));
+        p.tracks[t2_idx]
+            .events
+            .push(Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(1)));
+        p.media.push(item);
+
+        // Impulso na amostra 0 (L = +1.0, R = +1.0)
+        let mut pcm = vec![0.0_f32; 48_000 * 2];
+        pcm[0] = 1.0;
+        pcm[1] = 1.0;
+        let mut audio = HashMap::new();
+        audio.insert(mid_impulse, Arc::new(AudioData::from_stereo(48_000, pcm)));
+
+        // Trilha 1 entra com +6 frames no FX, passa pelo Bus A (+4 frames) => total 10 frames;
+        // Trilha 2 vai direto ao Master (0 frames), logo o PDC deve atrasá-la em 10 frames.
+        let plan = Mixer::compute_pdc_plan(&p, &mut |fx| match fx.id {
+            9001 => 6,
+            9002 => 4,
+            _ => 0,
+        });
+        assert_eq!(plan.master_in_lat, 10);
+        assert_eq!(plan.total_latency, 10);
+
+        let mut mixer = Mixer::new_offline(48_000);
+        let mut sim_delays = HashMap::<Id, DelayLine>::new();
+        mixer.mix_block_inner(&p, &audio, 0, 32, &plan, &mut |_, fx, buf, _| {
+            let d = match fx.id {
+                9001 => 6,
+                9002 => 4,
+                _ => 0,
+            };
+            if d > 0 {
+                sim_delays.entry(fx.id).or_default().process(d, buf);
+            }
+        });
+        // Ambas as trilhas somam no índice exato 10 (1.0 + 1.0 = 2.0) e zero antes!
+        for i in 0..32 {
+            let v = mixer.master_buf[i * 2];
+            if i == 10 {
+                assert!((v - 2.0).abs() < 1e-5, "esperado pico somado em i=10: {v}");
+            } else {
+                assert!(v.abs() < 1e-5, "desalinhamento em i={i}: {v}");
+            }
+        }
+
+        // Latência hostil gigantesca é limitada sem OOM/pânico (§0.4)
+        let hostile = Mixer::compute_pdc_plan(&p, &mut |_| usize::MAX / 2);
+        assert_eq!(hostile.total_latency, MAX_PDC_FRAMES);
     }
 }

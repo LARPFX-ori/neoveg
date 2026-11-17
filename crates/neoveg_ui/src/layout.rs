@@ -27,6 +27,7 @@ pub fn panel_key(tab: DockTab) -> &'static str {
         DockTab::Compositors => "compositors",
         DockTab::Scopes => "scopes",
         DockTab::Notes => "notes",
+        DockTab::Encoder => "encoder",
     }
 }
 

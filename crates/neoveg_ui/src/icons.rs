@@ -72,17 +72,21 @@ pub enum Icon {
     SurroundSpeakers,
     PluginPlug,
     Compositors,
+    EncoderQueue,
     TrimSelection,
     TrimStart,
     TrimEnd,
     InsertMarker,
     InsertRegion,
     ExternalApps,
+    NormalTool,
+    EnvelopeTool,
+    SelectionTool,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 70] = [
+    pub const ALL: [Icon; 74] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -147,12 +151,16 @@ impl Icon {
         Icon::SurroundSpeakers,
         Icon::PluginPlug,
         Icon::Compositors,
+        Icon::EncoderQueue,
         Icon::TrimSelection,
         Icon::TrimStart,
         Icon::TrimEnd,
         Icon::InsertMarker,
         Icon::InsertRegion,
         Icon::ExternalApps,
+        Icon::NormalTool,
+        Icon::EnvelopeTool,
+        Icon::SelectionTool,
     ];
 }
 
@@ -1010,6 +1018,17 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 StrokeKind::Inside,
             );
         }
+        Icon::EncoderQueue => {
+            // pilhas de fila + triângulo verde de codificação (arte original)
+            c.p.rect_filled(c.rect(0.14, 0.16, 0.78, 0.34), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.14, 0.42, 0.60, 0.60), c.u(0.03), pal.cyan);
+            c.p.rect_filled(c.rect(0.14, 0.68, 0.56, 0.86), c.u(0.03), pal.muted);
+            c.poly(
+                &[(0.64, 0.44), (0.90, 0.64), (0.64, 0.84)],
+                pal.green,
+                Some((0.04, pal.ink)),
+            );
+        }
         Icon::TrimSelection => {
             // evento: só o trecho entre as duas marcas fica
             c.p.rect_filled(c.rect(0.06, 0.38, 0.30, 0.66), c.u(0.03), pal.muted);
@@ -1095,6 +1114,49 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.46, 0.56, 0.78, 0.24, pal.ink, 0.09);
             c.line(0.60, 0.24, 0.78, 0.24, pal.ink, 0.09);
             c.line(0.78, 0.24, 0.78, 0.42, pal.ink, 0.09);
+        }
+        Icon::NormalTool => {
+            // seta de seleção
+            c.poly(
+                &[
+                    (0.26, 0.10),
+                    (0.26, 0.78),
+                    (0.42, 0.63),
+                    (0.54, 0.90),
+                    (0.66, 0.84),
+                    (0.54, 0.58),
+                    (0.76, 0.58),
+                ],
+                pal.paper,
+                Some((0.06, pal.ink)),
+            );
+        }
+        Icon::EnvelopeTool => {
+            // linha de envelope com pontos
+            let pts = [(0.10, 0.72), (0.36, 0.34), (0.64, 0.56), (0.90, 0.24)];
+            c.polyline(&pts, pal.green, 0.08);
+            for (x, y) in pts {
+                c.p.circle_filled(c.pt(x, y), c.u(0.08), pal.amber);
+            }
+        }
+        Icon::SelectionTool => {
+            // caixa de seleção tracejada sobre dois eventos
+            c.p.rect_filled(c.rect(0.14, 0.40, 0.48, 0.60), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.54, 0.40, 0.88, 0.60), c.u(0.03), pal.cyan);
+            let r = c.rect(0.08, 0.22, 0.94, 0.80);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            c.p.extend(Shape::dashed_line(
+                &corners,
+                c.stroke(0.06, pal.ink),
+                c.u(0.10),
+                c.u(0.07),
+            ));
         }
     }
 }

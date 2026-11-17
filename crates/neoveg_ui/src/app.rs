@@ -155,6 +155,10 @@ pub(crate) struct ScriptJob {
     started: std::time::Instant,
     media_before: std::collections::HashSet<u64>,
     rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+    /// Pedidos de janela da camada de Forms própria (Linux, macOS).
+    ui_rx: std::sync::mpsc::Receiver<crate::script_forms::UiCall>,
+    /// Janela do script aberta agora.
+    active: Option<crate::script_forms::Active>,
 }
 
 #[cfg(test)]
@@ -174,6 +178,9 @@ impl ScriptJob {
             started: std::time::Instant::now(),
             media_before: std::collections::HashSet::new(),
             rx,
+            // Sem remetente: o script de teste não abre janelas.
+            ui_rx: std::sync::mpsc::channel().1,
+            active: None,
         };
         (job, done_tx)
     }
@@ -247,6 +254,7 @@ pub struct App {
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
     pub(crate) integrations: crate::integrations_ui::IntegrationsState,
+    pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
 }
 
 impl Deref for App {
@@ -395,6 +403,7 @@ impl App {
             welcome_open,
             pending_welcome_after_splash,
             integrations: crate::integrations_ui::IntegrationsState::default(),
+            encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -1016,6 +1025,22 @@ impl App {
         self.apply_imported_project("AAF", path, res);
     }
 
+    pub fn export_aaf_dialog(&mut self) {
+        let default_name = self.export_interchange_path("aaf");
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Advanced Authoring Format", &["aaf"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::aaf::export_aaf_file(&self.session.project, &p) {
+            Ok(()) => self.set_status(format!("AAF exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar AAF: {e}")),
+        }
+    }
+
     pub fn import_fcp7_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro 7 XML", &["xml"])
@@ -1127,15 +1152,15 @@ impl App {
     }
 
     pub fn import_dialog(&mut self) {
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(media::IMAGE_EXTS);
+        all.extend_from_slice(media::VIDEO_EXTS);
+        all.extend_from_slice(media::AUDIO_EXTS);
+        all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter(
-                "Mídia suportada",
-                &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
-                    "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
-                    "flac", "ogg", "oga", "mp3", "m4a", "aac",
-                ],
-            )
+            .add_filter("Mídia suportada", &all)
+            .add_filter("Imagens", media::IMAGE_EXTS)
+            .add_filter("Áudio", media::AUDIO_EXTS)
             .add_filter("Todos os arquivos", &["*"])
             .pick_files()
         {
@@ -1145,7 +1170,7 @@ impl App {
 
     pub fn import_sequence_dialog(&mut self) {
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter("Imagens", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
+            .add_filter("Imagens", media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -1528,9 +1553,24 @@ impl App {
             UiAction::ImportFcp7Dialog => self.import_fcp7_dialog(),
             UiAction::ExportFcp7Dialog => self.export_fcp7_dialog(),
             UiAction::ImportAafDialog => self.import_aaf_dialog(),
+            UiAction::ExportAafDialog => self.export_aaf_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
+            UiAction::SendToEncoder => self.send_timeline_to_encoder(),
+            UiAction::EncoderStartQueue => {
+                self.encoder.start_queue(&self.media);
+                self.set_status("Fila do Neoveg Encoder iniciada");
+            }
+            UiAction::EncoderPauseQueue => {
+                self.encoder.runtime.toggle_pause();
+            }
+            UiAction::EncoderStopCurrent => {
+                self.encoder.runtime.stop_current();
+            }
+            UiAction::EncoderStopQueue => {
+                self.encoder.runtime.stop_queue();
+            }
             UiAction::SnapshotDialog => self.snapshot_dialog(),
             UiAction::OpenProjectProps => self.dlg.project_props = true,
             UiAction::OpenEventProps => {
@@ -1810,6 +1850,7 @@ impl App {
                     self.cmd_menu_btn(ui, "file.import_fcp7");
                     self.cmd_menu_btn(ui, "file.export_fcp7");
                     self.cmd_menu_btn(ui, "file.import_aaf");
+                    self.cmd_menu_btn(ui, "file.export_aaf");
                     ui.separator();
                     self.cmd_menu_btn(ui, "file.import_edl");
                     self.cmd_menu_btn(ui, "file.export_edl");
@@ -1820,6 +1861,7 @@ impl App {
                 });
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.render");
+                self.cmd_menu_btn(ui, "file.send_to_encoder");
                 self.cmd_menu_btn(ui, "file.snapshot");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.project_props");
@@ -1841,6 +1883,22 @@ impl App {
                     self.cmd_menu_btn(ui, "event.next_take");
                     self.cmd_menu_btn(ui, "event.prev_take");
                     self.cmd_menu_btn(ui, "event.delete_active_take");
+                });
+                ui.menu_button("Ferramenta de edição", |ui| {
+                    for id in [
+                        "edit.tool.normal",
+                        "edit.tool.envelope",
+                        "edit.tool.selection",
+                        "edit.tool.zoom",
+                    ] {
+                        self.cmd_menu_btn(ui, id);
+                    }
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.mode.normal");
+                    self.cmd_menu_btn(ui, "edit.tool.mode.slip");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.next");
+                    self.cmd_menu_btn(ui, "edit.tool.prev");
                 });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
@@ -2067,6 +2125,15 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                ui.menu_button("Neoveg Encoder", |ui| {
+                    self.cmd_menu_btn(ui, "view.tab.encoder");
+                    self.cmd_menu_btn(ui, "file.send_to_encoder");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.encoder_start");
+                    self.cmd_menu_btn(ui, "tools.encoder_pause");
+                    self.cmd_menu_btn(ui, "tools.encoder_stop_current");
+                    self.cmd_menu_btn(ui, "tools.encoder_stop_queue");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.run_script");
                 ui.separator();
@@ -2158,6 +2225,7 @@ impl App {
             self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
             self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
             self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
+            self.cmd_tool_btn(ui, Icon::EncoderQueue, None, "view.tab.encoder");
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             ui.separator();
             self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
@@ -2267,12 +2335,72 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
+            // Ferramentas de edição (manual do VEGAS Pro 21, pp. 75–76 e 236):
+            // Normal (com a seta dos modos), Envelope, Seleção e Zoom.
+            let tool = self.session.edit_tool;
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Normal,
+                Icon::NormalTool,
+                None,
+                "edit.tool.normal",
+            );
+            // A seta é desenhada em vetor: a fonte da interface não tem `▼`.
+            let arrow_btn = egui::Button::new("")
+                .min_size(egui::vec2(12.0, ui.spacing().interact_size.y))
+                .frame(false);
+            let modes = egui::menu::menu_custom_button(ui, arrow_btn, |ui| {
+                for id in ["edit.tool.mode.normal", "edit.tool.mode.slip"] {
+                    let mode = if id == "edit.tool.mode.slip" {
+                        neoveg_engine::session::EditMode::Slip
+                    } else {
+                        neoveg_engine::session::EditMode::Normal
+                    };
+                    let on = tool == neoveg_engine::session::EditTool::Normal
+                        && self.session.edit_mode == mode;
+                    let label = menu_label(id, &self.prefs.shortcuts);
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), id);
+                        ui.close_menu();
+                    }
+                }
+            });
+            crate::scrollbars::paint_arrow_glyph(
+                ui.painter(),
+                modes.response.rect,
+                crate::scrollbars::ArrowDir::Down,
+                ui.visuals().text_color(),
+            );
+            modes.response.on_hover_text("Modo da ferramenta Normal");
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Envelope,
+                Icon::EnvelopeTool,
+                None,
+                "edit.tool.envelope",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Selection,
+                Icon::SelectionTool,
+                None,
+                "edit.tool.selection",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Zoom,
+                Icon::ZoomGlass,
+                None,
+                "edit.tool.zoom",
+            );
+            ui.separator();
+
             // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
             // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
             // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
             // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
-            // sem botão porque a função não existe: Gravar, as ferramentas
-            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
+            // sem botão porque a função não existe: Gravar, os modos Shuffle,
+            // Slide, Stretch e Split Trim da ferramenta Normal, Smart Split,
             // Crossfades automáticos (sempre ligados), Travar envelopes e as
             // linhas do tempo aninhadas.
             for (icon, id) in [
@@ -2555,7 +2683,13 @@ impl App {
 
     pub(crate) fn snapshot_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
+            .add_filter(
+                "Imagem",
+                &[
+                    "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
+                    "wbmp", "xbm", "xpm", "ico",
+                ],
+            )
             .set_file_name("quadro.png")
             .save_file()
         {
@@ -2586,9 +2720,17 @@ impl App {
         let mut work = self.session.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let script = p.clone();
+        // janelas da camada de Forms própria são desenhadas por esta interface
+        let (ui, ui_rx) = crate::script_forms::bridge();
+        let options = neoveg_scripting::ScriptRunOptions {
+            ui: Some(ui),
+            // só para testar a camada própria no Windows
+            force_forms_shim: std::env::var_os("NEOVEG_SCRIPTS_FORMS_PROPRIA")
+                .is_some_and(|v| v == "1"),
+        };
         let spawned = crate::util::spawn("script-net", move || {
             let outcome = match crate::util::catch_isolated(|| {
-                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+                neoveg_scripting::run_cs_script_on_session_with(&script, &mut work, &options)
             }) {
                 Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
                 Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
@@ -2604,6 +2746,8 @@ impl App {
                     started: std::time::Instant::now(),
                     media_before,
                     rx,
+                    ui_rx,
+                    active: None,
                 });
             }
             Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
@@ -2613,15 +2757,28 @@ impl App {
     /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
     /// modal; ao terminar, aplica a sessão do script (ou só o erro).
     fn poll_script_job(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.script_job else {
+        let theme = self.theme.clone();
+        let Some(job) = &mut self.script_job else {
             return;
         };
         let (outcome, done) = match job.rx.try_recv() {
             Ok(r) => r,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // janela pedida pelo script (camada de Forms própria)
+                if job.active.is_none() {
+                    if let Ok(call) = job.ui_rx.try_recv() {
+                        job.active = crate::script_forms::Active::start(call);
+                    }
+                }
+                if let Some(active) = &mut job.active {
+                    if active.show(ctx) {
+                        job.active = None;
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    return;
+                }
                 let el = job.started.elapsed().as_secs_f64();
                 let path = job.path.display().to_string();
-                let theme = self.theme.clone();
                 egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         crate::splash::spinner_inline(ui, 20.0, el, &theme);
@@ -2804,6 +2961,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // saída normal: a cópia de recuperação não é mais necessária
+        self.encoder.save_to_disk();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");
     }
@@ -2827,6 +2985,9 @@ impl App {
         self.poll_integrations();
         self.poll_script_job(ctx);
         self.poll_render();
+        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media) {
+            self.set_status(msg);
+        }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(dt as f32);
@@ -2880,6 +3041,7 @@ impl App {
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
         self.show_integrations_window(ctx);
+        self.show_encoder_dialogs(ctx);
         self.crash_report_window(ctx);
         self.recovery_window(ctx);
         self.show_welcome_overlay(ctx);
@@ -3237,6 +3399,7 @@ impl App {
             jpeg_quality: 80,
             include_audio: true,
             wav_bits: crate::render::WavBits::Pcm16,
+            ..RenderSettings::default()
         };
         let tx = self.loader_tx.clone();
         let prog = Arc::new(RenderProgress::default());

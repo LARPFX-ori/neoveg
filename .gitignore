@@ -9,3 +9,6 @@
 /autosave/
 # configura??o local de build (pode conter caminhos desta m?quina)
 /.cargo/config.toml
+/.obsidian
+/filmcraft-main
+filmcraft-main.zip

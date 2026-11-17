@@ -290,10 +290,11 @@ pub enum DockPanel {
     Compositors,
     Scopes,
     Notes,
+    Encoder,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 16] = [
+    pub const ALL: [DockPanel; 17] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -310,6 +311,7 @@ impl DockPanel {
         DockPanel::Compositors,
         DockPanel::Scopes,
         DockPanel::Notes,
+        DockPanel::Encoder,
     ];
 
     pub fn name(self) -> &'static str {
@@ -330,6 +332,7 @@ impl DockPanel {
             DockPanel::Compositors => "Compositores",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
+            DockPanel::Encoder => "Neoveg Encoder",
         }
     }
 
@@ -351,6 +354,7 @@ impl DockPanel {
             DockPanel::Compositors => "view.tab.compositors",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
+            DockPanel::Encoder => "view.tab.encoder",
         }
     }
 }
@@ -377,7 +381,13 @@ pub enum UiAction {
     ImportFcp7Dialog,
     ExportFcp7Dialog,
     ImportAafDialog,
+    ExportAafDialog,
     OpenRenderDialog,
+    SendToEncoder,
+    EncoderStartQueue,
+    EncoderPauseQueue,
+    EncoderStopCurrent,
+    EncoderStopQueue,
     SnapshotDialog,
     OpenProjectProps,
     OpenEventProps,
@@ -796,6 +806,19 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::ImportAafDialog, h),
     },
     CommandDef {
+        id: "file.export_aaf",
+        label: "Exportar AAF (.aaf)...",
+        menu_path: "Arquivo/Exportar AAF (.aaf)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(s, h, UiAction::ExportAafDialog, "aaf", "AAF", |sess, p| {
+                crate::aaf::export_aaf_file(&sess.project, p)
+            })
+        },
+    },
+    CommandDef {
         id: "file.import_fcp7",
         label: "Importar Final Cut Pro 7 XML (.xml)...",
         menu_path: "Arquivo/Importar Final Cut Pro 7 XML (.xml)...",
@@ -830,6 +853,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenRenderDialog, h),
+    },
+    CommandDef {
+        id: "file.send_to_encoder",
+        label: "Enviar para o Neoveg Encoder...",
+        menu_path: "Arquivo/Enviar para o Neoveg Encoder...",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SendToEncoder, h),
     },
     CommandDef {
         id: "file.snapshot",
@@ -1002,6 +1034,106 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |s, h| {
             s.delete_active_take_selected();
             ok_mutated(s, h)
+        },
+    },
+    // Ferramentas de edição (manual do VEGAS Pro 21, p. 236): trocar de
+    // ferramenta não muda o projeto nem cria passo de Desfazer.
+    CommandDef {
+        id: "edit.tool.normal",
+        label: "Ferramenta Normal",
+        menu_path: "Editar/Ferramenta de edição/Normal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.envelope",
+        label: "Ferramenta Envelope",
+        menu_path: "Editar/Ferramenta de edição/Envelope",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Envelope;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.selection",
+        label: "Ferramenta Seleção",
+        menu_path: "Editar/Ferramenta de edição/Seleção",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Selection;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.zoom",
+        label: "Ferramenta Zoom",
+        menu_path: "Editar/Ferramenta de edição/Zoom",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Zoom;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.next",
+        label: "Próxima ferramenta",
+        menu_path: "Editar/Ferramenta de edição/Próxima ferramenta",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = s.edit_tool.next();
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.prev",
+        label: "Ferramenta anterior",
+        menu_path: "Editar/Ferramenta de edição/Ferramenta anterior",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = s.edit_tool.prev();
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.normal",
+        label: "Modo Normal",
+        menu_path: "Editar/Ferramenta de edição/Modo Normal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Normal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.slip",
+        label: "Modo Slip",
+        menu_path: "Editar/Ferramenta de edição/Modo Slip",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Slip;
+            Ok(CommandOutcome::Executed)
         },
     },
     CommandDef {
@@ -1375,6 +1507,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Notes), h),
     },
     CommandDef {
+        id: "view.tab.encoder",
+        label: "Neoveg Encoder",
+        menu_path: "Exibir/Neoveg Encoder",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
+    },
+    CommandDef {
         id: "view.envelopes",
         label: "Mostrar envelopes",
         menu_path: "Exibir/Mostrar envelopes",
@@ -1735,6 +1876,42 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
+    },
+    CommandDef {
+        id: "tools.encoder_start",
+        label: "Encoder: Iniciar / Retomar fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Iniciar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStartQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_pause",
+        label: "Encoder: Pausar / Retomar",
+        menu_path: "Ferramentas/Neoveg Encoder/Pausar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderPauseQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_current",
+        label: "Encoder: Interromper item atual",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper arquivo atual",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopCurrent, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_queue",
+        label: "Encoder: Interromper fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopQueue, h),
     },
     CommandDef {
         id: "tools.run_script",
@@ -2370,6 +2547,39 @@ mod tests {
     use super::*;
     use crate::model::Project;
     use std::collections::HashSet;
+
+    /// D e Shift+D percorrem as ferramentas; trocar de ferramenta ou de
+    /// modo não cria passo de Desfazer.
+    #[test]
+    fn ferramentas_de_edicao_alternam_sem_desfazer() {
+        use crate::session::{EditMode, EditTool};
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert_eq!(s.edit_tool, EditTool::Normal);
+        for want in [
+            EditTool::Envelope,
+            EditTool::Selection,
+            EditTool::Zoom,
+            EditTool::Normal,
+        ] {
+            run_command("edit.tool.next", &mut s, &mut h).unwrap();
+            assert_eq!(s.edit_tool, want);
+        }
+        run_command("edit.tool.prev", &mut s, &mut h).unwrap();
+        assert_eq!(s.edit_tool, EditTool::Zoom);
+        run_command("edit.tool.mode.slip", &mut s, &mut h).unwrap();
+        assert_eq!(
+            (s.edit_tool, s.edit_mode),
+            (EditTool::Normal, EditMode::Slip)
+        );
+        run_command("edit.tool.selection", &mut s, &mut h).unwrap();
+        run_command("edit.tool.mode.normal", &mut s, &mut h).unwrap();
+        assert_eq!(
+            (s.edit_tool, s.edit_mode),
+            (EditTool::Normal, EditMode::Normal)
+        );
+        assert!(s.undo.is_empty(), "ferramenta não entra no Desfazer");
+    }
 
     #[test]
     fn ids_da_tabela_sao_unicos() {

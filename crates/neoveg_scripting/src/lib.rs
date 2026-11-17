@@ -12,9 +12,20 @@
 
 mod dotnet_host;
 #[forbid(unsafe_code)]
+mod script_ui;
+#[forbid(unsafe_code)]
 mod vegas_cs;
+#[forbid(unsafe_code)]
+mod winforms_shim;
 
 pub use dotnet_host::{find_dotnet_env, DotnetEnv};
+/// Caracteres de um campo de texto dos formulários de script.
+pub use script_ui::MAX_TEXT_CHARS as MAX_FORM_TEXT_CHARS;
+pub use script_ui::{
+    ControlKind, ControlSpec, ControlValue, FileDialogMode, FileDialogSpec, FormSpec,
+    MessageButtons, ScriptUi, ScriptUiReply, ScriptUiRequest,
+};
+pub use vegas_cs::ScriptRunOptions;
 
 use neoveg_common::error::NeovegError;
 use neoveg_engine::commands::{
@@ -62,6 +73,17 @@ pub fn run_cs_script_on_session(
     script_path: &Path,
     session: &mut EditorSession,
 ) -> Result<Vec<String>, NeovegError> {
+    run_cs_script_on_session_with(script_path, session, &ScriptRunOptions::default())
+}
+
+/// Como [`run_cs_script_on_session`], com as opções da execução (quem
+/// mostra as janelas da camada de Forms própria).
+#[forbid(unsafe_code)]
+pub fn run_cs_script_on_session_with(
+    script_path: &Path,
+    session: &mut EditorSession,
+    options: &ScriptRunOptions,
+) -> Result<Vec<String>, NeovegError> {
     let mut host = HeadlessHost;
     let mut messages = Vec::new();
     let meta = std::fs::metadata(script_path).map_err(|e| {
@@ -87,7 +109,14 @@ pub fn run_cs_script_on_session(
                 MAX_DLL_BYTES / (1024 * 1024)
             )));
         }
-        vegas_cs::run_cs_script_impl(script_path, None, session, &mut host, &mut messages)?;
+        vegas_cs::run_cs_script_impl(
+            script_path,
+            None,
+            session,
+            &mut host,
+            &mut messages,
+            options,
+        )?;
         return Ok(messages);
     }
 
@@ -117,6 +146,7 @@ pub fn run_cs_script_on_session(
         session,
         &mut host,
         &mut messages,
+        options,
     )?;
     Ok(messages)
 }
@@ -1151,6 +1181,185 @@ public class EntryPoint
             }
             assert!(ctx.session.undo.is_empty(), "{tag}");
         }
+    }
+
+    /// Interface de teste: guarda os pedidos e devolve respostas programadas
+    /// (ou `NoUi` quando acabam).
+    struct Respondedor {
+        respostas: std::sync::Mutex<std::collections::VecDeque<ScriptUiReply>>,
+        pedidos: std::sync::Mutex<Vec<ScriptUiRequest>>,
+    }
+
+    impl ScriptUi for Respondedor {
+        fn request(&self, request: ScriptUiRequest) -> ScriptUiReply {
+            if let Ok(mut p) = self.pedidos.lock() {
+                p.push(request);
+            }
+            self.respostas
+                .lock()
+                .ok()
+                .and_then(|mut r| r.pop_front())
+                .unwrap_or(ScriptUiReply::NoUi)
+        }
+    }
+
+    /// Contexto, resultado e pedidos de janela de uma rodada com a camada.
+    type RodadaComForms = (
+        ScriptContext,
+        Result<Vec<String>, NeovegError>,
+        Vec<ScriptUiRequest>,
+    );
+
+    /// Roda o script com a camada de Forms própria (também no Windows) e o
+    /// respondedor; `None` sem .NET SDK.
+    fn roda_com_forms(
+        tag: &str,
+        corpo: &str,
+        respostas: Vec<ScriptUiReply>,
+    ) -> Option<RodadaComForms> {
+        let env = find_dotnet_env().ok()?;
+        if !env.has_sdk {
+            return None;
+        }
+        let path = temp_cs_path(tag);
+        let src = format!(
+            "using System.Windows.Forms;\nusing ScriptPortal.Vegas;\n\npublic class EntryPoint\n{{\n    public void FromVegas(Vegas vegas)\n    {{\n{corpo}\n    }}\n}}\n"
+        );
+        std::fs::write(&path, src).ok()?;
+        let ui = std::sync::Arc::new(Respondedor {
+            respostas: std::sync::Mutex::new(respostas.into()),
+            pedidos: std::sync::Mutex::new(Vec::new()),
+        });
+        let opts = ScriptRunOptions {
+            ui: Some(ui.clone()),
+            force_forms_shim: true,
+        };
+        let mut ctx = ScriptContext::new(projeto_com_takes());
+        let r = run_cs_script_on_session_with(&path, &mut ctx.session, &opts);
+        let _ = std::fs::remove_file(&path);
+        let pedidos = ui.pedidos.lock().map(|p| p.clone()).unwrap_or_default();
+        Some((ctx, r, pedidos))
+    }
+
+    #[test]
+    fn camada_forms_message_box_responde_pelo_neoveg() {
+        let corpo = r#"
+        var r = MessageBox.Show("Apagar?", "Confirma", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        vegas.ShowMessage(r.ToString());"#;
+        let resp = vec![ScriptUiReply::MessageBox {
+            result: "No".into(),
+        }];
+        let Some((_, r, pedidos)) = roda_com_forms("forms_msg", corpo, resp) else {
+            return;
+        };
+        assert_eq!(r.unwrap().last().map(String::as_str), Some("No"));
+        assert_eq!(
+            pedidos,
+            vec![ScriptUiRequest::MessageBox {
+                text: "Apagar?".into(),
+                caption: "Confirma".into(),
+                buttons: MessageButtons::YesNo,
+                icon: "Question".into(),
+            }]
+        );
+    }
+
+    /// Clique num botão com handler volta ao script, que muda outro
+    /// controle; a janela é redesenhada e o OK fecha com DialogResult.OK.
+    #[test]
+    fn camada_forms_formulario_com_handler_e_ok() {
+        let corpo = r#"
+        var form = new Form { Text = "Marcador", ClientSize = new System.Drawing.Size(300, 120) };
+        var rotulo = new Label { Text = "?", Left = 10, Top = 10 };
+        var caixa = new TextBox { Text = "a", Left = 10, Top = 40 };
+        var maiusc = new Button { Text = "Maiúsculas", Left = 10, Top = 80 };
+        maiusc.Click += (s, e) => rotulo.Text = caixa.Text.ToUpper();
+        var ok = new Button { Text = "OK", Left = 200, Top = 80, DialogResult = DialogResult.OK };
+        form.Controls.AddRange(new Control[] { rotulo, caixa, maiusc, ok });
+        form.AcceptButton = ok;
+        var res = form.ShowDialog();
+        vegas.Project.AddMarker(1.0, caixa.Text + "|" + rotulo.Text);
+        vegas.ShowMessage(res.ToString());"#;
+        let valores = |texto: &str| {
+            vec![ControlValue {
+                id: 1,
+                text: texto.into(),
+                ..Default::default()
+            }]
+        };
+        let resp = vec![
+            ScriptUiReply::Form {
+                closed: false,
+                result: None,
+                clicked: Some(2),
+                values: valores("abc"),
+            },
+            ScriptUiReply::Form {
+                closed: false,
+                result: None,
+                clicked: Some(3),
+                values: valores("abc"),
+            },
+        ];
+        let Some((ctx, r, pedidos)) = roda_com_forms("forms_form", corpo, resp) else {
+            return;
+        };
+        assert_eq!(r.unwrap().last().map(String::as_str), Some("OK"));
+        assert_eq!(pedidos.len(), 2, "redesenhada depois do clique");
+        let ScriptUiRequest::Form(f) = &pedidos[1] else {
+            panic!("formulário");
+        };
+        assert_eq!(
+            (f.title.as_str(), f.width, f.height),
+            ("Marcador", 300.0, 120.0)
+        );
+        assert_eq!(f.accept, Some(3));
+        assert_eq!(f.controls[0].text, "ABC", "o handler rodou no script");
+        assert_eq!(f.controls[1].kind, Some(ControlKind::TextBox));
+        assert_eq!(f.controls[3].dialog_result.as_deref(), Some("OK"));
+        let m = ctx.session.project.markers.last().expect("marcador");
+        assert_eq!(m.label, "abc|ABC");
+    }
+
+    #[test]
+    fn camada_forms_dialogo_de_arquivo_e_extensao_padrao() {
+        let corpo = r#"
+        var d = new SaveFileDialog { Filter = "Texto|*.txt", DefaultExt = "txt", Title = "Salvar" };
+        var res = d.ShowDialog();
+        vegas.ShowMessage(res + "|" + System.IO.Path.GetFileName(d.FileName));"#;
+        let resp = vec![ScriptUiReply::File {
+            ok: true,
+            paths: vec![std::env::temp_dir().join("lista").display().to_string()],
+        }];
+        let Some((_, r, pedidos)) = roda_com_forms("forms_file", corpo, resp) else {
+            return;
+        };
+        assert_eq!(r.unwrap().last().map(String::as_str), Some("OK|lista.txt"));
+        let ScriptUiRequest::FileDialog(d) = &pedidos[0] else {
+            panic!("diálogo");
+        };
+        assert_eq!((d.mode, d.title.as_str()), (FileDialogMode::Save, "Salvar"));
+        assert_eq!(
+            d.filters(),
+            vec![("Texto".to_string(), vec!["txt".to_string()])]
+        );
+    }
+
+    /// Sem interface (CLI): MessageBox responde com o primeiro botão e
+    /// registra o texto; formulário e diálogo de arquivo são cancelados.
+    #[test]
+    fn camada_forms_sem_interface_usa_o_padrao() {
+        let corpo = r#"
+        var r = MessageBox.Show("oi", "T", MessageBoxButtons.YesNo);
+        var f = new Form().ShowDialog();
+        var o = new OpenFileDialog().ShowDialog();
+        vegas.ShowMessage(r + "|" + f + "|" + o);"#;
+        let Some((_, r, _)) = roda_com_forms("forms_cli", corpo, Vec::new()) else {
+            return;
+        };
+        let msgs = r.unwrap();
+        assert!(msgs.iter().any(|m| m == "T: oi"), "{msgs:?}");
+        assert_eq!(msgs.last().map(String::as_str), Some("Yes|Cancel|Cancel"));
     }
 
     /// No Windows, scripts usam o System.Windows.Forms real e rodam numa

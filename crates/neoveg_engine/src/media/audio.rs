@@ -1,7 +1,8 @@
 //! Decodificação de áudio em Rust puro sob licenças da lista SPDX permitida
-//! (`AGENTS.md`): WAVE/AIFF próprio, FLAC (`claxon`, Apache-2.0), Ogg Vorbis
-//! (`lewton`, MIT OR Apache-2.0) e MP3 (`puremp3`, MIT OR CC0-1.0), além de
-//! `AAC`/`M4A` via API nativa do sistema operacional (`media::mf` no Windows).
+//! (`AGENTS.md`): WAVE/BWF/RF64/AIFF/AU/CAF/Wave64/VOC/8SVX/QOA próprios,
+//! FLAC (`claxon`, Apache-2.0), Ogg Vorbis (`lewton`, MIT OR Apache-2.0) e
+//! MP3 (`puremp3`, MIT OR CC0-1.0), além de `AAC`/`M4A`/`WMA` via API nativa
+//! do sistema operacional (`media::mf` no Windows).
 
 use anyhow::{anyhow, bail, Result};
 use std::fs::File;
@@ -224,7 +225,13 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "wav" | "wave" | "aif" | "aiff" | "aifc" => decode_wav_aiff(path),
+        "wav" | "wave" | "bwf" | "rf64" | "aif" | "aiff" | "aifc" => decode_wav_aiff(path),
+        "au" | "snd" | "caf" | "w64" | "voc" | "8svx" | "svx" | "qoa" => {
+            crate::util::guard("decodificação de áudio", || {
+                decode_extra_audio(path, &ext)
+            })
+            .map_err(|e| anyhow!("{e}"))?
+        }
         "flac" => crate::util::guard("decodificação FLAC", || decode_flac_raw(path))
             .map_err(|e| anyhow!("{e}"))?,
         "ogg" | "oga" => {
@@ -233,29 +240,26 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
         }
         "mp3" => crate::util::guard("decodificação MP3", || decode_mp3_raw(path))
             .map_err(|e| anyhow!("{e}"))?,
-        "aac" | "m4a" => decode_aac_or_m4a(path),
+        "aac" | "m4a" | "m4b" | "wma" | "mp2" | "mpa" | "alac" => decode_aac_or_m4a(path),
         _ => bail!("formato de áudio não suportado: .{ext}"),
     }
 }
 
-fn decode_aac_or_m4a(path: &Path) -> Result<AudioData> {
-    #[cfg(windows)]
-    {
-        decode_via_mf(path)
+fn decode_extra_audio(path: &Path, ext: &str) -> Result<AudioData> {
+    let len = std::fs::metadata(path)?.len();
+    if len > MAX_FILE_BYTES {
+        bail!("arquivo de áudio grande demais ({len} bytes)");
     }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        bail!("AAC/M4A requer API de mídia do sistema operacional (Media Foundation no Windows)")
-    }
+    let bytes = std::fs::read(path)?;
+    let pcm = super::audio_extra::decode_bytes(ext, &bytes, MAX_SAMPLES)?;
+    finalize_audio(pcm.sample_rate, pcm.channels as usize, pcm.samples)
 }
 
-#[cfg(windows)]
-fn decode_via_mf(path: &Path) -> Result<AudioData> {
-    let loaded = super::mf::open_media(path)?;
+fn decode_aac_or_m4a(path: &Path) -> Result<AudioData> {
+    let loaded = super::system::open_media(path)?;
     loaded
         .audio
-        .ok_or_else(|| anyhow!("Media Foundation: nenhuma faixa de áudio encontrada"))
+        .ok_or_else(|| anyhow!("{}: nenhuma faixa de áudio encontrada", loaded.backend))
 }
 
 fn decode_wav_aiff(path: &Path) -> Result<AudioData> {
@@ -391,6 +395,11 @@ mod tests {
             "oracle_flac.flac",
             "oracle_ogg.ogg",
             "oracle_mp3.mp3",
+            "oracle_au.au",
+            "oracle_caf.caf",
+            "oracle_w64.w64",
+            "oracle_adpcm.wav",
+            "oracle_alaw.wav",
         ];
         if cfg!(windows) {
             names.push("oracle_aac.m4a");

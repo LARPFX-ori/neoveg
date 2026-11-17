@@ -71,6 +71,7 @@ pub fn dock_tab_icon(tab: DockTab) -> Icon {
         DockTab::Compositors => Icon::Compositors,
         DockTab::Scopes => Icon::ScopesWave,
         DockTab::Notes => Icon::NotesPad,
+        DockTab::Encoder => Icon::EncoderQueue,
     }
 }
 

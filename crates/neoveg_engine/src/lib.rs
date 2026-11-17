@@ -18,9 +18,13 @@ pub use neoveg_common::{curve, error, prefs, session_marker, time, util};
 #[forbid(unsafe_code)]
 pub mod aaf;
 #[forbid(unsafe_code)]
+mod aaf_metadict;
+#[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;
+#[forbid(unsafe_code)]
+pub mod encoder;
 #[forbid(unsafe_code)]
 pub mod engine;
 #[forbid(unsafe_code)]

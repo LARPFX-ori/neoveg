@@ -870,3 +870,114 @@ fn assert_welcome_ui_layout(app: &mut App) {
         app.dismiss_welcome();
     }
 }
+
+/// Ferramentas de edição na linha do tempo (manual do VEGAS Pro 21, p. 236):
+/// Envelope não move eventos, Seleção seleciona pela caixa sem mover, Zoom
+/// aproxima pela caixa e ajusta o projeto com um clique, e o modo Slip da
+/// Normal desliza a mídia sem mover o evento.
+#[test]
+fn ferramentas_de_edicao_na_timeline() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0;
+    let mut frame = |app: &mut App, ev: Vec<Event>| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, Modifiers::NONE, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![]);
+    app.dismiss_splash();
+    frame(&mut app, vec![]);
+    app.dismiss_welcome();
+    app.session.sel_track = Some(0);
+    app.cursor = Ticks::ZERO;
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(6);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.dlg.gen_editor = None;
+    app.sel_events.clear();
+    for _ in 0..4 {
+        frame(&mut app, vec![]);
+    }
+    let ids: Vec<Id> = app.project.tracks[0].events.iter().map(|e| e.id).collect();
+    assert_eq!(ids.len(), 2, "dois eventos na trilha de vídeo");
+    let (a, b) = (ids[0], ids[1]);
+    let ra = app.event_screen_rect(a).expect("evento a na tela");
+    let rb = app.event_screen_rect(b).expect("evento b na tela");
+    let start = |app: &App, id| app.project.event(id).map(|e| e.start);
+    let drag = |app: &mut App, frame: &mut dyn FnMut(&mut App, Vec<Event>), p0: Pos2, p1: Pos2| {
+        frame(app, vec![Event::PointerMoved(p0), press(p0, true)]);
+        for k in 1..=8 {
+            let p = p0 + (p1 - p0) * (k as f32 / 8.0);
+            frame(app, vec![Event::PointerMoved(p)]);
+        }
+        frame(app, vec![press(p1, false)]);
+        frame(app, vec![]);
+    };
+
+    // Envelope: arrastar o corpo do evento não o move nem cria Desfazer
+    app.exec_cmd(Some(&ctx), "edit.tool.envelope");
+    let undo0 = app.undo.len();
+    let sa = start(&app, a);
+    drag(
+        &mut app,
+        &mut frame,
+        ra.center(),
+        ra.center() + vec2(120.0, 0.0),
+    );
+    assert_eq!(start(&app, a), sa, "Envelope não move eventos");
+    assert_eq!(app.undo.len(), undo0, "nem cria passo de Desfazer");
+
+    // Seleção: a caixa seleciona os dois eventos e não move nenhum
+    app.exec_cmd(Some(&ctx), "edit.tool.selection");
+    app.sel_events.clear();
+    let sb = start(&app, b);
+    drag(&mut app, &mut frame, ra.center(), rb.center());
+    assert!(app.sel_events.contains(&a) && app.sel_events.contains(&b));
+    assert_eq!(
+        (start(&app, a), start(&app, b)),
+        (sa, sb),
+        "Seleção não move"
+    );
+
+    // Zoom: a caixa aproxima; um clique mostra o projeto inteiro
+    app.exec_cmd(Some(&ctx), "edit.tool.zoom");
+    let pps0 = app.tl.px_per_sec;
+    let y = ra.center().y;
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(ra.left() + 10.0, y),
+        pos2(ra.left() + 70.0, y),
+    );
+    assert!(app.tl.px_per_sec > pps0, "a caixa aproxima o zoom");
+    let p = pos2(ra.left() + 10.0, y);
+    frame(&mut app, vec![Event::PointerMoved(p), press(p, true)]);
+    frame(&mut app, vec![press(p, false)]);
+    frame(&mut app, vec![]);
+    assert_eq!(app.tl.scroll_x, Ticks::ZERO, "o clique volta ao início");
+    assert!(
+        app.tl.px_per_sec < pps0 * 2.0,
+        "e afasta para o projeto inteiro"
+    );
+
+    // Normal no modo Slip: o arraste desliza a mídia e o evento fica
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.slip");
+    for _ in 0..2 {
+        frame(&mut app, vec![]);
+    }
+    let rb = app.event_screen_rect(b).expect("evento b na tela");
+    let off0 = app.project.event(b).map(|e| e.offset);
+    drag(
+        &mut app,
+        &mut frame,
+        rb.center(),
+        rb.center() - vec2(40.0, 0.0),
+    );
+    assert_eq!(start(&app, b), sb, "Slip não move o evento");
+    assert_ne!(
+        app.project.event(b).map(|e| e.offset),
+        off0,
+        "a mídia desliza"
+    );
+}

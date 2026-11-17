@@ -27,11 +27,11 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** Documento público **Apple *Final Cut Pro XML Interchange Format*** (edição para Final Cut Pro 7, `xmeml` versão 5; também lê a versão 4): elementos `<xmeml>`, `<sequence>`, `<rate>` (`<timebase>` + `<ntsc>`), `<timecode>`/`<displayformat>`, `<media>`/`<video>`/`<audio>`, `<format>`/`<samplecharacteristics>`, `<track>`, `<clipitem>` (`<start>`, `<end>`, `<in>`, `<out>`, `-1` em bordas de transição), `<transitionitem>`, `<file>` (`<pathurl>`, definição única + referências por `id`), `<link>`/`<linkclipref>` e `<marker>`.
 - **Método de implementação:** Reusa o parser XML limitado de `fcpxml.rs`; quadros inteiros limitados a `50 000 000` e convertidos para `Ticks` exatos; até `20 000` clipes e `64` trilhas. Na exportação, eventos sobrepostos de uma trilha vão para trilhas extras (o FCP7 não admite sobreposição numa trilha). Fuzzing por mutação em `fcp7xml::tests`.
 
-### AAF (`.aaf`, importação) — `src/aaf.rs`
+### AAF (`.aaf`, importação e exportação) — `src/aaf.rs`, `src/aaf_metadict.rs`
 
-- **Edição de referência:** Especificações públicas da AAF Association / AMWA — **MS-03 AAF Low-Level Container Specification v1.0.1** (o contêiner Compound File Binary, lido pelo `cfb`), **MS-02 AAF Stored Format Specification v1.0.1** (stream `properties`: ordem de bytes, contagem, entradas `pid/forma/tamanho`; formas de dado, referência forte, vetor e conjunto de referências fortes com stream `index`; referência fraca por chave) e **MS-01 AAF Object Specification v1.1** (Header → ContentStorage → Mobs; CompositionMob, MasterMob, SourceMob; TimelineMobSlot com EditRate; Sequence, SourceClip, Filler, Transition; EssenceDescriptor → NetworkLocator `URLString`; definições de dados *Picture*/*Sound*).
-- **Método de implementação:** Contêiner Compound File lido pelo crate `cfb` (MIT); só os streams de metadados são lidos (até `4 MiB` cada, `200 000` objetos, profundidade `32`, `20 000` clipes) e toda a leitura roda sob `catch_unwind`. Transições viram sobreposição com crossfade. A exportação AAF ainda não existe.
-- **Fixtures:** `tools/gen_aaf_fixtures.py` gera `target/fixtures/oracle_*.aaf` com o pacote externo `pyaaf2` (MIT), usado só como gerador (como o `ffmpeg`): `PYTHONPATH=<pasta do pyaaf2> python tools/gen_aaf_fixtures.py target/fixtures`. Sem as fixtures, os testes que dependem delas pulam.
+- **Edição de referência:** Especificações públicas da AAF Association / AMWA — **MS-03 AAF Low-Level Container Specification v1.0.1** (contêiner Compound File Binary, lido e gravado pelo `cfb`), **MS-02 AAF Stored Format Specification v1.0.1** (stream `properties`: ordem de bytes, contagem, entradas `pid/forma/tamanho`; formas de dado, referência forte, vetor e conjunto de referências fortes com stream `index` ordenado por chave; referência fraca e `/referenced properties`; assinatura de raiz §1.6 `aafSignature_Aaf_SSBinary`), **MS-01 AAF Object Specification v1.1** (§5/§27 `MetaDictionary` com `ClassDefinitions` e `TypeDefinitions`; `Header` → `Identification` / `Dictionary` / `ContentStorage` → Mobs; `CompositionMob`, `MasterMob`, `SourceMob`; `TimelineMobSlot` com `EditRate` e `PhysicalTrackNumber`; `Sequence`, `SourceClip`, `Filler`, `Transition` + `OperationGroup`; `EssenceDescriptor` → `ImportDescriptor` → `NetworkLocator` `URLString`) e **AMWA AS-01 *AAF Edit Protocol*** (2005-04-08, §12.1 `OperationDef_VideoDissolve` e §15 `OpEditProtocol`). Os AUIDs, tipos, rótulos (`PictureEssenceTrack`, `SoundEssenceTrack`, `AAFEditProtocol`) e `LocalIdentification` (*pids*) vêm dos registros públicos da **SMPTE** (`registry.smpte-ra.org`: ST 395, ST 335, ST 2003 e ST 400); o AUID de `Video Dissolve` (`0c3bea40-fc05-11d2-8a29-0050040ef7d2`) vem ainda do vetor binário gerado por `tools/gen_aaf_fixtures.py`.
+- **Método de implementação:** Contêiner Compound File lido e gravado pelo crate `cfb` (MIT); na leitura, só os streams de metadados são lidos (até `4 MiB` cada, `200 000` objetos, profundidade `32`, `20 000` clipes) e toda a operação roda sob `catch_unwind`. Na escrita (`export_aaf_bytes` / `export_aaf_file` com gravação atômica via `.part`), o arquivo inclui `/MetaDictionary-1` transitivamente fechado para o submodelo emitido, dissoluções de vídeo viram `Transition` + `OperationGroup` (`Video Dissolve`), lacunas viram `Filler`, e sobreposições de áudio são distribuídas em slots paralelos (sem transição de áudio, pois seu AUID numérico não consta das especificações MS-01/MS-02/MS-03 nem dos registros SMPTE citados).
+- **Fixtures:** `tools/gen_aaf_fixtures.py` gera `target/fixtures/oracle_*.aaf` com o pacote externo `pyaaf2` (MIT), usado só como oráculo/gerador externo (como o `ffmpeg`): `PYTHONPATH=<pasta do pyaaf2> python tools/gen_aaf_fixtures.py target/fixtures`. Sem as fixtures, os testes que dependem delas pulam.
 
 ### EDL CMX 3600 (`.edl`) — `src/edl.rs`
 
@@ -43,10 +43,10 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** Especificações públicas **SubRip Text (`.srt`)** (`HH:MM:SS,mmm --> HH:MM:SS,mmm`) e **W3C WebVTT — *Web Video Text Tracks Format*** (cabeçalho `WEBVTT`, blocos `NOTE`/`STYLE`/`REGION`, deixas `(HH:)?MM:SS.mmm --> ...`, ajustes `align:` / `line:`).
 - **Método de implementação:** Sala limpa com aritmética exata de milissegundos em `Ticks`, sanitização linear de tags inline sem retrocesso e criação de faixas superiores `GenSpec::Text` compatíveis com Desfazer e exportação bidirecional (`fuzz_subtitles_srt_and_vtt`).
 
-### AVI (`.avi`, MJPEG + PCM) — `src/media/avi.rs`
+### AVI (`.avi`, MJPEG / RGB24 / YUV + PCM / G.711) — `src/media/avi.rs`
 
-- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
-- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`). A escrita grava segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
+- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`, bitmaps `BI_RGB`/`DIB `, `YUY2`/`UYVY`, `I420`/`IYUV`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
+- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`), decodifica `MJPEG`, `BI_RGB`/`DIB ` (24/32 bpp) e YUV (`YUY2`/`UYVY` 4:2:2 e `I420`/`IYUV` 4:2:0) e áudio PCM/G.711. A escrita grava `MJPEG` ou `AVI Não Comprimido RGB24` (`AviVideoCodec::UncompressedRgb24`) em segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
 
 ### Integrações ArtCraft & Blender — `src/integrations/`
 
@@ -55,3 +55,33 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
   - Cliente TCP restrito a `127.0.0.1` com limite de linha de `4 MiB`, desafio HMAC-SHA256 em Rust puro (`RFC 2104` / `RFC 6234`, `photocraft-control-v1 server`/`client`) e token por requisição no FilmCraft.
 - **Broadcast Wave Format / `bext` (`workflows.rs`):** gravação WAV BWF segundo **EBU Tech 3285 v2** (bloco `bext` de 602 bytes com `Originator = "Neoveg"` e deslocamento exato de amostras em `TimeReference`) para intercâmbio com precisão de amostra no SoundCraft, além de cópias editáveis vinculadas como *Take* (`Add As Takes`) e observador de modificações no disco.
 - **Blender fora do processo (`blender.rs`):** invocação em segundo plano via `blender -b ... --factory-startup --python ...` sem linkar código GPL (`AGENTS.md` §2.3), renderização direta de sequências PNG para a timeline (`Fra:<N>`), geração de scripts `bpy` com escape JSON seguro e esquema limitado `neoveg.blender.camera.v1` para importar marcadores e keyframes de *Track Motion* / *Pan/Crop* (`16 MiB`, máx. `100 000` quadros).
+
+
+### Formatos Extras de Áudio e Extensões RIFF/AIFF — `src/media/wav.rs` e `src/media/audio_extra.rs`
+
+- **Edições de referência:**
+  - **Microsoft WAVE / RIFF** (`WAVEFORMATEX`, tags `0x0001` PCM, `0x0003` IEEE Float, `0x0006` ITU-T G.711 A-law, `0x0007` ITU-T G.711 µ-law, `0x0011` Microsoft IMA/DVI ADPCM com passo de 89 entradas) e `WAVE_FORMAT_EXTENSIBLE` (`0xFFFE`);
+  - **EBU Tech 3285** (*Broadcast Wave Format — BWF*, chunk `bext`) e **EBU Tech 3306** (*RF64: An Extended File Format for Audio*, chunk `ds64`);
+  - **Apple AIFF 1.3** e **AIFF-C** (`COMM` com `extended80`, `FVER`, `SSND`, codecs `NONE`/`sowt`/`fl32`/`fl64`/`ulaw`/`alaw`);
+  - **Sun / NeXT AU / SND** (`.snd` big-endian: PCM 8/16/24/32, Float 32/64 e ITU-T G.711 µ-law/A-law);
+  - **Apple Core Audio Format (CAF v1)** (`caff`, chunks de 64 bits `desc`, `data`);
+  - **Sony Pictures Digital Wave64** (`.w64`, GUIDs 128-bit `riff`, `wave`, `fmt `, `data`);
+  - **Creative Voice (`.voc`)** (v1.10/v1.20: blocos 0, 1, 2, 6, 7, 8, 9);
+  - **EA IFF 85 `8SVX`** (`.8svx`, `.svx`: `VHDR`, `BODY`, PCM 8 bits e compressão *Fibonacci Delta*);
+  - **Quite OK Audio (`.qoa`, especificação v1)** (cabeçalho `qoaf`, quadros e fatias com preditor *Sign-Sign LMS* de 4 estágios em blocos de até 20 amostras).
+- **Método de implementação:** Sala limpa estrita com limites explícitos de alocação/amostras e suíte de fuzzing por mutação (`fuzz_audio_extra`).
+
+### Formatos Adicionais de Imagem e Sequências — `src/media/img_extra.rs`
+
+- **Edições de referência:** **ANSI/SMPTE 268M-2003** (*DPX File Format*, big/little-endian 8/10/16 bits), **Kodak Cineon File Format v4.5** (`.cin`, cabeçalho 1024 B e empacotamento 10 bits), **WAP Wireless Bitmap Type 0** (`.wbmp`, *uintvar* multibyte + 1 bpp), **X Window System XBM & XPM v3** (`.xbm`, `.xpm` ASCII), **EA IFF 85 ILBM / PBM** (`.iff`, `.ilbm`, `.lbm`, `BMHD`/`CMAP`/`CAMG` EHB/HAM/`BODY` com compressão `ByteRun1`), além dos formatos licenciados do crate `image` 0.25 (`TGA`, `PNM`/`PBM`/`PGM`/`PPM`/`PAM`, `ICO`/`CUR`, `Radiance HDR`, `DDS`, `Farbfeld`, `QOI`, `OpenEXR`, `WebP` estático/animado).
+- **Método de implementação:** Leitores e escritores em sala limpa protegidos por `MAX_DIM` / orçamento de 512 MiB e testados sob mutação (`fuzz_imagens_extras`) e oráculo `ffmpeg`/`ffprobe` (`dpx`).
+
+### Media Foundation no Windows (Decodificação e Codificação) — `src/media/mf/{mod,encode}.rs`
+
+- **Edição de referência:** Documentação pública da Microsoft Win32 Media Foundation (`IMFSourceReader`, `IMFSinkWriter`, `MFTranscodeGetAudioOutputAvailableTypes`, formato de entrada `MFVideoFormat_NV12`).
+- **Método de implementação:** Fronteira FFI isolada com RAII e `// SAFETY:`, gravação atômica em arquivo temporário com `drop` explícito antes da renomeação e testes locais com oráculo `ffprobe`.
+
+### Neoveg Encoder e LUTs `.cube` 1D/3D — `src/encoder/`
+
+- **Edição de referência:** Especificação pública do formato **Cube LUT v1.0** (`TITLE`, `LUT_1D_SIZE`, `LUT_3D_SIZE`, `DOMAIN_MIN`, `DOMAIN_MAX`) e fluxos de codificação em lote (*Fila*, *Codificação* paralela, *Predefinições* `.neovegpreset`/grupos/apelidos, *Pastas Monitoradas*, Corte/5 modos de escala, sobreposições e registros).
+- **Método de implementação:** 100% Rust seguro (`#[forbid(unsafe_code)]`) com limites rígidos em JSON e tabelas `.cube` (`LUT_1D_SIZE <= 4096`, `LUT_3D_SIZE <= 65`), codificação paralela protegida por `catch_unwind` e testes de fuzzing por mutação (`fuzz_encoder_parsers`).

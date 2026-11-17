@@ -47,22 +47,32 @@ impl Fonts {
 }
 
 fn default_font() -> Option<FontArc> {
-    for p in SYSTEM_FONTS {
-        if let Ok(b) = std::fs::read(p) {
-            if let Ok(f) = FontArc::try_from_vec(b) {
-                return Some(f);
+    system_font()
+}
+
+/// Carrega e mantém em cache uma fonte TrueType/OpenType do sistema operacional (§1.5).
+pub(crate) fn system_font() -> Option<FontArc> {
+    static CACHED: std::sync::OnceLock<Option<FontArc>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            for p in SYSTEM_FONTS {
+                if let Ok(b) = std::fs::read(p) {
+                    if let Ok(f) = FontArc::try_from_vec(b) {
+                        return Some(f);
+                    }
+                }
             }
-        }
-    }
-    // Fallback em tempo de execução para qualquer fonte TTF/OTF do sistema operacional (§1.5).
-    for p in list_system_fonts() {
-        if let Ok(b) = std::fs::read(&p) {
-            if let Ok(f) = FontArc::try_from_vec(b) {
-                return Some(f);
+            // Fallback em tempo de execução para qualquer fonte TTF/OTF do sistema operacional (§1.5).
+            for p in list_system_fonts() {
+                if let Ok(b) = std::fs::read(&p) {
+                    if let Ok(f) = FontArc::try_from_vec(b) {
+                        return Some(f);
+                    }
+                }
             }
-        }
-    }
-    None
+            None
+        })
+        .clone()
 }
 
 /// Lista fontes TTF/OTF instaladas no sistema (para o seletor de fonte).
