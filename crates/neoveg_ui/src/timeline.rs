@@ -11,6 +11,15 @@ use egui::{
 };
 use std::collections::HashSet;
 
+mod keyframes;
+use keyframes::KfArea;
+use neoveg_engine::media::audio::WaveChannel;
+use neoveg_engine::session::{EditMode, EditTool};
+use neoveg_engine::track_keyframes::KfRowKind;
+
+/// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
+const KF_ROW_H: f32 = 18.0;
+
 const HEADER_W: f32 = 250.0;
 const LOOP_H: f32 = 12.0;
 const MARKER_H: f32 = 18.0;
@@ -28,7 +37,13 @@ enum EnvOwner {
 }
 
 struct TimelineRows {
+    /// Área dos eventos de cada trilha (sem as linhas de quadros-chave).
     track_rects: Vec<(f32, f32)>,
+    /// Trilha inteira, com as linhas de quadros-chave: para saber em que
+    /// trilha o ponteiro está (soltar mídia, mover entre trilhas).
+    track_spans: Vec<(f32, f32)>,
+    /// Linhas de quadros-chave abaixo de cada trilha, se houver.
+    kf_areas: Vec<Option<KfArea>>,
     bus_rects: Vec<(f32, f32)>,
 }
 
@@ -109,6 +124,11 @@ enum Drag {
         origin_t: Ticks,
         orig: Vec<(Id, Ticks)>,
     },
+    /// Caixa das ferramentas Seleção (`zoom: false`) e Zoom.
+    Box {
+        zoom: bool,
+        start: Pos2,
+    },
     EnvPoint {
         owner: EnvOwner,
         kind: EnvKind,
@@ -129,6 +149,12 @@ enum Drag {
     Pan {
         last: Pos2,
     },
+    Keyframe {
+        track: Id,
+        row: KfRowKind,
+        at: Ticks,
+        moved: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -141,6 +167,13 @@ enum CtxTarget {
     Lane(usize, Ticks),
     Marker(Id),
     Region(Id),
+    Keyframe {
+        track: Id,
+        row: KfRowKind,
+        key: Option<Ticks>,
+        t: Ticks,
+        has_curve: bool,
+    },
 }
 
 pub struct TimelineState {
@@ -153,6 +186,13 @@ pub struct TimelineState {
     rename: Option<(Id, String)>,
     snap_line: Option<Ticks>,
     drop_hint: Option<(usize, Ticks)>,
+    /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
+    pub kf_collapsed: HashSet<Id>,
+    /// Ponto atual da caixa das ferramentas Seleção e Zoom.
+    box_cur: Option<Pos2>,
+    /// Área das faixas e posição de cada trilha no último quadro.
+    pub(crate) last_lanes: Rect,
+    pub(crate) last_rows: Vec<(f32, f32)>,
 }
 
 impl Default for TimelineState {
@@ -167,20 +207,53 @@ impl Default for TimelineState {
             rename: None,
             snap_line: None,
             drop_hint: None,
+            kf_collapsed: HashSet::new(),
+            box_cur: None,
+            last_lanes: Rect::NOTHING,
+            last_rows: Vec::new(),
         }
     }
 }
 
 impl TimelineState {
+    /// Zoom mínimo (afastado): as 48 h de um projeto (`MAX_SECONDS`) cabem em
+    /// cerca de 35 px.
+    pub const MIN_PX_PER_SEC: f32 = 2.0e-4;
+    /// Zoom máximo (aproximado): cerca de 4 ticks por pixel, onde o tempo
+    /// exato ainda separa cada pixel; bem além de uma amostra por pixel.
+    pub const MAX_PX_PER_SEC: f32 = (neoveg_engine::time::TICKS_PER_SEC / 4) as f32;
+
+    /// Zoom dentro dos limites; valor inválido (NaN, infinito, <= 0) volta ao
+    /// padrão (§0.4).
+    pub fn clamp_pps(v: f32) -> f32 {
+        if v.is_finite() && v > 0.0 {
+            v.clamp(Self::MIN_PX_PER_SEC, Self::MAX_PX_PER_SEC)
+        } else {
+            60.0
+        }
+    }
+
     fn dx_to_ticks(&self, dx: f32) -> Ticks {
-        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(1.0)) as f64)
+        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(Self::MIN_PX_PER_SEC)) as f64)
     }
 
     pub fn zoom_by(&mut self, f: f32, anchor: Option<Ticks>) {
         let anchor = anchor.unwrap_or(self.scroll_x + self.dx_to_ticks(self.width / 2.0));
         let ax = (anchor - self.scroll_x).as_secs_f64() as f32 * self.px_per_sec;
-        self.px_per_sec = (self.px_per_sec * f).clamp(2.0, 4000.0);
+        self.px_per_sec = Self::clamp_pps(self.px_per_sec * f);
         self.scroll_x = (anchor - self.dx_to_ticks(ax)).max(Ticks::ZERO);
+    }
+
+    /// Zoom a partir da agulha de reprodução: se ela está na tela, fica no
+    /// mesmo pixel; se não, o zoom acontece e a agulha vai para o centro.
+    pub fn zoom_around_playhead(&mut self, f: f32, playhead: Ticks) {
+        let vis_end = self.scroll_x + self.dx_to_ticks(self.width);
+        if playhead >= self.scroll_x && playhead <= vis_end {
+            self.zoom_by(f, Some(playhead));
+        } else {
+            self.zoom_by(f, None);
+            self.center_on(playhead);
+        }
     }
 
     pub fn center_on(&mut self, t: Ticks) {
@@ -224,6 +297,9 @@ fn shade(c: [u8; 3], k: f32) -> Color32 {
     )
 }
 
+/// Teto de marcas da régua e linhas da grade por quadro.
+const MAX_RULER_MARKS: u32 = 4096;
+
 fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
     let f1 = fps.ticks_per_frame();
     let steps: [(Ticks, i64); 17] = [
@@ -251,10 +327,15 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
             return (s, minor);
         }
     }
-    (
-        Ticks::from_secs_i64(7200),
-        Ticks::from_secs_i64(600).max(f1),
-    )
+    // acima de 1 h: 2 h, 4 h, 8 h... até caber (o tempo satura em 48 h)
+    let mut s = Ticks::from_secs_i64(7200);
+    for _ in 0..48 {
+        if s.as_secs_f64() * pps as f64 >= 90.0 {
+            break;
+        }
+        s = s.saturating_mul(2);
+    }
+    (s, s.div_i64(6).max(f1))
 }
 
 const BUS_TRACK_H: f32 = 58.0;
@@ -262,16 +343,25 @@ const BUS_TRACK_H: f32 = 58.0;
 impl App {
     fn timeline_rows(&self, lanes_top: f32) -> TimelineRows {
         let mut y = lanes_top - self.tl.scroll_y;
-        let track_rects = self
-            .project
-            .tracks
-            .iter()
-            .map(|t| {
-                let r = (y, t.height);
-                y += t.height;
-                r
-            })
-            .collect();
+        let n = self.project.tracks.len();
+        let mut track_rects = Vec::with_capacity(n);
+        let mut track_spans = Vec::with_capacity(n);
+        let mut kf_areas = Vec::with_capacity(n);
+        for t in &self.project.tracks {
+            let kf = self.kf_visible_rows(t);
+            let kf_h = kf.len() as f32 * KF_ROW_H;
+            track_rects.push((y, t.height));
+            track_spans.push((y, t.height + kf_h));
+            kf_areas.push(if kf.is_empty() {
+                None
+            } else {
+                Some(KfArea {
+                    top: y + t.height,
+                    rows: kf,
+                })
+            });
+            y += t.height + kf_h;
+        }
         let bus_rects = if self.opts.show_bus_tracks {
             self.project
                 .audio_buses
@@ -287,6 +377,8 @@ impl App {
         };
         TimelineRows {
             track_rects,
+            track_spans,
+            kf_areas,
             bus_rects,
         }
     }
@@ -513,7 +605,13 @@ impl App {
         } else {
             0.0
         };
-        let total_h: f32 = self.project.tracks.iter().map(|t| t.height).sum::<f32>() + bus_h;
+        let total_h: f32 = self
+            .project
+            .tracks
+            .iter()
+            .map(|t| t.height + self.kf_visible_rows(t).len() as f32 * KF_ROW_H)
+            .sum::<f32>()
+            + bus_h;
         self.tl.scroll_y = self
             .tl
             .scroll_y
@@ -540,7 +638,9 @@ impl App {
         self.lanes_interact(ui, lanes, &rows);
         let rows = self.timeline_rows(lanes.top());
         self.draw_lanes(ui, lanes, &rows);
+        self.draw_keyframe_rows(ui, lanes, &rows);
         self.headers_ui(ui, headers, &rows);
+        self.draw_keyframe_labels(ui, headers, &rows);
 
         if show_v_col {
             let v_col = Rect::from_min_max(
@@ -571,13 +671,58 @@ impl App {
         self.rename_popup(ui);
     }
 
-    fn timeline_zoom_anchor(&self) -> Option<Ticks> {
-        let vis_end = self.tl.scroll_x + self.tl.dx_to_ticks(self.tl.width);
-        if self.cursor >= self.tl.scroll_x && self.cursor <= vis_end {
-            Some(self.cursor)
-        } else {
-            None
+    /// Fim da caixa das ferramentas Seleção e Zoom (manual do VEGAS Pro 21,
+    /// pp. 239–240). Seleção: seleciona os eventos que a caixa toca (Shift ou
+    /// Ctrl somam à seleção). Zoom: o trecho da caixa ocupa a largura da
+    /// linha do tempo.
+    fn finish_box(
+        &mut self,
+        rect: Rect,
+        zoom: bool,
+        lanes: Rect,
+        layout: &[(f32, f32)],
+        mods: egui::Modifiers,
+    ) {
+        let left = lanes.left();
+        if zoom {
+            // caixa muito estreita é um clique (tratado em `clicked`)
+            if rect.width() < 4.0 {
+                return;
+            }
+            let t0 = self.tl.x2t(rect.left().max(left), left);
+            let t1 = self.tl.x2t(rect.right().min(lanes.right()), left);
+            if t1 <= t0 {
+                return;
+            }
+            let secs = (t1 - t0).as_secs_f64() as f32;
+            self.tl.px_per_sec = TimelineState::clamp_pps(lanes.width() / secs);
+            self.tl.scroll_x = t0;
+            return;
         }
+        let mut hits: Vec<Id> = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            let Some(&(y0, h)) = layout.get(ti) else {
+                continue;
+            };
+            for e in &tr.events {
+                if self.event_rect(e, left, y0, h).intersects(rect) {
+                    hits.push(e.id);
+                }
+            }
+        }
+        if !(mods.shift || mods.command) {
+            self.sel_events.clear();
+        }
+        self.sel_events.extend(hits);
+    }
+
+    /// Retângulo de um evento na tela no último quadro (testes de interface).
+    #[cfg(test)]
+    pub(crate) fn event_screen_rect(&self, id: Id) -> Option<Rect> {
+        let (ti, ei) = self.project.find_event(id)?;
+        let &(y0, h) = self.tl.last_rows.get(ti)?;
+        let e = self.project.tracks.get(ti)?.events.get(ei)?;
+        Some(self.event_rect(e, self.tl.last_lanes.left(), y0, h))
     }
 
     fn fit_project_to_timeline(&mut self, lanes_width: f32) {
@@ -590,7 +735,7 @@ impl App {
             }
         }
         if target_secs.is_finite() && target_secs > 0.05 {
-            let pps = ((lanes_width - 24.0).max(40.0) / target_secs).clamp(2.0, 4000.0);
+            let pps = TimelineState::clamp_pps((lanes_width - 24.0).max(40.0) / target_secs);
             self.tl.px_per_sec = pps;
         } else {
             self.tl.px_per_sec = 60.0;
@@ -751,7 +896,8 @@ impl App {
             ),
         );
 
-        let view_secs = (lanes_w / self.tl.px_per_sec.max(1.0)).max(0.5);
+        let view_secs =
+            (lanes_w / self.tl.px_per_sec.max(TimelineState::MIN_PX_PER_SEC)).max(1.0e-9);
         let proj_secs = self.project.duration().as_secs_f64() as f32;
         let mut max_end_secs = proj_secs.max(self.cursor.as_secs_f64() as f32);
         if let Some((a, b)) = self.time_sel {
@@ -798,9 +944,9 @@ impl App {
                 pos2(zoom_left + btn_w, inner.top()),
                 pos2(inner.right(), inner.bottom()),
             );
-            let anchor = self.timeline_zoom_anchor();
-            let can_out = self.tl.px_per_sec > 2.01;
-            let can_in = self.tl.px_per_sec < 3999.0;
+            let playhead = self.cursor;
+            let can_out = self.tl.px_per_sec > TimelineState::MIN_PX_PER_SEC * 1.0001;
+            let can_in = self.tl.px_per_sec < TimelineState::MAX_PX_PER_SEC * 0.9999;
 
             let (dec_click, dec_drag) = crate::scrollbars::zoom_button(
                 ui,
@@ -826,15 +972,15 @@ impl App {
             );
 
             if dec_click {
-                self.tl.zoom_by(0.8, anchor);
+                self.tl.zoom_around_playhead(0.8, playhead);
             }
             if inc_click {
-                self.tl.zoom_by(1.25, anchor);
+                self.tl.zoom_around_playhead(1.25, playhead);
             }
             let drag = dec_drag + inc_drag;
             if drag.abs() > 0.01 {
                 let factor = (1.0 + drag * 0.012).clamp(0.5, 2.0);
-                self.tl.zoom_by(factor, anchor);
+                self.tl.zoom_around_playhead(factor, playhead);
             }
         }
 
@@ -1174,7 +1320,13 @@ impl App {
         let t_start = self.tl.scroll_x;
         let t_end = self.tl.x2t(r.right(), left);
         let mut idx = t_start.0 / step;
+        // teto por quadro: nenhum zoom desenha marcas sem fim (§0.5)
+        let mut marks = 0u32;
         loop {
+            marks += 1;
+            if marks > MAX_RULER_MARKS {
+                break;
+            }
             let t = Ticks::from_raw(idx.saturating_mul(step));
             if t > t_end {
                 break;
@@ -1621,7 +1773,53 @@ impl App {
             let kind = self.project.tracks[ti].kind;
             let mut changed_track = false;
             let mut want_checkpoint = false;
+            let kf_has = kind == TrackKind::Video
+                && self.project.tracks.get(ti).is_some_and(|t| {
+                    !neoveg_engine::track_keyframes::track_rows(t, self.kf_tol()).is_empty()
+                });
+            let kf_open = !self.tl.kf_collapsed.contains(&tid);
+            let mut kf_toggle = false;
+            let is_video = kind == TrackKind::Video;
+            let btns = self.prefs.track_header.get(is_video);
+            let mut more: Option<HeaderAction> = None;
             child.horizontal(|ui| {
+                // botão Mais (manual do VEGAS Pro 21, p. 69): os comandos de
+                // todos os botões do cabeçalho, inclusive os ocultos. O manual
+                // o põe acima do número; aqui fica ao lado, para não aumentar
+                // a altura do cabeçalho.
+                let (cur_mute, cur_solo) = {
+                    let t = &self.project.tracks[ti];
+                    (t.mute, t.solo)
+                };
+                let adj = self.project.tracks[ti].is_adjustment();
+                ui.menu_button(egui::RichText::new("…").small(), |ui| {
+                    if ui.selectable_label(cur_mute, "Mudo (Z)").clicked() {
+                        more = Some(HeaderAction::Mute);
+                        ui.close_menu();
+                    }
+                    if ui.selectable_label(cur_solo, "Solo (X)").clicked() {
+                        more = Some(HeaderAction::Solo);
+                        ui.close_menu();
+                    }
+                    if ui.button("Efeitos da trilha...").clicked() {
+                        more = Some(HeaderAction::Fx);
+                        ui.close_menu();
+                    }
+                    if is_video
+                        && !adj
+                        && ui.button("Movimento da trilha (Track Motion)...").clicked()
+                    {
+                        more = Some(HeaderAction::TrackMotion);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Editar conjunto de botões visíveis...").clicked() {
+                        more = Some(HeaderAction::EditButtons);
+                        ui.close_menu();
+                    }
+                })
+                .response
+                .on_hover_text("Mais (botões do cabeçalho, inclusive os ocultos)");
                 let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
                 let num_bg = if selected {
                     self.theme.selection_bg
@@ -1672,34 +1870,43 @@ impl App {
                 }
                 let t = &mut self.project.tracks[ti];
                 let r = ui.add(
+                    // 56 px: o botão Mais ocupa o resto da largura fixa do
+                    // cabeçalho, e com 78 px o último ícone (Track Motion)
+                    // ficava cortado
                     egui::TextEdit::singleline(&mut t.name)
-                        .desired_width(78.0)
+                        .desired_width(56.0)
                         .font(egui::TextStyle::Small),
                 );
                 if r.changed() {
                     changed_track = true;
                 }
-                let m = ui.selectable_label(t.mute, "M").on_hover_text("Mudo (Z)");
-                if m.clicked() {
-                    want_checkpoint = true;
-                    t.mute = !t.mute;
-                    changed_track = true;
+                if btns.mute
+                    && ui
+                        .selectable_label(t.mute, "M")
+                        .on_hover_text("Mudo (Z)")
+                        .clicked()
+                {
+                    more = Some(HeaderAction::Mute);
                 }
-                let s = ui.selectable_label(t.solo, "S").on_hover_text("Solo (X)");
-                if s.clicked() {
-                    want_checkpoint = true;
-                    t.solo = !t.solo;
-                    changed_track = true;
+                if btns.solo
+                    && ui
+                        .selectable_label(t.solo, "S")
+                        .on_hover_text("Solo (X)")
+                        .clicked()
+                {
+                    more = Some(HeaderAction::Solo);
                 }
                 let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
-                if ui
-                    .small_button(fxlabel)
-                    .on_hover_text("Efeitos da trilha")
-                    .clicked()
+                if btns.fx
+                    && ui
+                        .small_button(fxlabel)
+                        .on_hover_text("Efeitos da trilha")
+                        .clicked()
                 {
-                    self.dlg.fx_target = Some(FxTarget::Track(tid));
+                    more = Some(HeaderAction::Fx);
                 }
                 if kind == TrackKind::Video
+                    && btns.track_motion
                     && !is_adjustment
                     && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
                         .on_hover_text("Movimento da trilha (Track Motion)")
@@ -1707,7 +1914,47 @@ impl App {
                 {
                     self.dlg.track_motion = Some(tid);
                 }
+                if kf_has
+                    && icons::small_icon_button(
+                        ui,
+                        if kf_open {
+                            Icon::KeyframeFilled
+                        } else {
+                            Icon::KeyframeEmpty
+                        },
+                        None,
+                        kf_open,
+                        &self.theme,
+                    )
+                    .on_hover_text("Expandir/recolher os quadros-chave da trilha")
+                    .clicked()
+                {
+                    kf_toggle = true;
+                }
             });
+            if kf_toggle && !self.tl.kf_collapsed.remove(&tid) {
+                self.tl.kf_collapsed.insert(tid);
+            }
+            match more {
+                Some(HeaderAction::Mute) => {
+                    let t = &mut self.project.tracks[ti];
+                    t.mute = !t.mute;
+                    want_checkpoint = true;
+                    changed_track = true;
+                }
+                Some(HeaderAction::Solo) => {
+                    let t = &mut self.project.tracks[ti];
+                    t.solo = !t.solo;
+                    want_checkpoint = true;
+                    changed_track = true;
+                }
+                Some(HeaderAction::Fx) => self.dlg.fx_target = Some(FxTarget::Track(tid)),
+                Some(HeaderAction::TrackMotion) => self.dlg.track_motion = Some(tid),
+                Some(HeaderAction::EditButtons) => {
+                    self.dlg.header_buttons = Some((is_video, btns));
+                }
+                None => {}
+            }
             if h >= 50.0 {
                 child.horizontal(|ui| {
                     let t = &mut self.project.tracks[ti];
@@ -2108,6 +2355,9 @@ impl App {
     fn lanes_interact(&mut self, ui: &mut egui::Ui, lanes: Rect, rows: &TimelineRows) {
         let layout = &rows.track_rects;
         let left = lanes.left();
+        self.tl.last_lanes = lanes;
+        self.tl.last_rows.clone_from(layout);
+        let tool = self.session.edit_tool;
         let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
         let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
             (
@@ -2129,8 +2379,9 @@ impl App {
                     == neoveg_common::prefs::TimelineMouseScroll::HorizontalScroll;
                 if horiz_mode {
                     if mods.command {
-                        let t = self.tl.x2t(p.x, left);
-                        self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                        let c = self.cursor;
+                        self.tl
+                            .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                     } else if mods.shift {
                         self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                     } else {
@@ -2142,8 +2393,10 @@ impl App {
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                 } else {
-                    let t = self.tl.x2t(p.x, left);
-                    self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                    // como os botões e as setas: a partir da agulha de reprodução
+                    let c = self.cursor;
+                    self.tl
+                        .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                 }
             }
             // botão do meio: pan
@@ -2166,7 +2419,7 @@ impl App {
         if let Some(p) = pointer.filter(|p| lanes.contains(*p)) {
             if egui::DragAndDrop::has_any_payload(ui.ctx()) {
                 let ti = self
-                    .track_at(p.y, layout)
+                    .track_at(p.y, &rows.track_spans)
                     .unwrap_or(self.project.tracks.len());
                 let t = self.snap(self.tl.x2t(p.x, left), &HashSet::new(), mods.shift);
                 self.tl.drop_hint = Some((ti, t));
@@ -2175,7 +2428,7 @@ impl App {
                         let hit = self.hit_event(p, left, layout);
                         self.handle_drop(
                             (*payload).clone(),
-                            self.track_at(p.y, layout),
+                            self.track_at(p.y, &rows.track_spans),
                             t,
                             hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id),
                         );
@@ -2185,8 +2438,16 @@ impl App {
         }
 
         let hover = pointer.filter(|p| lanes.contains(*p));
-        // cursor do mouse conforme a zona
-        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
+        // cursor do mouse conforme a ferramenta e a zona
+        if let (Some(_), Drag::None, EditTool::Selection) = (hover, &self.tl.drag, tool) {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        } else if let (Some(_), Drag::None, EditTool::Zoom) = (hover, &self.tl.drag, tool) {
+            ui.ctx().set_cursor_icon(CursorIcon::ZoomIn);
+        } else if let (Some(p), Drag::None, EditTool::Envelope) = (hover, &self.tl.drag, tool) {
+            if self.hit_envelope(p, left, rows).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+        } else if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
             if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, rows) {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
@@ -2214,6 +2475,12 @@ impl App {
             }
         }
 
+        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
+            if matches!(self.hit_keyframe(p, left, rows), Some((_, _, Some(_), _))) {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            }
+        }
+
         if resp.drag_started_by(egui::PointerButton::Primary) {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
@@ -2232,7 +2499,27 @@ impl App {
                 }
             }
         }
+        // caixa das ferramentas Seleção e Zoom
+        if let (Drag::Box { start, .. }, Some(cur)) = (&self.tl.drag, self.tl.box_cur) {
+            let r = Rect::from_two_pos(*start, cur);
+            let stroke = Stroke::new(1.0_f32, self.theme.text_primary);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            ui.painter()
+                .with_clip_rect(lanes)
+                .extend(Shape::dashed_line(&corners, stroke, 4.0, 3.0));
+        }
         if resp.drag_stopped() {
+            if let (Drag::Box { zoom, start }, Some(cur)) = (self.tl.drag.clone(), self.tl.box_cur)
+            {
+                self.finish_box(Rect::from_two_pos(start, cur), zoom, lanes, layout, mods);
+            }
+            self.tl.box_cur = None;
             if matches!(self.tl.drag, Drag::Move { .. } | Drag::Trim { .. }) {
                 self.project.sort_events();
             }
@@ -2243,7 +2530,10 @@ impl App {
         }
 
         if resp.clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+            if tool == EditTool::Zoom {
+                // ferramenta Zoom: um clique mostra o projeto inteiro
+                self.fit_project_to_timeline(lanes.width());
+            } else if let Some(p) = resp.interact_pointer_pos() {
                 self.lane_click(p, left, rows, mods);
             }
         }
@@ -2283,26 +2573,27 @@ impl App {
         if resp.secondary_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let t = self.tl.x2t(p.x, left);
-                self.tl.ctx_target =
-                    if let Some((owner, k, idx, t)) = self.hit_envelope(p, left, rows) {
-                        match idx {
-                            Some(i) => CtxTarget::EnvPoint(owner, k, i),
-                            None => CtxTarget::EnvLine(owner, k, t),
-                        }
-                    } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
-                        let id = self.project.tracks[ti].events[ei].id;
-                        if !self.sel_events.contains(&id) {
-                            self.sel_events.clear();
-                            self.sel_events.insert(id);
-                        }
-                        self.sel_track = Some(ti);
-                        CtxTarget::Event(id)
-                    } else if let Some(ti) = self.track_at(p.y, layout) {
-                        self.sel_track = Some(ti);
-                        CtxTarget::Lane(ti, t)
-                    } else {
-                        CtxTarget::None
-                    };
+                self.tl.ctx_target = if let Some(kf) = self.keyframe_ctx(p, left, rows) {
+                    kf
+                } else if let Some((owner, k, idx, t)) = self.hit_envelope(p, left, rows) {
+                    match idx {
+                        Some(i) => CtxTarget::EnvPoint(owner, k, i),
+                        None => CtxTarget::EnvLine(owner, k, t),
+                    }
+                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
+                    let id = self.project.tracks[ti].events[ei].id;
+                    if !self.sel_events.contains(&id) {
+                        self.sel_events.clear();
+                        self.sel_events.insert(id);
+                    }
+                    self.sel_track = Some(ti);
+                    CtxTarget::Event(id)
+                } else if let Some(ti) = self.track_at(p.y, layout) {
+                    self.sel_track = Some(ti);
+                    CtxTarget::Lane(ti, t)
+                } else {
+                    CtxTarget::None
+                };
             }
         }
         resp.context_menu(|ui| self.lane_context_menu(ui));
@@ -2317,12 +2608,39 @@ impl App {
     ) {
         let layout = &rows.track_rects;
         let ot = self.tl.x2t(origin.x, left);
+        let tool = self.session.edit_tool;
+        // Seleção e Zoom desenham uma caixa e não mexem em nada (p. 239)
+        if matches!(tool, EditTool::Selection | EditTool::Zoom) {
+            self.tl.drag = Drag::Box {
+                zoom: tool == EditTool::Zoom,
+                start: origin,
+            };
+            self.tl.box_cur = Some(origin);
+            return;
+        }
+        let slip_mode = tool == EditTool::Normal && self.session.edit_mode == EditMode::Slip;
+        if let Some((ti, row, Some(key), _)) = self.hit_keyframe(origin, left, rows) {
+            if let Some(tr) = self.project.tracks.get(ti).filter(|tr| !tr.locked) {
+                self.tl.drag = Drag::Keyframe {
+                    track: tr.id,
+                    row: row.kind,
+                    at: key,
+                    moved: false,
+                };
+            }
+            return;
+        }
         if let Some((owner, kind, Some(idx), _)) = self.hit_envelope(origin, left, rows) {
             self.checkpoint();
             self.tl.drag = Drag::EnvPoint { owner, kind, idx };
             return;
         }
         if let Some((ti, ei, zone)) = self.hit_event(origin, left, layout) {
+            // ferramenta Envelope: eventos não se movem nem são aparados
+            // (p. 239); a volta acontece antes de qualquer checkpoint
+            if tool == EditTool::Envelope {
+                return;
+            }
             let id = self.project.tracks[ti].events[ei].id;
             if self.project.tracks[ti].events[ei].locked || self.project.tracks[ti].locked {
                 return;
@@ -2368,7 +2686,7 @@ impl App {
                     }
                     self.tl.drag = Drag::Trim {
                         left: left_edge,
-                        slip: mods.alt,
+                        slip: mods.alt || slip_mode,
                         origin_t: ot,
                         anchor_id: id,
                         orig,
@@ -2384,7 +2702,8 @@ impl App {
                         self.sel_events.insert(id);
                     }
                     let ids = self.expand_groups(&self.sel_events.clone());
-                    if mods.alt {
+                    // Alt, ou a ferramenta Normal no modo Slip (p. 236)
+                    if mods.alt || slip_mode {
                         let orig = ids
                             .iter()
                             .filter_map(|i| self.project.event(*i).map(|e| (*i, e.offset)))
@@ -2457,16 +2776,35 @@ impl App {
         }
         // área vazia: seleção de tempo
         let s = self.snap(ot, &HashSet::new(), mods.shift);
-        if let Some(ti) = self.track_at(origin.y, layout) {
+        if let Some(ti) = self.track_at(origin.y, &rows.track_spans) {
             self.sel_track = Some(ti);
         }
         self.tl.drag = Drag::TimeSel { anchor: s };
     }
 
     fn update_lane_drag(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
-        let layout = &rows.track_rects;
         let t = self.tl.x2t(p.x, left);
+        if matches!(self.tl.drag, Drag::Box { .. }) {
+            self.tl.box_cur = Some(p);
+            return;
+        }
         match self.tl.drag.clone() {
+            Drag::Keyframe {
+                track,
+                row,
+                at,
+                moved,
+            } => {
+                let target = self.snap(t, &HashSet::new(), mods.shift);
+                if let Some(new_at) = self.drag_keyframe(track, &row, at, moved, target) {
+                    self.tl.drag = Drag::Keyframe {
+                        track,
+                        row,
+                        at: new_at,
+                        moved: true,
+                    };
+                }
+            }
             Drag::TimeSel { anchor } => {
                 let s = self.snap(t, &HashSet::new(), mods.shift);
                 let sel = (anchor.min(s), anchor.max(s));
@@ -2543,6 +2881,13 @@ impl App {
             }
             Drag::Slip { origin_t, orig } => {
                 let dt = t - origin_t;
+                let slip_all_takes = self.opts.slip_all_takes;
+                let durations: std::collections::HashMap<Id, Option<Ticks>> = self
+                    .project
+                    .media
+                    .iter()
+                    .map(|m| (m.id, m.duration))
+                    .collect();
                 for (id, off) in orig {
                     let dur = self
                         .project
@@ -2550,6 +2895,7 @@ impl App {
                         .and_then(|e| self.project.media(e.media_id))
                         .and_then(|m| m.duration);
                     if let Some(e) = self.project.event_mut(id) {
+                        let before = e.offset;
                         let mut o = off - e.rate.scale_ticks(dt);
                         if let (Some(d), false) = (dur, e.looped) {
                             let max_o = (d - e.rate.scale_ticks(e.length)).max(Ticks::ZERO);
@@ -2562,6 +2908,12 @@ impl App {
                                     e.offset = e.offset.rem_euclid(d);
                                 }
                             }
+                        }
+                        if slip_all_takes {
+                            let delta = e.offset - before;
+                            neoveg_engine::takes::slip_alt_takes(e, delta, |m| {
+                                durations.get(&m).copied().flatten()
+                            });
                         }
                     }
                 }
@@ -2609,18 +2961,34 @@ impl App {
                         }
                     }
                 }
+                let slip_all_takes = self.opts.slip_all_takes;
+                let durations: std::collections::HashMap<Id, Option<Ticks>> = self
+                    .project
+                    .media
+                    .iter()
+                    .map(|m| (m.id, m.duration))
+                    .collect();
                 for &(id, st, len, off) in &orig {
                     if let Some(e) = self.project.event_mut(id) {
                         if is_left {
                             e.start = st + dt;
                             e.length = (len - dt).max(fd);
                             if !slip && !e.reverse {
-                                e.offset = off + e.rate.scale_ticks(dt);
+                                // todos os takes acompanham o início do evento
+                                let delta = off + e.rate.scale_ticks(dt) - e.offset;
+                                e.shift_offsets(delta);
                             }
                         } else {
                             e.length = (len + dt).max(fd);
                             if slip {
-                                e.offset = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                                let new_off = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                                let delta = new_off - e.offset;
+                                e.offset = new_off;
+                                if slip_all_takes {
+                                    neoveg_engine::takes::slip_alt_takes(e, delta, |m| {
+                                        durations.get(&m).copied().flatten()
+                                    });
+                                }
                             }
                         }
                         e.fade_in.len = e.fade_in.len.min(e.length);
@@ -2662,7 +3030,9 @@ impl App {
                 let min_start = orig.iter().map(|o| o.1).fold(Ticks::MAX, Ticks::min);
                 let dt = (ns - anchor_start).max(Ticks::ZERO - min_start);
                 // deslocamento vertical entre trilhas do mesmo tipo
-                let target = self.track_at(p.y, layout).unwrap_or(origin_track);
+                let target = self
+                    .track_at(p.y, &rows.track_spans)
+                    .unwrap_or(origin_track);
                 let dtrack = target as isize - origin_track as isize;
                 let n = self.project.tracks.len() as isize;
                 let valid = orig.iter().all(|&(id, _, ti)| {
@@ -2705,7 +3075,7 @@ impl App {
     fn lane_click(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
         let layout = &rows.track_rects;
         let t = self.tl.x2t(p.x, left);
-        if let Some(ti) = self.track_at(p.y, layout) {
+        if let Some(ti) = self.track_at(p.y, &rows.track_spans) {
             self.sel_track = Some(ti);
         }
         if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
@@ -2832,6 +3202,13 @@ impl App {
     fn lane_context_menu(&mut self, ui: &mut egui::Ui) {
         match self.tl.ctx_target.clone() {
             CtxTarget::Event(id) => self.event_context_menu(ui, id),
+            CtxTarget::Keyframe {
+                track,
+                row,
+                key,
+                t,
+                has_curve,
+            } => self.keyframe_context_menu(ui, track, row, key, t, has_curve),
             CtxTarget::EnvPoint(owner, kind, idx) => {
                 ui.label(
                     egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong(),
@@ -2965,6 +3342,39 @@ impl App {
         }
     }
 
+    /// Submenu Take (manual do VEGAS Pro 21, p. 347): escolher o take ativo,
+    /// próximo/anterior e excluir o ativo. Escolher pela lista substitui o
+    /// diálogo Take Chooser (que pré-visualiza) por enquanto.
+    fn take_submenu(&mut self, ui: &mut egui::Ui, e: &Event) {
+        use neoveg_engine::takes;
+        let list = takes::takes(e);
+        let active = takes::active_index(e);
+        let id = e.id;
+        ui.menu_button(format!("Take ({} de {})", active + 1, list.len()), |ui| {
+            for (k, t) in list.iter().enumerate() {
+                let name =
+                    takes::display_name(t, |m| self.project.media(m).map(|x| x.name.clone()));
+                if ui
+                    .radio(k == active, format!("{}. {name}", k + 1))
+                    .clicked()
+                {
+                    if !self.session.set_active_take(id, k) && k != active {
+                        self.set_status("Evento travado: o take não foi trocado.");
+                    }
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.cmd_menu_btn(ui, "event.next_take");
+            self.cmd_menu_btn(ui, "event.prev_take");
+            self.cmd_menu_btn(ui, "event.delete_active_take");
+        });
+    }
+
     fn event_context_menu(&mut self, ui: &mut egui::Ui, id: Id) {
         let Some((ti, ei)) = self.project.find_event(id) else {
             ui.close_menu();
@@ -2999,6 +3409,7 @@ impl App {
             self.tl.rename = Some((id, e.name.clone()));
             ui.close_menu();
         }
+        self.take_submenu(ui, &e);
         ui.separator();
         if ui.button("Dividir no cursor (S)").clicked() {
             self.split_at_cursor();
@@ -3224,7 +3635,12 @@ impl App {
         let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
         let mut idx = self.tl.scroll_x.0 / step;
+        let mut marks = 0u32;
         loop {
+            marks += 1;
+            if marks > MAX_RULER_MARKS {
+                break;
+            }
             let gt = Ticks::from_raw(idx.saturating_mul(step));
             if gt > t_end {
                 break;
@@ -3366,38 +3782,106 @@ impl App {
                             .media(e.media_id)
                             .and_then(|m| m.duration)
                             .or(Some(a.duration()));
-                        let mid = content.center().y;
-                        let amp = content.height() * 0.48 * db_to_lin(e.gain_db).min(4.0);
+                        // ganho do evento e zoom vertical das formas de onda (Shift+↑/↓)
+                        let gain = db_to_lin(e.gain_db).min(4.0) * self.opts.waveform_zoom();
                         let alpha = if e.mute { 70 } else { 185 };
-                        let col = if body_light {
+                        let gray = if body_light {
                             Color32::from_rgba_unmultiplied(22, 30, 42, alpha)
                         } else {
                             Color32::from_rgba_unmultiplied(220, 230, 240, alpha)
                         };
-                        let mut x = vis.left().floor();
-                        let mut segs = Vec::with_capacity(vis.width() as usize * 2);
-                        let min_span = Ticks::from_raw(TICKS_PER_MS / 10);
+                        // VEGAS: a forma de onda usa a cor da faixa (Track Display
+                        // Color); cinza quando mudo, em alto contraste ou sem contraste
+                        let tinted = shade(track.color, if body_light { 0.45 } else { 1.35 });
+                        let col = if e.mute
+                            || muted
+                            || self.theme.high_contrast
+                            || crate::theme::contrast_ratio(tinted, body) < 3.0
+                        {
+                            gray
+                        } else {
+                            tinted.gamma_multiply(f32::from(alpha) / 255.0)
+                        };
+                        let center_col = col.gamma_multiply(0.45);
+                        // como no VEGAS: fonte estéreo mostra L em cima e R embaixo,
+                        // cada um com sua linha central; evento baixo ou mono, um traço só
+                        let chans: Vec<(WaveChannel, Rect)> =
+                            if !a.mono_source && content.height() >= 30.0 {
+                                let my = content.center().y;
+                                vec![
+                                    (
+                                        WaveChannel::Left,
+                                        Rect::from_min_max(content.min, pos2(content.right(), my)),
+                                    ),
+                                    (
+                                        WaveChannel::Right,
+                                        Rect::from_min_max(pos2(content.left(), my), content.max),
+                                    ),
+                                ]
+                            } else {
+                                vec![(WaveChannel::Mix, content)]
+                            };
                         let last_t = (e.end() - Ticks::from_raw(1)).max(e.start);
-                        while x < vis.right() {
-                            let t0 = self.tl.x2t(x, left);
-                            let t1 = self.tl.x2t(x + 1.0, left);
-                            if let (Some(m0), Some(m1)) =
-                                (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
-                            {
-                                let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
-                                let (lo, hi) = a.peak_range(m0, m1.max(m0 + min_span));
+                        let x_first = vis.left().floor();
+                        // menos de uma amostra por pixel: curva amostra a amostra
+                        let one_sample = Ticks::from_samples(1, a.sample_rate).0.max(1);
+                        let sample_mode = match (
+                            e.media_time(self.tl.x2t(x_first, left), dur),
+                            e.media_time(self.tl.x2t(x_first + 1.0, left).min(last_t), dur),
+                        ) {
+                            (Some(m0), Some(m1)) => (m1 - m0).0.abs() < one_sample,
+                            _ => false,
+                        };
+                        let stroke = Stroke::new(1.0_f32, col);
+                        let curve = Stroke::new(1.2_f32, col);
+                        let mut shapes = Vec::with_capacity(vis.width() as usize * chans.len() + 4);
+                        for (ch, cr) in &chans {
+                            let (ya, yb) = (cr.top().min(cr.bottom()), cr.top().max(cr.bottom()));
+                            let mid = cr.center().y;
+                            let amp = cr.height() * 0.46 * gain;
+                            let y_of = |v: f32| (mid - v * amp).clamp(ya, yb);
+                            shapes.push(Shape::line_segment(
+                                [pos2(vis.left(), mid), pos2(vis.right(), mid)],
+                                Stroke::new(1.0_f32, center_col),
+                            ));
+                            let mut pts: Vec<Pos2> = Vec::new();
+                            let mut x = x_first;
+                            while x < vis.right() {
+                                let t0 = self.tl.x2t(x, left);
                                 let fg = e.fade_gain(t0);
-                                segs.push(Shape::line_segment(
-                                    [
-                                        pos2(x, mid - hi * amp * fg),
-                                        pos2(x, mid - lo * amp * fg + 0.5),
-                                    ],
-                                    Stroke::new(1.0_f32, col),
-                                ));
+                                if sample_mode {
+                                    let tc = self.tl.x2t(x + 0.5, left).min(last_t);
+                                    if let Some(m) = e.media_time(tc, dur) {
+                                        let v = a.sample_channel(*ch, m) * fg;
+                                        pts.push(pos2(x + 0.5, y_of(v)));
+                                    } else if pts.len() > 1 {
+                                        shapes.push(Shape::line(std::mem::take(&mut pts), curve));
+                                    } else {
+                                        pts.clear();
+                                    }
+                                } else {
+                                    let t1 = self.tl.x2t(x + 1.0, left);
+                                    if let (Some(m0), Some(m1)) =
+                                        (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
+                                    {
+                                        let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
+                                        let (lo, hi) = a.channel_range(*ch, m0, m1);
+                                        shapes.push(Shape::line_segment(
+                                            [
+                                                pos2(x + 0.5, y_of(hi * fg)),
+                                                pos2(x + 0.5, y_of(lo * fg) + 0.5),
+                                            ],
+                                            stroke,
+                                        ));
+                                    }
+                                }
+                                x += 1.0;
                             }
-                            x += 1.0;
+                            if pts.len() > 1 {
+                                shapes.push(Shape::line(pts, curve));
+                            }
                         }
-                        painter.with_clip_rect(vis).extend(segs);
+                        painter.with_clip_rect(vis).extend(shapes);
                     }
                 }
                 // nome e indicadores
@@ -3731,4 +4215,99 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
         );
         painter.rect_filled(bar, 0.0, col);
     }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    #[test]
+    fn zoom_aceita_extremos_e_recusa_valores_hostis() {
+        type S = TimelineState;
+        assert_eq!(S::clamp_pps(f32::NAN), 60.0);
+        assert_eq!(S::clamp_pps(f32::INFINITY), 60.0);
+        assert_eq!(S::clamp_pps(-3.0), 60.0);
+        assert_eq!(S::clamp_pps(0.0), 60.0);
+        assert_eq!(S::clamp_pps(1.0e-30), S::MIN_PX_PER_SEC);
+        assert_eq!(S::clamp_pps(1.0e30), S::MAX_PX_PER_SEC);
+        // o antigo teto (4000 px/s) e o antigo piso (2 px/s) ficaram para trás
+        assert_eq!(S::clamp_pps(1.0e6), 1.0e6);
+        assert_eq!(S::clamp_pps(0.01), 0.01);
+    }
+
+    // no zoom máximo, uma amostra a 48 kHz ocupa milhares de pixels
+    const _: () = assert!(TimelineState::MAX_PX_PER_SEC / 48_000.0 > 1000.0);
+
+    #[test]
+    fn regua_cabe_nos_dois_extremos() {
+        let fps = FrameRate::FPS_25;
+        for pps in [
+            TimelineState::MIN_PX_PER_SEC,
+            1.0e-3,
+            0.01,
+            0.5,
+            60.0,
+            1.0e5,
+            TimelineState::MAX_PX_PER_SEC,
+        ] {
+            let (major, minor) = nice_step(pps, fps);
+            assert!(minor.0 > 0 && major >= minor, "{pps}");
+            // tela de 4000 px (o tempo para em 48 h): marcas abaixo do teto
+            let view_secs = (4000.0 / f64::from(pps)).min(neoveg_engine::time::MAX_SECONDS as f64);
+            let marks = view_secs / minor.as_secs_f64();
+            assert!(marks <= f64::from(MAX_RULER_MARKS), "{pps}: {marks} marcas");
+        }
+    }
+
+    #[test]
+    fn zoom_ida_e_volta_mantem_a_ancora() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            ..Default::default()
+        };
+        let anchor = Ticks::from_secs_i64(90);
+        for _ in 0..200 {
+            tl.zoom_by(2.0, Some(anchor));
+        }
+        assert_eq!(tl.px_per_sec, TimelineState::MAX_PX_PER_SEC);
+        for _ in 0..400 {
+            tl.zoom_by(0.5, Some(anchor));
+        }
+        assert_eq!(tl.px_per_sec, TimelineState::MIN_PX_PER_SEC);
+        assert!(tl.scroll_x >= Ticks::ZERO);
+    }
+
+    #[test]
+    fn zoom_parte_da_agulha_de_reproducao() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            px_per_sec: 100.0,
+            scroll_x: Ticks::from_secs_i64(10),
+            ..Default::default()
+        };
+        // agulha visível, a 2 s do início da tela (200 px): fica no mesmo pixel
+        let agulha = Ticks::from_secs_i64(12);
+        for f in [4.0, 0.3, 50.0, 0.01] {
+            tl.zoom_around_playhead(f, agulha);
+            let px = (agulha - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+            assert!((px - 200.0).abs() < 1.0, "zoom {f}: agulha em {px} px");
+        }
+        // agulha fora da tela: vai para o centro
+        tl.px_per_sec = 100.0;
+        tl.scroll_x = Ticks::ZERO;
+        let longe = Ticks::from_secs_i64(600);
+        tl.zoom_around_playhead(2.0, longe);
+        let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+        assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
+    }
+}
+
+/// Ação pedida por um botão do cabeçalho de faixa ou pelo menu do botão Mais.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderAction {
+    Mute,
+    Solo,
+    Fx,
+    TrackMotion,
+    EditButtons,
 }

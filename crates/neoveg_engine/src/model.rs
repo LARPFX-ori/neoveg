@@ -413,6 +413,8 @@ impl Project {
         // trilhas e eventos
         let mut seen_tracks = std::collections::HashSet::new();
         let mut seen_events = std::collections::HashSet::new();
+        // ids de mídia do projeto: takes alternativos sem mídia são descartados
+        let media_ids: std::collections::HashSet<Id> = self.media.iter().map(|m| m.id).collect();
         for t in &mut self.tracks {
             if !seen_tracks.insert(t.id) {
                 t.id = new_id();
@@ -459,6 +461,7 @@ impl Project {
                 }
                 e.length = e.length.clamp_safe(Ticks::from_millis_i64(1), Ticks::MAX);
                 e.offset = e.offset.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                fixes.extend(crate::takes::sanitize_takes(e, &media_ids));
                 if e.rate.as_f64() > 100.0 {
                     e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
                 }
@@ -1556,6 +1559,31 @@ pub struct Event {
     /// Transição usada quando este evento se sobrepõe ao anterior (crossfade).
     #[serde(default)]
     pub transition: Option<TransitionSpec>,
+    /// Takes alternativos (não ativos) do evento (manual do VEGAS Pro 21,
+    /// p. 346). O take ativo continua em `media_id` / `offset` /
+    /// `take_name`, então render e edição não mudam.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt_takes: Vec<Take>,
+    /// Posição do take ativo na lista completa de takes (`0..=alt_takes.len()`).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub take_index: u32,
+    /// Nome do take ativo (vazio = nome da mídia).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub take_name: String,
+}
+
+/// Um take de um evento: a mídia, onde ela começa e o nome do take.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    pub media_id: Id,
+    #[serde(default)]
+    pub offset: Ticks,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 impl Event {
@@ -1580,6 +1608,19 @@ impl Event {
             fx: vec![],
             group: None,
             transition: None,
+            alt_takes: Vec::new(),
+            take_index: 0,
+            take_name: String::new(),
+        }
+    }
+
+    /// Desloca a mídia de **todos** os takes por `delta` (ticks de mídia).
+    /// Usado quando o início do evento anda junto com a mídia (dividir,
+    /// aparar à esquerda): os takes continuam sincronizados entre si.
+    pub fn shift_offsets(&mut self, delta: Ticks) {
+        self.offset += delta;
+        for t in &mut self.alt_takes {
+            t.offset = (t.offset + delta).max(Ticks::ZERO);
         }
     }
 
@@ -1642,6 +1683,38 @@ impl Event {
 // ---------------------------------------------------------------------------
 // Efeitos
 // ---------------------------------------------------------------------------
+
+/// Categoria de um efeito de vídeo na janela Efeitos de Vídeo (manual do
+/// VEGAS Pro 21, p. 54: os efeitos ficam organizados em categorias). As
+/// categorias e os nomes são do Neoveg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FxCategory {
+    Color,
+    Light,
+    BlurSharpen,
+    Stylize,
+    Key,
+}
+
+impl FxCategory {
+    pub const ALL: [FxCategory; 5] = [
+        FxCategory::Color,
+        FxCategory::Light,
+        FxCategory::BlurSharpen,
+        FxCategory::Stylize,
+        FxCategory::Key,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            FxCategory::Color => "Cor",
+            FxCategory::Light => "Luz",
+            FxCategory::BlurSharpen => "Desfoque e nitidez",
+            FxCategory::Stylize => "Estilizar",
+            FxCategory::Key => "Recorte",
+        }
+    }
+}
 
 // Efeitos externos (OFX para vídeo, VST3 para áudio) rodam no host isolado
 // `neoveg --plugin-host` (fronteira FFI §0.3); ver `plugin_host`.
@@ -1706,7 +1779,7 @@ pub struct OfxParamValue {
 }
 
 /// Máximo de keyframes por parâmetro OFX (entrada hostil, §0.4).
-const MAX_OFX_KEYS: usize = 4096;
+pub(crate) const MAX_OFX_KEYS: usize = 4096;
 
 impl OfxParamValue {
     /// Valores no tempo local `t`: antes do primeiro keyframe vale o
@@ -1831,8 +1904,42 @@ pub struct Vst3ParamValue {
     pub value: f64,
 }
 
+/// Tamanho máximo em bytes do estado binário serializado de um componente VST3.
+pub const MAX_VST3_STATE_BYTES: usize = 1024 * 1024;
+const MAX_VST3_STATE_HEX: usize = MAX_VST3_STATE_BYTES * 2;
+
+/// Codifica bytes arbitrários em string hexadecimal minúscula (limitada a [`MAX_VST3_STATE_BYTES`]).
+pub fn encode_hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let capped = &bytes[..bytes.len().min(MAX_VST3_STATE_BYTES)];
+    let mut out = String::with_capacity(capped.len().saturating_mul(2));
+    for &b in capped {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Decodifica string hexadecimal (par, apenas dígitos ASCII hex e limitada a
+/// [`MAX_VST3_STATE_BYTES`]). Retorna `None` para entrada malformada ou excessiva.
+pub fn decode_hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    let trimmed = hex.trim();
+    if trimmed.len() > MAX_VST3_STATE_HEX || !trimmed.len().is_multiple_of(2) {
+        return None;
+    }
+    let (pairs, _) = trimmed.as_bytes().as_chunks::<2>();
+    let mut out = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        let hi = char::from(pair[0]).to_digit(16)?;
+        let lo = char::from(pair[1]).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
 /// Referência a um efeito VST3: binário do módulo, classe (`TUID` em
-/// hexadecimal) e valores normalizados dos parâmetros alterados pelo usuário.
+/// hexadecimal), valores normalizados dos parâmetros e estado opaco do
+/// componente (`IComponent::getState` em hexadecimal).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vst3FxRef {
     pub binary: String,
@@ -1841,12 +1948,14 @@ pub struct Vst3FxRef {
     pub label: String,
     #[serde(default)]
     pub params: Vec<Vst3ParamValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 const MAX_VST3_REF_PARAMS: usize = 16384;
 
 impl Vst3FxRef {
-    /// Saneia textos, contagens e valores vindos de arquivo (§0.4).
+    /// Saneia textos, contagens, valores e estado binário vindos de arquivo (§0.4).
     pub fn sanitize(&mut self) {
         let cut = |s: &mut String| {
             if s.len() > MAX_OFX_REF_TEXT {
@@ -1870,6 +1979,12 @@ impl Vst3FxRef {
                 0.0
             };
         }
+        self.state = self
+            .state
+            .as_deref()
+            .and_then(decode_hex_bytes)
+            .filter(|b| !b.is_empty())
+            .map(|b| encode_hex_bytes(&b));
     }
 
     /// Grava o valor normalizado de um parâmetro (substitui o anterior).
@@ -1916,6 +2031,41 @@ const fn tg(name: &'static str, default: f32) -> ParamSpec {
 }
 
 impl FxKind {
+    /// Categoria na janela Efeitos de Vídeo (`None` para áudio e plug-ins
+    /// externos, que ficam em Terceiros).
+    pub fn category(self) -> Option<FxCategory> {
+        match self {
+            FxKind::BrightnessContrast
+            | FxKind::HslAdjust
+            | FxKind::ColorCorrector
+            | FxKind::Levels
+            | FxKind::BlackWhite
+            | FxKind::Sepia
+            | FxKind::Invert
+            | FxKind::Posterize
+            | FxKind::Colorize => Some(FxCategory::Color),
+            FxKind::Glow | FxKind::Vignette => Some(FxCategory::Light),
+            FxKind::GaussianBlur | FxKind::Sharpen => Some(FxCategory::BlurSharpen),
+            FxKind::Pixelate | FxKind::Mirror | FxKind::FilmGrain | FxKind::Emboss => {
+                Some(FxCategory::Stylize)
+            }
+            FxKind::ChromaKeyer => Some(FxCategory::Key),
+            FxKind::Gain
+            | FxKind::ParametricEq
+            | FxKind::HighPass
+            | FxKind::LowPass
+            | FxKind::Compressor
+            | FxKind::NoiseGate
+            | FxKind::Delay
+            | FxKind::Reverb
+            | FxKind::Chorus
+            | FxKind::Distortion
+            | FxKind::Limiter
+            | FxKind::Ofx
+            | FxKind::Vst3 => None,
+        }
+    }
+
     pub const VIDEO: [FxKind; 18] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
@@ -2273,6 +2423,7 @@ impl FxInstance {
             class_id: class_id.into(),
             label: label.into(),
             params: vec![],
+            state: None,
         });
         f
     }
@@ -2449,6 +2600,7 @@ mod tests {
             class_id: "z".into(),
             label: String::new(),
             params: vec![],
+            state: Some("00FF".into()),
         });
         p.master.fx = vec![fx, orphan, native];
         let json = serde_json::to_string(&p).expect("serializa");
@@ -2459,6 +2611,7 @@ mod tests {
                 id: 3,
                 value: f64::NAN,
             });
+            r.state = Some("AABB".into());
         }
         let _ = back.sanitize();
         let r = back.master.fx[0].vst3.as_ref().expect("referência mantida");
@@ -2470,6 +2623,7 @@ mod tests {
                 Vst3ParamValue { id: 3, value: 0.0 },
             ]
         );
+        assert_eq!(r.state.as_deref(), Some("aabb"));
         assert!(r.label.len() <= 4096 && r.label.is_char_boundary(r.label.len()));
         assert!(!back.master.fx[1].enabled, "FX VST3 sem referência desliga");
         assert!(
@@ -2478,12 +2632,39 @@ mod tests {
         );
         assert!(FxKind::Vst3.is_audio());
 
-        // projeto salvo antes do host VST3: sem o campo `vst3`
+        // estado VST3 hostil ou malformado é descartado na sanitização (§0.4)
+        let mut hostile = Vst3FxRef {
+            binary: "b".into(),
+            class_id: "c".into(),
+            label: "l".into(),
+            params: vec![],
+            state: Some("abc".into()), // ímpar
+        };
+        hostile.sanitize();
+        assert_eq!(hostile.state, None);
+        hostile.state = Some("zzzz".into());
+        hostile.sanitize();
+        assert_eq!(hostile.state, None);
+        hostile.state = Some("a".repeat(MAX_VST3_STATE_BYTES * 2 + 2));
+        hostile.sanitize();
+        assert_eq!(hostile.state, None);
+        assert_eq!(
+            decode_hex_bytes(&encode_hex_bytes(b"\x01\xfe")),
+            Some(vec![0x01, 0xfe])
+        );
+
+        // projeto salvo antes do host VST3: sem os campos `vst3`/`state`
         let old = serde_json::json!({
             "id": 5, "kind": "Gain", "enabled": true, "params": [{"value": 0.0, "keys": []}]
         });
         let f: FxInstance = serde_json::from_value(old).expect("formato antigo");
         assert!(f.vst3.is_none());
+        let no_state: Vst3FxRef = serde_json::from_value(serde_json::json!({
+            "binary": "a.vst3",
+            "class_id": "00",
+        }))
+        .expect("vst3 sem campo state");
+        assert_eq!(no_state.state, None);
         // e um FX sem VST3 não grava o campo
         let out = serde_json::to_value(FxInstance::new(FxKind::Gain)).expect("grava");
         assert!(out.get("vst3").is_none());

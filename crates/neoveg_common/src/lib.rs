@@ -16,6 +16,7 @@
 pub mod curve;
 pub mod error;
 pub mod prefs;
+pub mod session_marker;
 pub mod time;
 pub mod util;
 

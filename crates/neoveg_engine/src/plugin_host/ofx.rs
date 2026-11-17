@@ -6,9 +6,10 @@
 //! **Só roda no subprocesso `neoveg --plugin-host serve-ofx`**: o plug-in é
 //! código de terceiros e pode travar ou derrubar o processo.
 //!
-//! Escopo: contexto *Filter* (ou *General* com `Source` e `Output`), imagem
-//! RGBA inteira (sem tiles), profundidade float ou byte, um quadro por
-//! chamada, parâmetros sem animação e execução *multithread* sequencial.
+//! Escopo: contexto *Filter* (ou *General* com `Source`, `Output` e clipes
+//! opcionais desconectados), imagem RGBA inteira (sem tiles), profundidade float
+//! ou byte, um quadro por chamada, parâmetros com keyframes (`getValueAtTime`,
+//! `getDerivative`, `getIntegral`, chaves) e execução *multithread* sequencial.
 //!
 //! As funções variádicas de `ofxParam.h` (`paramGetValue`, `paramSetValue` e
 //! afins) são implementadas como funções de aridade fixa. Isso depende da
@@ -22,7 +23,7 @@
 #![allow(clippy::vec_box)]
 
 use super::{bounded_cstr, OfxParamInfo, OfxPluginRaw};
-use crate::model::OfxParamValue;
+use crate::model::{OfxParamValue, Ticks, MAX_OFX_KEYS, TICKS_PER_SEC};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 
@@ -497,6 +498,19 @@ struct Param {
     props: Box<PropSet>,
     nums: Vec<f64>,
     text: CString,
+    /// Keyframes `(tempo_em_quadros, valores)`, ordenados por tempo.
+    keys: Vec<(f64, Vec<f64>)>,
+    integer: bool,
+    hold: bool,
+}
+
+const KEY_TIME_EPS: f64 = 1.0e-6;
+
+fn ticks_to_ofx_time(t: Ticks, fps: f64) -> f64 {
+    if !fps.is_finite() || fps <= 0.0 {
+        return 0.0;
+    }
+    (t.0 as f64 * fps) / (TICKS_PER_SEC as f64)
 }
 
 /// Quantos valores e se são inteiros, por tipo de parâmetro (`ofxParam.h`).
@@ -513,13 +527,189 @@ fn param_shape(kind: &str) -> (usize, bool) {
     }
 }
 
+fn is_hold_kind(kind: &str) -> bool {
+    matches!(kind, "OfxParamTypeBoolean" | "OfxParamTypeChoice")
+}
+
 impl Param {
+    fn new_empty(kind: String, props: Box<PropSet>) -> Self {
+        let (_, is_int) = param_shape(&kind);
+        let hold = is_hold_kind(&kind);
+        Self {
+            kind,
+            props,
+            nums: vec![],
+            text: CString::default(),
+            keys: vec![],
+            integer: is_int,
+            hold,
+        }
+    }
+
     fn reset_to_default(&mut self) {
-        let (n, _) = param_shape(&self.kind);
+        let (n, is_int) = param_shape(&self.kind);
         let d = self.props.nums("OfxParamPropDefault");
         self.nums = (0..n).map(|i| d.get(i).copied().unwrap_or(0.0)).collect();
+        self.keys.clear();
+        self.integer = is_int;
+        self.hold = is_hold_kind(&self.kind);
         if let Some(s) = self.props.str0("OfxParamPropDefault") {
             self.text = cstring(&s);
+        }
+    }
+
+    fn eval_unrounded_at(&self, t: f64) -> Vec<f64> {
+        let (n, _) = param_shape(&self.kind);
+        if n == 0 {
+            return vec![];
+        }
+        let fit = |vals: &[f64]| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    vals.get(i)
+                        .copied()
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(0.0)
+                })
+                .collect()
+        };
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
+            return fit(&self.nums);
+        };
+        if !t.is_finite() || t <= first.0 {
+            return fit(&first.1);
+        }
+        if t >= last.0 {
+            return fit(&last.1);
+        }
+        for w in self.keys.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            if t >= a.0 && t < b.0 {
+                if self.hold || (b.0 - a.0).abs() <= KEY_TIME_EPS {
+                    return fit(&a.1);
+                }
+                let x = ((t - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
+                return (0..n)
+                    .map(|i| {
+                        let va = a.1.get(i).copied().filter(|v| v.is_finite()).unwrap_or(0.0);
+                        let vb = b.1.get(i).copied().filter(|v| v.is_finite()).unwrap_or(va);
+                        va + (vb - va) * x
+                    })
+                    .collect();
+            }
+        }
+        fit(&last.1)
+    }
+
+    fn eval_at(&self, t: f64) -> Vec<f64> {
+        let mut out = self.eval_unrounded_at(t);
+        if self.integer {
+            for v in &mut out {
+                *v = v.round();
+            }
+        }
+        out
+    }
+
+    fn derivative_at(&self, t: f64) -> Vec<f64> {
+        let (n, _) = param_shape(&self.kind);
+        if n == 0 || !t.is_finite() || self.keys.len() < 2 || self.hold || self.integer {
+            return vec![0.0; n];
+        }
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
+            return vec![0.0; n];
+        };
+        if t < first.0 || t > last.0 {
+            return vec![0.0; n];
+        }
+        for w in self.keys.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            if t >= a.0 && t <= b.0 {
+                let dt = b.0 - a.0;
+                if dt <= KEY_TIME_EPS {
+                    return vec![0.0; n];
+                }
+                return (0..n)
+                    .map(|i| {
+                        let va = a.1.get(i).copied().filter(|v| v.is_finite()).unwrap_or(0.0);
+                        let vb = b.1.get(i).copied().filter(|v| v.is_finite()).unwrap_or(va);
+                        (vb - va) / dt
+                    })
+                    .collect();
+            }
+        }
+        vec![0.0; n]
+    }
+
+    fn integral(&self, t1: f64, t2: f64) -> Vec<f64> {
+        let (n, _) = param_shape(&self.kind);
+        if n == 0 || !t1.is_finite() || !t2.is_finite() || (t2 - t1).abs() <= f64::EPSILON {
+            return vec![0.0; n];
+        }
+        if self.keys.is_empty() {
+            let dt = t2 - t1;
+            return (0..n)
+                .map(|i| self.nums.get(i).copied().unwrap_or(0.0) * dt)
+                .collect();
+        }
+        let (sign, a, b) = if t1 <= t2 {
+            (1.0, t1, t2)
+        } else {
+            (-1.0, t2, t1)
+        };
+        let mut pts = Vec::with_capacity(self.keys.len() + 2);
+        pts.push(a);
+        for (kt, _) in &self.keys {
+            if *kt > a + KEY_TIME_EPS && *kt < b - KEY_TIME_EPS {
+                pts.push(*kt);
+            }
+        }
+        pts.push(b);
+        let mut acc = vec![0.0; n];
+        for seg in pts.windows(2) {
+            let (x0, x1) = (seg[0], seg[1]);
+            let dt = x1 - x0;
+            if dt <= 0.0 {
+                continue;
+            }
+            if self.hold {
+                let v = self.eval_unrounded_at(x0);
+                for (dst, s) in acc.iter_mut().zip(v.iter()) {
+                    *dst += *s * dt;
+                }
+            } else {
+                let mid = 0.5 * (x0 + x1);
+                // Dentro de [x0, x1] não há keyframe intermediário, então é linear.
+                let va = self.eval_unrounded_at(x0);
+                let vb = self.eval_unrounded_at(x1);
+                let _ = mid;
+                for i in 0..n {
+                    acc[i] += 0.5 * (va[i] + vb[i]) * dt;
+                }
+            }
+        }
+        if sign < 0.0 {
+            for dst in &mut acc {
+                *dst = -*dst;
+            }
+        }
+        acc
+    }
+
+    fn set_key(&mut self, t: f64, vals: Vec<f64>) {
+        if !t.is_finite() {
+            return;
+        }
+        if let Some(k) = self
+            .keys
+            .iter_mut()
+            .find(|k| (k.0 - t).abs() <= KEY_TIME_EPS)
+        {
+            k.1 = vals;
+        } else if self.keys.len() < MAX_OFX_KEYS {
+            self.keys.push((t, vals));
+            self.keys
+                .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
     }
 }
@@ -572,12 +762,7 @@ impl Effect {
         e.props = desc.props.clone();
         e.params.props = desc.params.props.clone();
         for p in &desc.params.params {
-            let mut np = Box::new(Param {
-                kind: p.kind.clone(),
-                props: p.props.clone(),
-                nums: vec![],
-                text: CString::default(),
-            });
+            let mut np = Box::new(Param::new_empty(p.kind.clone(), p.props.clone()));
             np.reset_to_default();
             e.params.params.push(np);
         }
@@ -900,12 +1085,7 @@ unsafe extern "C" fn pa_define(
     let mut props = Box::<PropSet>::default();
     props.set_str("OfxPropName", &[&name]);
     props.set_str("OfxParamPropType", &[&kind]);
-    set.params.push(Box::new(Param {
-        kind,
-        props,
-        nums: vec![],
-        text: CString::default(),
-    }));
+    set.params.push(Box::new(Param::new_empty(kind, props)));
     if !out.is_null() {
         if let Some(p) = set.params.last_mut() {
             // SAFETY: `out` não nulo.
@@ -972,24 +1152,27 @@ unsafe extern "C" fn pa_get_property_set(p: *mut Param, out: *mut *mut PropSet) 
     STAT_OK
 }
 
-/// Escreve o valor do parâmetro nos ponteiros de saída variádicos.
-///
 /// # Safety
 /// Os ponteiros usados (conforme o tipo do parâmetro) apontam para variáveis
 /// do tipo certo, como pede `ofxParam.h`.
-unsafe fn write_value(p: &Param, outs: [*mut c_void; 4]) -> OfxStatus {
-    if p.kind == "OfxParamTypeString" || p.kind == "OfxParamTypeCustom" {
+unsafe fn write_vals(
+    kind: &str,
+    nums: &[f64],
+    text: &CString,
+    outs: [*mut c_void; 4],
+) -> OfxStatus {
+    if kind == "OfxParamTypeString" || kind == "OfxParamTypeCustom" {
         let o = outs[0].cast::<*const c_char>();
         if o.is_null() {
             return STAT_ERR_VALUE;
         }
         // SAFETY: pré-condição; a string vive no parâmetro.
-        unsafe { *o = p.text.as_ptr() };
+        unsafe { *o = text.as_ptr() };
         return STAT_OK;
     }
-    let (n, is_int) = param_shape(&p.kind);
+    let (n, is_int) = param_shape(kind);
     for (i, &o) in outs.iter().enumerate().take(n) {
-        let v = p.nums.get(i).copied().unwrap_or(0.0);
+        let v = nums.get(i).copied().unwrap_or(0.0);
         if o.is_null() {
             return STAT_ERR_VALUE;
         }
@@ -1002,6 +1185,15 @@ unsafe fn write_value(p: &Param, outs: [*mut c_void; 4]) -> OfxStatus {
         }
     }
     STAT_OK
+}
+
+/// Escreve o valor do parâmetro nos ponteiros de saída variádicos.
+///
+/// # Safety
+/// Ver [`write_vals`].
+unsafe fn write_value(p: &Param, outs: [*mut c_void; 4]) -> OfxStatus {
+    // SAFETY: pré-condição encaminhada.
+    unsafe { write_vals(&p.kind, &p.nums, &p.text, outs) }
 }
 
 unsafe extern "C" fn pa_get_value(
@@ -1020,39 +1212,42 @@ unsafe extern "C" fn pa_get_value(
 
 unsafe extern "C" fn pa_get_value_at_time(
     p: *mut Param,
-    _t: f64,
+    t: f64,
     a: *mut c_void,
     b: *mut c_void,
     c: *mut c_void,
     d: *mut c_void,
 ) -> OfxStatus {
-    // SAFETY: idem `pa_get_value` (parâmetros sem animação).
-    match unsafe { p.as_ref() } {
-        Some(p) => unsafe { write_value(p, [a, b, c, d]) },
-        None => STAT_ERR_BAD_HANDLE,
+    // SAFETY: handle do host; avalia keyframes no tempo `t` (ou `nums` sem keys).
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    if !t.is_finite() {
+        return STAT_ERR_VALUE;
     }
+    let vals = p.eval_at(t);
+    // SAFETY: saídas conforme o tipo.
+    unsafe { write_vals(&p.kind, &vals, &p.text, [a, b, c, d]) }
 }
 
 unsafe extern "C" fn pa_get_derivative(
     p: *mut Param,
-    _t: f64,
+    t: f64,
     a: *mut c_void,
     b: *mut c_void,
     c: *mut c_void,
     d: *mut c_void,
 ) -> OfxStatus {
-    // SAFETY: handle do host; derivada de parâmetro constante é zero.
+    // SAFETY: handle do host; derivada analítica ao longo dos keyframes.
     let Some(p) = (unsafe { p.as_ref() }) else {
         return STAT_ERR_BAD_HANDLE;
     };
-    let zero = Param {
-        kind: p.kind.clone(),
-        props: Box::default(),
-        nums: vec![],
-        text: CString::default(),
-    };
+    if !t.is_finite() {
+        return STAT_ERR_VALUE;
+    }
+    let deriv = p.derivative_at(t);
     // SAFETY: saídas conforme o tipo.
-    unsafe { write_value(&zero, [a, b, c, d]) }
+    unsafe { write_vals(&p.kind, &deriv, &p.text, [a, b, c, d]) }
 }
 
 unsafe extern "C" fn pa_get_integral(
@@ -1064,19 +1259,16 @@ unsafe extern "C" fn pa_get_integral(
     c: *mut c_void,
     d: *mut c_void,
 ) -> OfxStatus {
-    // SAFETY: handle do host; integral de constante = valor × intervalo.
+    // SAFETY: handle do host; integral analítica entre `t1` e `t2`.
     let Some(p) = (unsafe { p.as_ref() }) else {
         return STAT_ERR_BAD_HANDLE;
     };
-    let dt = if (t2 - t1).is_finite() { t2 - t1 } else { 0.0 };
-    let scaled = Param {
-        kind: p.kind.clone(),
-        props: Box::default(),
-        nums: p.nums.iter().map(|v| v * dt).collect(),
-        text: CString::default(),
-    };
+    if !t1.is_finite() || !t2.is_finite() {
+        return STAT_ERR_VALUE;
+    }
+    let vals = p.integral(t1, t2);
     // SAFETY: saídas conforme o tipo.
-    unsafe { write_value(&scaled, [a, b, c, d]) }
+    unsafe { write_vals(&p.kind, &vals, &p.text, [a, b, c, d]) }
 }
 
 /// Lê valores variádicos como palavras de 64 bits (Win64: `double` também
@@ -1125,45 +1317,115 @@ unsafe extern "C" fn pa_set_value(
 
 unsafe extern "C" fn pa_set_value_at_time(
     p: *mut Param,
-    _t: f64,
+    t: f64,
     a: usize,
     b: usize,
     c: usize,
     d: usize,
 ) -> OfxStatus {
-    // SAFETY: idem `pa_set_value`.
-    match unsafe { p.as_mut() } {
-        Some(p) => unsafe { read_value(p, [a, b, c, d]) },
-        None => STAT_ERR_BAD_HANDLE,
+    // SAFETY: handle do host; grava o valor e registra keyframe no tempo `t`.
+    let Some(p) = (unsafe { p.as_mut() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    if !t.is_finite() {
+        return STAT_ERR_VALUE;
     }
+    // SAFETY: leitura conforme o tipo.
+    let st = unsafe { read_value(p, [a, b, c, d]) };
+    if st == STAT_OK {
+        let vals = p.nums.clone();
+        p.set_key(t, vals);
+    }
+    st
 }
 
-unsafe extern "C" fn pa_get_num_keys(_p: *mut Param, out: *mut c_uint) -> OfxStatus {
-    if !out.is_null() {
-        // SAFETY: `out` não nulo.
-        unsafe { *out = 0 };
+unsafe extern "C" fn pa_get_num_keys(p: *mut Param, out: *mut c_uint) -> OfxStatus {
+    // SAFETY: handle deste host.
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    if out.is_null() {
+        return STAT_ERR_VALUE;
     }
+    // SAFETY: `out` não nulo.
+    unsafe { *out = p.keys.len() as c_uint };
     STAT_OK
 }
 
-unsafe extern "C" fn pa_get_key_time(_p: *mut Param, _n: c_uint, _out: *mut f64) -> OfxStatus {
-    STAT_ERR_BAD_INDEX
+unsafe extern "C" fn pa_get_key_time(p: *mut Param, n: c_uint, out: *mut f64) -> OfxStatus {
+    // SAFETY: handle deste host.
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    if out.is_null() {
+        return STAT_ERR_VALUE;
+    }
+    let Some(&(kt, _)) = p.keys.get(n as usize) else {
+        return STAT_ERR_BAD_INDEX;
+    };
+    // SAFETY: `out` não nulo.
+    unsafe { *out = kt };
+    STAT_OK
 }
 
 unsafe extern "C" fn pa_get_key_index(
-    _p: *mut Param,
-    _t: f64,
-    _dir: c_int,
-    _out: *mut c_int,
+    p: *mut Param,
+    t: f64,
+    dir: c_int,
+    out: *mut c_int,
 ) -> OfxStatus {
-    STAT_FAILED
+    // SAFETY: handle deste host (`kOfxKeyBefore` < 0, `kOfxKeyAt` == 0, `kOfxKeyAfter` > 0).
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    if out.is_null() || !t.is_finite() {
+        return STAT_ERR_VALUE;
+    }
+    let found = if dir == 0 {
+        p.keys
+            .iter()
+            .position(|(kt, _)| (*kt - t).abs() <= KEY_TIME_EPS)
+    } else if dir < 0 {
+        p.keys.iter().rposition(|(kt, _)| *kt < t - KEY_TIME_EPS)
+    } else {
+        p.keys.iter().position(|(kt, _)| *kt > t + KEY_TIME_EPS)
+    };
+    match found.and_then(|i| c_int::try_from(i).ok()) {
+        Some(idx) => {
+            // SAFETY: `out` não nulo.
+            unsafe { *out = idx };
+            STAT_OK
+        }
+        None => STAT_FAILED,
+    }
 }
 
-unsafe extern "C" fn pa_delete_key(_p: *mut Param, _t: f64) -> OfxStatus {
-    STAT_OK
+unsafe extern "C" fn pa_delete_key(p: *mut Param, t: f64) -> OfxStatus {
+    // SAFETY: handle deste host.
+    let Some(p) = (unsafe { p.as_mut() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    if !t.is_finite() {
+        return STAT_ERR_VALUE;
+    }
+    if let Some(pos) = p
+        .keys
+        .iter()
+        .position(|(kt, _)| (*kt - t).abs() <= KEY_TIME_EPS)
+    {
+        p.keys.remove(pos);
+        STAT_OK
+    } else {
+        STAT_ERR_BAD_INDEX
+    }
 }
 
-unsafe extern "C" fn pa_delete_all_keys(_p: *mut Param) -> OfxStatus {
+unsafe extern "C" fn pa_delete_all_keys(p: *mut Param) -> OfxStatus {
+    // SAFETY: handle deste host.
+    let Some(p) = (unsafe { p.as_mut() }) else {
+        return STAT_ERR_BAD_HANDLE;
+    };
+    p.keys.clear();
     STAT_OK
 }
 
@@ -1728,7 +1990,12 @@ impl HostedEffect {
             "OfxBitDepthByte"
         };
         for c in &mut me.inst.clips {
-            c.props.set_int("OfxImageClipPropConnected", &[1]);
+            let connected = if c.name == "Source" || c.name == "Output" {
+                1
+            } else {
+                0
+            };
+            c.props.set_int("OfxImageClipPropConnected", &[connected]);
             c.props
                 .set_str("OfxImageEffectPropComponents", &["OfxImageComponentRGBA"]);
             c.props.set_str(
@@ -1847,8 +2114,10 @@ impl HostedEffect {
                 .iter_mut()
                 .find(|p| p.props.str0("OfxPropName").as_deref() == Some(v.name.as_str()))
             {
-                let (k, _) = param_shape(&p.kind);
+                let (k, is_int) = param_shape(&p.kind);
                 if k > 0 {
+                    p.integer = v.integer || is_int;
+                    p.hold = v.hold || is_hold_kind(&p.kind);
                     p.nums = (0..k)
                         .map(|i| {
                             v.values
@@ -1858,6 +2127,23 @@ impl HostedEffect {
                                 .unwrap_or(0.0)
                         })
                         .collect();
+                    p.keys.clear();
+                    for (kt, kvals) in v.keys.iter().take(MAX_OFX_KEYS) {
+                        let t_frames = ticks_to_ofx_time(*kt, fps);
+                        let fitted: Vec<f64> = (0..k)
+                            .map(|i| {
+                                kvals
+                                    .get(i)
+                                    .copied()
+                                    .filter(|x| x.is_finite())
+                                    .unwrap_or(0.0)
+                            })
+                            .collect();
+                        p.set_key(t_frames, fitted);
+                    }
+                    if !p.keys.is_empty() {
+                        p.nums = p.eval_at(time);
+                    }
                 }
             }
         }
@@ -1994,14 +2280,9 @@ mod tests {
 
     #[test]
     fn param_values_follow_type_shape() {
-        let mut p = Param {
-            kind: "OfxParamTypeRGBA".into(),
-            props: Box::default(),
-            nums: vec![],
-            text: CString::default(),
-        };
-        p.props
-            .set_dbl("OfxParamPropDefault", &[0.1, 0.2, 0.3, 1.0]);
+        let mut props = Box::<PropSet>::default();
+        props.set_dbl("OfxParamPropDefault", &[0.1, 0.2, 0.3, 1.0]);
+        let mut p = Param::new_empty("OfxParamTypeRGBA".into(), props);
         p.reset_to_default();
         let mut out = [0f64; 4];
         let ptrs = out
@@ -2034,6 +2315,117 @@ mod tests {
                 mem_alloc(std::ptr::null_mut(), MAX_ALLOC + 1, &mut p),
                 STAT_ERR_MEMORY
             );
+        }
+    }
+
+    #[test]
+    fn param_keyframes_evaluate_derivative_integral_and_key_queries() {
+        let mut p = Box::new(Param::new_empty(
+            "OfxParamTypeDouble".into(),
+            Box::default(),
+        ));
+        p.set_key(10.0, vec![0.0]);
+        p.set_key(30.0, vec![10.0]);
+        let ptr: *mut Param = &mut *p;
+        // SAFETY: ponteiros locais válidos para c_uint / c_int / f64.
+        unsafe {
+            let mut count: c_uint = 0;
+            assert_eq!(pa_get_num_keys(ptr, &mut count), STAT_OK);
+            assert_eq!(count, 2);
+
+            let mut kt = 0.0;
+            assert_eq!(pa_get_key_time(ptr, 0, &mut kt), STAT_OK);
+            assert_eq!(kt, 10.0);
+            assert_eq!(pa_get_key_time(ptr, 1, &mut kt), STAT_OK);
+            assert_eq!(kt, 30.0);
+            assert_eq!(pa_get_key_time(ptr, 2, &mut kt), STAT_ERR_BAD_INDEX);
+
+            let mut idx: c_int = -1;
+            assert_eq!(pa_get_key_index(ptr, 10.0, 0, &mut idx), STAT_OK);
+            assert_eq!(idx, 0);
+            assert_eq!(pa_get_key_index(ptr, 15.0, 0, &mut idx), STAT_FAILED);
+            assert_eq!(pa_get_key_index(ptr, 15.0, -1, &mut idx), STAT_OK);
+            assert_eq!(idx, 0);
+            assert_eq!(pa_get_key_index(ptr, 15.0, 1, &mut idx), STAT_OK);
+            assert_eq!(idx, 1);
+
+            let mut val = 0.0f64;
+            assert_eq!(
+                pa_get_value_at_time(
+                    ptr,
+                    20.0,
+                    std::ptr::from_mut(&mut val).cast(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                STAT_OK
+            );
+            assert!((val - 5.0).abs() < 1e-9, "{val}");
+
+            let mut deriv = 0.0f64;
+            assert_eq!(
+                pa_get_derivative(
+                    ptr,
+                    20.0,
+                    std::ptr::from_mut(&mut deriv).cast(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                STAT_OK
+            );
+            assert!((deriv - 0.5).abs() < 1e-9, "{deriv}");
+
+            let mut integ = 0.0f64;
+            assert_eq!(
+                pa_get_integral(
+                    ptr,
+                    10.0,
+                    30.0,
+                    std::ptr::from_mut(&mut integ).cast(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                STAT_OK
+            );
+            assert!((integ - 100.0).abs() < 1e-9, "{integ}");
+
+            // ordem reversa inverte sinal da integral
+            assert_eq!(
+                pa_get_integral(
+                    ptr,
+                    30.0,
+                    10.0,
+                    std::ptr::from_mut(&mut integ).cast(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                STAT_OK
+            );
+            assert!((integ + 100.0).abs() < 1e-9, "{integ}");
+
+            // tempo hostil (NaN) retorna erro sem pânico
+            assert_eq!(
+                pa_get_value_at_time(
+                    ptr,
+                    f64::NAN,
+                    std::ptr::from_mut(&mut val).cast(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                STAT_ERR_VALUE
+            );
+
+            assert_eq!(pa_delete_key(ptr, 10.0), STAT_OK);
+            assert_eq!(pa_get_num_keys(ptr, &mut count), STAT_OK);
+            assert_eq!(count, 1);
+            assert_eq!(pa_delete_all_keys(ptr), STAT_OK);
+            assert_eq!(pa_get_num_keys(ptr, &mut count), STAT_OK);
+            assert_eq!(count, 0);
         }
     }
 }
