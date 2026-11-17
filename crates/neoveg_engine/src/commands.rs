@@ -1175,8 +1175,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sonic_foundry",
-        label: "Sonic Foundry",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sonic Foundry",
+        label: "Clássico",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Clássico",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1184,8 +1184,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sony",
-        label: "Sony",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sony",
+        label: "Intermediário",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Intermediário",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1193,8 +1193,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.magix",
-        label: "MAGIX",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/MAGIX",
+        label: "Atual",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Atual",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,

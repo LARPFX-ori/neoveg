@@ -3297,7 +3297,7 @@ fn edit_layout_checkboxes(
     changed |= ui
         .checkbox(
             &mut cfg.master_bus_docked,
-            "Exibir Master Bus acoplado à direita (padrão VEGAS Pro 21)",
+            "Exibir Master Bus acoplado à direita (padrão)",
         )
         .changed();
     if ui
