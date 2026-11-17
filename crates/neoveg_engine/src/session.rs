@@ -17,35 +17,115 @@ pub const MAX_UNDO: usize = 200;
 pub enum EditMode {
     #[default]
     Normal,
+    Shuffle,
     Slip,
     Slide,
     Stretch,
+    SplitTrim,
     Roll,
-    Shuffle,
     Ripple,
 }
 
 impl EditMode {
-    pub const ALL: [EditMode; 7] = [
+    pub const ALL: [EditMode; 8] = [
         EditMode::Normal,
+        EditMode::Shuffle,
         EditMode::Slip,
         EditMode::Slide,
         EditMode::Stretch,
+        EditMode::SplitTrim,
         EditMode::Roll,
-        EditMode::Shuffle,
         EditMode::Ripple,
+    ];
+
+    /// Modos da ferramenta Normal exibidos no seletor da barra de ferramentas (p. 236).
+    pub const NORMAL_MODES: [EditMode; 7] = [
+        EditMode::Normal,
+        EditMode::Shuffle,
+        EditMode::Slip,
+        EditMode::Slide,
+        EditMode::Stretch,
+        EditMode::SplitTrim,
+        EditMode::Roll,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
             EditMode::Normal => "Normal",
+            EditMode::Shuffle => "Shuffle (reordenar)",
             EditMode::Slip => "Slip (deslizar conteúdo)",
             EditMode::Slide => "Slide (deslizar evento)",
-            EditMode::Stretch => "Stretch (esticamento)",
+            EditMode::Stretch => "Stretch (esticamento de tempo)",
+            EditMode::SplitTrim => "Split Trim (dividir e aparar)",
             EditMode::Roll => "Roll (ajuste conjunto de corte)",
-            EditMode::Shuffle => "Shuffle (reordenar)",
             EditMode::Ripple => "Ripple (ondulação)",
         }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            EditMode::Normal => "Normal",
+            EditMode::Shuffle => "Shuffle",
+            EditMode::Slip => "Slip",
+            EditMode::Slide => "Slide",
+            EditMode::Stretch => "Stretch",
+            EditMode::SplitTrim => "Split Trim",
+            EditMode::Roll => "Roll",
+            EditMode::Ripple => "Ripple",
+        }
+    }
+
+    pub fn command_id(self) -> &'static str {
+        match self {
+            EditMode::Normal => "edit.tool.mode.normal",
+            EditMode::Shuffle => "edit.tool.mode.shuffle",
+            EditMode::Slip => "edit.tool.mode.slip",
+            EditMode::Slide => "edit.tool.mode.slide",
+            EditMode::Stretch => "edit.tool.mode.stretch",
+            EditMode::SplitTrim => "edit.tool.mode.split_trim",
+            EditMode::Roll => "edit.tool.mode.roll",
+            EditMode::Ripple => "edit.tool.mode.normal",
+        }
+    }
+}
+
+/// Máscara de seleção para "Colar atributos do evento" (Paste Event Attributes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PasteAttributesMask {
+    pub fx: bool,
+    pub pan_crop: bool,
+    pub gain_db: bool,
+    pub rate: bool,
+    pub fades: bool,
+    pub switches: bool,
+    pub transition: bool,
+}
+
+impl PasteAttributesMask {
+    pub const ALL: Self = Self {
+        fx: true,
+        pan_crop: true,
+        gain_db: true,
+        rate: true,
+        fades: true,
+        switches: true,
+        transition: true,
+    };
+
+    pub fn any(self) -> bool {
+        self.fx
+            || self.pan_crop
+            || self.gain_db
+            || self.rate
+            || self.fades
+            || self.switches
+            || self.transition
+    }
+}
+
+impl Default for PasteAttributesMask {
+    fn default() -> Self {
+        Self::ALL
     }
 }
 
@@ -176,7 +256,7 @@ pub struct EditorSession {
     pub clipboard: Vec<ClipItem>,
     pub clip_base: Ticks,
     pub opts: EditorOptions,
-    /// Modo da ferramenta Normal (por enquanto Normal ou Slip).
+    /// Modo da ferramenta Normal (Normal, Shuffle, Slip, Slide, Stretch, SplitTrim, Roll).
     pub edit_mode: EditMode,
     /// Ferramenta de edição ativa (Normal, Envelope, Seleção, Zoom).
     pub edit_tool: EditTool,
@@ -1613,6 +1693,1017 @@ impl EditorSession {
     }
 }
 
+/// Instantâneo de um evento numa trilha para edição live (Shuffle / Slide / Roll).
+#[derive(Clone, Debug)]
+pub struct TrackEventSnapshot {
+    pub id: Id,
+    pub track_idx: usize,
+    pub start: Ticks,
+    pub length: Ticks,
+    pub offset: Ticks,
+    pub rate: Rate,
+    pub reverse: bool,
+    pub looped: bool,
+    pub media_dur: Option<Ticks>,
+}
+
+/// Instantâneo de um evento para esticamento de tempo (Time Stretch / Compress).
+#[derive(Clone, Debug)]
+pub struct StretchEventSnapshot {
+    pub id: Id,
+    pub start: Ticks,
+    pub length: Ticks,
+    pub offset: Ticks,
+    pub rate: Rate,
+    pub fade_in: Ticks,
+    pub fade_out: Ticks,
+    pub pan_crop_times: Vec<Ticks>,
+    pub fx_key_times: Vec<Vec<Vec<Ticks>>>,
+}
+
+impl StretchEventSnapshot {
+    pub fn capture(ev: &Event) -> Self {
+        Self {
+            id: ev.id,
+            start: ev.start,
+            length: ev.length,
+            offset: ev.offset,
+            rate: ev.rate,
+            fade_in: ev.fade_in.len,
+            fade_out: ev.fade_out.len,
+            pan_crop_times: ev.pan_crop.keys.iter().map(|k| k.t).collect(),
+            fx_key_times: ev
+                .fx
+                .iter()
+                .map(|f| {
+                    f.params
+                        .iter()
+                        .map(|p| p.keys.iter().map(|k| k.0).collect())
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Reordena os eventos de uma trilha com base no instantâneo `snap` movendo `anchor_id`
+/// para a posição relativa de `target_time` sem criar lacunas nem sobreposições (modo Shuffle).
+/// Eventos agrupados em outras trilhas acompanham o deslocamento do evento âncora.
+pub fn apply_shuffle_from_snapshot(
+    project: &mut Project,
+    track_idx: usize,
+    snap: &[TrackEventSnapshot],
+    anchor_id: Id,
+    target_time: Ticks,
+    partners: &[(Id, Ticks)],
+) -> bool {
+    let Some(track) = project.tracks.get_mut(track_idx) else {
+        return false;
+    };
+    if snap.len() < 2 {
+        return false;
+    }
+    let Some(anchor_snap) = snap.iter().find(|s| s.id == anchor_id) else {
+        return false;
+    };
+    let mut others: Vec<&TrackEventSnapshot> = snap.iter().filter(|s| s.id != anchor_id).collect();
+    others.sort_by_key(|s| s.start);
+    let insert_pos = others
+        .iter()
+        .position(|s| {
+            let mid = s.start + s.length.div_i64(2);
+            target_time < mid
+        })
+        .unwrap_or(others.len());
+    let mut ordered: Vec<&TrackEventSnapshot> = Vec::with_capacity(snap.len());
+    for (i, item) in others.iter().enumerate() {
+        if i == insert_pos {
+            ordered.push(anchor_snap);
+        }
+        ordered.push(item);
+    }
+    if insert_pos >= others.len() {
+        ordered.push(anchor_snap);
+    }
+
+    let base_start = snap
+        .iter()
+        .map(|s| s.start)
+        .min()
+        .unwrap_or(Ticks::ZERO)
+        .max(Ticks::ZERO);
+    let mut cur = base_start;
+    let mut anchor_new_start = anchor_snap.start;
+    for s in ordered {
+        if let Some(ev) = track.events.iter_mut().find(|e| e.id == s.id) {
+            ev.start = cur;
+        }
+        if s.id == anchor_id {
+            anchor_new_start = cur;
+        }
+        cur += s.length;
+    }
+    let anchor_dt = anchor_new_start - anchor_snap.start;
+    for &(pid, orig_start) in partners {
+        if pid == anchor_id {
+            continue;
+        }
+        if let Some(pe) = project.event_mut(pid) {
+            pe.start = (orig_start + anchor_dt).max(Ticks::ZERO);
+        }
+    }
+    true
+}
+
+/// Desliza `anchor_id` (modo Slide) ajustando inversamente vizinhos imediatamente adjacentes
+/// na mesma trilha, mantendo fixos os limites externos sem alterar conteúdo do evento âncora.
+pub fn apply_slide_from_snapshot(
+    project: &mut Project,
+    track_idx: usize,
+    snap: &[TrackEventSnapshot],
+    anchor_id: Id,
+    raw_dt: Ticks,
+    fd: Ticks,
+    partners: &[(Id, Ticks)],
+) -> bool {
+    let min_len = fd.max(Ticks::from_millis_i64(1));
+    let tol = Ticks::from_millis_i64(2);
+    let mut sorted: Vec<&TrackEventSnapshot> = snap.iter().collect();
+    sorted.sort_by_key(|s| s.start);
+    let Some(pos) = sorted.iter().position(|s| s.id == anchor_id) else {
+        return false;
+    };
+    let anchor = sorted[pos];
+    let left = pos
+        .checked_sub(1)
+        .and_then(|i| sorted.get(i).copied())
+        .filter(|l| ((l.start + l.length) - anchor.start).abs() <= tol);
+    let right = sorted
+        .get(pos + 1)
+        .copied()
+        .filter(|r| (r.start - (anchor.start + anchor.length)).abs() <= tol);
+
+    let mut min_dt = -anchor.start;
+    let mut max_dt = Ticks::MAX;
+
+    if let Some(l) = left {
+        // Esquerda diminui quando dt < 0, aumenta quando dt > 0.
+        min_dt = min_dt.max(-(l.length - min_len));
+        if let (Some(d), false, false) = (l.media_dur, l.looped, l.reverse) {
+            if let Some(avail) = l.rate.unscale_ticks((d - l.offset).max(Ticks::ZERO)) {
+                max_dt = max_dt.min((avail - l.length).max(Ticks::ZERO));
+            }
+        }
+    } else if let Some(prev) = pos.checked_sub(1).and_then(|i| sorted.get(i).copied()) {
+        // Não atravessa vizinho não adjacente quando não há toque inicial.
+        min_dt = min_dt.max((prev.start + prev.length) - anchor.start);
+    }
+
+    if let Some(r) = right {
+        // Direita aumenta quando dt < 0 (anda à esquerda), diminui quando dt > 0.
+        max_dt = max_dt.min(r.length - min_len);
+        if !r.looped && !r.reverse {
+            if let Some(max_back) = r.rate.unscale_ticks(r.offset) {
+                min_dt = min_dt.max(-max_back);
+            }
+        }
+    } else if let Some(next) = sorted.get(pos + 1).copied() {
+        max_dt = max_dt.min(next.start - (anchor.start + anchor.length));
+    }
+
+    if min_dt > max_dt {
+        min_dt = Ticks::ZERO;
+        max_dt = Ticks::ZERO;
+    }
+    let dt = raw_dt.clamp_safe(min_dt, max_dt);
+
+    let Some(track) = project.tracks.get_mut(track_idx) else {
+        return false;
+    };
+    if let Some(ev) = track.events.iter_mut().find(|e| e.id == anchor_id) {
+        ev.start = (anchor.start + dt).max(Ticks::ZERO);
+    }
+    if let Some(l) = left {
+        if let Some(le) = track.events.iter_mut().find(|e| e.id == l.id) {
+            let orig_end = l.start + l.length;
+            le.length = (l.length + dt).max(min_len);
+            if l.reverse {
+                let d_end = (l.start + le.length) - orig_end;
+                let off_delta = l.offset - l.rate.scale_ticks(d_end) - le.offset;
+                le.shift_offsets(off_delta);
+            }
+            le.fade_in.len = le.fade_in.len.min(le.length);
+            le.fade_out.len = le.fade_out.len.min(le.length - le.fade_in.len);
+        }
+    }
+    if let Some(r) = right {
+        if let Some(re) = track.events.iter_mut().find(|e| e.id == r.id) {
+            re.start = (r.start + dt).max(Ticks::ZERO);
+            re.length = (r.length - dt).max(min_len);
+            if !r.reverse {
+                let target_off = (r.offset + r.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                let delta = target_off - re.offset;
+                re.shift_offsets(delta);
+            }
+            re.fade_in.len = re.fade_in.len.min(re.length);
+            re.fade_out.len = re.fade_out.len.min(re.length - re.fade_in.len);
+        }
+    }
+    for &(pid, orig_start) in partners {
+        if pid == anchor_id {
+            continue;
+        }
+        if let Some(pe) = project.event_mut(pid) {
+            pe.start = (orig_start + dt).max(Ticks::ZERO);
+        }
+    }
+    true
+}
+
+/// Estica ou comprime eventos pelo arrasto de borda, ajustando `Rate` e escalando keyframes/fades.
+pub fn apply_stretch_from_snapshot(
+    project: &mut Project,
+    snaps: &[StretchEventSnapshot],
+    anchor_id: Id,
+    left_edge: bool,
+    raw_dt: Ticks,
+    fd: Ticks,
+) -> bool {
+    let min_dur = fd.max(Ticks::from_millis_i64(10));
+    let Some(_anchor) = snaps.iter().find(|s| s.id == anchor_id) else {
+        return false;
+    };
+    // Limites seguros de taxa (0.25x .. 4.00x de taxa efetiva final).
+    let mut dt = raw_dt;
+    for s in snaps {
+        let orig_media = s.rate.scale_ticks(s.length).max(min_dur);
+        let min_len = (Ticks::from_raw((orig_media.0 / 4).max(min_dur.0)))
+            .max(min_dur)
+            .min(s.length);
+        let max_len = Ticks::from_raw(orig_media.0.saturating_mul(4)).max(s.length);
+        if left_edge {
+            let orig_end = s.start + s.length;
+            let lo_len = min_len;
+            let hi_len = max_len.min(orig_end);
+            let min_dt = s.length - hi_len.max(lo_len);
+            let max_dt = s.length - lo_len;
+            dt = dt.clamp_safe(min_dt, max_dt);
+        } else {
+            let min_dt = min_len - s.length;
+            let max_dt = max_len - s.length;
+            dt = dt.clamp_safe(min_dt, max_dt);
+        }
+    }
+
+    for s in snaps {
+        let Some(e) = project.event_mut(s.id) else {
+            continue;
+        };
+        if s.length <= Ticks::ZERO {
+            continue;
+        }
+        let new_len = if left_edge {
+            (s.length - dt).max(min_dur)
+        } else {
+            (s.length + dt).max(min_dur)
+        };
+        let orig_media = s.rate.scale_ticks(s.length);
+        if orig_media > Ticks::ZERO {
+            if let Some(new_rate) = Rate::from_ratio(orig_media.0 as u64, new_len.0 as u64) {
+                e.rate = new_rate;
+            }
+        }
+        if left_edge {
+            e.start = (s.start + s.length - new_len).max(Ticks::ZERO);
+        }
+        e.length = new_len;
+        let scale_tick = |t: Ticks| -> Ticks {
+            let num = t.0 as i128 * new_len.0 as i128;
+            let den = (s.length.0 as i128).max(1);
+            Ticks::from_raw((num / den) as i64)
+        };
+        e.fade_in.len = scale_tick(s.fade_in).clamp_safe(Ticks::ZERO, new_len);
+        e.fade_out.len = scale_tick(s.fade_out).clamp_safe(Ticks::ZERO, new_len - e.fade_in.len);
+        for (k, orig_t) in e.pan_crop.keys.iter_mut().zip(s.pan_crop_times.iter()) {
+            k.t = scale_tick(*orig_t).clamp_safe(Ticks::ZERO, new_len);
+        }
+        for (fx, orig_fx) in e.fx.iter_mut().zip(s.fx_key_times.iter()) {
+            for (p, orig_p) in fx.params.iter_mut().zip(orig_fx.iter()) {
+                for (k, orig_t) in p.keys.iter_mut().zip(orig_p.iter()) {
+                    k.0 = scale_tick(*orig_t).clamp_safe(Ticks::ZERO, new_len);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Ajuste conjunto de corte (Roll): ao arrastar a borda de corte entre dois eventos
+/// contíguos na mesma trilha, ambos têm o ponto de edição movido juntos sem alterar
+/// o comprimento total nem deixar lacunas.
+pub fn apply_roll_from_snapshot(
+    project: &mut Project,
+    track_idx: usize,
+    snap: &[TrackEventSnapshot],
+    anchor_id: Id,
+    left_edge: bool,
+    raw_dt: Ticks,
+    fd: Ticks,
+) -> bool {
+    let min_len = fd.max(Ticks::from_millis_i64(1));
+    let tol = Ticks::from_millis_i64(2);
+    let mut sorted: Vec<&TrackEventSnapshot> = snap.iter().collect();
+    sorted.sort_by_key(|s| s.start);
+    let Some(pos) = sorted.iter().position(|s| s.id == anchor_id) else {
+        return false;
+    };
+    let anchor = sorted[pos];
+    let cut_pos = if left_edge {
+        anchor.start
+    } else {
+        anchor.start + anchor.length
+    };
+    let (left_ev, right_ev) = if left_edge {
+        let Some(prev) = pos
+            .checked_sub(1)
+            .and_then(|i| sorted.get(i).copied())
+            .filter(|l| ((l.start + l.length) - cut_pos).abs() <= tol)
+        else {
+            return false;
+        };
+        (prev, anchor)
+    } else {
+        let Some(next) = sorted
+            .get(pos + 1)
+            .copied()
+            .filter(|r| (r.start - cut_pos).abs() <= tol)
+        else {
+            return false;
+        };
+        (anchor, next)
+    };
+
+    let mut min_dt = -(left_ev.length - min_len);
+    let mut max_dt = right_ev.length - min_len;
+    if let (Some(d), false, false) = (left_ev.media_dur, left_ev.looped, left_ev.reverse) {
+        if let Some(avail) = left_ev
+            .rate
+            .unscale_ticks((d - left_ev.offset).max(Ticks::ZERO))
+        {
+            max_dt = max_dt.min((avail - left_ev.length).max(Ticks::ZERO));
+        }
+    }
+    if !right_ev.looped && !right_ev.reverse {
+        if let Some(max_back) = right_ev.rate.unscale_ticks(right_ev.offset) {
+            min_dt = min_dt.max(-max_back);
+        }
+    }
+    if min_dt > max_dt {
+        min_dt = Ticks::ZERO;
+        max_dt = Ticks::ZERO;
+    }
+    let dt = raw_dt.clamp_safe(min_dt, max_dt);
+
+    let Some(track) = project.tracks.get_mut(track_idx) else {
+        return false;
+    };
+    if let Some(le) = track.events.iter_mut().find(|e| e.id == left_ev.id) {
+        let orig_end = left_ev.start + left_ev.length;
+        le.length = (left_ev.length + dt).max(min_len);
+        if left_ev.reverse {
+            let d_end = (left_ev.start + le.length) - orig_end;
+            let off_delta = left_ev.offset - left_ev.rate.scale_ticks(d_end) - le.offset;
+            le.shift_offsets(off_delta);
+        }
+        le.fade_in.len = le.fade_in.len.min(le.length);
+        le.fade_out.len = le.fade_out.len.min(le.length - le.fade_in.len);
+    }
+    if let Some(re) = track.events.iter_mut().find(|e| e.id == right_ev.id) {
+        re.start = (right_ev.start + dt).max(Ticks::ZERO);
+        re.length = (right_ev.length - dt).max(min_len);
+        if !right_ev.reverse {
+            let target_off = (right_ev.offset + right_ev.rate.scale_ticks(dt)).max(Ticks::ZERO);
+            let delta = target_off - re.offset;
+            re.shift_offsets(delta);
+        }
+        re.fade_in.len = re.fade_in.len.min(re.length);
+        re.fade_out.len = re.fade_out.len.min(re.length - re.fade_in.len);
+    }
+    true
+}
+
+/// Verifica se dois eventos sequenciais na mesma trilha são contínuos para juntar (Heal).
+pub fn can_heal_pair(a: &Event, b: &Event) -> bool {
+    if a.locked
+        || b.locked
+        || a.media_id != b.media_id
+        || a.reverse != b.reverse
+        || a.rate != b.rate
+        || a.take_index != b.take_index
+        || a.alt_takes != b.alt_takes
+    {
+        return false;
+    }
+    let tol = Ticks::from_millis_i64(2);
+    if (b.start - a.end()).abs() > tol {
+        return false;
+    }
+    if !a.reverse {
+        let expected_b = a.offset + a.rate.scale_ticks(b.start - a.start);
+        (b.offset - expected_b).abs() <= tol
+    } else {
+        let expected_a = b.offset + b.rate.scale_ticks(b.end() - a.end());
+        (a.offset - expected_a).abs() <= tol
+    }
+}
+
+impl EditorSession {
+    /// Verifica se há ao menos um par contíguo juntável na seleção atual (Heal).
+    pub fn can_heal_selection(&self) -> bool {
+        if self.sel_events.len() < 2 {
+            return false;
+        }
+        let ids = self.expand_groups(&self.sel_events);
+        for tr in &self.project.tracks {
+            if tr.locked {
+                continue;
+            }
+            let mut evs: Vec<&Event> = tr.events.iter().filter(|e| ids.contains(&e.id)).collect();
+            if evs.len() < 2 {
+                continue;
+            }
+            evs.sort_by_key(|e| e.start);
+            for pair in evs.windows(2) {
+                if can_heal_pair(pair[0], pair[1]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Junta eventos contíguos da mesma mídia cortados na timeline (Heal).
+    pub fn heal_events(&mut self) -> usize {
+        if self.sel_events.len() < 2 {
+            return 0;
+        }
+        if !self.can_heal_selection() {
+            self.set_status("Nada para juntar: selecione dois eventos contínuos da mesma mídia.");
+            return 0;
+        }
+        self.checkpoint();
+        let ids = self.expand_groups(&self.sel_events.clone());
+        let mut healed_count = 0usize;
+        let mut new_sel = self.sel_events.clone();
+        for tr in &mut self.project.tracks {
+            if tr.locked {
+                continue;
+            }
+            tr.events.sort_by_key(|e| e.start);
+            let mut i = 0usize;
+            while i + 1 < tr.events.len() {
+                if !ids.contains(&tr.events[i].id) {
+                    i += 1;
+                    continue;
+                }
+                let mut next_idx = i + 1;
+                while next_idx < tr.events.len() && !ids.contains(&tr.events[next_idx].id) {
+                    next_idx += 1;
+                }
+                if next_idx != i + 1 {
+                    i += 1;
+                    continue;
+                }
+                if can_heal_pair(&tr.events[i], &tr.events[next_idx]) {
+                    let right = tr.events.remove(next_idx);
+                    new_sel.remove(&right.id);
+                    let left = &mut tr.events[i];
+                    let shift = right.start - left.start;
+                    let total_end = left.end().max(right.end());
+                    left.length = total_end - left.start;
+                    if left.reverse {
+                        left.offset = right.offset;
+                    }
+                    left.fade_out = right.fade_out;
+                    left.fade_in.len = left.fade_in.len.min(left.length);
+                    left.fade_out.len = left.fade_out.len.min(left.length - left.fade_in.len);
+                    for mut k in right.pan_crop.keys {
+                        k.t += shift;
+                        if !left.pan_crop.keys.iter().any(|ek| ek.t == k.t) {
+                            left.pan_crop.keys.push(k);
+                        }
+                    }
+                    left.pan_crop.keys.sort_by_key(|k| k.t);
+                    new_sel.insert(left.id);
+                    healed_count += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        self.sel_events = new_sel;
+        if healed_count > 0 {
+            self.changed();
+            self.set_status(format!("{healed_count} corte(s) reunido(s) (Heal)."));
+        }
+        healed_count
+    }
+
+    /// Smart Split (`Alt+S`): remove o trecho `time_sel`, aplica crossfade curto com Warp Flow
+    /// (~5 quadros), agrupa as duas partes e desloca o restante da trilha.
+    pub fn smart_split(&mut self) -> usize {
+        let Some((a, b)) = self.time_sel else {
+            return 0;
+        };
+        if b <= a {
+            return 0;
+        }
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let explicit_targets: Option<HashSet<Id>> = if self.sel_events.is_empty() {
+            None
+        } else {
+            Some(self.expand_groups(&self.sel_events))
+        };
+        let has_hit = self.project.tracks.iter().any(|tr| {
+            !tr.locked
+                && tr.events.iter().any(|e| {
+                    !e.locked
+                        && e.end() > a
+                        && e.start < b
+                        && explicit_targets
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&e.id))
+                })
+        });
+        if !has_hit {
+            return 0;
+        }
+        self.checkpoint();
+        let span = b - a;
+        let overlap_cap = Ticks::from_raw(fd.0.saturating_mul(5)).min(span.div_i64(2));
+        let mut group_map: HashMap<Option<Id>, Id> = HashMap::new();
+        let mut count = 0usize;
+        let mut new_sel = HashSet::new();
+
+        for tr in &mut self.project.tracks {
+            if tr.locked {
+                continue;
+            }
+            let mut next_events: Vec<Event> = Vec::with_capacity(tr.events.len() + 2);
+            let mut track_shifted = false;
+            for mut ev in std::mem::take(&mut tr.events) {
+                let targeted = !ev.locked
+                    && explicit_targets
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&ev.id));
+                if ev.end() <= a {
+                    next_events.push(ev);
+                    continue;
+                }
+                if ev.start >= b {
+                    if track_shifted || explicit_targets.is_none() {
+                        ev.start = (ev.start - span).max(Ticks::ZERO);
+                    }
+                    next_events.push(ev);
+                    continue;
+                }
+                if !targeted {
+                    if ev.start >= b && track_shifted {
+                        ev.start = (ev.start - span).max(Ticks::ZERO);
+                    }
+                    next_events.push(ev);
+                    continue;
+                }
+                track_shifted = true;
+                if ev.start < a && ev.end() > b {
+                    let orig_start = ev.start;
+                    let orig_len = ev.length;
+                    let orig_end = ev.end();
+                    let orig_off = ev.offset;
+                    let left_base = a - orig_start;
+                    let right_len = orig_end - b;
+                    let ov = overlap_cap
+                        .min(left_base.div_i64(2))
+                        .min(right_len.div_i64(2));
+
+                    let mut right = ev.clone();
+                    let mut left = ev;
+                    left.length = left_base + ov;
+                    left.fade_out = Fade {
+                        len: ov,
+                        curve: Curve::Smooth,
+                    };
+                    if left.reverse {
+                        left.offset = orig_off + left.rate.scale_ticks(orig_end - (a + ov));
+                    }
+
+                    right.id = new_id();
+                    right.start = a;
+                    right.length = right_len;
+                    right.fade_in = Fade {
+                        len: ov,
+                        curve: Curve::Smooth,
+                    };
+                    right.transition = if ov > Ticks::ZERO {
+                        Some(TransitionSpec {
+                            kind: TransitionKind::WarpFlow,
+                            softness: 0.05,
+                        })
+                    } else {
+                        None
+                    };
+                    if !right.reverse {
+                        right.shift_offsets(right.rate.scale_ticks(b - orig_start));
+                    } else {
+                        right.offset = orig_off;
+                    }
+                    for k in &mut right.pan_crop.keys {
+                        k.t -= b - orig_start;
+                    }
+                    for f in &mut right.fx {
+                        for p in &mut f.params {
+                            for k in &mut p.keys {
+                                k.0 -= b - orig_start;
+                            }
+                        }
+                    }
+                    let _ = orig_len;
+                    let gid = *group_map.entry(left.group).or_insert_with(new_id);
+                    left.group = Some(gid);
+                    right.group = Some(gid);
+                    new_sel.insert(left.id);
+                    new_sel.insert(right.id);
+                    next_events.push(left);
+                    next_events.push(right);
+                    count += 1;
+                } else if ev.start < a && ev.end() > a {
+                    let cut_d = ev.end() - a;
+                    if ev.reverse {
+                        ev.shift_offsets(ev.rate.scale_ticks(cut_d));
+                    }
+                    ev.length = (a - ev.start).max(fd);
+                    ev.fade_out.len = ev.fade_out.len.min(ev.length);
+                    next_events.push(ev);
+                    count += 1;
+                } else if ev.start >= a && ev.end() > b {
+                    let d = b - ev.start;
+                    if !ev.reverse {
+                        ev.shift_offsets(ev.rate.scale_ticks(d));
+                    }
+                    ev.length = (ev.end() - b).max(fd);
+                    ev.start = a;
+                    ev.fade_in.len = ev.fade_in.len.min(ev.length);
+                    next_events.push(ev);
+                    count += 1;
+                } else {
+                    // Evento totalmente dentro da seleção [a, b]: removido.
+                    count += 1;
+                }
+            }
+            tr.events = next_events;
+        }
+        self.project.sort_events();
+        self.sel_events = new_sel;
+        self.time_sel = None;
+        self.project.loop_region = None;
+        self.cursor = a;
+        self.changed();
+        self.set_status(format!(
+            "Smart Split aplicado ({count} corte(s) com Warp Flow)."
+        ));
+        count
+    }
+
+    /// Cola atributos dos eventos na área de transferência para os eventos selecionados.
+    pub fn paste_attributes(&mut self, mask: PasteAttributesMask) -> usize {
+        if self.clipboard.is_empty() || self.sel_events.is_empty() || !mask.any() {
+            return 0;
+        }
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let has_target = ids.iter().any(|&id| {
+            self.project.find_event(id).is_some_and(|(ti, ei)| {
+                !self.project.tracks[ti].locked && !self.project.tracks[ti].events[ei].locked
+            })
+        });
+        if !has_target {
+            return 0;
+        }
+        self.checkpoint();
+        let mut applied = 0usize;
+        for id in ids {
+            let Some((ti, _)) = self.project.find_event(id) else {
+                continue;
+            };
+            if self.project.tracks[ti].locked {
+                continue;
+            }
+            let track_kind = self.project.tracks[ti].kind;
+            let src = self
+                .clipboard
+                .iter()
+                .find(|c| c.kind == track_kind)
+                .or_else(|| self.clipboard.first());
+            let Some(src) = src else {
+                continue;
+            };
+            let src_ev = &src.ev;
+            let Some(dst) = self.project.event_mut(id) else {
+                continue;
+            };
+            if dst.locked {
+                continue;
+            }
+            if mask.fx {
+                dst.fx = src_ev.fx.iter().map(|f| f.duplicate()).collect();
+            }
+            if mask.pan_crop && track_kind == TrackKind::Video {
+                dst.pan_crop = src_ev.pan_crop.clone();
+            }
+            if mask.gain_db && track_kind == TrackKind::Audio {
+                dst.gain_db = src_ev.gain_db;
+            }
+            if mask.rate {
+                dst.rate = src_ev.rate;
+            }
+            if mask.fades {
+                dst.fade_in = src_ev.fade_in.clone();
+                dst.fade_out = src_ev.fade_out.clone();
+                dst.fade_in.len = dst.fade_in.len.min(dst.length);
+                dst.fade_out.len = dst.fade_out.len.min(dst.length - dst.fade_in.len);
+            }
+            if mask.switches {
+                dst.mute = src_ev.mute;
+                dst.looped = src_ev.looped;
+                dst.reverse = src_ev.reverse;
+                if track_kind == TrackKind::Video {
+                    dst.maintain_aspect = src_ev.maintain_aspect;
+                }
+            }
+            if mask.transition && track_kind == TrackKind::Video {
+                dst.transition = src_ev.transition.clone();
+            }
+            applied += 1;
+        }
+        if applied > 0 {
+            self.changed();
+            self.set_status(format!("Atributos colados em {applied} evento(s)."));
+        }
+        applied
+    }
+
+    /// Reordena um evento na sua trilha no modo Shuffle para `target_time` em 1 passo de Desfazer.
+    pub fn shuffle_event(&mut self, event_id: Id, target_time: Ticks) -> bool {
+        let Some((ti, _)) = self.project.find_event(event_id) else {
+            return false;
+        };
+        if self.project.tracks[ti].locked {
+            return false;
+        }
+        let Some(ev) = self.project.tracks[ti]
+            .events
+            .iter()
+            .find(|e| e.id == event_id)
+        else {
+            return false;
+        };
+        if ev.locked {
+            return false;
+        }
+        let snap: Vec<TrackEventSnapshot> = self.project.tracks[ti]
+            .events
+            .iter()
+            .filter(|e| !e.locked)
+            .map(|e| TrackEventSnapshot {
+                id: e.id,
+                track_idx: ti,
+                start: e.start,
+                length: e.length,
+                offset: e.offset,
+                rate: e.rate,
+                reverse: e.reverse,
+                looped: e.looped,
+                media_dur: self.project.media(e.media_id).and_then(|m| m.duration),
+            })
+            .collect();
+        if snap.len() < 2 {
+            return false;
+        }
+        let mut single = HashSet::new();
+        single.insert(event_id);
+        let group_ids = self.expand_groups(&single);
+        let partners: Vec<(Id, Ticks)> = group_ids
+            .into_iter()
+            .filter(|&gid| !snap.iter().any(|s| s.id == gid))
+            .filter_map(|gid| self.project.event(gid).map(|e| (gid, e.start)))
+            .collect();
+        self.checkpoint();
+        let ok = apply_shuffle_from_snapshot(
+            &mut self.project,
+            ti,
+            &snap,
+            event_id,
+            target_time,
+            &partners,
+        );
+        if ok {
+            self.project.sort_events();
+            self.changed();
+        }
+        ok
+    }
+
+    /// Desliza um evento na sua trilha em `delta` no modo Slide em 1 passo de Desfazer.
+    pub fn slide_event(&mut self, event_id: Id, delta: Ticks) -> bool {
+        let Some((ti, _)) = self.project.find_event(event_id) else {
+            return false;
+        };
+        if self.project.tracks[ti].locked {
+            return false;
+        }
+        let snap: Vec<TrackEventSnapshot> = self.project.tracks[ti]
+            .events
+            .iter()
+            .filter(|e| !e.locked)
+            .map(|e| TrackEventSnapshot {
+                id: e.id,
+                track_idx: ti,
+                start: e.start,
+                length: e.length,
+                offset: e.offset,
+                rate: e.rate,
+                reverse: e.reverse,
+                looped: e.looped,
+                media_dur: self.project.media(e.media_id).and_then(|m| m.duration),
+            })
+            .collect();
+        let fd = self.project.settings.frame_dur();
+        let mut single = HashSet::new();
+        single.insert(event_id);
+        let group_ids = self.expand_groups(&single);
+        let partners: Vec<(Id, Ticks)> = group_ids
+            .into_iter()
+            .filter(|&gid| !snap.iter().any(|s| s.id == gid))
+            .filter_map(|gid| self.project.event(gid).map(|e| (gid, e.start)))
+            .collect();
+        self.checkpoint();
+        let ok =
+            apply_slide_from_snapshot(&mut self.project, ti, &snap, event_id, delta, fd, &partners);
+        if ok {
+            self.project.sort_events();
+            self.changed();
+        }
+        ok
+    }
+
+    /// Estica/comprime um evento (e parceiros agrupados) pela borda escolhida para `new_len`.
+    pub fn stretch_event_edge(&mut self, event_id: Id, left_edge: bool, new_len: Ticks) -> bool {
+        let Some(anchor) = self.project.event(event_id) else {
+            return false;
+        };
+        if anchor.locked {
+            return false;
+        }
+        let orig_len = anchor.length;
+        let orig_edge = if left_edge {
+            anchor.start
+        } else {
+            anchor.end()
+        };
+        let mut single = HashSet::new();
+        single.insert(event_id);
+        let group_ids = self.expand_groups(&single);
+        let snaps: Vec<StretchEventSnapshot> = group_ids
+            .into_iter()
+            .filter_map(|gid| {
+                let ge = self.project.event(gid)?;
+                let ge_edge = if left_edge { ge.start } else { ge.end() };
+                if ge.locked || ge_edge.abs_diff(orig_edge) >= Ticks::from_millis_i64(2) {
+                    return None;
+                }
+                Some(StretchEventSnapshot::capture(ge))
+            })
+            .collect();
+        if snaps.is_empty() {
+            return false;
+        }
+        let dt = if left_edge {
+            orig_len - new_len
+        } else {
+            new_len - orig_len
+        };
+        let fd = self.project.settings.frame_dur();
+        self.checkpoint();
+        let ok =
+            apply_stretch_from_snapshot(&mut self.project, &snaps, event_id, left_edge, dt, fd);
+        if ok {
+            self.project.sort_events();
+            self.changed();
+        }
+        ok
+    }
+
+    /// Divide um evento em `a` e apara o trecho arrastado `[a..b]` (modo Split Trim).
+    pub fn split_trim(&mut self, event_id: Id, a: Ticks, b: Ticks) -> bool {
+        let Some((ti, _)) = self.project.find_event(event_id) else {
+            return false;
+        };
+        if self.project.tracks[ti].locked {
+            return false;
+        }
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let lo = a.min(b);
+        let hi = a.max(b);
+        // Sem arrasto significativo: apenas divide no ponto clicado.
+        if hi - lo <= fd {
+            let saved_cursor = self.cursor;
+            let saved_sel = self.sel_events.clone();
+            self.cursor = a;
+            self.sel_events.clear();
+            self.sel_events.insert(event_id);
+            let n = self.split_at_cursor();
+            if n == 0 {
+                self.cursor = saved_cursor;
+                self.sel_events = saved_sel;
+                return false;
+            }
+            return true;
+        }
+        let mut single = HashSet::new();
+        single.insert(event_id);
+        let ids = self.expand_groups(&single);
+        self.checkpoint();
+        let mut touched = 0usize;
+        for tr in &mut self.project.tracks {
+            if tr.locked {
+                continue;
+            }
+            let mut next_events = Vec::with_capacity(tr.events.len() + 1);
+            for mut ev in std::mem::take(&mut tr.events) {
+                if !ids.contains(&ev.id) || ev.locked || ev.end() <= lo || ev.start >= hi {
+                    next_events.push(ev);
+                    continue;
+                }
+                touched += 1;
+                if ev.start < lo && ev.end() > hi {
+                    let orig_start = ev.start;
+                    let orig_end = ev.end();
+                    let orig_off = ev.offset;
+                    let mut right = ev.clone();
+                    ev.length = (lo - orig_start).max(fd);
+                    ev.fade_out = Fade::default();
+                    if ev.reverse {
+                        ev.offset = orig_off + ev.rate.scale_ticks(orig_end - lo);
+                    }
+                    right.id = new_id();
+                    right.start = hi;
+                    right.length = (orig_end - hi).max(fd);
+                    right.fade_in = Fade::default();
+                    right.transition = None;
+                    if !right.reverse {
+                        right.shift_offsets(right.rate.scale_ticks(hi - orig_start));
+                    }
+                    next_events.push(ev);
+                    next_events.push(right);
+                } else if ev.start < lo {
+                    let cut = ev.end() - lo;
+                    if ev.reverse {
+                        ev.shift_offsets(ev.rate.scale_ticks(cut));
+                    }
+                    ev.length = (lo - ev.start).max(fd);
+                    ev.fade_out.len = ev.fade_out.len.min(ev.length);
+                    next_events.push(ev);
+                } else if ev.end() > hi {
+                    let orig_end = ev.end();
+                    let cut = hi - ev.start;
+                    if !ev.reverse {
+                        ev.shift_offsets(ev.rate.scale_ticks(cut));
+                    }
+                    ev.start = hi;
+                    ev.length = (orig_end - hi).max(fd);
+                    ev.fade_in.len = ev.fade_in.len.min(ev.length);
+                    next_events.push(ev);
+                }
+            }
+            tr.events = next_events;
+        }
+        if touched > 0 {
+            self.project.sort_events();
+            self.changed();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Destino de faixa para cada item em um plano de movimentação/cópia (§3.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MoveTrackTarget {
@@ -1963,5 +3054,258 @@ mod tests {
         );
         sess.changed();
         assert!(sess.prerendered_ranges.is_empty());
+    }
+
+    #[test]
+    fn shuffle_reordena_eventos_na_trilha_sem_lacunas_e_desfaz() {
+        let mut p = Project::new_default();
+        let m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        let mid = m.id;
+        p.media.push(m.clone());
+        let a = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(2));
+        let b = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(3));
+        let mut c = Event::new(&m, Ticks::from_secs_i64(5), Ticks::from_secs_i64(4));
+        let mut audio_c = Event::new(&m, Ticks::from_secs_i64(5), Ticks::from_secs_i64(4));
+        let g = new_id();
+        c.group = Some(g);
+        audio_c.group = Some(g);
+        let (aid, bid, cid, ac_id) = (a.id, b.id, c.id, audio_c.id);
+        let _ = mid;
+        p.tracks[0].events.extend([a, b, c]);
+        p.tracks[1].events.push(audio_c);
+
+        let mut sess = EditorSession::new(p);
+        assert!(sess.shuffle_event(cid, Ticks::ZERO));
+        assert_eq!(sess.project.event(cid).map(|e| e.start), Some(Ticks::ZERO));
+        assert_eq!(
+            sess.project.event(aid).map(|e| e.start),
+            Some(Ticks::from_secs_i64(4))
+        );
+        assert_eq!(
+            sess.project.event(bid).map(|e| e.start),
+            Some(Ticks::from_secs_i64(6))
+        );
+        assert_eq!(
+            sess.project.event(ac_id).map(|e| e.start),
+            Some(Ticks::ZERO)
+        );
+        assert!(sess.undo());
+        assert_eq!(
+            sess.project.event(cid).map(|e| e.start),
+            Some(Ticks::from_secs_i64(5))
+        );
+    }
+
+    #[test]
+    fn slide_desliza_evento_ajustando_vizinhos_adjacentes_e_respeita_limites() {
+        let mut p = Project::new_default();
+        let mut m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        m.duration = Some(Ticks::from_secs_i64(20));
+        p.media.push(m.clone());
+        let a = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(5));
+        let mut b = Event::new(&m, Ticks::from_secs_i64(5), Ticks::from_secs_i64(4));
+        b.offset = Ticks::from_secs_i64(1);
+        let mut c = Event::new(&m, Ticks::from_secs_i64(9), Ticks::from_secs_i64(5));
+        c.offset = Ticks::from_secs_i64(4);
+        let (aid, bid, cid) = (a.id, b.id, c.id);
+        p.tracks[0].events.extend([a, b, c]);
+
+        let mut sess = EditorSession::new(p);
+        assert!(sess.slide_event(bid, Ticks::from_secs_i64(2)));
+        assert_eq!(
+            sess.project.event(aid).map(|e| e.length),
+            Some(Ticks::from_secs_i64(7))
+        );
+        let eb = sess.project.event(bid).unwrap();
+        assert_eq!(eb.start, Ticks::from_secs_i64(7));
+        assert_eq!(eb.length, Ticks::from_secs_i64(4));
+        assert_eq!(eb.offset, Ticks::from_secs_i64(1));
+        let ec = sess.project.event(cid).unwrap();
+        assert_eq!(ec.start, Ticks::from_secs_i64(11));
+        assert_eq!(ec.length, Ticks::from_secs_i64(3));
+        assert_eq!(ec.offset, Ticks::from_secs_i64(6));
+
+        // Entrada hostil gigante não encolhe vizinho abaixo de 1 quadro nem panica (§0.4).
+        assert!(sess.slide_event(bid, Ticks::from_secs_i64(500)));
+        assert!(sess.project.event(cid).unwrap().length >= sess.project.settings.frame_dur());
+    }
+
+    #[test]
+    fn stretch_escala_rate_fades_e_keyframes_por_aritmetica_exata() {
+        let mut p = Project::new_default();
+        let m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        p.media.push(m.clone());
+        let mut ev = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(4));
+        ev.fade_in.len = Ticks::from_secs_i64(1);
+        ev.pan_crop.keys.push(Keyframe {
+            t: Ticks::from_secs_i64(2),
+            value: PanCropKey::default(),
+            curve: Curve::Linear,
+        });
+        let id = ev.id;
+        p.tracks[0].events.push(ev);
+
+        let mut sess = EditorSession::new(p);
+        assert!(sess.stretch_event_edge(id, false, Ticks::from_secs_i64(8)));
+        let stretched = sess.project.event(id).unwrap();
+        assert_eq!(stretched.start, Ticks::from_secs_i64(2));
+        assert_eq!(stretched.length, Ticks::from_secs_i64(8));
+        assert_eq!(stretched.rate, Rate::from_ratio(1, 2).unwrap());
+        assert_eq!(stretched.fade_in.len, Ticks::from_secs_i64(2));
+        assert_eq!(stretched.pan_crop.keys[1].t, Ticks::from_secs_i64(4));
+
+        // Borda esquerda mantém o fim fixo.
+        assert!(sess.stretch_event_edge(id, true, Ticks::from_secs_i64(4)));
+        let restored = sess.project.event(id).unwrap();
+        assert_eq!(restored.end(), Ticks::from_secs_i64(10));
+        assert_eq!(restored.rate, Rate::NORMAL);
+    }
+
+    #[test]
+    fn smart_split_e_heal_e_colar_atributos() {
+        let mut p = Project::new_default();
+        let mut m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        m.duration = Some(Ticks::from_secs_i64(20));
+        p.media.push(m.clone());
+        let mut ev = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(10));
+        ev.fx.push(FxInstance::new(FxKind::GaussianBlur));
+        ev.fade_in.len = Ticks::from_secs_i64(1);
+        let tail = Event::new(&m, Ticks::from_secs_i64(10), Ticks::from_secs_i64(4));
+        let mut other = Event::new(&m, Ticks::from_secs_i64(15), Ticks::from_secs_i64(3));
+        let (ev_id, tail_id, other_id) = (ev.id, tail.id, other.id);
+        other.reverse = false;
+        p.tracks[0].events.extend([ev, tail, other]);
+
+        let mut sess = EditorSession::new(p);
+        sess.sel_events.insert(ev_id);
+        sess.copy_selection();
+
+        // Cola atributos no evento `other`.
+        sess.sel_events.clear();
+        sess.sel_events.insert(other_id);
+        assert_eq!(sess.paste_attributes(PasteAttributesMask::ALL), 1);
+        assert_eq!(sess.project.event(other_id).unwrap().fx.len(), 1);
+        assert_eq!(
+            sess.project.event(other_id).unwrap().fade_in.len,
+            Ticks::from_secs_i64(1)
+        );
+        assert!(sess.undo());
+        assert!(sess.project.event(other_id).unwrap().fx.is_empty());
+
+        // Smart Split em [3s .. 5s] no primeiro evento + ripple no evento seguinte.
+        sess.sel_events.clear();
+        sess.time_sel = Some((Ticks::from_secs_i64(3), Ticks::from_secs_i64(5)));
+        let n = sess.smart_split();
+        assert!(n >= 1);
+        assert_eq!(
+            sess.project.event(tail_id).map(|e| e.start),
+            Some(Ticks::from_secs_i64(8))
+        );
+        let tr0 = &sess.project.tracks[0];
+        let right = tr0
+            .events
+            .iter()
+            .find(|e| e.start == Ticks::from_secs_i64(3))
+            .expect("metade direita criada");
+        assert_eq!(
+            right.transition.as_ref().map(|t| t.kind),
+            Some(TransitionKind::WarpFlow)
+        );
+        assert!(sess.undo());
+
+        // Dividir + Juntar eventos (Heal).
+        sess.cursor = Ticks::from_secs_i64(4);
+        sess.sel_events.clear();
+        sess.sel_events.insert(ev_id);
+        assert_eq!(sess.split_at_cursor(), 1);
+        let right_split = *sess.sel_events.iter().next().unwrap();
+        sess.sel_events.insert(ev_id);
+        sess.sel_events.insert(right_split);
+        assert!(sess.can_heal_selection());
+        assert_eq!(sess.heal_events(), 1);
+        assert_eq!(
+            sess.project.event(ev_id).map(|e| e.length),
+            Some(Ticks::from_secs_i64(10))
+        );
+    }
+
+    #[test]
+    fn split_trim_e_roll_cortam_e_deslizam_fronteira_com_desfazer() {
+        let mut p = Project::new_default();
+        let mut m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        m.duration = Some(Ticks::from_secs_i64(20));
+        p.media.push(m.clone());
+        let e1 = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(10));
+        let id1 = e1.id;
+        p.tracks[0].events.push(e1);
+
+        let mut sess = EditorSession::new(p);
+        assert!(sess.split_trim(id1, Ticks::from_secs_i64(2), Ticks::from_secs_i64(4)));
+        assert_eq!(sess.project.tracks[0].events.len(), 2);
+        let left = &sess.project.tracks[0].events[0];
+        let right = &sess.project.tracks[0].events[1];
+        assert_eq!(left.end(), Ticks::from_secs_i64(2));
+        assert_eq!(right.start, Ticks::from_secs_i64(4));
+        assert_eq!(right.length, Ticks::from_secs_i64(6));
+        assert_eq!(right.offset, Ticks::from_secs_i64(4));
+
+        // Roll entre eventos contíguos.
+        assert!(sess.undo());
+        let mut left_ev = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(5));
+        left_ev.offset = Ticks::ZERO;
+        let mut right_ev = Event::new(&m, Ticks::from_secs_i64(5), Ticks::from_secs_i64(5));
+        right_ev.offset = Ticks::from_secs_i64(5);
+        let rid = right_ev.id;
+        sess.project.tracks[0].events = vec![left_ev, right_ev];
+        let snap = vec![
+            TrackEventSnapshot {
+                id: sess.project.tracks[0].events[0].id,
+                track_idx: 0,
+                start: Ticks::ZERO,
+                length: Ticks::from_secs_i64(5),
+                offset: Ticks::ZERO,
+                rate: Rate::NORMAL,
+                reverse: false,
+                looped: true,
+                media_dur: Some(Ticks::from_secs_i64(20)),
+            },
+            TrackEventSnapshot {
+                id: rid,
+                track_idx: 0,
+                start: Ticks::from_secs_i64(5),
+                length: Ticks::from_secs_i64(5),
+                offset: Ticks::from_secs_i64(5),
+                rate: Rate::NORMAL,
+                reverse: false,
+                looped: true,
+                media_dur: Some(Ticks::from_secs_i64(20)),
+            },
+        ];
+        let fd = sess.project.settings.frame_dur();
+        assert!(apply_roll_from_snapshot(
+            &mut sess.project,
+            0,
+            &snap,
+            rid,
+            true,
+            Ticks::from_secs_i64(2),
+            fd,
+        ));
+        assert_eq!(
+            sess.project.tracks[0].events[0].length,
+            Ticks::from_secs_i64(7)
+        );
+        assert_eq!(
+            sess.project.tracks[0].events[1].start,
+            Ticks::from_secs_i64(7)
+        );
+        assert_eq!(
+            sess.project.tracks[0].events[1].length,
+            Ticks::from_secs_i64(3)
+        );
+        assert_eq!(
+            sess.project.tracks[0].events[1].offset,
+            Ticks::from_secs_i64(7)
+        );
     }
 }

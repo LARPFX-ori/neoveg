@@ -14,7 +14,10 @@ use std::collections::HashSet;
 mod keyframes;
 use keyframes::KfArea;
 use neoveg_engine::media::audio::WaveChannel;
-use neoveg_engine::session::{EditMode, EditTool};
+use neoveg_engine::session::{
+    apply_roll_from_snapshot, apply_shuffle_from_snapshot, apply_slide_from_snapshot,
+    apply_stretch_from_snapshot, EditMode, EditTool, StretchEventSnapshot, TrackEventSnapshot,
+};
 use neoveg_engine::track_keyframes::KfRowKind;
 
 /// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
@@ -123,6 +126,41 @@ enum Drag {
     Slip {
         origin_t: Ticks,
         orig: Vec<(Id, Ticks)>,
+    },
+    Shuffle {
+        anchor_id: Id,
+        track_idx: usize,
+        origin_t: Ticks,
+        anchor_orig_start: Ticks,
+        snap: Vec<TrackEventSnapshot>,
+        partners: Vec<(Id, Ticks)>,
+    },
+    Slide {
+        anchor_id: Id,
+        track_idx: usize,
+        origin_t: Ticks,
+        anchor_orig_start: Ticks,
+        snap: Vec<TrackEventSnapshot>,
+        partners: Vec<(Id, Ticks)>,
+    },
+    Stretch {
+        left: bool,
+        origin_t: Ticks,
+        anchor_id: Id,
+        snaps: Vec<StretchEventSnapshot>,
+    },
+    Roll {
+        anchor_id: Id,
+        track_idx: usize,
+        left_edge: bool,
+        origin_t: Ticks,
+        orig_edge: Ticks,
+        snap: Vec<TrackEventSnapshot>,
+    },
+    SplitTrim {
+        event_id: Id,
+        origin_t: Ticks,
+        cur_t: Ticks,
     },
     /// Caixa das ferramentas Seleção (`zoom: false`) e Zoom.
     Box {
@@ -453,42 +491,49 @@ impl App {
         let ti = self.track_at(pos.y, layout)?;
         let (y0, h) = layout[ti];
         let track = &self.project.tracks[ti];
-        for (ei, e) in track.events.iter().enumerate().rev() {
-            let r = self.event_rect(e, left, y0, h);
-            if !r.expand2(vec2(EDGE_PX, 0.0)).contains(pos) {
-                continue;
-            }
-            let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
-            if fxb.map(|b| b.contains(pos)).unwrap_or(false) {
-                return Some((ti, ei, Zone::FxButton));
-            }
-            if pcb.map(|b| b.contains(pos)).unwrap_or(false) {
-                return Some((ti, ei, Zone::PanCropButton));
-            }
-            let fi_x = r.left() + (e.fade_in.len.as_secs_f64() as f32 * self.tl.px_per_sec);
-            let fo_x = r.right() - (e.fade_out.len.as_secs_f64() as f32 * self.tl.px_per_sec);
-            if pos.y < r.top() + 10.0 {
-                if (pos.x - fi_x).abs() < 6.0 && pos.x < r.center().x + 6.0 {
-                    return Some((ti, ei, Zone::FadeIn));
+        for strict in [true, false] {
+            for (ei, e) in track.events.iter().enumerate().rev() {
+                let r = self.event_rect(e, left, y0, h);
+                let hit_rect = if strict {
+                    r
+                } else {
+                    r.expand2(vec2(EDGE_PX, 0.0))
+                };
+                if !hit_rect.contains(pos) {
+                    continue;
                 }
-                if (pos.x - fo_x).abs() < 6.0 && pos.x > r.center().x - 6.0 {
-                    return Some((ti, ei, Zone::FadeOut));
+                let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
+                if fxb.map(|b| b.contains(pos)).unwrap_or(false) {
+                    return Some((ti, ei, Zone::FxButton));
                 }
-            }
-            if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
-                let gy = Self::gain_handle_y(r, e.gain_db);
-                if (pos.y - gy).abs() <= 4.5 && pos.x > fi_x + 5.0 && pos.x < fo_x - 5.0 {
-                    return Some((ti, ei, Zone::GainHandle));
+                if pcb.map(|b| b.contains(pos)).unwrap_or(false) {
+                    return Some((ti, ei, Zone::PanCropButton));
                 }
-            }
-            if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
-                return Some((ti, ei, Zone::LeftEdge));
-            }
-            if (pos.x - r.right()).abs() <= EDGE_PX {
-                return Some((ti, ei, Zone::RightEdge));
-            }
-            if r.contains(pos) {
-                return Some((ti, ei, Zone::Body));
+                let fi_x = r.left() + (e.fade_in.len.as_secs_f64() as f32 * self.tl.px_per_sec);
+                let fo_x = r.right() - (e.fade_out.len.as_secs_f64() as f32 * self.tl.px_per_sec);
+                if pos.y < r.top() + 10.0 {
+                    if (pos.x - fi_x).abs() < 6.0 && pos.x < r.center().x + 6.0 {
+                        return Some((ti, ei, Zone::FadeIn));
+                    }
+                    if (pos.x - fo_x).abs() < 6.0 && pos.x > r.center().x - 6.0 {
+                        return Some((ti, ei, Zone::FadeOut));
+                    }
+                }
+                if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
+                    let gy = Self::gain_handle_y(r, e.gain_db);
+                    if (pos.y - gy).abs() <= 4.5 && pos.x > fi_x + 5.0 && pos.x < fo_x - 5.0 {
+                        return Some((ti, ei, Zone::GainHandle));
+                    }
+                }
+                if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
+                    return Some((ti, ei, Zone::LeftEdge));
+                }
+                if (pos.x - r.right()).abs() <= EDGE_PX {
+                    return Some((ti, ei, Zone::RightEdge));
+                }
+                if r.contains(pos) {
+                    return Some((ti, ei, Zone::Body));
+                }
             }
         }
         None
@@ -2463,10 +2508,16 @@ impl App {
                         ui.ctx().set_cursor_icon(CursorIcon::PointingHand)
                     }
                     Zone::Body => {
-                        if mods.alt {
-                            ui.ctx().set_cursor_icon(CursorIcon::AllScroll)
+                        let mode = self.session.edit_mode;
+                        if mode == EditMode::SplitTrim || (mods.command && mods.alt && mods.shift) {
+                            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                        } else if mods.alt
+                            || matches!(mode, EditMode::Slip | EditMode::Slide)
+                            || (mods.command && mods.alt)
+                        {
+                            ui.ctx().set_cursor_icon(CursorIcon::AllScroll);
                         } else {
-                            ui.ctx().set_cursor_icon(CursorIcon::Grab)
+                            ui.ctx().set_cursor_icon(CursorIcon::Grab);
                         }
                     }
                 }
@@ -2514,13 +2565,53 @@ impl App {
                 .with_clip_rect(lanes)
                 .extend(Shape::dashed_line(&corners, stroke, 4.0, 3.0));
         }
+        if let Drag::SplitTrim {
+            event_id,
+            origin_t,
+            cur_t,
+        } = &self.tl.drag
+        {
+            if let Some((ti, _)) = self.project.find_event(*event_id) {
+                if let Some(&(y0, h)) = layout.get(ti) {
+                    let lo = origin_t.min(cur_t);
+                    let hi = origin_t.max(cur_t);
+                    let x0 = self.tl.t2x(*lo, left).max(lanes.left());
+                    let x1 = self.tl.t2x(*hi, left).min(lanes.right());
+                    if x1 > x0 {
+                        let cut_rect = Rect::from_min_max(pos2(x0, y0), pos2(x1, y0 + h));
+                        ui.painter().with_clip_rect(lanes).rect_filled(
+                            cut_rect,
+                            0.0,
+                            self.theme.offline_fg.gamma_multiply(0.35),
+                        );
+                    }
+                }
+            }
+        }
         if resp.drag_stopped() {
             if let (Drag::Box { zoom, start }, Some(cur)) = (self.tl.drag.clone(), self.tl.box_cur)
             {
                 self.finish_box(Rect::from_two_pos(start, cur), zoom, lanes, layout, mods);
             }
+            if let Drag::SplitTrim {
+                event_id,
+                origin_t,
+                cur_t,
+            } = self.tl.drag.clone()
+            {
+                self.session.split_trim(event_id, origin_t, cur_t);
+                self.sync_after_session();
+            }
             self.tl.box_cur = None;
-            if matches!(self.tl.drag, Drag::Move { .. } | Drag::Trim { .. }) {
+            if matches!(
+                self.tl.drag,
+                Drag::Move { .. }
+                    | Drag::Trim { .. }
+                    | Drag::Shuffle { .. }
+                    | Drag::Slide { .. }
+                    | Drag::Stretch { .. }
+                    | Drag::Roll { .. }
+            ) {
                 self.project.sort_events();
             }
             if !matches!(self.tl.drag, Drag::Pan { .. }) {
@@ -2672,9 +2763,58 @@ impl App {
                     let e = &self.project.tracks[ti].events[ei];
                     let left_edge = zone == Zone::LeftEdge;
                     let edge_t = if left_edge { e.start } else { e.end() };
+                    let mode = self.session.edit_mode;
                     let mut ids: HashSet<Id> = HashSet::new();
                     ids.insert(id);
                     let group_ids = self.expand_groups(&ids);
+
+                    // Ctrl+borda ou modo Stretch esticam a velocidade (p. 236).
+                    if mods.command || mode == EditMode::Stretch {
+                        let mut snaps = vec![];
+                        for gid in group_ids {
+                            if let Some(ge) = self.project.event(gid) {
+                                let ge_edge = if left_edge { ge.start } else { ge.end() };
+                                if !ge.locked
+                                    && ge_edge.abs_diff(edge_t) < Ticks::from_millis_i64(2)
+                                {
+                                    snaps.push(StretchEventSnapshot::capture(ge));
+                                }
+                            }
+                        }
+                        self.tl.drag = Drag::Stretch {
+                            left: left_edge,
+                            origin_t: ot,
+                            anchor_id: id,
+                            snaps,
+                        };
+                        return;
+                    }
+
+                    // Modo Roll ajusta em conjunto dois eventos contíguos no ponto de corte.
+                    if mode == EditMode::Roll {
+                        let snap = self.capture_track_snapshot(ti);
+                        let tol = Ticks::from_millis_i64(2);
+                        let has_neighbor = snap.iter().any(|s| {
+                            s.id != id
+                                && if left_edge {
+                                    ((s.start + s.length) - edge_t).abs() <= tol
+                                } else {
+                                    (s.start - edge_t).abs() <= tol
+                                }
+                        });
+                        if has_neighbor {
+                            self.tl.drag = Drag::Roll {
+                                anchor_id: id,
+                                track_idx: ti,
+                                left_edge,
+                                origin_t: ot,
+                                orig_edge: edge_t,
+                                snap,
+                            };
+                            return;
+                        }
+                    }
+
                     let mut orig = vec![];
                     for gid in group_ids {
                         if let Some(ge) = self.project.event(gid) {
@@ -2694,6 +2834,20 @@ impl App {
                 }
                 Zone::FxButton | Zone::PanCropButton => {}
                 Zone::Body => {
+                    let mode = self.session.edit_mode;
+                    if mode == EditMode::SplitTrim || (mods.command && mods.alt && mods.shift) {
+                        if !self.sel_events.contains(&id) {
+                            self.sel_events.clear();
+                            self.sel_events.insert(id);
+                        }
+                        let snapped = self.snap(ot, &HashSet::new(), mods.shift);
+                        self.tl.drag = Drag::SplitTrim {
+                            event_id: id,
+                            origin_t: snapped,
+                            cur_t: snapped,
+                        };
+                        return;
+                    }
                     self.checkpoint();
                     if !self.sel_events.contains(&id) {
                         if !mods.command && !mods.shift {
@@ -2702,6 +2856,25 @@ impl App {
                         self.sel_events.insert(id);
                     }
                     let ids = self.expand_groups(&self.sel_events.clone());
+                    // Ctrl+Alt+arrastar ou modo Slide deslizam mantendo vizinhos contíguos.
+                    if (mods.command && mods.alt) || mode == EditMode::Slide {
+                        let snap = self.capture_track_snapshot(ti);
+                        let anchor_orig_start = self.project.tracks[ti].events[ei].start;
+                        let partners = ids
+                            .iter()
+                            .filter(|pid| !snap.iter().any(|s| s.id == **pid))
+                            .filter_map(|pid| self.project.event(*pid).map(|ev| (*pid, ev.start)))
+                            .collect();
+                        self.tl.drag = Drag::Slide {
+                            anchor_id: id,
+                            track_idx: ti,
+                            origin_t: ot,
+                            anchor_orig_start,
+                            snap,
+                            partners,
+                        };
+                        return;
+                    }
                     // Alt, ou a ferramenta Normal no modo Slip (p. 236)
                     if mods.alt || slip_mode {
                         let orig = ids
@@ -2710,6 +2883,29 @@ impl App {
                             .collect();
                         self.tl.drag = Drag::Slip { origin_t: ot, orig };
                         return;
+                    }
+                    // Modo Shuffle reordena eventos na trilha mantendo sequência contínua.
+                    if mode == EditMode::Shuffle && !mods.command {
+                        let snap = self.capture_track_snapshot(ti);
+                        if snap.len() >= 2 {
+                            let anchor_orig_start = self.project.tracks[ti].events[ei].start;
+                            let partners = ids
+                                .iter()
+                                .filter(|pid| !snap.iter().any(|s| s.id == **pid))
+                                .filter_map(|pid| {
+                                    self.project.event(*pid).map(|ev| (*pid, ev.start))
+                                })
+                                .collect();
+                            self.tl.drag = Drag::Shuffle {
+                                anchor_id: id,
+                                track_idx: ti,
+                                origin_t: ot,
+                                anchor_orig_start,
+                                snap,
+                                partners,
+                            };
+                            return;
+                        }
                     }
                     let mut anchor = id;
                     if mods.command {
@@ -3068,8 +3264,129 @@ impl App {
                 }
                 self.changed();
             }
+            Drag::Shuffle {
+                anchor_id,
+                track_idx,
+                origin_t,
+                anchor_orig_start,
+                snap,
+                partners,
+            } => {
+                let target_t = anchor_orig_start + (t - origin_t);
+                if apply_shuffle_from_snapshot(
+                    &mut self.project,
+                    track_idx,
+                    &snap,
+                    anchor_id,
+                    target_t,
+                    &partners,
+                ) {
+                    self.changed();
+                }
+            }
+            Drag::Slide {
+                anchor_id,
+                track_idx,
+                origin_t,
+                anchor_orig_start,
+                snap,
+                partners,
+            } => {
+                let exclude: HashSet<Id> = snap.iter().map(|s| s.id).collect();
+                let raw = anchor_orig_start + (t - origin_t);
+                let snapped = self.snap(raw, &exclude, mods.shift);
+                let dt = snapped - anchor_orig_start;
+                let fd = self.project.settings.frame_dur();
+                if apply_slide_from_snapshot(
+                    &mut self.project,
+                    track_idx,
+                    &snap,
+                    anchor_id,
+                    dt,
+                    fd,
+                    &partners,
+                ) {
+                    self.changed();
+                }
+            }
+            Drag::Stretch {
+                left,
+                origin_t,
+                anchor_id,
+                snaps,
+            } => {
+                let exclude: HashSet<Id> = snaps.iter().map(|s| s.id).collect();
+                let Some(a) = snaps.iter().find(|s| s.id == anchor_id) else {
+                    return;
+                };
+                let orig_edge = if left { a.start } else { a.start + a.length };
+                let target_edge = self.snap(orig_edge + (t - origin_t), &exclude, mods.shift);
+                let dt = target_edge - orig_edge;
+                let fd = self.project.settings.frame_dur();
+                if apply_stretch_from_snapshot(&mut self.project, &snaps, anchor_id, left, dt, fd) {
+                    self.changed();
+                }
+            }
+            Drag::Roll {
+                anchor_id,
+                track_idx,
+                left_edge,
+                origin_t,
+                orig_edge,
+                snap,
+            } => {
+                let exclude: HashSet<Id> = snap.iter().map(|s| s.id).collect();
+                let target_edge = self.snap(orig_edge + (t - origin_t), &exclude, mods.shift);
+                let dt = target_edge - orig_edge;
+                let fd = self.project.settings.frame_dur();
+                if apply_roll_from_snapshot(
+                    &mut self.project,
+                    track_idx,
+                    &snap,
+                    anchor_id,
+                    left_edge,
+                    dt,
+                    fd,
+                ) {
+                    self.changed();
+                }
+            }
+            Drag::SplitTrim {
+                event_id, origin_t, ..
+            } => {
+                let cur_t = self.snap(t, &HashSet::new(), mods.shift);
+                self.tl.drag = Drag::SplitTrim {
+                    event_id,
+                    origin_t,
+                    cur_t,
+                };
+            }
             _ => {}
         }
+    }
+
+    fn capture_track_snapshot(&self, track_idx: usize) -> Vec<TrackEventSnapshot> {
+        self.project
+            .tracks
+            .get(track_idx)
+            .map(|tr| {
+                tr.events
+                    .iter()
+                    .filter(|e| !e.locked)
+                    .map(|e| TrackEventSnapshot {
+                        id: e.id,
+                        track_idx,
+                        start: e.start,
+                        length: e.length,
+                        offset: e.offset,
+                        rate: e.rate,
+                        reverse: e.reverse,
+                        looped: e.looped,
+                        media_dur: self.project.media(e.media_id).and_then(|m| m.duration),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn lane_click(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
@@ -3080,6 +3397,15 @@ impl App {
         }
         if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
             let id = self.project.tracks[ti].events[ei].id;
+            if self.session.edit_tool == EditTool::Normal
+                && self.session.edit_mode == EditMode::SplitTrim
+                && matches!(zone, Zone::Body)
+            {
+                let snapped = self.snap(t, &HashSet::new(), mods.shift);
+                self.session.split_trim(id, snapped, snapped);
+                self.sync_after_session();
+                return;
+            }
             match zone {
                 Zone::FxButton => {
                     self.dlg.fx_target = Some(FxTarget::Event(id));
@@ -3440,6 +3766,14 @@ impl App {
             self.split_at_cursor();
             ui.close_menu();
         }
+        if self.time_sel.is_some() && ui.button("Smart Split (Alt+S)").clicked() {
+            self.exec_cmd(Some(ui.ctx()), "edit.smart_split");
+            ui.close_menu();
+        }
+        if self.session.can_heal_selection() && ui.button("Juntar eventos (Heal)").clicked() {
+            self.exec_cmd(Some(ui.ctx()), "edit.heal_events");
+            ui.close_menu();
+        }
         if ui.button("Copiar").clicked() {
             self.copy_selection();
             ui.close_menu();
@@ -3447,6 +3781,16 @@ impl App {
         if ui.button("Recortar").clicked() {
             self.cut_selection();
             ui.close_menu();
+        }
+        if !self.clipboard.is_empty() {
+            if ui.button("Colar atributos do evento").clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.paste_attributes");
+                ui.close_menu();
+            }
+            if ui.button("Colar atributos seletivamente...").clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.paste_attributes_selective");
+                ui.close_menu();
+            }
         }
         if ui.button("Excluir").clicked() {
             self.delete_selection();

@@ -391,6 +391,7 @@ pub enum UiAction {
     SnapshotDialog,
     OpenProjectProps,
     OpenEventProps,
+    OpenPasteAttributesDialog,
     OpenPanCrop,
     OpenFxEvent,
     OpenFxMasterAudio,
@@ -964,6 +965,27 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.paste_attributes",
+        label: "Colar atributos do evento",
+        menu_path: "Editar/Colar atributos do evento",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::V)),
+        needs_ui: false,
+        enabled: |s, _| !s.clipboard.is_empty() && !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.paste_attributes(crate::session::PasteAttributesMask::ALL);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.paste_attributes_selective",
+        label: "Colar atributos seletivamente...",
+        menu_path: "Editar/Colar atributos seletivamente...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: |s, _| !s.clipboard.is_empty() && !s.sel_events.is_empty(),
+        run: |_s, h| ui_action(UiAction::OpenPasteAttributesDialog, h),
+    },
+    CommandDef {
         id: "edit.delete",
         label: "Excluir",
         menu_path: "Editar/Excluir",
@@ -984,6 +1006,30 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.split_at_cursor();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.smart_split",
+        label: "Smart Split (corte com transição)",
+        menu_path: "Editar/Smart Split",
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::S)),
+        needs_ui: false,
+        enabled: has_time_selection,
+        run: |s, h| {
+            s.smart_split();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.heal_events",
+        label: "Juntar eventos (Heal)",
+        menu_path: "Editar/Juntar eventos (Heal)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.can_heal_selection(),
+        run: |s, h| {
+            s.heal_events();
             ok_mutated(s, h)
         },
     },
@@ -1124,8 +1170,21 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.tool.mode.shuffle",
+        label: "Modo Shuffle (reordenar)",
+        menu_path: "Editar/Ferramenta de edição/Modo Shuffle",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Shuffle;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
         id: "edit.tool.mode.slip",
-        label: "Modo Slip",
+        label: "Modo Slip (deslizar conteúdo)",
         menu_path: "Editar/Ferramenta de edição/Modo Slip",
         default_shortcut: None,
         needs_ui: false,
@@ -1133,6 +1192,73 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |s, _| {
             s.edit_tool = crate::session::EditTool::Normal;
             s.edit_mode = crate::session::EditMode::Slip;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.slide",
+        label: "Modo Slide (deslizar evento)",
+        menu_path: "Editar/Ferramenta de edição/Modo Slide",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Slide;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.stretch",
+        label: "Modo Stretch (esticamento)",
+        menu_path: "Editar/Ferramenta de edição/Modo Stretch",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Stretch;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.split_trim",
+        label: "Modo Split Trim (dividir e aparar)",
+        menu_path: "Editar/Ferramenta de edição/Modo Split Trim",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::SplitTrim;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.roll",
+        label: "Modo Roll (ajuste de corte)",
+        menu_path: "Editar/Ferramenta de edição/Modo Roll",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Roll;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.next",
+        label: "Alternar modo da ferramenta Normal",
+        menu_path: "Editar/Ferramenta de edição/Alternar modo",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            let modes = crate::session::EditMode::NORMAL_MODES;
+            let idx = modes.iter().position(|m| *m == s.edit_mode).unwrap_or(0);
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = modes[(idx + 1) % modes.len()];
             Ok(CommandOutcome::Executed)
         },
     },
@@ -2578,6 +2704,13 @@ mod tests {
             (s.edit_tool, s.edit_mode),
             (EditTool::Normal, EditMode::Normal)
         );
+        for mode in EditMode::NORMAL_MODES {
+            run_command(mode.command_id(), &mut s, &mut h).unwrap();
+            assert_eq!((s.edit_tool, s.edit_mode), (EditTool::Normal, mode));
+        }
+        run_command("edit.tool.mode.normal", &mut s, &mut h).unwrap();
+        run_command("edit.tool.mode.next", &mut s, &mut h).unwrap();
+        assert_eq!(s.edit_mode, EditMode::Shuffle);
         assert!(s.undo.is_empty(), "ferramenta não entra no Desfazer");
     }
 

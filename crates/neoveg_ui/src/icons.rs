@@ -82,11 +82,20 @@ pub enum Icon {
     NormalTool,
     EnvelopeTool,
     SelectionTool,
+    ShuffleTool,
+    SlipTool,
+    SlideTool,
+    StretchTool,
+    SplitTrimTool,
+    RollTool,
+    SmartSplit,
+    HealEvents,
+    PasteAttributes,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 74] = [
+    pub const ALL: [Icon; 83] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -161,7 +170,29 @@ impl Icon {
         Icon::NormalTool,
         Icon::EnvelopeTool,
         Icon::SelectionTool,
+        Icon::ShuffleTool,
+        Icon::SlipTool,
+        Icon::SlideTool,
+        Icon::StretchTool,
+        Icon::SplitTrimTool,
+        Icon::RollTool,
+        Icon::SmartSplit,
+        Icon::HealEvents,
+        Icon::PasteAttributes,
     ];
+}
+
+pub fn normal_mode_icon(mode: neoveg_engine::session::EditMode) -> Icon {
+    use neoveg_engine::session::EditMode;
+    match mode {
+        EditMode::Normal | EditMode::Ripple => Icon::NormalTool,
+        EditMode::Shuffle => Icon::ShuffleTool,
+        EditMode::Slip => Icon::SlipTool,
+        EditMode::Slide => Icon::SlideTool,
+        EditMode::Stretch => Icon::StretchTool,
+        EditMode::SplitTrim => Icon::SplitTrimTool,
+        EditMode::Roll => Icon::RollTool,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1157,6 +1188,99 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 c.u(0.10),
                 c.u(0.07),
             ));
+        }
+        Icon::ShuffleTool => {
+            // dois blocos alternando ordem com setas opostas
+            c.p.rect_filled(c.rect(0.12, 0.22, 0.44, 0.44), c.u(0.04), pal.blue);
+            c.p.rect_filled(c.rect(0.56, 0.56, 0.88, 0.78), c.u(0.04), pal.cyan);
+            c.line(0.52, 0.30, 0.86, 0.30, pal.amber, 0.08);
+            c.line(0.76, 0.20, 0.86, 0.30, pal.amber, 0.08);
+            c.line(0.76, 0.40, 0.86, 0.30, pal.amber, 0.08);
+            c.line(0.14, 0.68, 0.48, 0.68, pal.amber, 0.08);
+            c.line(0.24, 0.58, 0.14, 0.68, pal.amber, 0.08);
+            c.line(0.24, 0.78, 0.14, 0.68, pal.amber, 0.08);
+        }
+        Icon::SlipTool => {
+            // evento fixo com setas de conteúdo interno deslizando
+            c.p.rect_stroke(
+                c.rect(0.16, 0.26, 0.84, 0.74),
+                c.u(0.05),
+                c.stroke(0.08, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.24, 0.50, 0.76, 0.50, pal.cyan, 0.09);
+            c.line(0.36, 0.38, 0.24, 0.50, pal.cyan, 0.08);
+            c.line(0.36, 0.62, 0.24, 0.50, pal.cyan, 0.08);
+            c.line(0.64, 0.38, 0.76, 0.50, pal.cyan, 0.08);
+            c.line(0.64, 0.62, 0.76, 0.50, pal.cyan, 0.08);
+        }
+        Icon::SlideTool => {
+            // barra central deslizando entre dois blocos adjacentes
+            c.p.rect_filled(c.rect(0.10, 0.32, 0.26, 0.68), c.u(0.03), pal.muted);
+            c.p.rect_filled(c.rect(0.30, 0.26, 0.70, 0.74), c.u(0.04), pal.amber);
+            c.p.rect_filled(c.rect(0.74, 0.32, 0.90, 0.68), c.u(0.03), pal.muted);
+            c.line(0.38, 0.50, 0.62, 0.50, pal.ink, 0.08);
+        }
+        Icon::StretchTool => {
+            // onda comprimida/esticada entre colchetes móveis
+            c.line(0.16, 0.22, 0.16, 0.78, pal.ink, 0.08);
+            c.line(0.84, 0.22, 0.84, 0.78, pal.ink, 0.08);
+            c.polyline(
+                &[
+                    (0.24, 0.50),
+                    (0.34, 0.28),
+                    (0.46, 0.72),
+                    (0.58, 0.28),
+                    (0.70, 0.72),
+                    (0.76, 0.50),
+                ],
+                pal.green,
+                0.08,
+            );
+        }
+        Icon::SplitTrimTool => {
+            // lâmina com seta de descarte de trecho
+            c.line(0.40, 0.14, 0.40, 0.86, pal.amber, 0.09);
+            c.p.rect_filled(
+                c.rect(0.44, 0.32, 0.86, 0.68),
+                c.u(0.04),
+                pal.red.gamma_multiply(0.55),
+            );
+            c.line(0.52, 0.38, 0.78, 0.62, pal.ink, 0.08);
+            c.line(0.78, 0.38, 0.52, 0.62, pal.ink, 0.08);
+        }
+        Icon::RollTool => {
+            // linha vertical de corte com setas duplas esquerda/direita
+            c.p.rect_filled(c.rect(0.12, 0.30, 0.46, 0.70), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.54, 0.30, 0.88, 0.70), c.u(0.03), pal.cyan);
+            c.line(0.50, 0.16, 0.50, 0.84, pal.ink, 0.09);
+            c.line(0.24, 0.50, 0.76, 0.50, pal.amber, 0.08);
+        }
+        Icon::SmartSplit => {
+            // dois segmentos convergindo sobre região de corte com transição
+            c.p.rect_filled(c.rect(0.10, 0.26, 0.44, 0.74), c.u(0.04), pal.blue);
+            c.p.rect_filled(c.rect(0.56, 0.26, 0.90, 0.74), c.u(0.04), pal.cyan);
+            c.poly(
+                &[(0.42, 0.22), (0.58, 0.50), (0.42, 0.78)],
+                pal.amber,
+                Some((0.05, pal.ink)),
+            );
+        }
+        Icon::HealEvents => {
+            // duas metades se unindo no centro
+            c.p.rect_filled(c.rect(0.12, 0.28, 0.46, 0.72), c.u(0.04), pal.green);
+            c.p.rect_filled(c.rect(0.54, 0.28, 0.88, 0.72), c.u(0.04), pal.green);
+            c.line(0.36, 0.50, 0.64, 0.50, pal.paper, 0.10);
+            c.line(0.50, 0.36, 0.50, 0.64, pal.paper, 0.10);
+        }
+        Icon::PasteAttributes => {
+            // prancheta com estrela/atributo
+            let r = c.rect(0.20, 0.18, 0.76, 0.86);
+            c.p.rect_filled(r, c.u(0.06), pal.paper);
+            c.p.rect_stroke(r, c.u(0.06), c.stroke(0.07, pal.ink), StrokeKind::Inside);
+            c.line(0.36, 0.14, 0.60, 0.14, pal.ink, 0.10);
+            c.line(0.32, 0.46, 0.64, 0.46, pal.blue, 0.08);
+            c.line(0.32, 0.64, 0.58, 0.64, pal.amber, 0.08);
         }
     }
 }
