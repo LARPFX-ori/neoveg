@@ -174,6 +174,38 @@ pub fn remove_media(e: &mut Event, id: Id) -> bool {
     true
 }
 
+/// Substitui referências à mídia `old_id` por `new_id` (take ativo e takes
+/// alternativos). Retorna `true` se o evento utilizava `old_id`.
+pub fn replace_media_id(
+    e: &mut Event,
+    old_id: Id,
+    new_id: Id,
+    old_name: &str,
+    new_name: &str,
+) -> bool {
+    let mut changed = false;
+    if e.media_id == old_id {
+        e.media_id = new_id;
+        if e.name == old_name {
+            e.name = new_name.to_string();
+        }
+        if e.take_name == old_name {
+            e.take_name = new_name.to_string();
+        }
+        changed = true;
+    }
+    for t in &mut e.alt_takes {
+        if t.media_id == old_id {
+            t.media_id = new_id;
+            if t.name == old_name {
+                t.name = new_name.to_string();
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Correções de takes ao abrir um projeto (§0.4): limite de takes, takes
 /// alternativos sem mídia no projeto e posição do ativo fora da lista.
 pub fn sanitize_takes(e: &mut Event, media: &HashSet<Id>) -> Vec<String> {

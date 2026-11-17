@@ -615,23 +615,26 @@ impl MediaCache {
         img
     }
 
-    /// Miniatura (para a janela de mídia do projeto e eventos).
-    pub fn thumbnail(&self, item: &MediaItem, max: u32) -> Option<RgbaImage> {
+    /// Miniatura em um instante específico (para *hover scrub* e prévias).
+    pub fn thumbnail_at(&self, item: &MediaItem, t: Ticks, max: u32) -> Option<RgbaImage> {
         let (w, h) = if item.width > 0 && item.height > 0 {
             (item.width, item.height)
         } else {
             (1920, 1080)
         };
-        let s = max as f32 / w.max(h) as f32;
+        let s = max.max(1) as f32 / w.max(h) as f32;
         let (tw, th) = (
             ((w as f32 * s) as u32).max(1),
             ((h as f32 * s) as u32).max(1),
         );
-        let t = item
-            .duration
-            .map(|d| d.div_i64(10).min(Ticks::from_secs_i64(1)))
-            .unwrap_or(Ticks::ZERO);
-        let f = self.video_frame(item, t, tw, th)?;
+        let sample_t = match item.duration {
+            Some(d) if d > Ticks::ZERO => {
+                let end = (d - Ticks::from_millis_i64(1)).max(Ticks::ZERO);
+                t.clamp_safe(Ticks::ZERO, end)
+            }
+            _ => t.max(Ticks::ZERO),
+        };
+        let f = self.video_frame(item, sample_t, tw, th)?;
         if f.width() == tw && f.height() == th {
             return Some((*f).clone());
         }
@@ -641,6 +644,15 @@ impl MediaCache {
             th,
             image::imageops::FilterType::Triangle,
         ))
+    }
+
+    /// Miniatura padrão (para a janela de mídia do projeto e eventos).
+    pub fn thumbnail(&self, item: &MediaItem, max: u32) -> Option<RgbaImage> {
+        let t = item
+            .duration
+            .map(|d| d.div_i64(10).min(Ticks::from_secs_i64(1)))
+            .unwrap_or(Ticks::ZERO);
+        self.thumbnail_at(item, t, max)
     }
 }
 

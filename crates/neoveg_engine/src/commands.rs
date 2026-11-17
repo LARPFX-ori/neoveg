@@ -435,6 +435,12 @@ pub enum UiAction {
     ZoomBy(f32),
     JumpMarker(bool),
     JumpMarkerIndex(usize),
+    ProjectMediaSetView(u8),
+    ProjectMediaNewBin,
+    ProjectMediaNewSmartBin,
+    ProjectMediaNewStoryboard,
+    ProjectMediaReplaceDialog,
+    ProjectMediaInsertStoryboard,
 }
 
 /// Resultado de execução de um comando.
@@ -578,6 +584,15 @@ fn has_selected_audio_track(s: &EditorSession, _h: &dyn CommandHost) -> bool {
             .get(ti)
             .is_some_and(|t| t.kind == TrackKind::Audio && !t.locked)
     })
+}
+
+fn has_active_media(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.active_media_id
+        .is_some_and(|id| s.project.media(id).is_some())
+}
+
+fn has_active_media_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
+    h.supports_ui() && has_active_media(s, h)
 }
 
 fn can_create_sync_link(s: &EditorSession, _h: &dyn CommandHost) -> bool {
@@ -2472,6 +2487,115 @@ pub static COMMANDS: &[CommandDef] = &[
             ok_mutated(s, h)
         },
     },
+    CommandDef {
+        id: "media.view.thumbnails",
+        label: "Mídia do Projeto: Miniaturas",
+        menu_path: "Exibir/Mídia do Projeto/Miniaturas",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(0), h),
+    },
+    CommandDef {
+        id: "media.view.list",
+        label: "Mídia do Projeto: Lista",
+        menu_path: "Exibir/Mídia do Projeto/Lista",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(1), h),
+    },
+    CommandDef {
+        id: "media.view.details",
+        label: "Mídia do Projeto: Detalhes",
+        menu_path: "Exibir/Mídia do Projeto/Detalhes",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(2), h),
+    },
+    CommandDef {
+        id: "media.view.storyboard",
+        label: "Mídia do Projeto: Storyboard",
+        menu_path: "Exibir/Mídia do Projeto/Storyboard",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(3), h),
+    },
+    CommandDef {
+        id: "media.new_bin",
+        label: "Nova pasta de mídia (Bin)",
+        menu_path: "Projeto/Nova pasta de mídia (Bin)",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaNewBin, h),
+    },
+    CommandDef {
+        id: "media.new_smart_bin",
+        label: "Nova pasta inteligente...",
+        menu_path: "Projeto/Nova pasta inteligente...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaNewSmartBin, h),
+    },
+    CommandDef {
+        id: "media.new_storyboard",
+        label: "Novo storyboard",
+        menu_path: "Projeto/Novo storyboard",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaNewStoryboard, h),
+    },
+    CommandDef {
+        id: "media.select_events",
+        label: "Selecionar eventos desta mídia",
+        menu_path: "Editar/Selecionar eventos da mídia",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_active_media,
+        run: |s, h| {
+            if let Some(mid) = s.active_media_id {
+                s.select_events_using_media(mid);
+            }
+            h.after_mutation(s);
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "media.replace",
+        label: "Substituir mídia selecionada...",
+        menu_path: "Projeto/Substituir mídia selecionada...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_active_media_ui,
+        run: |_s, h| ui_action(UiAction::ProjectMediaReplaceDialog, h),
+    },
+    CommandDef {
+        id: "media.insert_storyboard",
+        label: "Inserir storyboard na timeline",
+        menu_path: "Inserir/Storyboard na timeline",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.active_storyboard_id.is_some_and(|id| {
+                s.project
+                    .storyboards
+                    .iter()
+                    .any(|sb| sb.id == id && !sb.items.is_empty())
+            })
+        },
+        run: |s, h| {
+            if let Some(sb_id) = s.active_storyboard_id {
+                let c = s.cursor;
+                s.insert_storyboard_at_cursor(sb_id, c, 5.0);
+            }
+            ok_mutated(s, h)
+        },
+    },
     // --- Opções ---
     CommandDef {
         id: "options.snapping",
@@ -3147,5 +3271,13 @@ mod tests {
         s.sel_track = Some(1);
         run_command("track.record_arm", &mut s, &mut h).unwrap();
         assert!(!s.armed_audio_tracks().is_empty());
+
+        s.active_media_id = Some(ma.id);
+        run_command("media.select_events", &mut s, &mut h).unwrap();
+        assert_eq!(s.sel_events.len(), 2);
+        let sb = s.create_storyboard("Teste").unwrap();
+        s.add_media_to_storyboard(sb, ma.id);
+        run_command("media.insert_storyboard", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.tracks[1].events.len(), 3);
     }
 }

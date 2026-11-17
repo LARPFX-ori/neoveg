@@ -156,6 +156,15 @@ pub struct Project {
     pub notes: String,
     #[serde(default)]
     pub loop_region: Option<(Ticks, Ticks)>,
+    /// Pastas manuais (*bins*) da janela Mídia do Projeto.
+    #[serde(default)]
+    pub media_bins: Vec<MediaBin>,
+    /// Pastas inteligentes (*smart bins*) personalizadas do projeto.
+    #[serde(default)]
+    pub smart_bins: Vec<SmartBin>,
+    /// Sequências de *storyboard* para montagem rápida na timeline.
+    #[serde(default)]
+    pub storyboards: Vec<Storyboard>,
 }
 
 impl Project {
@@ -335,7 +344,79 @@ impl Project {
         for x in &self.regions {
             m = m.max(x.id);
         }
+        for b in &self.media_bins {
+            m = m.max(b.id);
+        }
+        for sb in &self.smart_bins {
+            m = m.max(sb.id);
+        }
+        for st in &self.storyboards {
+            m = m.max(st.id);
+        }
         m
+    }
+
+    /// Garante que atribuir `parent` a uma pasta (`bin_id`) é acíclico e respeita [`MAX_BIN_DEPTH`].
+    pub fn validate_bin_parent(&self, bin_id: Id, parent: Option<Id>) -> bool {
+        let Some(mut cur) = parent else {
+            return true;
+        };
+        if cur == bin_id {
+            return false;
+        }
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(bin_id);
+        for _ in 0..MAX_BIN_DEPTH {
+            if !visited.insert(cur) {
+                return false;
+            }
+            let Some(bin) = self.media_bins.iter().find(|b| b.id == cur) else {
+                return false;
+            };
+            match bin.parent_id {
+                Some(next) => cur = next,
+                None => return true,
+            }
+        }
+        false
+    }
+
+    /// IDs das mídias efetivamente usadas na timeline (take ativo ou alternativo).
+    pub fn used_media_ids(&self) -> std::collections::HashSet<Id> {
+        self.tracks
+            .iter()
+            .flat_map(|t| t.events.iter().flat_map(crate::takes::media_ids))
+            .collect()
+    }
+
+    /// Quantos eventos da linha do tempo referenciam a mídia `media_id`.
+    pub fn media_usage_count(&self, media_id: Id) -> usize {
+        self.tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .filter(|e| crate::takes::uses_media(e, media_id))
+            .count()
+    }
+
+    /// Coleta IDs de mídia pertencentes à pasta `bin_id` (opcionalmente recursivo em subpastas).
+    pub fn collect_bin_media(&self, bin_id: Id, recursive: bool) -> std::collections::HashSet<Id> {
+        let mut out = std::collections::HashSet::new();
+        let mut stack = vec![(bin_id, 0usize)];
+        let mut seen_bins = std::collections::HashSet::new();
+        while let Some((cur, depth)) = stack.pop() {
+            if depth >= MAX_BIN_DEPTH || !seen_bins.insert(cur) {
+                continue;
+            }
+            if let Some(bin) = self.media_bins.iter().find(|b| b.id == cur) {
+                out.extend(bin.media_ids.iter().copied());
+                if recursive {
+                    for child in self.media_bins.iter().filter(|b| b.parent_id == Some(cur)) {
+                        stack.push((child.id, depth + 1));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Ordena os eventos das trilhas por tempo de início.
@@ -611,6 +692,90 @@ impl Project {
             .loop_region
             .filter(|(a, b)| b > a && *a >= Ticks::ZERO)
             .map(|(a, b)| (a.min(Ticks::MAX), b.min(Ticks::MAX)));
+
+        // Pastas manuais (bins), pastas inteligentes e storyboards (§0.4 e §0.5)
+        if self.media_bins.len() > MAX_MEDIA_BINS {
+            self.media_bins.truncate(MAX_MEDIA_BINS);
+            fixes.push(format!("pastas de mídia limitadas a {MAX_MEDIA_BINS}"));
+        }
+        let mut seen_bins = std::collections::HashSet::new();
+        for bin in &mut self.media_bins {
+            if !seen_bins.insert(bin.id) {
+                bin.id = new_id();
+                seen_bins.insert(bin.id);
+                fixes.push("id de pasta de mídia duplicado renumerado".into());
+            }
+            if bin.name.trim().is_empty() {
+                bin.name = "Pasta".into();
+            }
+            let mut seen_m = std::collections::HashSet::new();
+            bin.media_ids
+                .retain(|id| media_ids.contains(id) && seen_m.insert(*id));
+        }
+        let bin_ids: std::collections::HashSet<Id> = self.media_bins.iter().map(|b| b.id).collect();
+        for bi in 0..self.media_bins.len() {
+            let bid = self.media_bins[bi].id;
+            if let Some(pid) = self.media_bins[bi].parent_id {
+                if !bin_ids.contains(&pid) || !self.validate_bin_parent(bid, Some(pid)) {
+                    self.media_bins[bi].parent_id = None;
+                    fixes.push(format!(
+                        "hierarquia inválida/cíclica da pasta \"{}\" restaurada para a raiz",
+                        self.media_bins[bi].name
+                    ));
+                }
+            }
+        }
+
+        if self.smart_bins.len() > MAX_MEDIA_BINS {
+            self.smart_bins.truncate(MAX_MEDIA_BINS);
+            fixes.push(format!("pastas inteligentes limitadas a {MAX_MEDIA_BINS}"));
+        }
+        let mut seen_smart = std::collections::HashSet::new();
+        for sb in &mut self.smart_bins {
+            if !seen_smart.insert(sb.id) {
+                sb.id = new_id();
+                seen_smart.insert(sb.id);
+                fixes.push("id de pasta inteligente duplicado renumerado".into());
+            }
+            if sb.name.trim().is_empty() {
+                sb.name = sb.rule.label().into();
+            }
+            if sb.query.len() > 128 {
+                sb.query = sb.query.chars().take(128).collect();
+            }
+        }
+
+        if self.storyboards.len() > MAX_STORYBOARDS {
+            self.storyboards.truncate(MAX_STORYBOARDS);
+            fixes.push(format!("storyboards limitados a {MAX_STORYBOARDS}"));
+        }
+        let mut seen_sb = std::collections::HashSet::new();
+        for st in &mut self.storyboards {
+            if !seen_sb.insert(st.id) {
+                st.id = new_id();
+                seen_sb.insert(st.id);
+                fixes.push("id de storyboard duplicado renumerado".into());
+            }
+            if st.name.trim().is_empty() {
+                st.name = "Storyboard".into();
+            }
+            if st.items.len() > MAX_STORYBOARD_ITEMS {
+                st.items.truncate(MAX_STORYBOARD_ITEMS);
+                fixes.push(format!(
+                    "itens do storyboard \"{}\" limitados a {MAX_STORYBOARD_ITEMS}",
+                    st.name
+                ));
+            }
+            st.items.retain(|it| media_ids.contains(&it.media_id));
+            for it in &mut st.items {
+                it.trim_in = it.trim_in.map(|t| t.clamp_safe(Ticks::ZERO, Ticks::MAX));
+                it.duration_override = it
+                    .duration_override
+                    .filter(|d| *d > Ticks::ZERO)
+                    .map(|d| d.min(Ticks::MAX));
+            }
+        }
+
         self.sort_events();
         fixes
     }
@@ -870,6 +1035,119 @@ pub enum MediaSource {
     File { path: String },
     ImageSequence { paths: Vec<String>, fps: FrameRate },
     Generated(GenSpec),
+}
+
+pub const MAX_MEDIA_BINS: usize = 256;
+pub const MAX_BIN_DEPTH: usize = 32;
+pub const MAX_STORYBOARDS: usize = 64;
+pub const MAX_STORYBOARD_ITEMS: usize = 1024;
+
+/// Pasta manual (*Bin*) para organização hierárquica da mídia do projeto.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaBin {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<Id>,
+    #[serde(default)]
+    pub media_ids: Vec<Id>,
+}
+
+/// Critério de filtragem de uma pasta inteligente (*Smart Bin*).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SmartBinRule {
+    #[default]
+    AllVideo,
+    AudioOnly,
+    StillImages,
+    Generated,
+    Unused,
+    WithProxy,
+    NameContains,
+}
+
+impl SmartBinRule {
+    pub const ALL: [SmartBinRule; 7] = [
+        SmartBinRule::AllVideo,
+        SmartBinRule::AudioOnly,
+        SmartBinRule::StillImages,
+        SmartBinRule::Generated,
+        SmartBinRule::Unused,
+        SmartBinRule::WithProxy,
+        SmartBinRule::NameContains,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SmartBinRule::AllVideo => "Com vídeo",
+            SmartBinRule::AudioOnly => "Somente áudio",
+            SmartBinRule::StillImages => "Imagens estáticas",
+            SmartBinRule::Generated => "Mídias geradas",
+            SmartBinRule::Unused => "Não utilizadas",
+            SmartBinRule::WithProxy => "Com proxy de vídeo",
+            SmartBinRule::NameContains => "Texto no nome",
+        }
+    }
+
+    pub fn matches(
+        self,
+        query: &str,
+        m: &MediaItem,
+        used_media: &std::collections::HashSet<Id>,
+    ) -> bool {
+        let base = match self {
+            SmartBinRule::AllVideo => m.has_video && m.duration.is_some(),
+            SmartBinRule::AudioOnly => m.has_audio && !m.has_video,
+            SmartBinRule::StillImages => {
+                m.has_video
+                    && m.duration.is_none()
+                    && !matches!(m.source, MediaSource::Generated(_))
+            }
+            SmartBinRule::Generated => matches!(m.source, MediaSource::Generated(_)),
+            SmartBinRule::Unused => !used_media.contains(&m.id),
+            SmartBinRule::WithProxy => m.proxy_path.is_some(),
+            SmartBinRule::NameContains => true,
+        };
+        if !base {
+            return false;
+        }
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        m.name.to_lowercase().contains(&q) || m.info.to_lowercase().contains(&q)
+    }
+}
+
+/// Pasta inteligente (*Smart Bin*) persistente com filtro dinâmico.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartBin {
+    pub id: Id,
+    pub name: String,
+    pub rule: SmartBinRule,
+    #[serde(default)]
+    pub query: String,
+}
+
+/// Entrada ordenada de uma mídia dentro de um *Storyboard*.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoryboardItem {
+    pub media_id: Id,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub trim_in: Option<Ticks>,
+    #[serde(default)]
+    pub duration_override: Option<Ticks>,
+}
+
+/// Sequência de *storyboard* do projeto para organização e inserção sequencial.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Storyboard {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub items: Vec<StoryboardItem>,
 }
 
 /// Mídia gerada (Media Generators): cores sólidas, gradientes, padrões, texto.

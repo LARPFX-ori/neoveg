@@ -70,6 +70,7 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
         "insert.empty_event",
         "track.record_arm",
         "transport.record",
+        "media.select_events",
         "insert.marker",
         "insert.region",
         "transport.jump_prev_marker",
@@ -127,6 +128,7 @@ pub enum PlaceTarget {
 pub enum LoadMsg {
     Imported(media::Imported, Option<PlaceTarget>),
     Reloaded(Id, Result<media::Imported, String>),
+    Replaced(Id, Result<media::Imported, String>),
     ProxyBuilt(Id, Result<PathBuf, String>),
     PrerenderDone {
         start: Ticks,
@@ -291,6 +293,7 @@ pub struct App {
     pub(crate) recorder: Option<neoveg_engine::playback::AudioRecorder>,
     pub(crate) recorder_tracks: Vec<Id>,
     pub(crate) recording_peaks: HashMap<Id, [f32; 2]>,
+    pub project_media: crate::project_media::ProjectMediaState,
 }
 
 impl Deref for App {
@@ -447,6 +450,7 @@ impl App {
             recorder: None,
             recorder_tracks: Vec::new(),
             recording_peaks: HashMap::new(),
+            project_media: crate::project_media::ProjectMediaState::default(),
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -501,6 +505,7 @@ impl App {
         let removed = std::mem::take(&mut self.session.removed_media_ids);
         for id in removed {
             self.thumbs.remove(&id);
+            self.project_media.invalidate_media(id);
         }
         for m in &self.session.project.media {
             if let MediaSource::Generated(_) = m.source {
@@ -764,6 +769,7 @@ impl App {
         self.session.reset_project(proj, None);
         apply_pref_defaults(&mut self.session.opts, &self.prefs);
         self.thumbs.clear();
+        self.project_media.clear_thumbs();
         self.set_status("Novo projeto");
     }
 
@@ -778,6 +784,7 @@ impl App {
 
     fn reload_all_media(&mut self) {
         self.thumbs.clear();
+        self.project_media.clear_thumbs();
         let items = self.project.media.clone();
         for m in items {
             self.media.remove(m.id);
@@ -1322,9 +1329,15 @@ impl App {
                             m.has_video = imp.item.has_video;
                             m.info = imp.item.info.clone();
                         }
+                        self.thumbs.remove(&id);
+                        self.project_media.invalidate_media(id);
                         self.generation += 1;
                     }
                     Err(e) => self.set_status(format!("Mídia offline: {e}")),
+                },
+                LoadMsg::Replaced(id, r) => match r {
+                    Ok(imp) => self.replace_media_with_imported(id, imp),
+                    Err(e) => self.set_status(format!("Erro ao substituir mídia: {e}")),
                 },
                 LoadMsg::ProxyBuilt(id, res) => match res {
                     Ok(p) => {
@@ -1848,6 +1861,66 @@ impl App {
                     self.set_cursor(t);
                 }
             }
+            UiAction::ProjectMediaSetView(mode) => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                self.project_media.view_mode = match mode {
+                    1 => crate::project_media::MediaViewMode::List,
+                    2 => crate::project_media::MediaViewMode::Details,
+                    3 => {
+                        if self.project.storyboards.is_empty() {
+                            self.session.create_storyboard("Storyboard 1");
+                        }
+                        crate::project_media::MediaViewMode::Storyboard
+                    }
+                    _ => crate::project_media::MediaViewMode::Thumbnails,
+                };
+            }
+            UiAction::ProjectMediaNewBin => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                if let Some(bid) = self.session.create_media_bin("", None) {
+                    self.project_media.filter_target =
+                        crate::project_media::MediaFilterTarget::Bin(bid);
+                    self.sync_after_session();
+                }
+            }
+            UiAction::ProjectMediaNewSmartBin => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                self.project_media.editing_smart_id = None;
+                self.project_media.smart_dialog_open = true;
+            }
+            UiAction::ProjectMediaNewStoryboard => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                if let Some(sb_id) = self.session.create_storyboard("") {
+                    self.project_media.view_mode = crate::project_media::MediaViewMode::Storyboard;
+                    self.project_media.filter_target =
+                        crate::project_media::MediaFilterTarget::Storyboard(sb_id);
+                    self.sync_after_session();
+                }
+            }
+            UiAction::ProjectMediaReplaceDialog => {
+                if let Some(mid) = self.session.active_media_id {
+                    self.replace_media_dialog(mid);
+                }
+            }
+            UiAction::ProjectMediaInsertStoryboard => {
+                if let Some(sb_id) = self.session.active_storyboard_id {
+                    let cur = self.cursor;
+                    self.session.insert_storyboard_at_cursor(
+                        sb_id,
+                        cur,
+                        self.prefs.still_image_secs,
+                    );
+                    self.sync_after_session();
+                }
+            }
         }
     }
 
@@ -2316,6 +2389,12 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
+                ui.menu_button("Modo de exibição (Mídia do Projeto)", |ui| {
+                    self.cmd_menu_btn(ui, "media.view.thumbnails");
+                    self.cmd_menu_btn(ui, "media.view.list");
+                    self.cmd_menu_btn(ui, "media.view.details");
+                    self.cmd_menu_btn(ui, "media.view.storyboard");
+                });
                 ui.separator();
                 ui.label("Formato de tempo:");
                 for fmt in TimeFormat::ALL {
@@ -2334,6 +2413,7 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.gen_text");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
                 self.cmd_menu_btn(ui, "insert.empty_event");
+                self.cmd_menu_btn(ui, "media.insert_storyboard");
                 ui.separator();
                 ui.label("Envelopes da trilha selecionada:");
                 self.cmd_menu_btn(ui, "insert.env_volume");
@@ -2342,6 +2422,15 @@ impl App {
             ui.menu_button("Ferramentas", |ui| {
                 self.cmd_menu_btn(ui, "tools.fx_master_audio");
                 self.cmd_menu_btn(ui, "tools.fx_master_video");
+                ui.menu_button("Mídia do Projeto", |ui| {
+                    self.cmd_menu_btn(ui, "media.new_bin");
+                    self.cmd_menu_btn(ui, "media.new_smart_bin");
+                    self.cmd_menu_btn(ui, "media.new_storyboard");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "media.select_events");
+                    self.cmd_menu_btn(ui, "media.replace");
+                    self.cmd_menu_btn(ui, "tools.remove_unused_media");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.event_props");
                 self.cmd_menu_btn(ui, "tools.pan_crop");

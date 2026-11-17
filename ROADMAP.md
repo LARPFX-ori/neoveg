@@ -71,11 +71,11 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Mídia do Projeto
 
-- **Pastas de mídia (*bins*)** com busca (p. 144) e **pastas inteligentes** (*smart bins*, p. 172).
-- **Modos de exibição** (miniaturas, lista, detalhes, p. 142) e **scrub ao passar o mouse** sobre a miniatura (p. 135).
-- **Substituir e trocar mídia** mantendo os eventos (pp. 137 e 144).
-- **Selecionar todos os eventos que usam uma mídia** (p. 144).
-- **Storyboards** (p. 155).
+- **Pastas de mídia (*bins*)** com hierarquia, arrastar-e-soltar e busca + **pastas inteligentes** (*smart bins* embutidas e personalizáveis, pp. 144 e 172) implementadas em `model.rs`, `session.rs` e `project_media.rs`.
+- **Modos de exibição** (**Miniaturas**, **Lista**, **Detalhes** ordenáveis com contagem de uso e **Storyboard**, p. 142) e **scrub ao passar o mouse** (`thumbnail_at`) com linha de tempo e timecode ao vivo (p. 135).
+- **Substituir e trocar mídia** mantendo eventos, takes e propriedades (`replace_media_item` e `swap_media_references`, pp. 137 e 144).
+- **Selecionar todos os eventos que usam uma mídia** (`media.select_events`, p. 144).
+- **Storyboards** com sequência ordenável, cálculo de duração e **Inserir storyboard na timeline** em passo único de Desfazer (`media.insert_storyboard`, p. 155).
 
 ### Prévia de Vídeo
 

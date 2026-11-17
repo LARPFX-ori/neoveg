@@ -343,6 +343,10 @@ pub struct EditorSession {
     pub box_axis: BoxAxisMode,
     /// Modo de edição expandido (prévia dupla A/B e ajuste preciso de corte, p. 329).
     pub expanded_edit: Option<ExpandedEditState>,
+    /// Mídia atualmente focada no painel Mídia do Projeto (para comandos de Substituir / Selecionar).
+    pub active_media_id: Option<Id>,
+    /// Storyboard atualmente selecionado na aba Storyboard.
+    pub active_storyboard_id: Option<Id>,
     pub status: String,
     pub removed_media_ids: Vec<Id>,
     /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
@@ -358,6 +362,7 @@ impl EditorSession {
         } else {
             Some(0)
         };
+        let active_storyboard_id = project.storyboards.first().map(|s| s.id);
         Self {
             project,
             snapshot,
@@ -379,6 +384,8 @@ impl EditorSession {
             edit_tool: EditTool::Normal,
             box_axis: BoxAxisMode::Both,
             expanded_edit: None,
+            active_media_id: None,
+            active_storyboard_id,
             status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),
@@ -1530,6 +1537,18 @@ impl EditorSession {
             .map(|m| m.id)
             .collect();
         self.project.media.retain(|m| used.contains(&m.id));
+        if !removed.is_empty() {
+            let rem_set: HashSet<Id> = removed.iter().copied().collect();
+            for bin in &mut self.project.media_bins {
+                bin.media_ids.retain(|id| !rem_set.contains(id));
+            }
+            for st in &mut self.project.storyboards {
+                st.items.retain(|it| !rem_set.contains(&it.media_id));
+            }
+            if self.active_media_id.is_some_and(|id| rem_set.contains(&id)) {
+                self.active_media_id = None;
+            }
+        }
         if let Some(cache) = media {
             for &id in &removed {
                 cache.remove(id);
@@ -3596,6 +3615,600 @@ impl EditorSession {
         ));
         created
     }
+
+    // =========================================================================
+    // Mídia do Projeto: Bins, Pastas Inteligentes, Substituição e Storyboards
+    // =========================================================================
+
+    /// Cria uma pasta manual (*bin*) na Mídia do Projeto respeitando aciclicidade.
+    pub fn create_media_bin(&mut self, name: &str, parent_id: Option<Id>) -> Option<Id> {
+        if self.project.media_bins.len() >= MAX_MEDIA_BINS {
+            self.set_status("Limite máximo de pastas de mídia atingido.");
+            return None;
+        }
+        if let Some(pid) = parent_id {
+            if !self.project.media_bins.iter().any(|b| b.id == pid) {
+                return None;
+            }
+        }
+        let clean = name.trim();
+        let label = if clean.is_empty() {
+            format!("Pasta {}", self.project.media_bins.len() + 1)
+        } else {
+            clean.chars().take(128).collect()
+        };
+        let id = new_id();
+        if !self.project.validate_bin_parent(id, parent_id) {
+            return None;
+        }
+        self.checkpoint();
+        self.project.media_bins.push(MediaBin {
+            id,
+            name: label.clone(),
+            parent_id,
+            media_ids: Vec::new(),
+        });
+        self.changed();
+        self.set_status(format!("Pasta \"{label}\" criada."));
+        Some(id)
+    }
+
+    pub fn rename_media_bin(&mut self, bin_id: Id, name: &str) -> bool {
+        let clean: String = name.trim().chars().take(128).collect();
+        if clean.is_empty() {
+            return false;
+        }
+        let Some(pos) = self.project.media_bins.iter().position(|b| b.id == bin_id) else {
+            return false;
+        };
+        if self.project.media_bins[pos].name == clean {
+            return false;
+        }
+        self.checkpoint();
+        self.project.media_bins[pos].name = clean;
+        self.changed();
+        true
+    }
+
+    pub fn delete_media_bin(&mut self, bin_id: Id) -> bool {
+        let Some(pos) = self.project.media_bins.iter().position(|b| b.id == bin_id) else {
+            return false;
+        };
+        self.checkpoint();
+        let parent_of_deleted = self.project.media_bins[pos].parent_id;
+        self.project.media_bins.remove(pos);
+        for bin in &mut self.project.media_bins {
+            if bin.parent_id == Some(bin_id) {
+                bin.parent_id = parent_of_deleted;
+            }
+        }
+        self.changed();
+        self.set_status("Pasta de mídia removida.");
+        true
+    }
+
+    /// Adiciona `media_id` à pasta `bin_id` (ou remove de todas as pastas quando `None`).
+    pub fn assign_media_to_bin(&mut self, media_id: Id, bin_id: Option<Id>) -> bool {
+        if self.project.media(media_id).is_none() {
+            return false;
+        }
+        match bin_id {
+            Some(bid) => {
+                let Some(pos) = self.project.media_bins.iter().position(|b| b.id == bid) else {
+                    return false;
+                };
+                if self.project.media_bins[pos].media_ids.contains(&media_id) {
+                    return false;
+                }
+                self.checkpoint();
+                self.project.media_bins[pos].media_ids.push(media_id);
+                let name = self.project.media_bins[pos].name.clone();
+                self.changed();
+                self.set_status(format!("Mídia adicionada à pasta \"{name}\"."));
+                true
+            }
+            None => {
+                let had_any = self
+                    .project
+                    .media_bins
+                    .iter()
+                    .any(|b| b.media_ids.contains(&media_id));
+                if !had_any {
+                    return false;
+                }
+                self.checkpoint();
+                for bin in &mut self.project.media_bins {
+                    bin.media_ids.retain(|&id| id != media_id);
+                }
+                self.changed();
+                self.set_status("Mídia removida das pastas.");
+                true
+            }
+        }
+    }
+
+    pub fn remove_media_from_bin(&mut self, media_id: Id, bin_id: Id) -> bool {
+        let Some(pos) = self.project.media_bins.iter().position(|b| b.id == bin_id) else {
+            return false;
+        };
+        if !self.project.media_bins[pos].media_ids.contains(&media_id) {
+            return false;
+        }
+        self.checkpoint();
+        self.project.media_bins[pos]
+            .media_ids
+            .retain(|&id| id != media_id);
+        self.changed();
+        true
+    }
+
+    pub fn create_smart_bin(&mut self, name: &str, rule: SmartBinRule, query: &str) -> Option<Id> {
+        if self.project.smart_bins.len() >= MAX_MEDIA_BINS {
+            self.set_status("Limite máximo de pastas inteligentes atingido.");
+            return None;
+        }
+        let clean = name.trim();
+        let label = if clean.is_empty() {
+            rule.label().to_string()
+        } else {
+            clean.chars().take(128).collect()
+        };
+        let q: String = query.trim().chars().take(128).collect();
+        self.checkpoint();
+        let id = new_id();
+        self.project.smart_bins.push(SmartBin {
+            id,
+            name: label.clone(),
+            rule,
+            query: q,
+        });
+        self.changed();
+        self.set_status(format!("Pasta inteligente \"{label}\" criada."));
+        Some(id)
+    }
+
+    pub fn update_smart_bin(
+        &mut self,
+        id: Id,
+        name: &str,
+        rule: SmartBinRule,
+        query: &str,
+    ) -> bool {
+        let Some(pos) = self.project.smart_bins.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        let clean: String = name.trim().chars().take(128).collect();
+        if clean.is_empty() {
+            return false;
+        }
+        self.checkpoint();
+        let sb = &mut self.project.smart_bins[pos];
+        sb.name = clean;
+        sb.rule = rule;
+        sb.query = query.trim().chars().take(128).collect();
+        self.changed();
+        true
+    }
+
+    pub fn delete_smart_bin(&mut self, id: Id) -> bool {
+        let Some(pos) = self.project.smart_bins.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        self.checkpoint();
+        self.project.smart_bins.remove(pos);
+        self.changed();
+        self.set_status("Pasta inteligente removida.");
+        true
+    }
+
+    /// Seleciona todos os eventos da timeline que utilizam `media_id` (p. 144).
+    pub fn select_events_using_media(&mut self, media_id: Id) -> usize {
+        self.sel_events.clear();
+        let mut first_track = None;
+        for (ti, t) in self.project.tracks.iter().enumerate() {
+            for e in &t.events {
+                if crate::takes::uses_media(e, media_id) {
+                    self.sel_events.insert(e.id);
+                    if first_track.is_none() {
+                        first_track = Some(ti);
+                    }
+                }
+            }
+        }
+        if first_track.is_some() {
+            self.sel_track = first_track;
+        }
+        self.active_media_id = Some(media_id);
+        let n = self.sel_events.len();
+        let label = self
+            .project
+            .media(media_id)
+            .map(|m| m.name.as_str())
+            .unwrap_or("mídia");
+        self.set_status(format!("{n} evento(s) selecionado(s) para \"{label}\"."));
+        n
+    }
+
+    /// Remove uma mídia específica do projeto e seus takes/eventos, em um passo de Desfazer.
+    pub fn remove_media_by_id(&mut self, media_id: Id, cache: Option<&MediaCache>) -> bool {
+        if self.project.media(media_id).is_none() {
+            return false;
+        }
+        self.checkpoint();
+        for t in &mut self.project.tracks {
+            t.events.retain_mut(|e| {
+                !crate::takes::uses_media(e, media_id) || crate::takes::remove_media(e, media_id)
+            });
+        }
+        self.project.media.retain(|m| m.id != media_id);
+        for bin in &mut self.project.media_bins {
+            bin.media_ids.retain(|&id| id != media_id);
+        }
+        for st in &mut self.project.storyboards {
+            st.items.retain(|it| it.media_id != media_id);
+        }
+        self.sel_events
+            .retain(|eid| self.project.event(*eid).is_some());
+        if self.active_media_id == Some(media_id) {
+            self.active_media_id = None;
+        }
+        self.removed_media_ids.push(media_id);
+        if let Some(c) = cache {
+            c.remove(media_id);
+        }
+        self.changed();
+        self.set_status("Mídia removida do projeto.");
+        true
+    }
+
+    /// Substitui a mídia `target_id` in-loco por `replacement` mantendo IDs e propriedades dos eventos.
+    pub fn replace_media_item(&mut self, target_id: Id, replacement: MediaItem) -> bool {
+        let Some(pos) = self.project.media.iter().position(|m| m.id == target_id) else {
+            return false;
+        };
+        self.checkpoint();
+        let old_name = self.project.media[pos].name.clone();
+        let mut updated = replacement;
+        updated.id = target_id;
+        updated.proxy_path = None;
+        let new_name = updated.name.clone();
+        let new_dur = updated.duration;
+        self.project.media[pos] = updated;
+
+        for t in &mut self.project.tracks {
+            for e in &mut t.events {
+                if e.media_id == target_id {
+                    if e.name == old_name {
+                        e.name = new_name.clone();
+                    }
+                    if e.take_name == old_name {
+                        e.take_name = new_name.clone();
+                    }
+                    if !e.looped {
+                        if let Some(d) = new_dur.filter(|d| *d > Ticks::ZERO) {
+                            e.offset = e.offset.clamp_safe(Ticks::ZERO, d);
+                        }
+                    }
+                }
+                for alt in &mut e.alt_takes {
+                    if alt.media_id == target_id && alt.name == old_name {
+                        alt.name = new_name.clone();
+                    }
+                    if !e.looped {
+                        if let Some(d) = new_dur.filter(|d| *d > Ticks::ZERO) {
+                            alt.offset = alt.offset.clamp_safe(Ticks::ZERO, d);
+                        }
+                    }
+                }
+            }
+        }
+        self.active_media_id = Some(target_id);
+        self.changed();
+        self.set_status(format!("Mídia substituída por \"{new_name}\"."));
+        true
+    }
+
+    /// Redireciona eventos, takes e storyboards que usam `old_id` para `new_id` (p. 137/144).
+    pub fn swap_media_references(&mut self, old_id: Id, new_id: Id) -> usize {
+        if old_id == new_id {
+            return 0;
+        }
+        let Some(old_name) = self.project.media(old_id).map(|m| m.name.clone()) else {
+            return 0;
+        };
+        let Some(new_item) = self.project.media(new_id).cloned() else {
+            return 0;
+        };
+        self.checkpoint();
+        let mut touched = 0usize;
+        for t in &mut self.project.tracks {
+            for e in &mut t.events {
+                if crate::takes::replace_media_id(e, old_id, new_id, &old_name, &new_item.name) {
+                    if !e.looped {
+                        if let Some(d) = new_item.duration.filter(|d| *d > Ticks::ZERO) {
+                            e.offset = e.offset.clamp_safe(Ticks::ZERO, d);
+                        }
+                    }
+                    touched += 1;
+                }
+            }
+        }
+        for st in &mut self.project.storyboards {
+            for it in &mut st.items {
+                if it.media_id == old_id {
+                    it.media_id = new_id;
+                    if it.label == old_name {
+                        it.label = new_item.name.clone();
+                    }
+                }
+            }
+        }
+        self.active_media_id = Some(new_id);
+        self.changed();
+        self.set_status(format!(
+            "{touched} evento(s) atualizado(s) para \"{}\".",
+            new_item.name
+        ));
+        touched
+    }
+
+    pub fn create_storyboard(&mut self, name: &str) -> Option<Id> {
+        if self.project.storyboards.len() >= MAX_STORYBOARDS {
+            self.set_status("Limite máximo de storyboards atingido.");
+            return None;
+        }
+        let clean = name.trim();
+        let label = if clean.is_empty() {
+            format!("Storyboard {}", self.project.storyboards.len() + 1)
+        } else {
+            clean.chars().take(128).collect()
+        };
+        self.checkpoint();
+        let id = new_id();
+        self.project.storyboards.push(Storyboard {
+            id,
+            name: label.clone(),
+            items: Vec::new(),
+        });
+        self.active_storyboard_id = Some(id);
+        self.changed();
+        self.set_status(format!("Storyboard \"{label}\" criado."));
+        Some(id)
+    }
+
+    pub fn rename_storyboard(&mut self, id: Id, name: &str) -> bool {
+        let clean: String = name.trim().chars().take(128).collect();
+        if clean.is_empty() {
+            return false;
+        }
+        let Some(pos) = self.project.storyboards.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        if self.project.storyboards[pos].name == clean {
+            return false;
+        }
+        self.checkpoint();
+        self.project.storyboards[pos].name = clean;
+        self.changed();
+        true
+    }
+
+    pub fn delete_storyboard(&mut self, id: Id) -> bool {
+        let Some(pos) = self.project.storyboards.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        self.checkpoint();
+        self.project.storyboards.remove(pos);
+        if self.active_storyboard_id == Some(id) {
+            self.active_storyboard_id = self.project.storyboards.first().map(|s| s.id);
+        }
+        self.changed();
+        self.set_status("Storyboard removido.");
+        true
+    }
+
+    pub fn add_media_to_storyboard(&mut self, sb_id: Id, media_id: Id) -> bool {
+        let Some(m_name) = self.project.media(media_id).map(|m| m.name.clone()) else {
+            return false;
+        };
+        let Some(pos) = self.project.storyboards.iter().position(|s| s.id == sb_id) else {
+            return false;
+        };
+        if self.project.storyboards[pos].items.len() >= MAX_STORYBOARD_ITEMS {
+            return false;
+        }
+        self.checkpoint();
+        self.project.storyboards[pos].items.push(StoryboardItem {
+            media_id,
+            label: m_name,
+            trim_in: None,
+            duration_override: None,
+        });
+        self.changed();
+        true
+    }
+
+    pub fn remove_storyboard_item(&mut self, sb_id: Id, idx: usize) -> bool {
+        let Some(pos) = self.project.storyboards.iter().position(|s| s.id == sb_id) else {
+            return false;
+        };
+        if idx >= self.project.storyboards[pos].items.len() {
+            return false;
+        }
+        self.checkpoint();
+        self.project.storyboards[pos].items.remove(idx);
+        self.changed();
+        true
+    }
+
+    pub fn move_storyboard_item(&mut self, sb_id: Id, from: usize, to: usize) -> bool {
+        let Some(pos) = self.project.storyboards.iter().position(|s| s.id == sb_id) else {
+            return false;
+        };
+        let n = self.project.storyboards[pos].items.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        self.checkpoint();
+        let item = self.project.storyboards[pos].items.remove(from);
+        self.project.storyboards[pos].items.insert(to, item);
+        self.changed();
+        true
+    }
+
+    /// Calcula a duração total prevista de um storyboard.
+    pub fn storyboard_duration(&self, sb_id: Id, still_secs: f32) -> Ticks {
+        let Some(sb) = self.project.storyboards.iter().find(|s| s.id == sb_id) else {
+            return Ticks::ZERO;
+        };
+        let still_len = Ticks::from_secs_f64_clamped(f64::from(still_secs.clamp(0.1, 3600.0)));
+        let min_len = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+        sb.items
+            .iter()
+            .filter_map(|it| {
+                let m = self.project.media(it.media_id)?;
+                Some(
+                    it.duration_override
+                        .or(m.duration)
+                        .unwrap_or(still_len)
+                        .max(min_len),
+                )
+            })
+            .fold(Ticks::ZERO, |acc, d| {
+                Ticks::from_raw(acc.0.saturating_add(d.0))
+            })
+    }
+
+    /// Insere todos os itens de um storyboard em sequência a partir de `start`,
+    /// em um único passo atômico de Desfazer.
+    pub fn insert_storyboard_at_cursor(
+        &mut self,
+        sb_id: Id,
+        start: Ticks,
+        still_secs: f32,
+    ) -> Vec<Id> {
+        let Some(sb) = self
+            .project
+            .storyboards
+            .iter()
+            .find(|s| s.id == sb_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let still_len = Ticks::from_secs_f64_clamped(f64::from(still_secs.clamp(0.1, 3600.0)));
+        let min_len = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+        let mut plan = Vec::new();
+        for it in &sb.items {
+            if let Some(m) = self.project.media(it.media_id).cloned() {
+                if !m.has_video && !m.has_audio {
+                    continue;
+                }
+                let dur = it
+                    .duration_override
+                    .or(m.duration)
+                    .unwrap_or(still_len)
+                    .max(min_len);
+                let trim_in = it.trim_in.unwrap_or(Ticks::ZERO).max(Ticks::ZERO);
+                plan.push((m, trim_in, dur));
+            }
+        }
+        if plan.is_empty() {
+            self.set_status("Storyboard vazio ou sem mídias válidas.");
+            return Vec::new();
+        }
+        self.checkpoint();
+        let mut video_ti: Option<usize> = None;
+        let mut audio_ti: Option<usize> = None;
+        let mut pos = start.max(Ticks::ZERO);
+        let mut created = Vec::new();
+        for (m, trim_in, dur) in plan {
+            let group = if m.has_video && m.has_audio {
+                Some(new_id())
+            } else {
+                None
+            };
+            if m.has_video {
+                let ti = match video_ti {
+                    Some(i)
+                        if self
+                            .project
+                            .tracks
+                            .get(i)
+                            .is_some_and(|t| t.kind == TrackKind::Video) =>
+                    {
+                        i
+                    }
+                    _ => {
+                        let found = self
+                            .sel_track
+                            .filter(|&i| {
+                                self.project
+                                    .tracks
+                                    .get(i)
+                                    .is_some_and(|t| t.kind == TrackKind::Video)
+                            })
+                            .or_else(|| {
+                                self.project
+                                    .tracks
+                                    .iter()
+                                    .position(|t| t.kind == TrackKind::Video)
+                            })
+                            .unwrap_or_else(|| self.insert_track(TrackKind::Video));
+                        video_ti = Some(found);
+                        found
+                    }
+                };
+                let mut e = Event::new(&m, pos, dur);
+                e.offset = trim_in;
+                e.group = group;
+                if m.duration.is_none() {
+                    e.looped = false;
+                }
+                created.push(e.id);
+                self.project.tracks[ti].events.push(e);
+            }
+            if m.has_audio {
+                let ti = match audio_ti {
+                    Some(i)
+                        if self
+                            .project
+                            .tracks
+                            .get(i)
+                            .is_some_and(|t| t.kind == TrackKind::Audio) =>
+                    {
+                        i
+                    }
+                    _ => {
+                        let found = self
+                            .project
+                            .tracks
+                            .iter()
+                            .position(|t| t.kind == TrackKind::Audio)
+                            .unwrap_or_else(|| self.insert_track(TrackKind::Audio));
+                        audio_ti = Some(found);
+                        found
+                    }
+                };
+                let mut e = Event::new(&m, pos, dur);
+                e.offset = trim_in;
+                e.group = group;
+                created.push(e.id);
+                self.project.tracks[ti].events.push(e);
+            }
+            pos = Ticks::from_raw(pos.0.saturating_add(dur.0));
+        }
+        self.project.sort_events();
+        self.sel_events = created.iter().copied().collect();
+        self.cursor = pos;
+        self.changed();
+        self.set_status(format!(
+            "Storyboard \"{}\" inserido: {} evento(s).",
+            sb.name,
+            created.len()
+        ));
+        created
+    }
 }
 
 fn split_event_in_track(
@@ -4462,5 +5075,64 @@ mod tests {
         assert_eq!(sess.project.tracks[1].events.len(), 1);
         assert!(sess.undo());
         assert!(sess.project.tracks[1].events.is_empty());
+    }
+
+    #[test]
+    fn midia_do_projeto_bins_smart_bins_substituicao_selecao_e_storyboard() {
+        let mut p = Project::new_default();
+        let mut mv1 = sample_media(10, 1920, 1080, Some(FrameRate::FPS_30));
+        mv1.has_audio = false;
+        mv1.duration = Some(Ticks::from_secs_i64(5));
+        let mut ma = sample_media(11, 0, 0, None);
+        ma.has_video = false;
+        ma.has_audio = true;
+        ma.duration = Some(Ticks::from_secs_i64(4));
+        ma.name = "locucao.wav".into();
+        let mut mstill = sample_media(12, 1280, 720, None);
+        mstill.has_audio = false;
+        mstill.duration = None;
+        mstill.name = "foto.png".into();
+        p.media = vec![mv1.clone(), ma.clone(), mstill.clone()];
+        let ev1 = Event::new(&mv1, Ticks::ZERO, Ticks::from_secs_i64(3));
+        let ev1_id = ev1.id;
+        p.tracks[0].events.push(ev1);
+
+        let mut sess = EditorSession::new(p);
+        let root_bin = sess.create_media_bin("Cenas", None).unwrap();
+        let sub_bin = sess.create_media_bin("Externa", Some(root_bin)).unwrap();
+        assert!(sess.assign_media_to_bin(mv1.id, Some(sub_bin)));
+        assert!(sess
+            .project
+            .collect_bin_media(root_bin, true)
+            .contains(&mv1.id));
+        assert!(!sess.project.validate_bin_parent(root_bin, Some(sub_bin)));
+
+        let sb = sess
+            .create_smart_bin("Sem uso", SmartBinRule::Unused, "")
+            .unwrap();
+        let used = sess.project.used_media_ids();
+        assert!(!sess.project.smart_bins[0].rule.matches("", &mv1, &used));
+        assert!(sess.project.smart_bins[0].rule.matches("", &ma, &used));
+        assert!(sess.delete_smart_bin(sb));
+
+        assert_eq!(sess.select_events_using_media(mv1.id), 1);
+        assert!(sess.sel_events.contains(&ev1_id));
+
+        let mut mv2 = sample_media(99, 3840, 2160, Some(FrameRate::FPS_60));
+        mv2.name = "cena_4k.mp4".into();
+        assert!(sess.replace_media_item(mv1.id, mv2));
+        assert_eq!(sess.project.media(mv1.id).unwrap().width, 3840);
+        assert!(sess.undo());
+        assert_eq!(sess.project.media(mv1.id).unwrap().width, 1920);
+
+        let story = sess.create_storyboard("Abertura").unwrap();
+        assert!(sess.add_media_to_storyboard(story, mv1.id));
+        assert!(sess.add_media_to_storyboard(story, mstill.id));
+        assert!(sess.move_storyboard_item(story, 1, 0));
+        let inserted = sess.insert_storyboard_at_cursor(story, Ticks::from_secs_i64(10), 2.0);
+        assert_eq!(inserted.len(), 2);
+        assert_eq!(sess.cursor, Ticks::from_secs_i64(17));
+        assert!(sess.undo());
+        assert_eq!(sess.project.tracks[0].events.len(), 1);
     }
 }
