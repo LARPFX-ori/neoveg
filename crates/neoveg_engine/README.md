@@ -56,6 +56,13 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Broadcast Wave Format / `bext` (`workflows.rs`):** gravação WAV BWF segundo **EBU Tech 3285 v2** (bloco `bext` de 602 bytes com `Originator = "Neoveg"` e deslocamento exato de amostras em `TimeReference`) para intercâmbio com precisão de amostra no SoundCraft, além de cópias editáveis vinculadas como *Take* (`Add As Takes`) e observador de modificações no disco.
 - **Blender fora do processo (`blender.rs`):** invocação em segundo plano via `blender -b ... --factory-startup --python ...` sem linkar código GPL (`AGENTS.md` §2.3), renderização direta de sequências PNG para a timeline (`Fra:<N>`), geração de scripts `bpy` com escape JSON seguro e esquema limitado `neoveg.blender.camera.v1` para importar marcadores e keyframes de *Track Motion* / *Pan/Crop* (`16 MiB`, máx. `100 000` quadros).
 
+### Demuxer MP4 / MOV / MKV / WebM — `src/media/demux/`
+
+- **Edição de referência:**
+  - **ISO/IEC 14496-12** (*Information technology — Coding of audio-visual objects — Part 12: ISO Base Media File Format*) e **Apple *QuickTime File Format Specification*** (`ftyp`, `moov`/`mvhd`/`tkhd`/`edts`/`elst`/`mdia`/`mdhd`/`hdlr`/`minf`/`stbl` com `stsd`/`stts`/`ctts`/`stsc`/`stsz`/`stz2`/`stco`/`co64`/`stss`, extensões de fragmentos `mvex`/`trex`/`moof`/`mfhd`/`traf`/`tfhd`/`tfdt`/`trun`, e descriptores `avcC`/`hvcC`/`av1C`/`vpcC`/`esds`/`wave`);
+  - **RFC 8794** (*Extensible Binary Meta Language — EBML*) e **RFC 9559** (*Matroska Media Container Format*) / WebM Container Guidelines (`EBML`, `Segment`, `Info`/`TimestampScale`, `Tracks`/`TrackEntry`/`CodecPrivate`, `Cluster`/`Timestamp`/`SimpleBlock`/`BlockGroup`/`Block`/`BlockDuration`/`ReferenceBlock`, e modos de *lacing* Xiph, Fixed-size e EBML).
+- **Método de implementação:** Leitores em Rust puro (`#[forbid(unsafe_code)]`) sobre `Read + Seek`, limitando profundidade (`32`), trilhas (`64`), tabelas de metadados em memória (`64 MiB`), extradata (`1 MiB`) e número de amostras (`2 000 000`) sem carregar `mdat` ou payloads de mídia para a RAM, com conversão racional exata para `Ticks` em `i128` (`AGENTS.md` §0.4, §3.6 e Regra Rust 5). Validado contra oráculo externo `ffprobe -show_packets` e testes de fuzzing por mutação em `fuzz_demux_mp4_e_mkv`.
+
 
 ### Formatos Extras de Áudio e Extensões RIFF/AIFF — `src/media/wav.rs` e `src/media/audio_extra.rs`
 
