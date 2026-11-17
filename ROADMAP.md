@@ -89,18 +89,16 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Edição na linha do tempo
 
-- **Seletor de ferramenta de edição** na barra de transporte (p. 236), parcial. Já existem:
-  - a ferramenta Normal, com os modos Normal e Slip;
-  - as ferramentas Envelope, Seleção (caixa) e Zoom (caixa e clique);
-  - `D` e `Shift+D` para alternar entre elas.
+- **Seletor de ferramenta de edição** na barra de transporte (p. 236):
+  - ferramenta **Normal** com os 7 modos na interface e no motor (**Normal**, **Shuffle**, **Slip**, **Slide**, **Stretch**, **Split Trim** e **Roll**), ícone dinâmico no seletor e modificadores diretos (`Alt`, `Ctrl+Alt`, `Ctrl+borda`, `Ctrl+Alt+Shift`);
+  - ferramentas **Envelope**, **Seleção** (caixa) e **Zoom** (caixa e clique), além de `D` e `Shift+D` para alternar.
 
-  Faltam os modos Shuffle, Slide, Stretch e Split Trim, a seleção só vertical ou só horizontal, o zoom só de tempo ou só de trilhas e o clique direito que alterna o modo.
-- **Inserir evento vazio** (p. 243).
-- **Smart Split** (p. 308) e **juntar eventos divididos** (*healing*, p. 309).
+  Ainda faltam a seleção só vertical ou só horizontal, o zoom só de tempo ou só de trilhas e o clique direito para escolher o modo no arraste.
+- **Smart Split (`Alt+S`)** com crossfade Warp Flow e agrupamento, e **juntar eventos divididos (`Heal`)** (pp. 308–309) implementados; falta **inserir evento vazio** (p. 243).
 - **Detecção de cenas/cortes** (p. 300).
 - **Modo de edição expandido** ao clicar na borda entre dois eventos (p. 329) e **exibição da duração do evento** (p. 329).
 - **Vínculos de sincronia** entre eventos (*sync links*, p. 351).
-- **Colar atributos do evento seletivamente** (p. 369).
+- **Colar atributos do evento** (`Ctrl+Alt+V`) e **Colar atributos seletivamente...** (p. 369) implementados.
 - **Esticar o tempo ou mudar o tom** de um evento de áudio (p. 363).
 - **Estabilização de vídeo** (p. 341).
 - **Diálogo *Take Chooser*** com prévia (p. 347). Hoje a escolha é por uma lista no submenu *Take*.

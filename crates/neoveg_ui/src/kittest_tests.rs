@@ -1072,3 +1072,59 @@ fn kittest_janela_integracoes_artcraft_e_blender() {
         crate::dialogs::PrefsCategory::Integrations
     );
 }
+
+#[test]
+fn kittest_seletor_modos_ferramenta_normal_e_colar_atributos() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // Abre o seletor de modos da ferramenta Normal na barra e alterna para Shuffle.
+    harness
+        .get_by_label("Selecionar modo da ferramenta Normal")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label("Modo Shuffle (reordenar)").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().session.edit_mode,
+        neoveg_engine::session::EditMode::Shuffle
+    );
+
+    // Prepara dois eventos, copia atributos e testa o diálogo Colar atributos seletivamente.
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut();
+        app.session.sel_track = Some(0);
+        app.cursor = crate::model::Ticks::ZERO;
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.cursor = crate::model::Ticks::from_secs_i64(6);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.4, 0.8, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let ids: Vec<crate::model::Id> =
+            app.project.tracks[0].events.iter().map(|e| e.id).collect();
+        if let Some(ev0) = app.project.event_mut(ids[0]) {
+            ev0.fade_in.len = crate::model::Ticks::from_secs_i64(1);
+        }
+        app.sel_events.clear();
+        app.sel_events.insert(ids[0]);
+        app.copy_selection();
+        app.sel_events.clear();
+        app.sel_events.insert(ids[1]);
+        app.exec_cmd(Some(&ctx), "edit.paste_attributes_selective");
+    }
+    harness.run_steps(2);
+    assert!(harness.state().dlg.paste_attrs_open);
+
+    harness.get_by_label("Aplicar").click();
+    harness.run_steps(2);
+    assert!(!harness.state().dlg.paste_attrs_open);
+    let ev1_id = *harness.state().sel_events.iter().next().unwrap();
+    assert_eq!(
+        harness.state().project.event(ev1_id).unwrap().fade_in.len,
+        crate::model::Ticks::from_secs_i64(1)
+    );
+}

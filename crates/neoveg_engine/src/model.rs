@@ -1465,10 +1465,11 @@ pub enum TransitionKind {
     Zoom,
     Blinds,
     Checker,
+    WarpFlow,
 }
 
 impl TransitionKind {
-    pub const ALL: [TransitionKind; 16] = [
+    pub const ALL: [TransitionKind; 17] = [
         TransitionKind::Dissolve,
         TransitionKind::FadeThroughBlack,
         TransitionKind::WipeLeft,
@@ -1485,6 +1486,7 @@ impl TransitionKind {
         TransitionKind::Zoom,
         TransitionKind::Blinds,
         TransitionKind::Checker,
+        TransitionKind::WarpFlow,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -1504,6 +1506,7 @@ impl TransitionKind {
             TransitionKind::Zoom => "Zoom",
             TransitionKind::Blinds => "Persianas",
             TransitionKind::Checker => "Tabuleiro",
+            TransitionKind::WarpFlow => "Warp Flow (fluxo óptico)",
         }
     }
 }

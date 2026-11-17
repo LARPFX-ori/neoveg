@@ -986,3 +986,106 @@ fn ferramentas_de_edicao_na_timeline() {
         "a mídia desliza"
     );
 }
+
+#[test]
+fn modos_shuffle_slide_stretch_split_trim_na_timeline() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0;
+    let mut frame = |app: &mut App, ev: Vec<Event>| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, Modifiers::NONE, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![]);
+    app.dismiss_splash();
+    frame(&mut app, vec![]);
+    app.dismiss_welcome();
+
+    app.session.sel_track = Some(0);
+    app.cursor = Ticks::ZERO;
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(5);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(10);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.dlg.gen_editor = None;
+    app.sel_events.clear();
+    for _ in 0..4 {
+        frame(&mut app, vec![]);
+    }
+    let ids: Vec<Id> = app.project.tracks[0].events.iter().map(|e| e.id).collect();
+    assert_eq!(ids.len(), 3);
+    let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+    let drag = |app: &mut App, frame: &mut dyn FnMut(&mut App, Vec<Event>), p0: Pos2, p1: Pos2| {
+        frame(app, vec![Event::PointerMoved(p0), press(p0, true)]);
+        for k in 1..=8 {
+            let p = p0 + (p1 - p0) * (k as f32 / 8.0);
+            frame(app, vec![Event::PointerMoved(p)]);
+        }
+        frame(app, vec![press(p1, false)]);
+        frame(app, vec![]);
+    };
+
+    // 1. Modo Shuffle: arrastar C para antes de A reordena [C, A, B] sem lacunas.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.shuffle");
+    frame(&mut app, vec![]);
+    let ra = app.event_screen_rect(a).expect("evento a na tela");
+    let rc = app.event_screen_rect(c).expect("evento c na tela");
+    drag(
+        &mut app,
+        &mut frame,
+        rc.center(),
+        ra.left_top() + vec2(4.0, ra.height() * 0.5),
+    );
+    assert_eq!(app.project.event(c).map(|e| e.start), Some(Ticks::ZERO));
+
+    // 2. Modo Slide: desliza evento do meio (A) ajustando vizinhos sem mover seu conteúdo.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.slide");
+    frame(&mut app, vec![]);
+    let ra_after = app.event_screen_rect(a).expect("evento a após shuffle");
+    let a_off_before = app.project.event(a).map(|e| e.offset);
+    let a_start_before = app.project.event(a).unwrap().start;
+    drag(
+        &mut app,
+        &mut frame,
+        ra_after.center(),
+        ra_after.center() + vec2(40.0, 0.0),
+    );
+    assert!(app.project.event(a).unwrap().start > a_start_before);
+    assert_eq!(app.project.event(a).map(|e| e.offset), a_off_before);
+    assert_eq!(
+        app.project.event(b).map(|e| e.start),
+        app.project.event(a).map(|e| e.end())
+    );
+
+    // 3. Modo Stretch: arrastar borda direita altera Rate e comprimento.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.stretch");
+    frame(&mut app, vec![]);
+    let rc_now = app.event_screen_rect(c).expect("evento c para stretch");
+    let rate_before = app.project.event(c).unwrap().rate;
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(rc_now.right() - 2.0, rc_now.center().y),
+        pos2(rc_now.right() + 40.0, rc_now.center().y),
+    );
+    assert_ne!(app.project.event(c).unwrap().rate, rate_before);
+
+    // 4. Modo SplitTrim: arrastar trecho interno recorta o segmento.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.split_trim");
+    frame(&mut app, vec![]);
+    let n_before = app.project.tracks[0].events.len();
+    let rb_now = app.event_screen_rect(b).expect("evento b para split trim");
+    let rx0 = rb_now.left() + rb_now.width() * 0.25;
+    let rx1 = rb_now.left() + rb_now.width() * 0.65;
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(rx0, rb_now.center().y),
+        pos2(rx1, rb_now.center().y),
+    );
+    assert!(app.project.tracks[0].events.len() > n_before);
+}

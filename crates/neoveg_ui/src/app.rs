@@ -39,6 +39,10 @@ pub use neoveg_engine::commands::DockPanel as DockTab;
 /// por divisória. Só ids da Tabela Única (§3.3); o teste abaixo garante isso.
 pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
     &[
+        "edit.paste_attributes",
+        "edit.paste_attributes_selective",
+        "edit.smart_split",
+        "edit.heal_events",
         "edit.trim_to_selection",
         "edit.trim_start",
         "edit.trim_end",
@@ -1576,6 +1580,9 @@ impl App {
             UiAction::OpenEventProps => {
                 self.dlg.event_props = self.sel_events.iter().next().copied();
             }
+            UiAction::OpenPasteAttributesDialog => {
+                self.dlg.paste_attrs_open = true;
+            }
             UiAction::OpenPanCrop => {
                 self.dlg.pan_crop = self.sel_events.iter().next().copied();
             }
@@ -1876,9 +1883,13 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.copy");
                 self.cmd_menu_btn(ui, "edit.paste");
                 self.cmd_menu_btn(ui, "edit.paste_insert");
+                self.cmd_menu_btn(ui, "edit.paste_attributes");
+                self.cmd_menu_btn(ui, "edit.paste_attributes_selective");
                 self.cmd_menu_btn(ui, "edit.delete");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.split");
+                self.cmd_menu_btn(ui, "edit.smart_split");
+                self.cmd_menu_btn(ui, "edit.heal_events");
                 ui.menu_button("Take", |ui| {
                     self.cmd_menu_btn(ui, "event.next_take");
                     self.cmd_menu_btn(ui, "event.prev_take");
@@ -1894,11 +1905,13 @@ impl App {
                         self.cmd_menu_btn(ui, id);
                     }
                     ui.separator();
-                    self.cmd_menu_btn(ui, "edit.tool.mode.normal");
-                    self.cmd_menu_btn(ui, "edit.tool.mode.slip");
+                    for mode in neoveg_engine::session::EditMode::NORMAL_MODES {
+                        self.cmd_menu_btn(ui, mode.command_id());
+                    }
                     ui.separator();
                     self.cmd_menu_btn(ui, "edit.tool.next");
                     self.cmd_menu_btn(ui, "edit.tool.prev");
+                    self.cmd_menu_btn(ui, "edit.tool.mode.next");
                 });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
@@ -2336,12 +2349,14 @@ impl App {
             ui.separator();
 
             // Ferramentas de edição (manual do VEGAS Pro 21, pp. 75–76 e 236):
-            // Normal (com a seta dos modos), Envelope, Seleção e Zoom.
+            // Normal (com seletor de modos: Normal/Shuffle/Slip/Slide/Stretch/SplitTrim/Roll),
+            // Envelope, Seleção e Zoom.
             let tool = self.session.edit_tool;
+            let active_mode = self.session.edit_mode;
             self.cmd_tool_toggle(
                 ui,
                 tool == neoveg_engine::session::EditTool::Normal,
-                Icon::NormalTool,
+                icons::normal_mode_icon(active_mode),
                 None,
                 "edit.tool.normal",
             );
@@ -2350,14 +2365,10 @@ impl App {
                 .min_size(egui::vec2(12.0, ui.spacing().interact_size.y))
                 .frame(false);
             let modes = egui::menu::menu_custom_button(ui, arrow_btn, |ui| {
-                for id in ["edit.tool.mode.normal", "edit.tool.mode.slip"] {
-                    let mode = if id == "edit.tool.mode.slip" {
-                        neoveg_engine::session::EditMode::Slip
-                    } else {
-                        neoveg_engine::session::EditMode::Normal
-                    };
-                    let on = tool == neoveg_engine::session::EditTool::Normal
-                        && self.session.edit_mode == mode;
+                for mode in neoveg_engine::session::EditMode::NORMAL_MODES {
+                    let id = mode.command_id();
+                    let on =
+                        tool == neoveg_engine::session::EditTool::Normal && active_mode == mode;
                     let label = menu_label(id, &self.prefs.shortcuts);
                     if ui.selectable_label(on, label).clicked() {
                         self.exec_cmd(Some(ui.ctx()), id);
@@ -2371,7 +2382,16 @@ impl App {
                 crate::scrollbars::ArrowDir::Down,
                 ui.visuals().text_color(),
             );
-            modes.response.on_hover_text("Modo da ferramenta Normal");
+            modes.response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Selecionar modo da ferramenta Normal",
+                )
+            });
+            modes
+                .response
+                .on_hover_text(format!("Modo da ferramenta Normal: {}", active_mode.name()));
             self.cmd_tool_toggle(
                 ui,
                 tool == neoveg_engine::session::EditTool::Envelope,
@@ -2395,20 +2415,18 @@ impl App {
             );
             ui.separator();
 
-            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
-            // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
-            // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
-            // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
-            // sem botão porque a função não existe: Gravar, os modos Shuffle,
-            // Slide, Stretch e Split Trim da ferramenta Normal, Smart Split,
-            // Crossfades automáticos (sempre ligados), Travar envelopes e as
-            // linhas do tempo aninhadas.
+            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21 (pp. 75–78):
+            // Excluir, Aparar, Aparar início, Aparar fim, Dividir, Smart Split,
+            // Juntar eventos, Travar, Inserir marcador, Inserir região, Encaixe,
+            // Ripple automático, Ignorar agrupamento e Color Grading.
             for (icon, id) in [
                 (Icon::DeleteTrash, "edit.delete"),
                 (Icon::TrimSelection, "edit.trim_to_selection"),
                 (Icon::TrimStart, "edit.trim_start"),
                 (Icon::TrimEnd, "edit.trim_end"),
                 (Icon::Split, "edit.split"),
+                (Icon::SmartSplit, "edit.smart_split"),
+                (Icon::HealEvents, "edit.heal_events"),
             ] {
                 self.cmd_tool_btn(ui, icon, None, id);
             }

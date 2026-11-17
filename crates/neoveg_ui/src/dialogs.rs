@@ -595,6 +595,8 @@ pub struct Dialogs {
     pub track_motion: Option<Id>,
     pub fx_target: Option<FxTarget>,
     pub gen_editor: Option<Id>,
+    pub paste_attrs_open: bool,
+    pub paste_attrs_mask: neoveg_engine::session::PasteAttributesMask,
     pub shortcuts: bool,
     pub prefs_open: bool,
     pub prefs_tab: PrefsCategory,
@@ -800,6 +802,7 @@ impl App {
         self.track_motion_window(ctx);
         self.fx_window(ctx);
         self.gen_editor_window(ctx);
+        self.paste_attributes_window(ctx);
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
@@ -869,6 +872,72 @@ impl App {
             Some(false) => self.dlg.header_buttons = None,
             None if !open => self.dlg.header_buttons = None,
             None => self.dlg.header_buttons = Some((video, draft)),
+        }
+    }
+
+    fn paste_attributes_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.paste_attrs_open {
+            return;
+        }
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        let mut mask = self.dlg.paste_attrs_mask;
+        egui::Window::new("Colar atributos do evento")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Escolha os atributos da área de transferência para aplicar aos eventos selecionados:");
+                ui.separator();
+                ui.checkbox(&mut mask.fx, "Cadeia de efeitos (Video FX / Audio FX)");
+                ui.checkbox(&mut mask.pan_crop, "Pan/Crop (quadros-chave)");
+                ui.checkbox(&mut mask.gain_db, "Ganho de áudio (dB)");
+                ui.checkbox(&mut mask.rate, "Taxa de reprodução (Velocidade)");
+                ui.checkbox(&mut mask.fades, "Fades de entrada e saída");
+                ui.checkbox(&mut mask.switches, "Opções (Mudo, Loop, Reverso, Proporção)");
+                ui.checkbox(&mut mask.transition, "Transição de entrada");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Marcar tudo").clicked() {
+                        mask = neoveg_engine::session::PasteAttributesMask::ALL;
+                    }
+                    if ui.button("Desmarcar tudo").clicked() {
+                        mask = neoveg_engine::session::PasteAttributesMask {
+                            fx: false,
+                            pan_crop: false,
+                            gain_db: false,
+                            rate: false,
+                            fades: false,
+                            switches: false,
+                            transition: false,
+                        };
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_apply =
+                        mask.any() && !self.clipboard.is_empty() && !self.sel_events.is_empty();
+                    if ui
+                        .add_enabled(can_apply, egui::Button::new("Aplicar"))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        self.dlg.paste_attrs_mask = mask;
+        if apply {
+            self.session.paste_attributes(mask);
+            self.sync_after_session();
+            self.dlg.paste_attrs_open = false;
+        } else if !open || cancel {
+            self.dlg.paste_attrs_open = false;
         }
     }
 
