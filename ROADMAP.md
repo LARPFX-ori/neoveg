@@ -91,17 +91,15 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 - **Seletor de ferramenta de edição** na barra de transporte (p. 236):
   - ferramenta **Normal** com os 7 modos na interface e no motor (**Normal**, **Shuffle**, **Slip**, **Slide**, **Stretch**, **Split Trim** e **Roll**), ícone dinâmico no seletor e modificadores diretos (`Alt`, `Ctrl+Alt`, `Ctrl+borda`, `Ctrl+Alt+Shift`);
-  - ferramentas **Envelope**, **Seleção** (caixa) e **Zoom** (caixa e clique), além de `D` e `Shift+D` para alternar.
-
-  Ainda faltam a seleção só vertical ou só horizontal, o zoom só de tempo ou só de trilhas e o clique direito para escolher o modo no arraste.
-- **Smart Split (`Alt+S`)** com crossfade Warp Flow e agrupamento, e **juntar eventos divididos (`Heal`)** (pp. 308–309) implementados; falta **inserir evento vazio** (p. 243).
+  - ferramentas **Envelope**, **Seleção** (caixa) e **Zoom** (caixa e clique), além de `D`/`Shift+D` e seletor de **eixo Livre / Horizontal / Vertical** na barra, no menu e no menu de contexto (pp. 239–240).
+- **Smart Split (`Alt+S`)**, **Juntar eventos (`Heal`)**, **Inserir evento vazio** (`insert.empty_event`, p. 243) e **Exibição da duração nos cabeçalhos dos eventos** (p. 329) implementados.
+- **Vínculos de sincronia (*Sync Links*, p. 351):** criar vínculo unidirecional (`event.sync_link_create`), selecionar rede (`event.sync_link_select`), desvincular (`event.sync_link_unlink`), realce visual e proteção contra ciclos implementados.
+- **Colar atributos do evento** (`Ctrl+Alt+V`) e **Colar atributos seletivamente...** (p. 369) implementados (inclusive **Tom / Pitch**).
+- **Esticar o tempo e mudar o tom (`Time Stretch` / `Pitch Shift`, p. 363):** transposição por semitons (`=`/`-`) e oitavas (`Ctrl+=`/`Ctrl+-`) em `-24..+24 st`, opção *Preservar tom ao esticar* com compensador **WSOLA** em tempo de execução no mixer e coluna *Tom* em *Detalhes da Edição* e *Propriedades do evento* implementados.
+- **Diálogo *Take Chooser*** com prévia de quadro, listagem, renomeação, reordenação, adição e exclusão de takes (`event.take_chooser`, p. 347) implementado.
 - **Detecção de cenas/cortes** (p. 300).
-- **Modo de edição expandido** ao clicar na borda entre dois eventos (p. 329) e **exibição da duração do evento** (p. 329).
-- **Vínculos de sincronia** entre eventos (*sync links*, p. 351).
-- **Colar atributos do evento** (`Ctrl+Alt+V`) e **Colar atributos seletivamente...** (p. 369) implementados.
-- **Esticar o tempo ou mudar o tom** de um evento de áudio (p. 363).
+- **Modo de edição expandido** ao clicar na borda entre dois eventos (p. 329).
 - **Estabilização de vídeo** (p. 341).
-- **Diálogo *Take Chooser*** com prévia (p. 347). Hoje a escolha é por uma lista no submenu *Take*.
 - **Gravação de áudio** nas trilhas, com armar a trilha (p. 821).
 
 ### Trilhas

@@ -1089,3 +1089,121 @@ fn modos_shuffle_slide_stretch_split_trim_na_timeline() {
     );
     assert!(app.project.tracks[0].events.len() > n_before);
 }
+
+#[test]
+fn ui_sync_links_arraste_unidirecional_e_eixos_selecao() {
+    use neoveg_engine::session::BoxAxisMode;
+
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0f64;
+    let mut frame = |app: &mut App, ev: Vec<Event>| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, Modifiers::NONE, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![]);
+    app.dismiss_splash();
+    frame(&mut app, vec![]);
+    app.dismiss_welcome();
+
+    app.session.sel_track = Some(0);
+    app.cursor = Ticks::ZERO;
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(7);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.session.sel_track = Some(1);
+    app.cursor = Ticks::ZERO;
+    app.session.insert_empty_event();
+    app.dlg.gen_editor = None;
+    for _ in 0..4 {
+        frame(&mut app, vec![]);
+    }
+    let m_id = app.project.tracks[0].events[0].id;
+    let f_id = app.project.tracks[1].events[0].id;
+    let other_v = app.project.tracks[0].events[1].id;
+    app.sel_events = [m_id, f_id].into_iter().collect();
+    assert_eq!(app.session.create_sync_links(Some(m_id)), 1);
+    app.sync_after_session();
+    frame(&mut app, vec![]);
+
+    let drag = |app: &mut App, frame: &mut dyn FnMut(&mut App, Vec<Event>), p0: Pos2, p1: Pos2| {
+        frame(app, vec![Event::PointerMoved(p0), press(p0, true)]);
+        for k in 1..=6 {
+            let p = p0 + (p1 - p0) * (k as f32 / 6.0);
+            frame(app, vec![Event::PointerMoved(p)]);
+        }
+        frame(app, vec![press(p1, false)]);
+        frame(app, vec![]);
+    };
+
+    // 1. Arrastar mestre (m_id) arrasta o seguidor (f_id) pelo mesmo delta horizontal.
+    app.sel_events = [m_id].into_iter().collect();
+    let rm = app.event_screen_rect(m_id).expect("retângulo mestre");
+    let m0 = app.project.event(m_id).unwrap().start;
+    let f0 = app.project.event(f_id).unwrap().start;
+    drag(
+        &mut app,
+        &mut frame,
+        rm.center(),
+        rm.center() + vec2(60.0, 0.0),
+    );
+    let dm = app.project.event(m_id).unwrap().start - m0;
+    let df = app.project.event(f_id).unwrap().start - f0;
+    assert!(dm > Ticks::ZERO);
+    assert_eq!(dm, df, "seguidor Sync Link deve acompanhar mestre");
+
+    // 2. Arrastar seguidor (f_id) não move o mestre (unidirecional).
+    app.sel_events = [f_id].into_iter().collect();
+    frame(&mut app, vec![]);
+    let rf = app.event_screen_rect(f_id).expect("retângulo seguidor");
+    let m_before = app.project.event(m_id).unwrap().start;
+    let f_before = app.project.event(f_id).unwrap().start;
+    drag(
+        &mut app,
+        &mut frame,
+        rf.center(),
+        rf.center() + vec2(40.0, 0.0),
+    );
+    assert!(app.project.event(f_id).unwrap().start > f_before);
+    assert_eq!(app.project.event(m_id).unwrap().start, m_before);
+
+    // 3. Eixo Vertical da ferramenta Seleção seleciona todos os eventos da trilha 0 cruzada.
+    app.exec_cmd(Some(&ctx), "edit.tool.selection");
+    app.exec_cmd(Some(&ctx), "edit.tool.axis.vertical");
+    app.sel_events.clear();
+    frame(&mut app, vec![]);
+    let rm_now = app.event_screen_rect(m_id).expect("mestre após move");
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(rm_now.left() + 4.0, rm_now.top() + 4.0),
+        pos2(rm_now.left() + 10.0, rm_now.bottom() - 4.0),
+    );
+    assert!(app.sel_events.contains(&m_id));
+    assert!(
+        app.sel_events.contains(&other_v),
+        "eixo vertical deve pegar toda a trilha"
+    );
+    assert!(!app.sel_events.contains(&f_id));
+
+    // 4. Eixo Horizontal seleciona todas as trilhas dentro do intervalo temporal da caixa.
+    app.exec_cmd(Some(&ctx), "edit.tool.axis.horizontal");
+    app.sel_events.clear();
+    frame(&mut app, vec![]);
+    let rf_now = app.event_screen_rect(f_id).expect("seguidor após move");
+    let box_x0 = rm_now.center().x.min(rf_now.center().x);
+    let box_x1 = rm_now.center().x.max(rf_now.center().x);
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(box_x0, rm_now.top() + 4.0),
+        pos2(box_x1, rm_now.top() + 10.0),
+    );
+    assert_eq!(app.session.box_axis, BoxAxisMode::Horizontal);
+    assert!(app.sel_events.contains(&m_id));
+    assert!(
+        app.sel_events.contains(&f_id),
+        "eixo horizontal deve atravessar todas as trilhas"
+    );
+}

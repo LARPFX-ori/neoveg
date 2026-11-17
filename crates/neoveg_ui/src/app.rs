@@ -51,8 +51,21 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
         "edit.close_gaps",
     ],
     &["edit.group", "edit.ungroup", "edit.select_group"],
-    &["tools.reverse", "tools.freeze_frame", "tools.event_props"],
     &[
+        "event.sync_link_create",
+        "event.sync_link_select",
+        "event.sync_link_unlink",
+    ],
+    &[
+        "event.take_chooser",
+        "event.pitch_up",
+        "event.pitch_down",
+        "tools.reverse",
+        "tools.freeze_frame",
+        "tools.event_props",
+    ],
+    &[
+        "insert.empty_event",
         "insert.marker",
         "insert.region",
         "transport.jump_prev_marker",
@@ -1583,6 +1596,9 @@ impl App {
             UiAction::OpenPasteAttributesDialog => {
                 self.dlg.paste_attrs_open = true;
             }
+            UiAction::OpenTakeChooser => {
+                self.dlg.take_chooser = self.sel_events.iter().next().copied();
+            }
             UiAction::OpenPanCrop => {
                 self.dlg.pan_crop = self.sel_events.iter().next().copied();
             }
@@ -1830,7 +1846,7 @@ impl App {
         }
     }
 
-    fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
+    pub(crate) fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
         let label = menu_label(id, &self.prefs.shortcuts);
         if ui.checkbox(&mut value, label).changed() {
             self.exec_cmd(Some(ui.ctx()), id);
@@ -1891,9 +1907,25 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.smart_split");
                 self.cmd_menu_btn(ui, "edit.heal_events");
                 ui.menu_button("Take", |ui| {
+                    self.cmd_menu_btn(ui, "event.take_chooser");
+                    ui.separator();
                     self.cmd_menu_btn(ui, "event.next_take");
                     self.cmd_menu_btn(ui, "event.prev_take");
                     self.cmd_menu_btn(ui, "event.delete_active_take");
+                });
+                ui.menu_button("Tom (Pitch)", |ui| {
+                    self.cmd_menu_btn(ui, "event.pitch_up");
+                    self.cmd_menu_btn(ui, "event.pitch_down");
+                    self.cmd_menu_btn(ui, "event.pitch_up_oct");
+                    self.cmd_menu_btn(ui, "event.pitch_down_oct");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "event.toggle_pitch_lock");
+                    self.cmd_menu_btn(ui, "event.pitch_reset");
+                });
+                ui.menu_button("Sync Link", |ui| {
+                    self.cmd_menu_btn(ui, "event.sync_link_create");
+                    self.cmd_menu_btn(ui, "event.sync_link_select");
+                    self.cmd_menu_btn(ui, "event.sync_link_unlink");
                 });
                 ui.menu_button("Ferramenta de edição", |ui| {
                     for id in [
@@ -1907,6 +1939,14 @@ impl App {
                     ui.separator();
                     for mode in neoveg_engine::session::EditMode::NORMAL_MODES {
                         self.cmd_menu_btn(ui, mode.command_id());
+                    }
+                    ui.separator();
+                    for id in [
+                        "edit.tool.axis.both",
+                        "edit.tool.axis.horizontal",
+                        "edit.tool.axis.vertical",
+                    ] {
+                        self.cmd_menu_btn(ui, id);
                     }
                     ui.separator();
                     self.cmd_menu_btn(ui, "edit.tool.next");
@@ -2121,6 +2161,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.gen_text");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
+                self.cmd_menu_btn(ui, "insert.empty_event");
                 ui.separator();
                 ui.label("Envelopes da trilha selecionada:");
                 self.cmd_menu_btn(ui, "insert.env_volume");
@@ -2413,6 +2454,46 @@ impl App {
                 None,
                 "edit.tool.zoom",
             );
+            if matches!(
+                tool,
+                neoveg_engine::session::EditTool::Selection
+                    | neoveg_engine::session::EditTool::Zoom
+            ) {
+                let axis = self.session.box_axis;
+                let axis_btn = egui::Button::new(axis.short_name())
+                    .min_size(egui::vec2(38.0, ui.spacing().interact_size.y));
+                let axis_menu = egui::menu::menu_custom_button(ui, axis_btn, |ui| {
+                    for (mode, cmd_id) in [
+                        (
+                            neoveg_engine::session::BoxAxisMode::Both,
+                            "edit.tool.axis.both",
+                        ),
+                        (
+                            neoveg_engine::session::BoxAxisMode::Horizontal,
+                            "edit.tool.axis.horizontal",
+                        ),
+                        (
+                            neoveg_engine::session::BoxAxisMode::Vertical,
+                            "edit.tool.axis.vertical",
+                        ),
+                    ] {
+                        if ui.selectable_label(axis == mode, mode.name()).clicked() {
+                            self.exec_cmd(Some(ui.ctx()), cmd_id);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                axis_menu.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "Selecionar eixo de Seleção/Zoom",
+                    )
+                });
+                axis_menu
+                    .response
+                    .on_hover_text(format!("Eixo da caixa: {}", axis.name()));
+            }
             ui.separator();
 
             // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21 (pp. 75–78):
@@ -3560,5 +3641,7 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::OpenBracket => Key::OpenBracket,
         ShortcutKey::CloseBracket => Key::CloseBracket,
         ShortcutKey::Backslash => Key::Backslash,
+        ShortcutKey::Equals => Key::Equals,
+        ShortcutKey::Minus => Key::Minus,
     }
 }

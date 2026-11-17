@@ -597,6 +597,12 @@ pub struct Dialogs {
     pub gen_editor: Option<Id>,
     pub paste_attrs_open: bool,
     pub paste_attrs_mask: neoveg_engine::session::PasteAttributesMask,
+    pub take_chooser: Option<Id>,
+    take_chooser_selected: Option<usize>,
+    take_chooser_tex: Option<(egui::TextureHandle, (Id, usize))>,
+    take_chooser_add_media: Option<Id>,
+    take_chooser_name_buf: String,
+    take_chooser_renamed_idx: Option<(Id, usize)>,
     pub shortcuts: bool,
     pub prefs_open: bool,
     pub prefs_tab: PrefsCategory,
@@ -803,6 +809,7 @@ impl App {
         self.fx_window(ctx);
         self.gen_editor_window(ctx);
         self.paste_attributes_window(ctx);
+        self.take_chooser_window(ctx);
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
@@ -896,6 +903,7 @@ impl App {
                 ui.checkbox(&mut mask.pan_crop, "Pan/Crop (quadros-chave)");
                 ui.checkbox(&mut mask.gain_db, "Ganho de áudio (dB)");
                 ui.checkbox(&mut mask.rate, "Taxa de reprodução (Velocidade)");
+                ui.checkbox(&mut mask.pitch, "Tom (Pitch Shift / Preservar tom)");
                 ui.checkbox(&mut mask.fades, "Fades de entrada e saída");
                 ui.checkbox(&mut mask.switches, "Opções (Mudo, Loop, Reverso, Proporção)");
                 ui.checkbox(&mut mask.transition, "Transição de entrada");
@@ -910,6 +918,7 @@ impl App {
                             pan_crop: false,
                             gain_db: false,
                             rate: false,
+                            pitch: false,
                             fades: false,
                             switches: false,
                             transition: false,
@@ -938,6 +947,400 @@ impl App {
             self.dlg.paste_attrs_open = false;
         } else if !open || cancel {
             self.dlg.paste_attrs_open = false;
+        }
+    }
+
+    /// Diálogo **Take Chooser** (manual do VEGAS Pro 21, p. 347): lista os takes
+    /// do evento selecionado, mostra miniatura de pré-visualização, permite
+    /// renomear, reordenar, adicionar mídia como take e definir o take ativo.
+    fn take_chooser_window(&mut self, ctx: &egui::Context) {
+        use neoveg_engine::{model::Take, takes};
+
+        let Some(id) = self.dlg.take_chooser else {
+            return;
+        };
+        let Some((ti, ei)) = self.project.find_event(id) else {
+            self.dlg.take_chooser = None;
+            self.dlg.take_chooser_tex = None;
+            return;
+        };
+        let is_video = self.project.tracks[ti].kind == TrackKind::Video;
+        let track_locked = self.project.tracks[ti].locked;
+        let ev = self.project.tracks[ti].events[ei].clone();
+        let list = takes::takes(&ev);
+        let active = takes::active_index(&ev);
+        let sel_idx = self
+            .dlg
+            .take_chooser_selected
+            .filter(|&i| i < list.len())
+            .unwrap_or(active);
+        if self.dlg.take_chooser_renamed_idx != Some((id, sel_idx)) {
+            self.dlg.take_chooser_name_buf = list
+                .get(sel_idx)
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+            self.dlg.take_chooser_renamed_idx = Some((id, sel_idx));
+        }
+
+        // Prévia visual do take selecionado (para faixas de vídeo)
+        if is_video {
+            let key = (id, sel_idx);
+            let need_tex = self
+                .dlg
+                .take_chooser_tex
+                .as_ref()
+                .is_none_or(|(_, k)| *k != key);
+            if need_tex {
+                if let Some(tk) = list.get(sel_idx) {
+                    if let Some(m) = self.project.media(tk.media_id).cloned() {
+                        let local = if (self.cursor >= ev.start && self.cursor <= ev.end())
+                            && ev.length > Ticks::ZERO
+                        {
+                            self.cursor - ev.start
+                        } else {
+                            ev.length.div_i64(2)
+                        };
+                        let raw_t = tk.offset + ev.rate.scale_ticks(local);
+                        let mt = match m.duration {
+                            Some(d) if d > Ticks::ZERO => raw_t.clamp_safe(Ticks::ZERO, d),
+                            _ => raw_t.max(Ticks::ZERO),
+                        };
+                        if let Some(img) = self.media.video_frame(&m, mt, 288, 162) {
+                            let ci = super::rgba_to_color_image(&img);
+                            let tex = ctx.load_texture(
+                                "take_chooser_preview",
+                                ci,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.dlg.take_chooser_tex = Some((tex, key));
+                        } else {
+                            self.dlg.take_chooser_tex = None;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.dlg.take_chooser_tex = None;
+        }
+
+        let sel_take_opt = list.get(sel_idx).cloned();
+        let sel_media_info = sel_take_opt
+            .as_ref()
+            .and_then(|tk| self.project.media(tk.media_id))
+            .map(|m| (m.name.clone(), m.info.clone()));
+        let add_candidates: Vec<(Id, String)> = self
+            .project
+            .media
+            .iter()
+            .filter(|m| if is_video { m.has_video } else { m.has_audio })
+            .map(|m| (m.id, m.name.clone()))
+            .collect();
+        if self
+            .dlg
+            .take_chooser_add_media
+            .is_none_or(|mid| !add_candidates.iter().any(|(cid, _)| *cid == mid))
+        {
+            self.dlg.take_chooser_add_media = add_candidates.first().map(|(cid, _)| *cid);
+        }
+
+        let mut open = true;
+        let mut new_sel = sel_idx;
+        let mut activate_idx: Option<usize> = None;
+        let mut move_delta: Option<isize> = None;
+        let mut delete_idx: Option<usize> = None;
+        let mut rename_apply: Option<(usize, String)> = None;
+        let mut add_media: Option<Id> = None;
+        let mut close_dlg = false;
+
+        let editable = !track_locked && !ev.locked;
+        egui::Window::new(format!("Escolher take — {}", ev.name))
+            .open(&mut open)
+            .resizable(true)
+            .default_size([560.0, 360.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.columns(2, |cols| {
+                    let left = &mut cols[0];
+                    left.label(
+                        egui::RichText::new(format!(
+                            "Takes do evento ({} de {})",
+                            active + 1,
+                            list.len()
+                        ))
+                        .strong(),
+                    );
+                    left.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("take_chooser_list")
+                        .max_height(190.0)
+                        .show(left, |ui| {
+                            for (idx, tk) in list.iter().enumerate() {
+                                let name = takes::display_name(tk, |mid| {
+                                    self.project.media(mid).map(|m| m.name.clone())
+                                });
+                                let tag = if idx == active { " [Ativo]" } else { "" };
+                                let resp = ui.selectable_label(
+                                    idx == sel_idx,
+                                    format!("{}. {name}{tag}", idx + 1),
+                                );
+                                if resp.clicked() {
+                                    new_sel = idx;
+                                }
+                                if resp.double_clicked() && editable {
+                                    new_sel = idx;
+                                    activate_idx = Some(idx);
+                                    close_dlg = true;
+                                }
+                            }
+                        });
+                    left.add_space(4.0);
+                    left.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(editable && sel_idx != active, egui::Button::new("Ativar"))
+                            .clicked()
+                        {
+                            activate_idx = Some(sel_idx);
+                        }
+                        if ui
+                            .add_enabled(editable && sel_idx > 0, egui::Button::new("Subir"))
+                            .clicked()
+                        {
+                            move_delta = Some(-1);
+                        }
+                        if ui
+                            .add_enabled(
+                                editable && sel_idx + 1 < list.len(),
+                                egui::Button::new("Descer"),
+                            )
+                            .clicked()
+                        {
+                            move_delta = Some(1);
+                        }
+                        if ui
+                            .add_enabled(editable && list.len() > 1, egui::Button::new("Excluir"))
+                            .clicked()
+                        {
+                            delete_idx = Some(sel_idx);
+                        }
+                    });
+                    if !add_candidates.is_empty() {
+                        left.separator();
+                        left.label(egui::RichText::new("Adicionar mídia como take:").small());
+                        let sel_add_label = self
+                            .dlg
+                            .take_chooser_add_media
+                            .and_then(|mid| {
+                                add_candidates
+                                    .iter()
+                                    .find(|(cid, _)| *cid == mid)
+                                    .map(|(_, n)| n.as_str())
+                            })
+                            .unwrap_or("Selecionar mídia...");
+                        left.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("take_chooser_add_combo")
+                                .selected_text(sel_add_label)
+                                .width(155.0)
+                                .show_ui(ui, |ui| {
+                                    for (cid, cname) in &add_candidates {
+                                        ui.selectable_value(
+                                            &mut self.dlg.take_chooser_add_media,
+                                            Some(*cid),
+                                            cname,
+                                        );
+                                    }
+                                });
+                            if ui
+                                .add_enabled(
+                                    editable && self.dlg.take_chooser_add_media.is_some(),
+                                    egui::Button::new("+ Take"),
+                                )
+                                .clicked()
+                            {
+                                add_media = self.dlg.take_chooser_add_media;
+                            }
+                        });
+                    }
+
+                    let right = &mut cols[1];
+                    right.label(egui::RichText::new("Prévia e propriedades").strong());
+                    right.add_space(4.0);
+                    let preview_size = egui::vec2(240.0, 135.0);
+                    let (prev_rect, _) =
+                        right.allocate_exact_size(preview_size, egui::Sense::hover());
+                    right.painter().rect_filled(
+                        prev_rect,
+                        2.0,
+                        egui::Color32::from_rgb(18, 20, 24),
+                    );
+                    if let Some((tex, key)) = &self.dlg.take_chooser_tex {
+                        if *key == (id, sel_idx) {
+                            let ts = tex.size_vec2();
+                            let scale = (prev_rect.width() / ts.x.max(1.0))
+                                .min(prev_rect.height() / ts.y.max(1.0));
+                            let draw_sz = ts * scale;
+                            let draw_r = egui::Rect::from_center_size(prev_rect.center(), draw_sz);
+                            right.painter().image(
+                                tex.id(),
+                                draw_r,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    } else {
+                        let msg = if is_video {
+                            "(Sem quadro decodificado)"
+                        } else {
+                            "Evento de áudio"
+                        };
+                        right.painter().text(
+                            prev_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            msg,
+                            egui::FontId::proportional(11.0),
+                            self.theme.text_muted,
+                        );
+                    }
+                    right.add_space(6.0);
+                    if let Some((mname, minfo)) = &sel_media_info {
+                        right.label(egui::RichText::new(format!("Mídia: {mname}")).small());
+                        if !minfo.is_empty() {
+                            right.label(
+                                egui::RichText::new(minfo)
+                                    .small()
+                                    .color(self.theme.text_muted),
+                            );
+                        }
+                    }
+                    if let Some(tk) = &sel_take_opt {
+                        right.label(
+                            egui::RichText::new(format!("Offset: {}", self.fmt_time(tk.offset)))
+                                .small(),
+                        );
+                    }
+                    right.add_space(4.0);
+                    right.horizontal(|ui| {
+                        ui.label("Nome:");
+                        let te = ui.add_enabled(
+                            editable,
+                            egui::TextEdit::singleline(&mut self.dlg.take_chooser_name_buf)
+                                .desired_width(130.0),
+                        );
+                        let enter_pressed =
+                            te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (enter_pressed
+                            || ui
+                                .add_enabled(editable, egui::Button::new("Salvar"))
+                                .clicked())
+                            && editable
+                        {
+                            rename_apply =
+                                Some((sel_idx, self.dlg.take_chooser_name_buf.trim().to_string()));
+                        }
+                    });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(editable, egui::Button::new("OK")).clicked() {
+                        activate_idx = Some(new_sel);
+                        close_dlg = true;
+                    }
+                    if ui.button("Fechar").clicked() {
+                        close_dlg = true;
+                    }
+                });
+            });
+
+        self.dlg.take_chooser_selected = Some(new_sel);
+
+        if let Some((ridx, new_name)) = rename_apply {
+            let mut updated = list.clone();
+            if let Some(tk) = updated.get_mut(ridx) {
+                if tk.name != new_name {
+                    tk.name = new_name;
+                    self.checkpoint();
+                    if let Some(ev_mut) = self.project.event_mut(id) {
+                        takes::replace_takes(ev_mut, updated, active);
+                    }
+                    self.changed();
+                }
+            }
+        }
+        if let Some(delta) = move_delta {
+            let target = sel_idx as isize + delta;
+            if target >= 0 && (target as usize) < list.len() {
+                let tidx = target as usize;
+                let mut reordered = list.clone();
+                reordered.swap(sel_idx, tidx);
+                let new_active = if active == sel_idx {
+                    tidx
+                } else if active == tidx {
+                    sel_idx
+                } else {
+                    active
+                };
+                self.checkpoint();
+                if let Some(ev_mut) = self.project.event_mut(id) {
+                    takes::replace_takes(ev_mut, reordered, new_active);
+                }
+                self.dlg.take_chooser_selected = Some(tidx);
+                self.dlg.take_chooser_renamed_idx = None;
+                self.dlg.take_chooser_tex = None;
+                self.changed();
+            }
+        }
+        if let Some(didx) = delete_idx {
+            self.checkpoint();
+            let removed = self
+                .project
+                .event_mut(id)
+                .is_some_and(|ev_mut| takes::delete_take(ev_mut, didx));
+            if removed {
+                let next_sel = didx.min(list.len().saturating_sub(2));
+                self.dlg.take_chooser_selected = Some(next_sel);
+                self.dlg.take_chooser_renamed_idx = None;
+                self.dlg.take_chooser_tex = None;
+                self.changed();
+            } else {
+                self.undo.pop();
+            }
+        }
+        if let Some(mid) = add_media {
+            if let Some(m) = self.project.media(mid).cloned() {
+                let tk = Take {
+                    media_id: m.id,
+                    offset: Ticks::ZERO,
+                    name: m.name,
+                };
+                self.checkpoint();
+                let added = self
+                    .project
+                    .event_mut(id)
+                    .is_some_and(|ev_mut| takes::add_take(ev_mut, tk, true));
+                if added {
+                    let next_active = list.len();
+                    self.dlg.take_chooser_selected = Some(next_active);
+                    self.dlg.take_chooser_renamed_idx = None;
+                    self.dlg.take_chooser_tex = None;
+                    self.changed();
+                } else {
+                    self.undo.pop();
+                }
+            }
+        }
+        if let Some(aidx) = activate_idx {
+            if aidx != active {
+                self.session.set_active_take(id, aidx);
+                self.sync_after_session();
+            }
+        }
+        if !open || close_dlg {
+            self.dlg.take_chooser = None;
+            self.dlg.take_chooser_tex = None;
+            self.dlg.take_chooser_renamed_idx = None;
         }
     }
 
@@ -1072,15 +1475,26 @@ impl App {
             .effective_time_format(self.opts.time_format);
         let mut open = true;
         let mut changed = false;
-        let media_info = {
+        let (media_info, sync_master_name, has_sync_followers) = {
             let Some(e) = self.project.event(id) else {
                 return;
             };
-            self.project
+            let info = self
+                .project
                 .media(e.media_id)
                 .map(|m| format!("{}  —  {}", m.name, m.info))
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let master_name = e.sync_link_master.and_then(|mid| {
+                self.project
+                    .event(mid)
+                    .map(|me| format!("{} ({})", me.name, self.fmt_time(me.start)))
+            });
+            let followers = self.session.has_sync_followers(id);
+            (info, master_name, followers)
         };
+        let mut unlink_sync = false;
+        let mut select_sync = false;
+        let mut open_tc = false;
         let mut open_pc = false;
         let mut open_fx = false;
         egui::Window::new("Propriedades do evento")
@@ -1133,6 +1547,28 @@ impl App {
                         changed |= ui
                             .add(egui::Slider::new(&mut e.gain_db, -40.0..=20.0).suffix(" dB"))
                             .changed();
+                        ui.end_row();
+                        ui.label("Tom (Pitch Shift)");
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut e.pitch_semitones, -24.0..=24.0)
+                                            .step_by(0.1)
+                                            .suffix(" st"),
+                                    )
+                                    .changed();
+                                if e.pitch_semitones.abs() > 1e-4
+                                    && ui.small_button("0 st").clicked()
+                                {
+                                    e.pitch_semitones = 0.0;
+                                    changed = true;
+                                }
+                            });
+                            changed |= ui
+                                .checkbox(&mut e.lock_pitch_to_stretch, "Preservar tom ao esticar")
+                                .changed();
+                        });
                         ui.end_row();
                     }
                     ui.label("Fade de entrada");
@@ -1206,6 +1642,29 @@ impl App {
                         });
                         ui.end_row();
                     }
+                    ui.label("Sync Link");
+                    ui.horizontal(|ui| {
+                        if let Some(mname) = &sync_master_name {
+                            ui.label(format!("Segue: {mname}"));
+                            if ui.small_button("Desvincular").clicked() {
+                                unlink_sync = true;
+                            }
+                            if ui.small_button("Selecionar rede").clicked() {
+                                select_sync = true;
+                            }
+                        } else if has_sync_followers {
+                            ui.label("Evento mestre com seguidores");
+                            if ui.small_button("Selecionar rede").clicked() {
+                                select_sync = true;
+                            }
+                            if ui.small_button("Liberar seguidores").clicked() {
+                                unlink_sync = true;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("Sem vínculo de sincronização").weak());
+                        }
+                    });
+                    ui.end_row();
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -1215,8 +1674,30 @@ impl App {
                     if ui.button("Efeitos do evento...").clicked() {
                         open_fx = true;
                     }
+                    if ui.button("Escolher take...").clicked() {
+                        open_tc = true;
+                    }
                 });
             });
+        if unlink_sync {
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.session.unlink_sync_links();
+            self.sync_after_session();
+        }
+        if select_sync {
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.session.select_sync_linked();
+            self.sync_after_session();
+        }
+        if open_tc {
+            self.dlg.take_chooser = Some(id);
+        }
         if open_pc {
             self.dlg.pan_crop = Some(id);
         }
@@ -3647,6 +4128,8 @@ fn capture_shortcut(ctx: &egui::Context) -> Option<Option<Shortcut>> {
         (Key::OpenBracket, ShortcutKey::OpenBracket),
         (Key::CloseBracket, ShortcutKey::CloseBracket),
         (Key::Backslash, ShortcutKey::Backslash),
+        (Key::Equals, ShortcutKey::Equals),
+        (Key::Minus, ShortcutKey::Minus),
     ];
     for &(ek, sk) in KEYS {
         if ctx.input(|i| i.key_pressed(ek)) {

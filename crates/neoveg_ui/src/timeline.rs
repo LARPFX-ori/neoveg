@@ -16,7 +16,8 @@ use keyframes::KfArea;
 use neoveg_engine::media::audio::WaveChannel;
 use neoveg_engine::session::{
     apply_roll_from_snapshot, apply_shuffle_from_snapshot, apply_slide_from_snapshot,
-    apply_stretch_from_snapshot, EditMode, EditTool, StretchEventSnapshot, TrackEventSnapshot,
+    apply_stretch_from_snapshot, BoxAxisMode, EditMode, EditTool, StretchEventSnapshot,
+    TrackEventSnapshot,
 };
 use neoveg_engine::track_keyframes::KfRowKind;
 
@@ -106,6 +107,7 @@ enum Drag {
         origin_t: Ticks,
         origin_track: usize,
         orig: Vec<(Id, Ticks, usize)>,
+        sync_followers: Vec<(Id, Ticks)>,
     },
     Trim {
         left: bool,
@@ -134,6 +136,7 @@ enum Drag {
         anchor_orig_start: Ticks,
         snap: Vec<TrackEventSnapshot>,
         partners: Vec<(Id, Ticks)>,
+        sync_followers: Vec<(Id, Ticks)>,
     },
     Slide {
         anchor_id: Id,
@@ -142,6 +145,7 @@ enum Drag {
         anchor_orig_start: Ticks,
         snap: Vec<TrackEventSnapshot>,
         partners: Vec<(Id, Ticks)>,
+        sync_followers: Vec<(Id, Ticks)>,
     },
     Stretch {
         left: bool,
@@ -716,10 +720,24 @@ impl App {
         self.rename_popup(ui);
     }
 
+    fn effective_box_rect(&self, raw: Rect, lanes: Rect) -> Rect {
+        match self.session.box_axis {
+            BoxAxisMode::Both => raw,
+            BoxAxisMode::Horizontal => Rect::from_min_max(
+                pos2(raw.left(), lanes.top()),
+                pos2(raw.right(), lanes.bottom()),
+            ),
+            BoxAxisMode::Vertical => Rect::from_min_max(
+                pos2(lanes.left(), raw.top()),
+                pos2(lanes.right(), raw.bottom()),
+            ),
+        }
+    }
+
     /// Fim da caixa das ferramentas Seleção e Zoom (manual do VEGAS Pro 21,
     /// pp. 239–240). Seleção: seleciona os eventos que a caixa toca (Shift ou
-    /// Ctrl somam à seleção). Zoom: o trecho da caixa ocupa a largura da
-    /// linha do tempo.
+    /// Ctrl somam à seleção). Zoom: o trecho da caixa ocupa a largura (ou
+    /// altura das trilhas no eixo vertical) da linha do tempo.
     fn finish_box(
         &mut self,
         rect: Rect,
@@ -729,7 +747,30 @@ impl App {
         mods: egui::Modifiers,
     ) {
         let left = lanes.left();
+        let axis = self.session.box_axis;
+        let rect = self.effective_box_rect(rect, lanes);
         if zoom {
+            if axis == BoxAxisMode::Vertical {
+                if rect.height() < 8.0 {
+                    return;
+                }
+                let hit_tracks: Vec<usize> = layout
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ti, &(y0, h))| {
+                        (y0 + h >= rect.top() && y0 <= rect.bottom()).then_some(ti)
+                    })
+                    .collect();
+                if !hit_tracks.is_empty() {
+                    let target_h = (lanes.height() / hit_tracks.len() as f32).clamp(32.0, 220.0);
+                    for ti in hit_tracks {
+                        if let Some(tr) = self.project.tracks.get_mut(ti) {
+                            tr.height = target_h;
+                        }
+                    }
+                }
+                return;
+            }
             // caixa muito estreita é um clique (tratado em `clicked`)
             if rect.width() < 4.0 {
                 return;
@@ -749,8 +790,12 @@ impl App {
             let Some(&(y0, h)) = layout.get(ti) else {
                 continue;
             };
+            if axis == BoxAxisMode::Vertical && (y0 + h < rect.top() || y0 > rect.bottom()) {
+                continue;
+            }
             for e in &tr.events {
-                if self.event_rect(e, left, y0, h).intersects(rect) {
+                if axis == BoxAxisMode::Vertical || self.event_rect(e, left, y0, h).intersects(rect)
+                {
                     hits.push(e.id);
                 }
             }
@@ -2552,7 +2597,7 @@ impl App {
         }
         // caixa das ferramentas Seleção e Zoom
         if let (Drag::Box { start, .. }, Some(cur)) = (&self.tl.drag, self.tl.box_cur) {
-            let r = Rect::from_two_pos(*start, cur);
+            let r = self.effective_box_rect(Rect::from_two_pos(*start, cur), lanes);
             let stroke = Stroke::new(1.0_f32, self.theme.text_primary);
             let corners = [
                 r.left_top(),
@@ -2865,6 +2910,12 @@ impl App {
                             .filter(|pid| !snap.iter().any(|s| s.id == **pid))
                             .filter_map(|pid| self.project.event(*pid).map(|ev| (*pid, ev.start)))
                             .collect();
+                        let masters: HashSet<Id> = snap
+                            .iter()
+                            .map(|s| s.id)
+                            .chain(ids.iter().copied())
+                            .collect();
+                        let sync_followers = self.session.sync_followers_for(&masters);
                         self.tl.drag = Drag::Slide {
                             anchor_id: id,
                             track_idx: ti,
@@ -2872,6 +2923,7 @@ impl App {
                             anchor_orig_start,
                             snap,
                             partners,
+                            sync_followers,
                         };
                         return;
                     }
@@ -2896,6 +2948,12 @@ impl App {
                                     self.project.event(*pid).map(|ev| (*pid, ev.start))
                                 })
                                 .collect();
+                            let masters: HashSet<Id> = snap
+                                .iter()
+                                .map(|s| s.id)
+                                .chain(ids.iter().copied())
+                                .collect();
+                            let sync_followers = self.session.sync_followers_for(&masters);
                             self.tl.drag = Drag::Shuffle {
                                 anchor_id: id,
                                 track_idx: ti,
@@ -2903,6 +2961,7 @@ impl App {
                                 anchor_orig_start,
                                 snap,
                                 partners,
+                                sync_followers,
                             };
                             return;
                         }
@@ -2919,6 +2978,7 @@ impl App {
                             let mut c = self.project.tracks[t].events[e].clone();
                             c.id = new_id();
                             c.group = c.group.map(|g| *gm.entry(g).or_insert_with(new_id));
+                            c.sync_link_master = None;
                             c.fx = c.fx.iter().map(|f| f.duplicate()).collect();
                             if *i == id {
                                 anchor = c.id;
@@ -2947,6 +3007,7 @@ impl App {
                             origin_t: ot,
                             origin_track: ti,
                             orig,
+                            sync_followers: Vec::new(),
                         };
                         return;
                     }
@@ -2958,6 +3019,7 @@ impl App {
                                 .map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t))
                         })
                         .collect();
+                    let sync_followers = self.session.sync_followers_for(&ids);
                     let anchor_start = self.project.tracks[ti].events[ei].start;
                     self.tl.drag = Drag::Move {
                         anchor_id: anchor,
@@ -2965,6 +3027,7 @@ impl App {
                         origin_t: ot,
                         origin_track: ti,
                         orig,
+                        sync_followers,
                     };
                 }
             }
@@ -3199,6 +3262,7 @@ impl App {
                 origin_t,
                 origin_track,
                 orig,
+                sync_followers,
             } => {
                 let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
                 let raw = anchor_start + (t - origin_t);
@@ -3262,6 +3326,11 @@ impl App {
                         e.start = st + dt;
                     }
                 }
+                for &(fid, f_orig) in &sync_followers {
+                    if let Some(fe) = self.project.event_mut(fid) {
+                        fe.start = (f_orig + dt).max(Ticks::ZERO);
+                    }
+                }
                 self.changed();
             }
             Drag::Shuffle {
@@ -3271,6 +3340,7 @@ impl App {
                 anchor_orig_start,
                 snap,
                 partners,
+                sync_followers,
             } => {
                 let target_t = anchor_orig_start + (t - origin_t);
                 if apply_shuffle_from_snapshot(
@@ -3281,6 +3351,16 @@ impl App {
                     target_t,
                     &partners,
                 ) {
+                    let actual_dt = self
+                        .project
+                        .event(anchor_id)
+                        .map(|e| e.start - anchor_orig_start)
+                        .unwrap_or(Ticks::ZERO);
+                    for &(fid, f_orig) in &sync_followers {
+                        if let Some(fe) = self.project.event_mut(fid) {
+                            fe.start = (f_orig + actual_dt).max(Ticks::ZERO);
+                        }
+                    }
                     self.changed();
                 }
             }
@@ -3291,6 +3371,7 @@ impl App {
                 anchor_orig_start,
                 snap,
                 partners,
+                sync_followers,
             } => {
                 let exclude: HashSet<Id> = snap.iter().map(|s| s.id).collect();
                 let raw = anchor_orig_start + (t - origin_t);
@@ -3306,6 +3387,16 @@ impl App {
                     fd,
                     &partners,
                 ) {
+                    let actual_dt = self
+                        .project
+                        .event(anchor_id)
+                        .map(|e| e.start - anchor_orig_start)
+                        .unwrap_or(Ticks::ZERO);
+                    for &(fid, f_orig) in &sync_followers {
+                        if let Some(fe) = self.project.event_mut(fid) {
+                            fe.start = (f_orig + actual_dt).max(Ticks::ZERO);
+                        }
+                    }
                     self.changed();
                 }
             }
@@ -3659,18 +3750,52 @@ impl App {
                     self.insert_generated(GenSpec::Text(TextSpec::default()));
                     ui.close_menu();
                 }
+                if ui.button("Inserir evento vazio aqui").clicked() {
+                    self.cursor = t;
+                    self.sel_track = Some(ti);
+                    self.session.insert_empty_event();
+                    self.sync_after_session();
+                    ui.close_menu();
+                }
+                if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
+                    ui.separator();
+                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                        for axis in BoxAxisMode::ALL {
+                            if ui
+                                .radio(self.session.box_axis == axis, axis.name())
+                                .clicked()
+                            {
+                                self.session.box_axis = axis;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
                 ui.separator();
                 self.track_menu(ui, ti);
             }
             _ => {
-                ui.label("—");
+                if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
+                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                        for axis in BoxAxisMode::ALL {
+                            if ui
+                                .radio(self.session.box_axis == axis, axis.name())
+                                .clicked()
+                            {
+                                self.session.box_axis = axis;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                } else {
+                    ui.label("—");
+                }
             }
         }
     }
 
     /// Submenu Take (manual do VEGAS Pro 21, p. 347): escolher o take ativo,
-    /// próximo/anterior e excluir o ativo. Escolher pela lista substitui o
-    /// diálogo Take Chooser (que pré-visualiza) por enquanto.
+    /// próximo/anterior, Take Chooser e excluir o ativo.
     fn take_submenu(&mut self, ui: &mut egui::Ui, e: &Event) {
         use neoveg_engine::takes;
         let list = takes::takes(e);
@@ -3695,6 +3820,8 @@ impl App {
                 self.sel_events.clear();
                 self.sel_events.insert(id);
             }
+            self.cmd_menu_btn(ui, "event.take_chooser");
+            ui.separator();
             self.cmd_menu_btn(ui, "event.next_take");
             self.cmd_menu_btn(ui, "event.prev_take");
             self.cmd_menu_btn(ui, "event.delete_active_take");
@@ -3928,6 +4055,33 @@ impl App {
             self.select_group();
             ui.close_menu();
         }
+        ui.menu_button("Sync Link", |ui| {
+            let can_link = self.sel_events.len() >= 2;
+            if ui
+                .add_enabled(
+                    can_link,
+                    egui::Button::new("Vincular seleção a este (Sync Link)"),
+                )
+                .clicked()
+            {
+                self.session.create_sync_links(Some(id));
+                self.sync_after_session();
+                ui.close_menu();
+            }
+            self.cmd_menu_btn(ui, "event.sync_link_select");
+            self.cmd_menu_btn(ui, "event.sync_link_unlink");
+        });
+        if !is_video {
+            ui.menu_button("Tom (Pitch)", |ui| {
+                self.cmd_menu_btn(ui, "event.pitch_up");
+                self.cmd_menu_btn(ui, "event.pitch_down");
+                self.cmd_menu_btn(ui, "event.pitch_up_oct");
+                self.cmd_menu_btn(ui, "event.pitch_down_oct");
+                ui.separator();
+                self.cmd_menu_chk(ui, e.lock_pitch_to_stretch, "event.toggle_pitch_lock");
+                self.cmd_menu_btn(ui, "event.pitch_reset");
+            });
+        }
         if is_video && ui.button("Congelar quadro no cursor").clicked() {
             self.freeze_frame();
             ui.close_menu();
@@ -4030,6 +4184,13 @@ impl App {
             painter.rect_filled(r, 0.0, self.theme.tl_sel_band);
         }
         let audio_map = self.media.audio_map();
+        let sync_masters: HashSet<Id> = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .filter_map(|e| e.sync_link_master)
+            .collect();
         for ti in 0..self.project.tracks.len() {
             let (y0, h) = layout[ti];
             if y0 + h < lanes.top() || y0 > lanes.bottom() {
@@ -4258,6 +4419,9 @@ impl App {
                 if !e.rate.is_normal() {
                     label.push_str(&format!("  [{:.0}%]", e.rate.percent_f64()));
                 }
+                if e.pitch_semitones.abs() > 0.05 {
+                    label.push_str(&format!("  [{:+.1} st]", e.pitch_semitones));
+                }
                 if e.reverse {
                     label.push_str("  [Rev]");
                 }
@@ -4274,10 +4438,45 @@ impl App {
                 if e.group.is_some() {
                     label.push_str("  [Grp]");
                 }
+                let is_sync = e.sync_link_master.is_some() || sync_masters.contains(&e.id);
+                if e.sync_link_master.is_some() {
+                    label.push_str("  [Sync←]");
+                } else if sync_masters.contains(&e.id) {
+                    label.push_str("  [Sync★]");
+                }
                 if let Some(tr) = &e.transition {
                     label = format!("[{}] {}", tr.kind.name(), label);
                 }
-                painter.with_clip_rect(hdr.intersect(lanes)).text(
+                let btns_w = if r.width() < 70.0 {
+                    2.0
+                } else if track.kind == TrackKind::Video {
+                    42.0
+                } else {
+                    24.0
+                };
+                let mut text_right = (r.right() - btns_w).min(lanes.right());
+                if r.width() >= 150.0 {
+                    let dur_str = self.fmt_time(e.length);
+                    let dur_galley = painter.layout_no_wrap(
+                        dur_str,
+                        FontId::monospace(9.5),
+                        hdr_fg.gamma_multiply(0.85),
+                    );
+                    let dur_w = dur_galley.size().x;
+                    if text_right - dur_w - 8.0 > r.left().max(lanes.left()) + 36.0 {
+                        let dx = text_right - dur_w - 4.0;
+                        painter.with_clip_rect(hdr.intersect(lanes)).galley(
+                            pos2(dx, hdr.top() + 1.5),
+                            dur_galley,
+                            hdr_fg,
+                        );
+                        text_right = dx - 4.0;
+                    }
+                }
+                let label_clip =
+                    Rect::from_min_max(hdr.min, pos2(text_right.max(hdr.left()), hdr.bottom()))
+                        .intersect(lanes);
+                painter.with_clip_rect(label_clip).text(
                     pos2(r.left().max(lanes.left()) + 4.0, hdr.top() + 1.0),
                     Align2::LEFT_TOP,
                     label,
@@ -4410,6 +4609,13 @@ impl App {
                         self.theme.tl_event_sel_border
                     };
                     Stroke::new(2.0_f32, sel_col)
+                } else if is_sync {
+                    let sync_col = if self.theme.dark_mode {
+                        Color32::from_rgb(168, 120, 240)
+                    } else {
+                        Color32::from_rgb(110, 55, 190)
+                    };
+                    Stroke::new(1.5_f32, sync_col)
                 } else {
                     Stroke::new(1.0_f32, self.theme.tl_event_border)
                 };

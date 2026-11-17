@@ -1128,3 +1128,82 @@ fn kittest_seletor_modos_ferramenta_normal_e_colar_atributos() {
         crate::model::Ticks::from_secs_i64(1)
     );
 }
+
+#[test]
+fn kittest_take_chooser_pitch_evento_vazio_e_eixo() {
+    use neoveg_engine::{model::Take, session::BoxAxisMode, takes};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Inserir evento vazio pela Tabela Única.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.empty_event");
+    harness.run_steps(2);
+    let empty_id = *harness.state().sel_events.iter().next().unwrap();
+    assert_eq!(
+        harness.state().project.event(empty_id).unwrap().name,
+        "Evento vazio"
+    );
+
+    // 2. Inserir dois geradores na trilha de vídeo e adicionar take alternativo -> abrir Take Chooser.
+    {
+        let app = harness.state_mut();
+        app.session.sel_track = Some(0);
+        app.cursor = crate::model::Ticks::from_secs_i64(8);
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.cursor = crate::model::Ticks::from_secs_i64(15);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.8, 0.2, 0.2, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let ev_vid_id = app.project.tracks[0].events[1].id;
+        let mid2 = app.project.media.last().unwrap().id;
+        if let Some(ev) = app.project.event_mut(ev_vid_id) {
+            assert!(takes::add_take(
+                ev,
+                Take {
+                    media_id: mid2,
+                    offset: crate::model::Ticks::ZERO,
+                    name: "Take B".into(),
+                },
+                true
+            ));
+        }
+        app.sel_events.clear();
+        app.sel_events.insert(ev_vid_id);
+        app.exec_cmd(Some(&ctx), "event.take_chooser");
+    }
+    harness.run_steps(3);
+    assert!(harness.state().dlg.take_chooser.is_some());
+    assert!(harness.query_by_label("Takes do evento (2 de 2)").is_some());
+
+    // Seleciona primeiro take, confirma OK e verifica mudança do ativo.
+    let ev_vid_id = harness.state().dlg.take_chooser.unwrap();
+    harness.get_by_label("1. Barras de cor").click();
+    harness.run_steps(2);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert!(harness.state().dlg.take_chooser.is_none());
+    assert_eq!(
+        takes::active_index(harness.state().project.event(ev_vid_id).unwrap()),
+        0
+    );
+
+    // 3. Seletor de eixo na barra de ferramentas quando Seleção está ativa.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "edit.tool.selection");
+    harness.run_steps(2);
+    harness
+        .get_by_label("Selecionar eixo de Seleção/Zoom")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label("Apenas horizontal").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().session.box_axis, BoxAxisMode::Horizontal);
+}

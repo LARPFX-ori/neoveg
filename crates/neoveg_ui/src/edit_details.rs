@@ -146,6 +146,7 @@ impl App {
             length: Ticks,
             offset: Ticks,
             rate: f64,
+            pitch_semitones: f32,
             gain_db: f32,
             mute: bool,
             locked: bool,
@@ -171,6 +172,7 @@ impl App {
                     length: e.length,
                     offset: e.offset,
                     rate: e.rate.as_f64(),
+                    pitch_semitones: e.pitch_semitones,
                     gain_db: e.gain_db,
                     mute: e.mute,
                     locked: e.locked,
@@ -191,6 +193,7 @@ impl App {
         let mut edit_len: Option<(usize, usize, Ticks)> = None;
         let mut edit_off: Option<(usize, usize, Ticks)> = None;
         let mut edit_rate: Option<(usize, usize, Rate)> = None;
+        let mut edit_pitch: Option<(usize, usize, f32)> = None;
         let mut edit_gain: Option<(usize, usize, f32)> = None;
         let mut toggle_mute: Option<(usize, usize)> = None;
         let mut toggle_lock: Option<(usize, usize)> = None;
@@ -208,6 +211,7 @@ impl App {
                     "Duração",
                     "Offset",
                     "Taxa",
+                    "Tom",
                     "Ganho",
                     "M",
                     "Bloq",
@@ -295,6 +299,19 @@ impl App {
                         }
                     }
                     if row.kind == TrackKind::Audio {
+                        let mut p_val = row.pitch_semitones;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut p_val)
+                                    .speed(0.25)
+                                    .range(-24.0..=24.0)
+                                    .fixed_decimals(1)
+                                    .suffix(" st"),
+                            )
+                            .changed()
+                        {
+                            edit_pitch = Some((row.ti, row.ei, p_val));
+                        }
                         let mut g = row.gain_db;
                         if ui
                             .add(
@@ -309,6 +326,7 @@ impl App {
                             edit_gain = Some((row.ti, row.ei, g));
                         }
                     } else {
+                        ui.label(egui::RichText::new("—").small().weak());
                         ui.label(egui::RichText::new("—").small().weak());
                     }
                     if ui.selectable_label(row.mute, "M").clicked() {
@@ -382,6 +400,22 @@ impl App {
                 .and_then(|t| t.events.get_mut(ei))
             {
                 e.rate = r;
+                dirty = true;
+            }
+        }
+        if let Some((ti, ei, p_val)) = edit_pitch {
+            self.checkpoint();
+            if let Some(e) = self
+                .project
+                .tracks
+                .get_mut(ti)
+                .and_then(|t| t.events.get_mut(ei))
+            {
+                e.pitch_semitones = if p_val.is_finite() {
+                    p_val.clamp(-24.0, 24.0)
+                } else {
+                    0.0
+                };
                 dirty = true;
             }
         }
