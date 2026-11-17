@@ -72,11 +72,17 @@ pub enum Icon {
     SurroundSpeakers,
     PluginPlug,
     Compositors,
+    EncoderQueue,
+    TrimSelection,
+    TrimStart,
+    TrimEnd,
+    InsertMarker,
+    InsertRegion,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 64] = [
+    pub const ALL: [Icon; 70] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -141,6 +147,12 @@ impl Icon {
         Icon::SurroundSpeakers,
         Icon::PluginPlug,
         Icon::Compositors,
+        Icon::EncoderQueue,
+        Icon::TrimSelection,
+        Icon::TrimStart,
+        Icon::TrimEnd,
+        Icon::InsertMarker,
+        Icon::InsertRegion,
     ];
 }
 
@@ -997,6 +1009,81 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 c.stroke(0.05, pal.ink),
                 StrokeKind::Inside,
             );
+        }
+        Icon::EncoderQueue => {
+            // pilhas de fila + triângulo verde de codificação (arte original)
+            c.p.rect_filled(c.rect(0.14, 0.16, 0.78, 0.34), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.14, 0.42, 0.60, 0.60), c.u(0.03), pal.cyan);
+            c.p.rect_filled(c.rect(0.14, 0.68, 0.56, 0.86), c.u(0.03), pal.muted);
+            c.poly(
+                &[(0.64, 0.44), (0.90, 0.64), (0.64, 0.84)],
+                pal.green,
+                Some((0.04, pal.ink)),
+            );
+        }
+        Icon::TrimSelection => {
+            // evento: só o trecho entre as duas marcas fica
+            c.p.rect_filled(c.rect(0.06, 0.38, 0.30, 0.66), c.u(0.03), pal.muted);
+            c.p.rect_filled(c.rect(0.70, 0.38, 0.94, 0.66), c.u(0.03), pal.muted);
+            let keep = c.rect(0.30, 0.34, 0.70, 0.70);
+            c.p.rect_filled(keep, c.u(0.03), pal.blue);
+            c.p.rect_stroke(keep, c.u(0.03), c.stroke(0.06, pal.ink), StrokeKind::Inside);
+            c.line(0.30, 0.16, 0.30, 0.86, pal.amber, 0.09);
+            c.line(0.70, 0.16, 0.70, 0.86, pal.amber, 0.09);
+        }
+        Icon::TrimStart => {
+            // o começo do evento sai até o cursor
+            c.p.rect_filled(c.rect(0.08, 0.38, 0.44, 0.66), c.u(0.03), pal.muted);
+            let keep = c.rect(0.44, 0.34, 0.92, 0.70);
+            c.p.rect_filled(keep, c.u(0.03), pal.blue);
+            c.p.rect_stroke(keep, c.u(0.03), c.stroke(0.06, pal.ink), StrokeKind::Inside);
+            c.line(0.44, 0.12, 0.44, 0.90, pal.red, 0.10);
+            c.poly(&[(0.16, 0.20), (0.32, 0.12), (0.32, 0.28)], pal.red, None);
+        }
+        Icon::TrimEnd => {
+            // o fim do evento sai a partir do cursor
+            let keep = c.rect(0.08, 0.34, 0.56, 0.70);
+            c.p.rect_filled(keep, c.u(0.03), pal.blue);
+            c.p.rect_stroke(keep, c.u(0.03), c.stroke(0.06, pal.ink), StrokeKind::Inside);
+            c.p.rect_filled(c.rect(0.56, 0.38, 0.92, 0.66), c.u(0.03), pal.muted);
+            c.line(0.56, 0.12, 0.56, 0.90, pal.red, 0.10);
+            c.poly(&[(0.84, 0.20), (0.68, 0.12), (0.68, 0.28)], pal.red, None);
+        }
+        Icon::InsertMarker => {
+            // marca numerada no alto da régua, com a linha descendo
+            c.poly(
+                &[
+                    (0.30, 0.12),
+                    (0.70, 0.12),
+                    (0.70, 0.36),
+                    (0.50, 0.48),
+                    (0.30, 0.36),
+                ],
+                pal.amber,
+                Some((0.06, pal.ink)),
+            );
+            c.line(0.50, 0.48, 0.50, 0.92, pal.amber, 0.09);
+        }
+        Icon::InsertRegion => {
+            // duas marcas nas pontas do trecho, ligadas no alto
+            c.p.rect_filled(
+                c.rect(0.12, 0.22, 0.88, 0.30),
+                0.0,
+                pal.green.gamma_multiply(0.6),
+            );
+            for x in [0.16_f32, 0.84] {
+                c.poly(
+                    &[
+                        (x - 0.10, 0.12),
+                        (x + 0.10, 0.12),
+                        (x + 0.10, 0.32),
+                        (x - 0.10, 0.32),
+                    ],
+                    pal.green,
+                    Some((0.05, pal.ink)),
+                );
+                c.line(x, 0.32, x, 0.92, pal.green, 0.08);
+            }
         }
     }
 }

@@ -88,10 +88,7 @@ pub fn convert_to_compatible(
     dest_dir: &Path,
     progress: &ConvertProgress,
 ) -> Result<Converted> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        convert_inner(src, dest_dir, progress)
-    }))
-    .unwrap_or_else(|_| {
+    crate::util::catch_isolated(|| convert_inner(src, dest_dir, progress)).unwrap_or_else(|_| {
         Err(anyhow!(
             "falha interna isolada ao converter {}",
             src.display()

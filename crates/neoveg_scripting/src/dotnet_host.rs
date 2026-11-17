@@ -11,7 +11,6 @@ use netcorehost::hostfxr::{
 };
 use netcorehost::pdcstring::PdCString;
 use std::ffi::OsStr;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, OnceLock};
 
@@ -25,6 +24,18 @@ pub struct DotnetEnv {
     pub tfm: String,
     pub framework_version: String,
     pub has_sdk: bool,
+    /// Versão do runtime `Microsoft.WindowsDesktop.App` com a mesma versão
+    /// principal do .NET usado (só no Windows). Com ela, os scripts
+    /// compilam com WinForms (`net*-windows`) e o host a carrega.
+    pub windows_desktop_version: Option<String>,
+}
+
+impl DotnetEnv {
+    /// Scripts podem usar `System.Windows.Forms` (Windows com o runtime
+    /// WindowsDesktop instalado).
+    pub fn use_winforms(&self) -> bool {
+        self.windows_desktop_version.is_some()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -213,7 +224,20 @@ pub fn find_dotnet_env() -> Result<DotnetEnv, NeovegError> {
         } else {
             None
         };
-        let tfm = format!("net{}.0", ver.major);
+        // WinForms só existe no Windows; o runtime WindowsDesktop precisa ter a
+        // mesma versão principal do .NET escolhido
+        let windows_desktop_version = if cfg!(windows) {
+            highest_versioned_subdir(&root.join("shared").join("Microsoft.WindowsDesktop.App"))
+                .filter(|(_, sv, _)| sv.major == ver.major)
+                .map(|(name, _, _)| name)
+        } else {
+            None
+        };
+        let tfm = if windows_desktop_version.is_some() {
+            format!("net{}.0-windows", ver.major)
+        } else {
+            format!("net{}.0", ver.major)
+        };
         return Ok(DotnetEnv {
             dotnet_root: root,
             hostfxr_path,
@@ -221,6 +245,7 @@ pub fn find_dotnet_env() -> Result<DotnetEnv, NeovegError> {
             tfm,
             framework_version,
             has_sdk,
+            windows_desktop_version,
         });
     }
     Err(NeovegError::Unsupported(
@@ -260,9 +285,16 @@ fn ensure_host_runtime_config(env: &DotnetEnv) -> Result<PathBuf, NeovegError> {
         "runtimeOptions": {
             "tfm": env.tfm,
             "rollForward": "LatestMajor",
-            "framework": {
-                "name": "Microsoft.NETCore.App",
-                "version": env.framework_version
+            // o WindowsDesktop inclui o Microsoft.NETCore.App
+            "framework": match &env.windows_desktop_version {
+                Some(v) => serde_json::json!({
+                    "name": "Microsoft.WindowsDesktop.App",
+                    "version": v
+                }),
+                None => serde_json::json!({
+                    "name": "Microsoft.NETCore.App",
+                    "version": env.framework_version
+                }),
             }
         }
     });
@@ -286,17 +318,72 @@ fn call_component_entry(
     } else {
         payload.as_ptr().cast()
     };
-    catch_unwind(AssertUnwindSafe(|| {
+    neoveg_common::util::catch_isolated(|| {
         // SAFETY: `func` é um ponteiro de função gerenciada carregado via
         // `Hostfxr` com assinatura padrão `ComponentEntryPoint(IntPtr args,
         // int sizeBytes) -> int` (`unsafe extern "system" fn(*const c_void, i32)
         // -> i32`); `ptr` aponta para `payload` válido e imutável durante toda
         // a chamada síncrona (ou nulo se `len_i32 == 0`).
         unsafe { func(ptr, len_i32) }
-    }))
+    })
     .map_err(|_| {
         NeovegError::Internal("falha inesperada (unwind) ao executar assembly .NET".into())
     })
+}
+
+/// Assinatura de [`media_probe_entry`], igual ao `MediaProbeFn` da ponte C#.
+type MediaProbeFn = extern "C" fn(u64, *const u8, i32, *mut u8, i32) -> i32;
+
+/// Ponto de entrada que a ponte C# chama para importar mídia durante o
+/// script (`MediaPool.AddMedia`). Grava em `out_ptr` a resposta JSON e
+/// devolve o tamanho; se não couber, devolve o tamanho pedido negativo; em
+/// argumentos inválidos ou falha interna, `i32::MIN`. Nunca deixa um pânico
+/// atravessar a fronteira (§0.6).
+#[allow(unsafe_code)]
+extern "C" fn media_probe_entry(
+    token: u64,
+    path_ptr: *const u8,
+    path_len: i32,
+    out_ptr: *mut u8,
+    out_cap: i32,
+) -> i32 {
+    neoveg_common::util::catch_isolated(|| {
+        let (Ok(plen), Ok(cap)) = (usize::try_from(path_len), usize::try_from(out_cap)) else {
+            return i32::MIN;
+        };
+        if path_ptr.is_null()
+            || out_ptr.is_null()
+            || plen > crate::vegas_cs::MAX_PROBE_PATH_BYTES
+            || cap == 0
+        {
+            return i32::MIN;
+        }
+        // SAFETY: a ponte C# (`Project.ImportMedia`) passa em `path_ptr` um
+        // bloco de `path_len` bytes alocado com `Marshal.AllocHGlobal` e só o
+        // libera depois que esta chamada síncrona retorna; o tamanho foi
+        // validado acima e o ponteiro não é nulo.
+        let path = unsafe { std::slice::from_raw_parts(path_ptr, plen) };
+        let reply = crate::vegas_cs::probe_media_for_script(token, path);
+        let Ok(n) = i32::try_from(reply.len()) else {
+            return i32::MIN;
+        };
+        if reply.len() > cap {
+            return -n;
+        }
+        // SAFETY: `out_ptr` é um bloco de `out_cap` bytes gravável, alocado
+        // pela ponte C# e vivo durante a chamada; `reply.len() <= cap` foi
+        // verificado acima, e os dois blocos não se sobrepõem (`reply` é um
+        // `Vec` novo do Rust).
+        unsafe { std::ptr::copy_nonoverlapping(reply.as_ptr(), out_ptr, reply.len()) };
+        n
+    })
+    .unwrap_or(i32::MIN)
+}
+
+/// Endereço de [`media_probe_entry`], passado à ponte C# no snapshot.
+pub fn media_probe_fn_addr() -> u64 {
+    let f: MediaProbeFn = media_probe_entry;
+    f as usize as u64
 }
 
 fn execute_on_host_thread(

@@ -139,6 +139,46 @@ pub struct RenderJob {
     pub settings: RenderSettings,
 }
 
+/// Resultado de um script .NET que rodou em segundo plano.
+enum ScriptOutcome {
+    Done(Result<Vec<String>, String>),
+    /// Pânico isolado na ponte (§0.6); a sessão da interface não mudou.
+    Panicked,
+}
+
+/// Script .NET em execução. Ele roda numa thread própria, sobre uma cópia da
+/// sessão: a interface continua viva (e atende as janelas do WinForms que o
+/// script abre, que travariam com a interface parada), mas a edição fica
+/// bloqueada até o fim, quando a cópia vira a sessão (§0, nada pela metade).
+pub(crate) struct ScriptJob {
+    path: PathBuf,
+    started: std::time::Instant,
+    media_before: std::collections::HashSet<u64>,
+    rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+}
+
+#[cfg(test)]
+impl ScriptJob {
+    /// Script "em andamento" para testes: termina com sucesso, devolvendo a
+    /// sessão dada, quando o teste manda `()` pelo canal devolvido.
+    pub(crate) fn fake(session: EditorSession) -> (Self, std::sync::mpsc::Sender<()>) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if done_rx.recv().is_ok() {
+                let _ = tx.send((ScriptOutcome::Done(Ok(Vec::new())), session));
+            }
+        });
+        let job = Self {
+            path: PathBuf::from("teste.cs"),
+            started: std::time::Instant::now(),
+            media_before: std::collections::HashSet::new(),
+            rx,
+        };
+        (job, done_tx)
+    }
+}
+
 pub struct App {
     pub session: EditorSession,
     pub prefs: Preferences,
@@ -178,6 +218,11 @@ pub struct App {
     pub explorer_dir: PathBuf,
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
+    pub(crate) script_job: Option<ScriptJob>,
+    /// Janela Efeitos de Vídeo (categorias, busca e miniaturas).
+    pub(crate) fx_browser: crate::fx_browser::FxBrowser,
+    /// Janela Geradores de Mídia (categorias, busca e miniaturas).
+    pub(crate) gen_browser: crate::gen_browser::GenBrowser,
     pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
@@ -195,10 +240,13 @@ pub struct App {
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
+    /// Sessões anteriores que não fecharam normalmente (janela de relatório).
+    pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
+    pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
 }
 
 impl Deref for App {
@@ -270,7 +318,8 @@ impl App {
         );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let recovery_offer = recovery::find_existing_recovery().is_some();
+        let recovery_offer = recovery::find_existing_recovery().is_some()
+            && !neoveg_engine::session_marker::other_instance_active();
         let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
         let want_welcome = prefs.show_welcome && open.is_none() && !recovery_offer;
         let welcome_open = want_welcome && !splash.active;
@@ -320,6 +369,9 @@ impl App {
             explorer_dir,
             explorer_filter: String::new(),
             render_job: None,
+            script_job: None,
+            fx_browser: Default::default(),
+            gen_browser: Default::default(),
             prerender_job: None,
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
@@ -337,10 +389,12 @@ impl App {
             gen_fonts: vec![],
             last_autosave: Instant::now(),
             recovery_offer,
+            crash_reports: Vec::new(),
             splash,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
+            encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -413,7 +467,8 @@ impl App {
 
     /// Salvamento automático para recuperação após falha (§0.7).
     fn autosave(&mut self) {
-        if !self.prefs.autosave_enabled
+        if self.recovery_offer
+            || !self.prefs.autosave_enabled
             || !self.dirty
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
@@ -426,7 +481,8 @@ impl App {
     }
 
     fn recovery_window(&mut self, ctx: &egui::Context) {
-        if !self.recovery_offer {
+        // com relatório de travamento, a recuperação é oferecida na janela dele
+        if !self.recovery_offer || !self.crash_reports.is_empty() {
             return;
         }
         let mut choice = None;
@@ -445,21 +501,24 @@ impl App {
                     }
                 });
             });
-        match choice {
-            Some(true) => {
-                self.recovery_offer = false;
-                if let Some(p) = recovery::find_existing_recovery() {
-                    self.open_project_path(p);
-                    self.path = None;
-                    self.dirty = true;
-                    self.set_status("Projeto recuperado. Salve-o com Salvar como...");
-                }
+        if let Some(recover) = choice {
+            self.resolve_recovery(recover);
+        }
+    }
+
+    /// Recupera (`true`) ou descarta (`false`) a cópia automática da sessão
+    /// anterior.
+    pub(crate) fn resolve_recovery(&mut self, recover: bool) {
+        self.recovery_offer = false;
+        if recover {
+            if let Some(p) = recovery::find_existing_recovery() {
+                self.open_project_path(p);
+                self.path = None;
+                self.dirty = true;
+                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
             }
-            Some(false) => {
-                self.recovery_offer = false;
-                recovery::clear_recovery();
-            }
-            None => {}
+        } else {
+            recovery::clear_recovery();
         }
     }
 
@@ -670,6 +729,14 @@ impl App {
         let items = self.project.media.clone();
         for m in items {
             self.media.remove(m.id);
+            self.spawn_media_load(m);
+        }
+    }
+
+    /// Abre em segundo plano a mídia de um item do projeto; o resultado
+    /// volta como `LoadMsg::Reloaded`.
+    fn spawn_media_load(&mut self, m: MediaItem) {
+        {
             let tx = self.loader_tx.clone();
             self.loading += 1;
             let spawned = util::spawn("recarregar-midia", move || {
@@ -1060,15 +1127,15 @@ impl App {
     }
 
     pub fn import_dialog(&mut self) {
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(media::IMAGE_EXTS);
+        all.extend_from_slice(media::VIDEO_EXTS);
+        all.extend_from_slice(media::AUDIO_EXTS);
+        all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter(
-                "Mídia suportada",
-                &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
-                    "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
-                    "flac", "ogg", "oga", "mp3", "m4a", "aac",
-                ],
-            )
+            .add_filter("Mídia suportada", &all)
+            .add_filter("Imagens", media::IMAGE_EXTS)
+            .add_filter("Áudio", media::AUDIO_EXTS)
             .add_filter("Todos os arquivos", &["*"])
             .pick_files()
         {
@@ -1078,7 +1145,7 @@ impl App {
 
     pub fn import_sequence_dialog(&mut self) {
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter("Imagens", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
+            .add_filter("Imagens", media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -1145,6 +1212,13 @@ impl App {
     }
 
     fn poll_loader(&mut self) {
+        // Com um script rodando, a sessão que vale no fim é a do script
+        // (`poll_script_job` a coloca no lugar desta): o que chegar agora
+        // (importação, mídia recarregada, proxy, pré-renderização) fica no
+        // canal e é aplicado depois, sobre a sessão do script, sem se perder.
+        if self.script_job.is_some() {
+            return;
+        }
         while let Ok(msg) = self.loader_rx.try_recv() {
             self.loading = self.loading.saturating_sub(1);
             match msg {
@@ -1457,6 +1531,20 @@ impl App {
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
+            UiAction::SendToEncoder => self.send_timeline_to_encoder(),
+            UiAction::EncoderStartQueue => {
+                self.encoder.start_queue(&self.media);
+                self.set_status("Fila do Neoveg Encoder iniciada");
+            }
+            UiAction::EncoderPauseQueue => {
+                self.encoder.runtime.toggle_pause();
+            }
+            UiAction::EncoderStopCurrent => {
+                self.encoder.runtime.stop_current();
+            }
+            UiAction::EncoderStopQueue => {
+                self.encoder.runtime.stop_queue();
+            }
             UiAction::SnapshotDialog => self.snapshot_dialog(),
             UiAction::OpenProjectProps => self.dlg.project_props = true,
             UiAction::OpenEventProps => {
@@ -1530,7 +1618,10 @@ impl App {
                 let c = self.cursor;
                 self.tl.center_on(c);
             }
-            UiAction::ZoomBy(f) => self.tl.zoom_by(f, None),
+            UiAction::ZoomBy(f) => {
+                let c = self.cursor;
+                self.tl.zoom_around_playhead(f, c);
+            }
             UiAction::JumpMarker(forward) => self.jump_marker(forward),
             UiAction::JumpMarkerIndex(idx) => {
                 if let Some(t) = self.session.jump_to_marker_index(idx) {
@@ -1545,7 +1636,12 @@ impl App {
     // -----------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.splash.active || self.welcome_open || ctx.wants_keyboard_input() {
+        // com um script rodando, a sessão é dele até o fim
+        if self.splash.active
+            || self.welcome_open
+            || self.script_job.is_some()
+            || ctx.wants_keyboard_input()
+        {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
@@ -1581,15 +1677,27 @@ impl App {
         // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
         if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                    .max(Ticks::from_raw(1));
+                let dt = Ticks::from_secs_f64_clamped(
+                    1.0 / self
+                        .tl
+                        .px_per_sec
+                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+                        as f64,
+                )
+                .max(Ticks::from_raw(1));
                 let c = self.cursor;
                 self.set_cursor(c - dt);
                 return;
             }
             if pressed(Key::ArrowRight) {
-                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                    .max(Ticks::from_raw(1));
+                let dt = Ticks::from_secs_f64_clamped(
+                    1.0 / self
+                        .tl
+                        .px_per_sec
+                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+                        as f64,
+                )
+                .max(Ticks::from_raw(1));
                 let c = self.cursor;
                 self.set_cursor(c + dt);
                 return;
@@ -1650,7 +1758,7 @@ impl App {
     // Barras de menu e ferramentas (despachadas pela Tabela Única)
     // -----------------------------------------------------------------
 
-    fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
         let label = menu_label(id, &self.prefs.shortcuts);
         if ui
             .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
@@ -1721,6 +1829,7 @@ impl App {
                 });
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.render");
+                self.cmd_menu_btn(ui, "file.send_to_encoder");
                 self.cmd_menu_btn(ui, "file.snapshot");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.project_props");
@@ -1738,6 +1847,11 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.delete");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.split");
+                ui.menu_button("Take", |ui| {
+                    self.cmd_menu_btn(ui, "event.next_take");
+                    self.cmd_menu_btn(ui, "event.prev_take");
+                    self.cmd_menu_btn(ui, "event.delete_active_take");
+                });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
                 self.cmd_menu_btn(ui, "edit.insert_time");
@@ -1924,6 +2038,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_chk(ui, self.opts.show_envelopes, "view.envelopes");
                 self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
+                self.cmd_menu_btn(ui, "view.waveform_zoom_in");
+                self.cmd_menu_btn(ui, "view.waveform_zoom_out");
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
@@ -1961,6 +2077,15 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                ui.menu_button("Neoveg Encoder", |ui| {
+                    self.cmd_menu_btn(ui, "view.tab.encoder");
+                    self.cmd_menu_btn(ui, "file.send_to_encoder");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.encoder_start");
+                    self.cmd_menu_btn(ui, "tools.encoder_pause");
+                    self.cmd_menu_btn(ui, "tools.encoder_stop_current");
+                    self.cmd_menu_btn(ui, "tools.encoder_stop_queue");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.run_script");
             });
@@ -1969,6 +2094,7 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
+                self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
                 ui.separator();
                 ui.label(format!(
@@ -2037,6 +2163,7 @@ impl App {
             self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
             self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
             self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
+            self.cmd_tool_btn(ui, Icon::EncoderQueue, None, "view.tab.encoder");
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             ui.separator();
             self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
@@ -2096,17 +2223,23 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(
-                        egui::RichText::new(label)
-                            .small()
-                            .color(self.theme.text_muted),
-                    );
-                    ui.label(
-                        egui::RichText::new(txt)
-                            .monospace()
-                            .small()
-                            .color(self.theme.text_primary),
-                    );
+                    let name = egui::RichText::new(label)
+                        .small()
+                        .color(self.theme.text_muted);
+                    let value = egui::RichText::new(txt)
+                        .monospace()
+                        .small()
+                        .color(self.theme.text_primary);
+                    // a barra é desenhada da direita para a esquerda e o
+                    // `horizontal` herda isso: aí o valor entra primeiro, para
+                    // o nome ficar à esquerda dele na tela
+                    if ui.layout().prefer_right_to_left() {
+                        ui.label(value);
+                        ui.label(name);
+                    } else {
+                        ui.label(name);
+                        ui.label(value);
+                    }
                 });
             })
             .response
@@ -2139,9 +2272,27 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
-            // Bloco 2: Ferramentas de Edição da Timeline (Manual VEGAS Pro 21 §6)
-            self.cmd_tool_btn(ui, Icon::Split, None, "edit.split");
-            self.cmd_tool_btn(ui, Icon::DeleteTrash, None, "edit.delete");
+            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
+            // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
+            // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
+            // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
+            // sem botão porque a função não existe: Gravar, as ferramentas
+            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
+            // Crossfades automáticos (sempre ligados), Travar envelopes e as
+            // linhas do tempo aninhadas.
+            for (icon, id) in [
+                (Icon::DeleteTrash, "edit.delete"),
+                (Icon::TrimSelection, "edit.trim_to_selection"),
+                (Icon::TrimStart, "edit.trim_start"),
+                (Icon::TrimEnd, "edit.trim_end"),
+                (Icon::Split, "edit.split"),
+            ] {
+                self.cmd_tool_btn(ui, icon, None, id);
+            }
+            let all_locked = self.session.selection_all_locked();
+            self.cmd_tool_toggle(ui, all_locked, Icon::LockClosed, None, "event.lock");
+            self.cmd_tool_btn(ui, Icon::InsertMarker, None, "insert.marker");
+            self.cmd_tool_btn(ui, Icon::InsertRegion, None, "insert.region");
             self.cmd_tool_toggle(
                 ui,
                 self.opts.snapping,
@@ -2158,19 +2309,11 @@ impl App {
             );
             self.cmd_tool_toggle(
                 ui,
-                self.opts.show_envelopes,
-                Icon::Envelopes,
-                None,
-                "view.envelopes",
-            );
-            self.cmd_tool_toggle(
-                ui,
                 self.opts.ignore_grouping,
                 Icon::IgnoreGrouping,
                 None,
                 "options.ignore_grouping",
             );
-            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
             self.cmd_tool_toggle(
                 ui,
                 self.is_panel_open(DockTab::ColorGrading),
@@ -2178,6 +2321,16 @@ impl App {
                 None,
                 "view.tab.color_grading",
             );
+            // do Neoveg, depois dos botões do manual
+            ui.separator();
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.show_envelopes,
+                Icon::Envelopes,
+                None,
+                "view.envelopes",
+            );
+            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
 
             if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
                 ui.label(egui::RichText::new(format!("Shuttle {:+.2}x", self.shuttle)).small());
@@ -2244,13 +2397,17 @@ impl App {
                     if ui
                         .add_sized(
                             [72.0, 16.0],
-                            egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln())
-                                .show_value(false),
+                            egui::Slider::new(
+                                &mut z,
+                                crate::timeline::TimelineState::MIN_PX_PER_SEC.ln()
+                                    ..=crate::timeline::TimelineState::MAX_PX_PER_SEC.ln(),
+                            )
+                            .show_value(false),
                         )
                         .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
                         .changed()
                     {
-                        self.tl.px_per_sec = z.exp();
+                        self.tl.px_per_sec = crate::timeline::TimelineState::clamp_pps(z.exp());
                     }
                     if ui
                         .small_button("-")
@@ -2403,7 +2560,13 @@ impl App {
 
     pub(crate) fn snapshot_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
+            .add_filter(
+                "Imagem",
+                &[
+                    "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
+                    "wbmp", "xbm", "xpm", "ico",
+                ],
+            )
             .set_file_name("quadro.png")
             .save_file()
         {
@@ -2415,28 +2578,116 @@ impl App {
     }
 
     pub(crate) fn run_script_dialog(&mut self) {
+        if self.script_job.is_some() {
+            self.set_status("Já há um script em execução.");
+            return;
+        }
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Scripts VEGAS / .NET", &["cs", "dll"])
             .pick_file()
         else {
             return;
         };
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
-        }));
-        self.sync_after_session();
-        match res {
-            Ok(Ok(msgs)) => {
+        // o script trabalha sobre uma cópia: a reprodução não pode mexer no cursor
+        if self.is_playing() {
+            self.stop(true);
+        }
+        let media_before: std::collections::HashSet<u64> =
+            self.session.project.media.iter().map(|m| m.id).collect();
+        let mut work = self.session.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let script = p.clone();
+        let spawned = crate::util::spawn("script-net", move || {
+            let outcome = match crate::util::catch_isolated(|| {
+                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+            }) {
+                Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
+                Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
+                Err(_) => ScriptOutcome::Panicked,
+            };
+            let _ = tx.send((outcome, work));
+        });
+        match spawned {
+            Ok(()) => {
+                self.set_status(format!("Executando script: {}", p.display()));
+                self.script_job = Some(ScriptJob {
+                    path: p,
+                    started: std::time::Instant::now(),
+                    media_before,
+                    rx,
+                });
+            }
+            Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
+        }
+    }
+
+    /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
+    /// modal; ao terminar, aplica a sessão do script (ou só o erro).
+    fn poll_script_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.script_job else {
+            return;
+        };
+        let (outcome, done) = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                let el = job.started.elapsed().as_secs_f64();
+                let path = job.path.display().to_string();
+                let theme = self.theme.clone();
+                egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        crate::splash::spinner_inline(ui, 20.0, el, &theme);
+                        ui.strong("Executando script...");
+                    });
+                    ui.label(path);
+                    ui.label(
+                        egui::RichText::new(
+                            "A edição volta quando o script terminar. Se o script abriu uma \
+                             janela, ela pode estar atrás do Neoveg.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.script_job = None;
+                self.set_status("Erro interno: o script terminou sem resposta.");
+                return;
+            }
+        };
+        let Some(job) = self.script_job.take() else {
+            return;
+        };
+        match outcome {
+            ScriptOutcome::Done(Ok(msgs)) => {
+                self.session = done;
+                self.sync_after_session();
+                // o que o carregador guardou durante o script entra no próximo quadro
+                ctx.request_repaint();
+                // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
+                let novas: Vec<MediaItem> = self
+                    .session
+                    .project
+                    .media
+                    .iter()
+                    .filter(|m| !job.media_before.contains(&m.id) && !self.media.contains(m.id))
+                    .cloned()
+                    .collect();
+                for m in novas {
+                    self.spawn_media_load(m);
+                }
                 if let Some(last) = msgs.last() {
                     self.set_status(format!("Script executado: {last}"));
                 } else {
-                    self.set_status(format!("Script executado: {}", p.display()));
+                    self.set_status(format!("Script executado: {}", job.path.display()));
                 }
             }
-            Ok(Err(e)) => self.set_status(format!("Erro no script: {e}")),
-            Err(_) => {
-                let _ = self.session.project.sanitize();
-                self.set_status("Erro interno isolado ao executar script .NET/C#.");
+            // a sessão da interface não foi tocada: nada a desfazer
+            ScriptOutcome::Done(Err(e)) => self.set_status(format!("Erro no script: {e}")),
+            ScriptOutcome::Panicked => {
+                self.set_status("Erro interno isolado ao executar script .NET/C#.")
             }
         }
     }
@@ -2465,6 +2716,10 @@ impl App {
                 .collect()
         });
         if files.is_empty() {
+            return;
+        }
+        if self.script_job.is_some() {
+            self.set_status("Aguarde o script terminar para soltar arquivos.");
             return;
         }
         let t = self.cursor;
@@ -2560,6 +2815,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // saída normal: a cópia de recuperação não é mais necessária
+        self.encoder.save_to_disk();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");
     }
@@ -2580,7 +2836,11 @@ impl App {
         self.last_frame = Instant::now();
         self.audio.tick_without_device(dt);
         self.poll_loader();
+        self.poll_script_job(ctx);
         self.poll_render();
+        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media) {
+            self.set_status(msg);
+        }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(dt as f32);
@@ -2631,6 +2891,8 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.show_encoder_dialogs(ctx);
+        self.crash_report_window(ctx);
         self.recovery_window(ctx);
         self.show_welcome_overlay(ctx);
         self.show_splash_overlay(ctx);
@@ -2987,6 +3249,7 @@ impl App {
             jpeg_quality: 80,
             include_audio: true,
             wav_bits: crate::render::WavBits::Pcm16,
+            ..RenderSettings::default()
         };
         let tx = self.loader_tx.clone();
         let prog = Arc::new(RenderProgress::default());

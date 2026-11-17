@@ -13,7 +13,7 @@
     clippy::unreachable
 )]
 
-pub use neoveg_common::{curve, error, prefs, time, util};
+pub use neoveg_common::{curve, error, prefs, session_marker, time, util};
 
 #[forbid(unsafe_code)]
 pub mod aaf;
@@ -21,6 +21,8 @@ pub mod aaf;
 pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;
+#[forbid(unsafe_code)]
+pub mod encoder;
 #[forbid(unsafe_code)]
 pub mod engine;
 #[forbid(unsafe_code)]
@@ -48,6 +50,8 @@ pub mod scopes;
 pub mod session;
 #[forbid(unsafe_code)]
 pub mod subtitles;
+#[forbid(unsafe_code)]
+pub mod takes;
 #[forbid(unsafe_code)]
 pub mod track_keyframes;
 

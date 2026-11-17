@@ -290,10 +290,11 @@ pub enum DockPanel {
     Compositors,
     Scopes,
     Notes,
+    Encoder,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 16] = [
+    pub const ALL: [DockPanel; 17] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -310,6 +311,7 @@ impl DockPanel {
         DockPanel::Compositors,
         DockPanel::Scopes,
         DockPanel::Notes,
+        DockPanel::Encoder,
     ];
 
     pub fn name(self) -> &'static str {
@@ -330,6 +332,7 @@ impl DockPanel {
             DockPanel::Compositors => "Compositores",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
+            DockPanel::Encoder => "Neoveg Encoder",
         }
     }
 
@@ -351,6 +354,7 @@ impl DockPanel {
             DockPanel::Compositors => "view.tab.compositors",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
+            DockPanel::Encoder => "view.tab.encoder",
         }
     }
 }
@@ -378,6 +382,11 @@ pub enum UiAction {
     ExportFcp7Dialog,
     ImportAafDialog,
     OpenRenderDialog,
+    SendToEncoder,
+    EncoderStartQueue,
+    EncoderPauseQueue,
+    EncoderStopCurrent,
+    EncoderStopQueue,
     SnapshotDialog,
     OpenProjectProps,
     OpenEventProps,
@@ -827,6 +836,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::OpenRenderDialog, h),
     },
     CommandDef {
+        id: "file.send_to_encoder",
+        label: "Enviar para o Neoveg Encoder...",
+        menu_path: "Arquivo/Enviar para o Neoveg Encoder...",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SendToEncoder, h),
+    },
+    CommandDef {
         id: "file.snapshot",
         label: "Salvar quadro (snapshot) em PNG...",
         menu_path: "Arquivo/Salvar quadro (snapshot) em PNG...",
@@ -947,6 +965,55 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.split_at_cursor();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.next_take",
+        label: "Próximo take",
+        menu_path: "Editar/Take/Próximo take",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::T)),
+        needs_ui: false,
+        enabled: |s, _| s.selection_has_takes(),
+        run: |s, h| {
+            s.next_take_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.prev_take",
+        label: "Take anterior",
+        menu_path: "Editar/Take/Take anterior",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::T)),
+        needs_ui: false,
+        enabled: |s, _| s.selection_has_takes(),
+        run: |s, h| {
+            s.prev_take_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.lock",
+        label: "Travar eventos",
+        menu_path: "Editar/Travar eventos",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.toggle_lock_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.delete_active_take",
+        label: "Excluir take ativo",
+        menu_path: "Editar/Take/Excluir take ativo",
+        default_shortcut: None,
+        needs_ui: false,
+        // nunca deixa um evento sem take: só com mais de um
+        enabled: |s, _| s.selection_has_takes(),
+        run: |s, h| {
+            s.delete_active_take_selected();
             ok_mutated(s, h)
         },
     },
@@ -1138,8 +1205,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sonic_foundry",
-        label: "Sonic Foundry",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sonic Foundry",
+        label: "Clássico",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Clássico",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1147,8 +1214,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sony",
-        label: "Sony",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sony",
+        label: "Intermediário",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Intermediário",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1156,8 +1223,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.magix",
-        label: "MAGIX",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/MAGIX",
+        label: "Atual",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Atual",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1321,6 +1388,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Notes), h),
     },
     CommandDef {
+        id: "view.tab.encoder",
+        label: "Neoveg Encoder",
+        menu_path: "Exibir/Neoveg Encoder",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
+    },
+    CommandDef {
         id: "view.envelopes",
         label: "Mostrar envelopes",
         menu_path: "Exibir/Mostrar envelopes",
@@ -1341,6 +1417,34 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.opts.show_waveforms = !s.opts.show_waveforms;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.waveform_zoom_in",
+        label: "Ampliar formas de onda (vertical)",
+        menu_path: "Exibir/Ampliar formas de onda",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::ArrowUp)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.waveform_zoom_steps = s
+                .opts
+                .waveform_zoom_steps
+                .saturating_add(1)
+                .min(crate::session::MAX_WAVEFORM_ZOOM_STEPS);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.waveform_zoom_out",
+        label: "Reduzir formas de onda (vertical)",
+        menu_path: "Exibir/Reduzir formas de onda",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::ArrowDown)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.waveform_zoom_steps = s.opts.waveform_zoom_steps.saturating_sub(1);
             ok_mutated(s, h)
         },
     },
@@ -1655,6 +1759,42 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
     },
     CommandDef {
+        id: "tools.encoder_start",
+        label: "Encoder: Iniciar / Retomar fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Iniciar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStartQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_pause",
+        label: "Encoder: Pausar / Retomar",
+        menu_path: "Ferramentas/Neoveg Encoder/Pausar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderPauseQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_current",
+        label: "Encoder: Interromper item atual",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper arquivo atual",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopCurrent, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_queue",
+        label: "Encoder: Interromper fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopQueue, h),
+    },
+    CommandDef {
         id: "tools.run_script",
         label: "Executar script (.cs/.dll)...",
         menu_path: "Ferramentas/Executar script (.cs/.dll)...",
@@ -1723,6 +1863,18 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.opts.ignore_grouping = !s.opts.ignore_grouping;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.slip_all_takes",
+        label: "Slip em todos os takes",
+        menu_path: "Opções/Slip em todos os takes",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.slip_all_takes = !s.opts.slip_all_takes;
             ok_mutated(s, h)
         },
     },
@@ -2165,6 +2317,35 @@ mod tests {
             assert!(!cmd.label.is_empty());
             assert!(!cmd.menu_path.is_empty());
         }
+    }
+
+    #[test]
+    fn zoom_vertical_das_formas_de_onda_sobe_desce_e_nao_mexe_no_projeto() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert_eq!(s.opts.waveform_zoom(), 1.0);
+        // no 1× não desce mais
+        run_command("view.waveform_zoom_out", &mut s, &mut h).unwrap();
+        assert_eq!(s.opts.waveform_zoom_steps, 0);
+        run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        assert_eq!(s.opts.waveform_zoom(), 2.0);
+        // para no máximo (64×)
+        for _ in 0..40 {
+            run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        }
+        assert_eq!(s.opts.waveform_zoom(), 64.0);
+        for _ in 0..40 {
+            run_command("view.waveform_zoom_out", &mut s, &mut h).unwrap();
+        }
+        assert_eq!(s.opts.waveform_zoom(), 1.0, "volta exatamente a 1×");
+        assert!(
+            s.undo.is_empty(),
+            "zoom de exibição não cria passo de Desfazer"
+        );
+        // valor fora do limite (estado hostil) não passa de 64×
+        s.opts.waveform_zoom_steps = u8::MAX;
+        assert_eq!(s.opts.waveform_zoom(), 64.0);
     }
 
     #[test]

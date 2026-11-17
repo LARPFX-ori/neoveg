@@ -63,6 +63,25 @@ pub struct EditorOptions {
     pub preview_quality: PreviewQuality,
     pub safe_areas: bool,
     pub loop_playback: bool,
+    /// "Slip All Takes" (menu Opções, manual do VEGAS Pro 21 p. 346):
+    /// o slip desloca todos os takes do evento, não só o ativo.
+    pub slip_all_takes: bool,
+    /// Zoom vertical das formas de onda de áudio, em passos de √2 (0 = 1×):
+    /// Shift+↑/↓ (lista de atalhos do VEGAS Pro: "Zoom waveforms in/out
+    /// vertically (audio only)"). Passos inteiros: subir e descer volta
+    /// exatamente a 1×.
+    pub waveform_zoom_steps: u8,
+}
+
+/// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
+pub const MAX_WAVEFORM_ZOOM_STEPS: u8 = 12;
+
+impl EditorOptions {
+    /// Fator do zoom vertical das formas de onda (1× a 64×).
+    pub fn waveform_zoom(&self) -> f32 {
+        let steps = self.waveform_zoom_steps.min(MAX_WAVEFORM_ZOOM_STEPS);
+        2f32.powf(f32::from(steps) * 0.5)
+    }
 }
 
 impl Default for EditorOptions {
@@ -80,6 +99,8 @@ impl Default for EditorOptions {
             preview_quality: PreviewQuality::Preview,
             safe_areas: false,
             loop_playback: false,
+            slip_all_takes: false,
+            waveform_zoom_steps: 0,
         }
     }
 }
@@ -563,6 +584,136 @@ impl EditorSession {
 
     /// Divide eventos no cursor (selecionados, ou todos sob o cursor se nada
     /// estiver selecionado). Retorna o número de eventos divididos.
+    /// Aplica `f` a cada evento selecionado (sem expandir grupos: os takes
+    /// são de cada evento). Um passo de Desfazer se algum evento mudou.
+    fn edit_selected_takes(&mut self, f: impl Fn(&mut Event) -> bool) -> usize {
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let mut probe = self.project.clone();
+        let mut n = 0;
+        for id in ids {
+            if let Some(e) = probe.event_mut(id) {
+                if !e.locked && f(e) {
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.checkpoint();
+            self.project = probe;
+            self.changed();
+        }
+        n
+    }
+
+    /// Próximo take dos eventos selecionados (T).
+    pub fn next_take_selected(&mut self) -> usize {
+        self.edit_selected_takes(crate::takes::next_take)
+    }
+
+    /// Take anterior dos eventos selecionados (Shift+T).
+    pub fn prev_take_selected(&mut self) -> usize {
+        self.edit_selected_takes(crate::takes::prev_take)
+    }
+
+    /// Apaga o take ativo dos eventos selecionados que têm mais de um take.
+    pub fn delete_active_take_selected(&mut self) -> usize {
+        self.edit_selected_takes(crate::takes::delete_active)
+    }
+
+    /// Todos os eventos selecionados (pelo menos um) estão travados?
+    pub fn selection_all_locked(&self) -> bool {
+        !self.sel_events.is_empty()
+            && self
+                .sel_events
+                .iter()
+                .all(|id| self.project.event(*id).is_some_and(|e| e.locked))
+    }
+
+    /// Botão Travar (Lock) da barra de transporte e edição (manual do VEGAS
+    /// Pro 21, p. 77): trava os eventos selecionados; se todos já estão
+    /// travados, destrava. Um passo de Desfazer; devolve quantos mudaram.
+    pub fn toggle_lock_selected(&mut self) -> usize {
+        let lock = !self.selection_all_locked();
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let mut probe = self.project.clone();
+        let mut n = 0;
+        for id in ids {
+            if let Some(e) = probe.event_mut(id) {
+                if e.locked != lock {
+                    e.locked = lock;
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.checkpoint();
+            self.project = probe;
+            self.changed();
+        }
+        n
+    }
+
+    /// Algum evento selecionado tem mais de um take?
+    pub fn selection_has_takes(&self) -> bool {
+        self.sel_events.iter().any(|id| {
+            self.project
+                .event(*id)
+                .is_some_and(|e| crate::takes::take_count(e) > 1)
+        })
+    }
+
+    /// "Add As Takes" (p. 346): adiciona a mídia como take ativo de cada
+    /// evento selecionado do mesmo tipo (vídeo/áudio); o take anterior fica.
+    pub fn add_media_as_take_to_selected(&mut self, media_id: Id) -> usize {
+        let Some(m) = self.project.media(media_id).cloned() else {
+            return 0;
+        };
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let mut probe = self.project.clone();
+        let mut n = 0;
+        for t in &mut probe.tracks {
+            let fits = match t.kind {
+                TrackKind::Video => m.has_video,
+                TrackKind::Audio => m.has_audio,
+            };
+            if !fits {
+                continue;
+            }
+            for e in &mut t.events {
+                if ids.contains(&e.id) && !e.locked {
+                    let take = crate::model::Take {
+                        media_id,
+                        offset: Ticks::ZERO,
+                        name: String::new(),
+                    };
+                    if crate::takes::add_take(e, take, true) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        if n > 0 {
+            self.checkpoint();
+            self.project = probe;
+            self.changed();
+        }
+        n
+    }
+
+    /// Torna ativo o take `k` do evento `id` (escolha no submenu Take).
+    pub fn set_active_take(&mut self, id: Id, k: usize) -> bool {
+        let mut probe = self.project.clone();
+        let changed = probe
+            .event_mut(id)
+            .is_some_and(|e| !e.locked && crate::takes::set_active(e, k));
+        if changed {
+            self.checkpoint();
+            self.project = probe;
+            self.changed();
+        }
+        changed
+    }
+
     pub fn split_at_cursor(&mut self) -> usize {
         let t = self.cursor;
         let targets: HashSet<Id> = if self.sel_events.is_empty() {
@@ -612,10 +763,10 @@ impl EditorSession {
             right.fade_in = Fade::default();
             right.transition = None;
             if !right.reverse {
-                right.offset += right.rate.scale_ticks(left_len);
+                right.shift_offsets(right.rate.scale_ticks(left_len));
             }
             if e.reverse {
-                e.offset += e.rate.scale_ticks(right.length);
+                e.shift_offsets(e.rate.scale_ticks(right.length));
             }
             for k in &mut right.pan_crop.keys {
                 k.t -= left_len;
@@ -663,7 +814,7 @@ impl EditorSession {
                 if e.start < a {
                     let d = a - e.start;
                     if !e.reverse {
-                        e.offset += e.rate.scale_ticks(d);
+                        e.shift_offsets(e.rate.scale_ticks(d));
                     }
                     e.start = a;
                     e.length -= d;
@@ -671,7 +822,7 @@ impl EditorSession {
                 if e.end() > b {
                     let d = e.end() - b;
                     if e.reverse {
-                        e.offset += e.rate.scale_ticks(d);
+                        e.shift_offsets(e.rate.scale_ticks(d));
                     }
                     e.length -= d;
                 }
@@ -693,7 +844,7 @@ impl EditorSession {
                 if c > e.start && c < e.end() {
                     let d = c - e.start;
                     if !e.reverse {
-                        e.offset += e.rate.scale_ticks(d);
+                        e.shift_offsets(e.rate.scale_ticks(d));
                     }
                     e.start = c;
                     e.length -= d;
@@ -715,7 +866,7 @@ impl EditorSession {
                 if c > e.start && c < e.end() {
                     let d = e.end() - c;
                     if e.reverse {
-                        e.offset += e.rate.scale_ticks(d);
+                        e.shift_offsets(e.rate.scale_ticks(d));
                     }
                     e.length = c - e.start;
                 }
@@ -749,7 +900,7 @@ impl EditorSession {
                     let cut = b - e.start;
                     right.start = a;
                     right.length = e.end() - b;
-                    right.offset += right.rate.scale_ticks(cut);
+                    right.shift_offsets(right.rate.scale_ticks(cut));
                     right.fade_in = Fade::default();
                     e.length = a - e.start;
                     e.fade_out = Fade::default();
@@ -760,7 +911,7 @@ impl EditorSession {
                     keep.push(e);
                 } else {
                     let d = b - e.start;
-                    e.offset += e.rate.scale_ticks(d);
+                    e.shift_offsets(e.rate.scale_ticks(d));
                     e.length -= d;
                     e.start = a;
                     keep.push(e);
@@ -806,7 +957,7 @@ impl EditorSession {
                     let cut = a - e.start;
                     right.start = b;
                     right.length = e.length - cut;
-                    right.offset += right.rate.scale_ticks(cut);
+                    right.shift_offsets(right.rate.scale_ticks(cut));
                     right.fade_in = Fade::default();
                     e.length = cut;
                     e.fade_out = Fade::default();
@@ -1046,6 +1197,9 @@ impl EditorSession {
         fr.start = c;
         fr.length = two_s;
         fr.offset = mt;
+        // um quadro congelado é da mídia ativa; os outros takes não se aplicam
+        fr.alt_takes.clear();
+        fr.take_index = 0;
         fr.rate = Rate::FROZEN;
         fr.looped = false;
         fr.reverse = false;
@@ -1066,7 +1220,7 @@ impl EditorSession {
                     right.id = new_id();
                     right.start = c + two_s;
                     right.length = original.length - left;
-                    right.offset += right.rate.scale_ticks(left);
+                    right.shift_offsets(right.rate.scale_ticks(left));
                     right.fade_in = Fade::default();
                     original.length = left;
                     original.fade_out = Fade::default();
@@ -1186,7 +1340,7 @@ impl EditorSession {
             .project
             .tracks
             .iter()
-            .flat_map(|t| t.events.iter().map(|e| e.media_id))
+            .flat_map(|t| t.events.iter().flat_map(crate::takes::media_ids))
             .collect();
         let n0 = self.project.media.len();
         self.checkpoint();
@@ -1519,6 +1673,39 @@ mod tests {
             info: String::new(),
             proxy_path: None,
         }
+    }
+
+    #[test]
+    fn travar_selecao_alterna_em_um_passo_de_desfazer() {
+        let mut p = Project::default();
+        p.tracks.push(Track::new(TrackKind::Video, "Vídeo 1"));
+        let m = sample_media(new_id(), 1920, 1080, Some(FrameRate::FPS_30));
+        let a = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(1));
+        let mut b = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(1));
+        b.locked = true;
+        let (ida, idb) = (a.id, b.id);
+        p.media.push(m);
+        p.tracks[0].events = vec![a, b];
+        let mut s = EditorSession::new(p);
+        let locked = |s: &EditorSession, id| s.project.event(id).map(|e| e.locked);
+        // sem seleção, nada muda
+        assert_eq!(s.toggle_lock_selected(), 0);
+        assert!(s.undo.is_empty());
+        s.sel_events.insert(ida);
+        s.sel_events.insert(idb);
+        // um travado e outro não: trava os dois
+        assert!(!s.selection_all_locked());
+        assert_eq!(s.toggle_lock_selected(), 1);
+        assert_eq!((locked(&s, ida), locked(&s, idb)), (Some(true), Some(true)));
+        assert_eq!(s.undo.len(), 1);
+        // todos travados: destrava
+        assert!(s.selection_all_locked());
+        assert_eq!(s.toggle_lock_selected(), 2);
+        assert_eq!(
+            (locked(&s, ida), locked(&s, idb)),
+            (Some(false), Some(false))
+        );
+        assert_eq!(s.undo.len(), 2);
     }
 
     #[test]

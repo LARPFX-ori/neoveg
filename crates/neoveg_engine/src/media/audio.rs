@@ -1,7 +1,8 @@
 //! Decodificação de áudio em Rust puro sob licenças da lista SPDX permitida
-//! (`AGENTS.md`): WAVE/AIFF próprio, FLAC (`claxon`, Apache-2.0), Ogg Vorbis
-//! (`lewton`, MIT OR Apache-2.0) e MP3 (`puremp3`, MIT OR CC0-1.0), além de
-//! `AAC`/`M4A` via API nativa do sistema operacional (`media::mf` no Windows).
+//! (`AGENTS.md`): WAVE/BWF/RF64/AIFF/AU/CAF/Wave64/VOC/8SVX/QOA próprios,
+//! FLAC (`claxon`, Apache-2.0), Ogg Vorbis (`lewton`, MIT OR Apache-2.0) e
+//! MP3 (`puremp3`, MIT OR CC0-1.0), além de `AAC`/`M4A`/`WMA` via API nativa
+//! do sistema operacional (`media::mf` no Windows).
 
 use anyhow::{anyhow, bail, Result};
 use std::fs::File;
@@ -15,6 +16,20 @@ pub struct AudioData {
     /// Picos (mín, máx) mono por bloco de `PEAK_BLOCK` amostras, para desenhar
     /// a forma de onda.
     pub peaks: Vec<(f32, f32)>,
+    /// Picos (mín, máx) de cada canal (L, R) pelos mesmos blocos, para
+    /// desenhar os canais de um evento estéreo separados.
+    pub peaks_lr: Vec<[(f32, f32); 2]>,
+    /// A fonte tinha um canal só (L e R são a mesma amostra).
+    pub mono_source: bool,
+}
+
+/// Canal desenhado na forma de onda.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveChannel {
+    /// Média de L e R.
+    Mix,
+    Left,
+    Right,
 }
 
 pub const PEAK_BLOCK: usize = 256;
@@ -31,6 +46,8 @@ impl AudioData {
             sample_rate,
             data,
             peaks: vec![],
+            peaks_lr: vec![],
+            mono_source: false,
         };
         a.compute_peaks();
         a
@@ -46,22 +63,31 @@ impl AudioData {
             data.push(l);
             data.push(r);
         }
-        Self::from_stereo(sample_rate, data)
+        let mut a = Self::from_stereo(sample_rate, data);
+        a.mono_source = ch == 1;
+        a
     }
 
     fn compute_peaks(&mut self) {
         let frames = self.frames();
         let mut peaks = Vec::with_capacity(frames / PEAK_BLOCK + 1);
-        for b in (0..frames).step_by(PEAK_BLOCK) {
+        let mut peaks_lr = Vec::with_capacity(frames / PEAK_BLOCK + 1);
+        for block in self.data.chunks(PEAK_BLOCK * 2) {
             let (mut lo, mut hi) = (0f32, 0f32);
-            for f in b..(b + PEAK_BLOCK).min(frames) {
-                let v = (self.data[f * 2] + self.data[f * 2 + 1]) * 0.5;
+            let mut lr = [(0f32, 0f32); 2];
+            let (frames, _) = block.as_chunks::<2>();
+            for &[l, r] in frames {
+                let v = (l + r) * 0.5;
                 lo = lo.min(v);
                 hi = hi.max(v);
+                lr[0] = (lr[0].0.min(l), lr[0].1.max(l));
+                lr[1] = (lr[1].0.min(r), lr[1].1.max(r));
             }
             peaks.push((lo, hi));
+            peaks_lr.push(lr);
         }
         self.peaks = peaks;
+        self.peaks_lr = peaks_lr;
     }
 
     pub fn frames(&self) -> usize {
@@ -90,6 +116,74 @@ impl AudioData {
         let l = self.data[i * 2] + (self.data[i * 2 + 2] - self.data[i * 2]) * fr;
         let r = self.data[i * 2 + 1] + (self.data[i * 2 + 3] - self.data[i * 2 + 1]) * fr;
         (l, r)
+    }
+
+    /// Amostra do canal `ch` no frame `f` (0 fora do áudio).
+    fn value(&self, ch: WaveChannel, f: usize) -> f32 {
+        let l = self.data.get(f * 2).copied().unwrap_or(0.0);
+        let r = self.data.get(f * 2 + 1).copied().unwrap_or(0.0);
+        match ch {
+            WaveChannel::Mix => (l + r) * 0.5,
+            WaveChannel::Left => l,
+            WaveChannel::Right => r,
+        }
+    }
+
+    /// Valor do canal `ch` no tempo exato `t`, interpolado (para desenhar a
+    /// forma de onda amostra a amostra com zoom alto).
+    pub fn sample_channel(&self, ch: WaveChannel, t: crate::time::Ticks) -> f32 {
+        let (l, r) = self.sample(t);
+        match ch {
+            WaveChannel::Mix => (l + r) * 0.5,
+            WaveChannel::Left => l,
+            WaveChannel::Right => r,
+        }
+    }
+
+    /// Pico (mín, máx) do canal `ch` entre t0..t1 (ticks). Trechos curtos (menos
+    /// de `PEAK_BLOCK` amostras) são lidos das amostras, para o zoom alto não
+    /// virar degraus; trechos longos usam a tabela de picos, incluindo o bloco
+    /// parcial do fim. O intervalo sempre inclui o zero.
+    pub fn channel_range(
+        &self,
+        ch: WaveChannel,
+        t0: crate::time::Ticks,
+        t1: crate::time::Ticks,
+    ) -> (f32, f32) {
+        let n = self.frames() as i64;
+        let s0 = t0.to_samples_floor(self.sample_rate).max(0);
+        let s1 = t1
+            .to_samples_floor(self.sample_rate)
+            .max(s0.saturating_add(1))
+            .min(n);
+        let (mut lo, mut hi) = (0f32, 0f32);
+        if s0 >= n {
+            return (lo, hi);
+        }
+        let block = PEAK_BLOCK as i64;
+        if s1 - s0 < block {
+            for f in s0..s1 {
+                let v = self.value(ch, f as usize);
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            return (lo, hi);
+        }
+        let a = (s0 / block) as usize;
+        let b = (s1.saturating_add(block - 1) / block) as usize;
+        for i in a..b {
+            let p = match ch {
+                WaveChannel::Mix => self.peaks.get(i).copied(),
+                WaveChannel::Left => self.peaks_lr.get(i).map(|p| p[0]),
+                WaveChannel::Right => self.peaks_lr.get(i).map(|p| p[1]),
+            };
+            let Some((l, h)) = p else {
+                break;
+            };
+            lo = lo.min(l);
+            hi = hi.max(h);
+        }
+        (lo, hi)
     }
 
     /// Pico (mín, máx) entre os tempos t0..t1 (ticks), usando a tabela de picos.
@@ -131,7 +225,13 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "wav" | "wave" | "aif" | "aiff" | "aifc" => decode_wav_aiff(path),
+        "wav" | "wave" | "bwf" | "rf64" | "aif" | "aiff" | "aifc" => decode_wav_aiff(path),
+        "au" | "snd" | "caf" | "w64" | "voc" | "8svx" | "svx" | "qoa" => {
+            crate::util::guard("decodificação de áudio", || {
+                decode_extra_audio(path, &ext)
+            })
+            .map_err(|e| anyhow!("{e}"))?
+        }
         "flac" => crate::util::guard("decodificação FLAC", || decode_flac_raw(path))
             .map_err(|e| anyhow!("{e}"))?,
         "ogg" | "oga" => {
@@ -140,9 +240,19 @@ pub fn decode_file(path: &Path) -> Result<AudioData> {
         }
         "mp3" => crate::util::guard("decodificação MP3", || decode_mp3_raw(path))
             .map_err(|e| anyhow!("{e}"))?,
-        "aac" | "m4a" => decode_aac_or_m4a(path),
+        "aac" | "m4a" | "m4b" | "wma" | "mp2" | "mpa" | "alac" => decode_aac_or_m4a(path),
         _ => bail!("formato de áudio não suportado: .{ext}"),
     }
+}
+
+fn decode_extra_audio(path: &Path, ext: &str) -> Result<AudioData> {
+    let len = std::fs::metadata(path)?.len();
+    if len > MAX_FILE_BYTES {
+        bail!("arquivo de áudio grande demais ({len} bytes)");
+    }
+    let bytes = std::fs::read(path)?;
+    let pcm = super::audio_extra::decode_bytes(ext, &bytes, MAX_SAMPLES)?;
+    finalize_audio(pcm.sample_rate, pcm.channels as usize, pcm.samples)
 }
 
 fn decode_aac_or_m4a(path: &Path) -> Result<AudioData> {
@@ -285,6 +395,11 @@ mod tests {
             "oracle_flac.flac",
             "oracle_ogg.ogg",
             "oracle_mp3.mp3",
+            "oracle_au.au",
+            "oracle_caf.caf",
+            "oracle_w64.w64",
+            "oracle_adpcm.wav",
+            "oracle_alaw.wav",
         ];
         if cfg!(windows) {
             names.push("oracle_aac.m4a");
@@ -309,5 +424,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn tone(frames: usize, f: impl Fn(usize) -> (f32, f32)) -> AudioData {
+        let mut d = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let (l, r) = f(i);
+            d.push(l);
+            d.push(r);
+        }
+        AudioData::from_stereo(48_000, d)
+    }
+
+    fn t(samples: i64) -> crate::time::Ticks {
+        crate::time::Ticks::from_samples(samples, 48_000)
+    }
+
+    #[test]
+    fn canais_separados_na_forma_de_onda() {
+        // L só positivo, R só negativo: a mistura esconde os dois
+        let a = tone(4096, |_| (0.5, -0.5));
+        assert_eq!(
+            a.channel_range(WaveChannel::Left, t(0), t(4096)),
+            (0.0, 0.5)
+        );
+        assert_eq!(
+            a.channel_range(WaveChannel::Right, t(0), t(4096)),
+            (-0.5, 0.0)
+        );
+        assert_eq!(a.channel_range(WaveChannel::Mix, t(0), t(4096)), (0.0, 0.0));
+        assert!(!a.mono_source);
+        let m = AudioData::from_interleaved(48_000, 1, &[0.25; 512]);
+        assert!(m.mono_source);
+    }
+
+    #[test]
+    fn zoom_alto_le_as_amostras_e_nao_o_bloco() {
+        // um pico isolado na amostra 300 (bloco 1): fora dele, nada
+        let a = tone(1024, |i| if i == 300 { (0.9, 0.9) } else { (0.0, 0.0) });
+        assert_eq!(
+            a.channel_range(WaveChannel::Mix, t(256), t(290)),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            a.channel_range(WaveChannel::Mix, t(290), t(310)),
+            (0.0, 0.9)
+        );
+        // com o trecho longo, a tabela de picos acha o mesmo pico
+        assert_eq!(
+            a.channel_range(WaveChannel::Left, t(0), t(1024)),
+            (0.0, 0.9)
+        );
+    }
+
+    #[test]
+    fn bloco_parcial_do_fim_entra_e_fora_do_audio_e_zero() {
+        // pico na última amostra, num bloco parcial
+        let a = tone(600, |i| if i == 599 { (-0.7, 0.3) } else { (0.0, 0.0) });
+        assert_eq!(
+            a.channel_range(WaveChannel::Left, t(0), t(600)),
+            (-0.7, 0.0)
+        );
+        assert_eq!(
+            a.channel_range(WaveChannel::Right, t(0), t(600)),
+            (0.0, 0.3)
+        );
+        assert_eq!(
+            a.channel_range(WaveChannel::Mix, t(5000), t(9000)),
+            (0.0, 0.0)
+        );
+        // intervalo invertido ou negativo não entra em pânico
+        let _ = a.channel_range(WaveChannel::Mix, t(500), t(-10));
+        let _ = a.channel_range(WaveChannel::Mix, t(-500), t(-10));
+        assert_eq!(a.sample_channel(WaveChannel::Left, t(599)), -0.7);
+        assert_eq!(a.sample_channel(WaveChannel::Right, t(599)), 0.3);
     }
 }

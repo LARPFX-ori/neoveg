@@ -6,6 +6,8 @@
 
 #![allow(unsafe_code)]
 
+pub(crate) mod encode;
+
 use crate::media::audio::{AudioData, MAX_SAMPLES};
 use crate::model::{FrameRate, Ticks, MAX_DIM, TICKS_PER_SEC};
 use anyhow::{anyhow, bail, Result};
@@ -27,7 +29,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-const HNS_PER_SEC: i128 = 10_000_000;
+pub(super) const HNS_PER_SEC: i128 = 10_000_000;
 
 fn hns_to_ticks(hns: i64) -> Ticks {
     let clamped = hns.max(0) as i128;
@@ -35,19 +37,19 @@ fn hns_to_ticks(hns: i64) -> Ticks {
     Ticks::from_raw(t.min(i64::MAX as i128) as i64)
 }
 
-fn ticks_to_hns(t: Ticks) -> i64 {
+pub(super) fn ticks_to_hns(t: Ticks) -> i64 {
     let raw = t.0.max(0) as i128;
     ((raw * HNS_PER_SEC) / TICKS_PER_SEC as i128).min(i64::MAX as i128) as i64
 }
 
 /// Garante ciclo de vida RAII de COM MTA e Media Foundation na thread atual.
-struct MfGuard {
+pub(super) struct MfGuard {
     uninit_com: bool,
     shutdown_mf: bool,
 }
 
 impl MfGuard {
-    fn enter() -> Result<Self> {
+    pub(super) fn enter() -> Result<Self> {
         // SAFETY: `CoInitializeEx` com `COINIT_MULTITHREADED` e `pvReserved = None`
         // segue a especificação Win32; se a thread já estiver inicializada com outro
         // apartamento (`RPC_E_CHANGED_MODE`), não devemos chamar `CoUninitialize`.
