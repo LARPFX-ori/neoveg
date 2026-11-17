@@ -95,11 +95,17 @@ pub enum Icon {
     ExpandedEdit,
     SceneDetect,
     StabilizeVideo,
+    ViewThumbnails,
+    ViewList,
+    ViewDetails,
+    StoryboardGrid,
+    SmartFolder,
+    ReplaceMedia,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 87] = [
+    pub const ALL: [Icon; 93] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -187,6 +193,12 @@ impl Icon {
         Icon::ExpandedEdit,
         Icon::SceneDetect,
         Icon::StabilizeVideo,
+        Icon::ViewThumbnails,
+        Icon::ViewList,
+        Icon::ViewDetails,
+        Icon::StoryboardGrid,
+        Icon::SmartFolder,
+        Icon::ReplaceMedia,
     ];
 }
 
@@ -1324,6 +1336,56 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 c.stroke(0.08, pal.green),
                 StrokeKind::Inside,
             );
+        }
+        Icon::ViewThumbnails => {
+            for (rx, ry) in [(0.16, 0.16), (0.54, 0.16), (0.16, 0.54), (0.54, 0.54)] {
+                c.p.rect_filled(c.rect(rx, ry, rx + 0.28, ry + 0.28), c.u(0.04), pal.ink);
+            }
+        }
+        Icon::ViewList => {
+            for ry in [0.22, 0.46, 0.70] {
+                c.p.rect_filled(c.rect(0.14, ry, 0.24, ry + 0.10), c.u(0.03), pal.blue);
+                c.line(0.32, ry + 0.05, 0.86, ry + 0.05, pal.ink, 0.08);
+            }
+        }
+        Icon::ViewDetails => {
+            c.p.rect_filled(c.rect(0.14, 0.16, 0.86, 0.28), c.u(0.03), pal.blue);
+            for ry in [0.42, 0.60, 0.78] {
+                c.line(0.14, ry, 0.44, ry, pal.ink, 0.07);
+                c.line(0.52, ry, 0.68, ry, pal.muted, 0.07);
+                c.line(0.74, ry, 0.86, ry, pal.muted, 0.07);
+            }
+        }
+        Icon::StoryboardGrid => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.22, 0.42, 0.76),
+                c.u(0.04),
+                c.stroke(0.07, pal.blue),
+                StrokeKind::Inside,
+            );
+            c.p.rect_stroke(
+                c.rect(0.58, 0.22, 0.88, 0.76),
+                c.u(0.04),
+                c.stroke(0.07, pal.green),
+                StrokeKind::Inside,
+            );
+            c.line(0.42, 0.49, 0.58, 0.49, pal.amber, 0.08);
+        }
+        Icon::SmartFolder => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.24, 0.86, 0.82),
+                c.u(0.06),
+                c.stroke(0.07, pal.amber),
+                StrokeKind::Inside,
+            );
+            c.line(0.18, 0.24, 0.44, 0.24, pal.amber, 0.09);
+            c.p.circle_filled(c.pt(0.62, 0.55), c.u(0.12), pal.cyan);
+        }
+        Icon::ReplaceMedia => {
+            c.line(0.20, 0.34, 0.76, 0.34, pal.blue, 0.08);
+            c.line(0.62, 0.22, 0.78, 0.34, pal.blue, 0.08);
+            c.line(0.80, 0.66, 0.24, 0.66, pal.green, 0.08);
+            c.line(0.38, 0.78, 0.22, 0.66, pal.green, 0.08);
         }
     }
 }

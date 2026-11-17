@@ -1268,3 +1268,94 @@ fn kittest_modo_expandido_deteccao_cenas_e_armar_gravacao() {
     harness.run_steps(2);
     assert!(harness.state().project.tracks[1].record_armed);
 }
+
+#[test]
+fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // Insere duas mídias geradas no projeto e seleciona a aba Mídia do Projeto.
+    {
+        let app = harness.state_mut();
+        let imp1 = neoveg_engine::media::import_generated(crate::model::GenSpec::ColorBars);
+        let id1 = imp1.item.id;
+        app.media.insert(id1, imp1.entry);
+        app.session.register_imported_media(imp1.item, None);
+        let imp2 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.5, 0.9, 1.0],
+        });
+        let id2 = imp2.item.id;
+        app.media.insert(id2, imp2.entry);
+        app.session.register_imported_media(imp2.item, None);
+        app.add_media_to_timeline(id1, crate::model::Ticks::ZERO, Some(0));
+        app.session.active_media_id = Some(id1);
+        app.dock_tab = DockTab::ProjectMedia;
+        app.pending_dock_focus = Some(DockTab::ProjectMedia);
+    }
+    harness.run_steps(2);
+
+    // 1. Criar pasta manual (Bin) e pasta inteligente personalizada pela UI.
+    harness.get_by_label("Nova pasta (Bin)").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.media_bins.len(), 1);
+
+    harness.get_by_label("Nova pasta inteligente").click();
+    harness.run_steps(2);
+    assert!(harness.state().project_media.smart_dialog_open);
+    harness.get_by_label("Salvar filtro").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.smart_bins.len(), 1);
+
+    // 2. Alternar entre modos Lista, Detalhes e Storyboard.
+    harness.get_by_label("Lista").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project_media.view_mode,
+        crate::project_media::MediaViewMode::List
+    );
+
+    harness.get_by_label("Detalhes").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project_media.view_mode,
+        crate::project_media::MediaViewMode::Details
+    );
+
+    // 3. Selecionar eventos na timeline e trocar mídia mantendo os eventos.
+    let (id1, id2) = {
+        let app = harness.state();
+        (app.project.media[0].id, app.project.media[1].id)
+    };
+    harness.state_mut().session.sel_events.clear();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "media.select_events");
+    harness.run_steps(1);
+    assert_eq!(harness.state().sel_events.len(), 1);
+    assert_eq!(
+        harness.state_mut().session.swap_media_references(id1, id2),
+        1
+    );
+    assert_eq!(harness.state().project.tracks[0].events[0].media_id, id2);
+
+    // 4. Storyboard: criar, adicionar mídia e inserir na linha do tempo.
+    harness.get_by_label("Storyboard").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.storyboards.len(), 1);
+    let sb_id = harness.state().project.storyboards[0].id;
+    harness.state_mut().session.active_media_id = Some(id2);
+    harness.get_by_label("+ Adicionar selecionada").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.storyboards[0].items.len(), 1);
+    harness.state_mut().cursor = crate::model::Ticks::from_secs_i64(10);
+    let before = harness.state().project.tracks[0].events.len();
+    harness
+        .get_by_label("Inserir storyboard na timeline")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.tracks[0].events.len(), before + 1);
+    assert_eq!(harness.state().session.active_storyboard_id, Some(sb_id));
+}

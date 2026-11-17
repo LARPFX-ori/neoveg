@@ -3964,6 +3964,7 @@ impl App {
         if clear_cache_now {
             self.media.clear_frame_caches();
             self.thumbs.clear();
+            self.project_media.clear_thumbs();
             self.set_status("Cache de quadros e miniaturas liberado.");
         }
 

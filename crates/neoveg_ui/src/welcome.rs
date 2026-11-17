@@ -765,6 +765,7 @@ impl App {
         p.settings.manually_configured = manually_configured;
         self.session.reset_project(p, None);
         self.thumbs.clear();
+        self.project_media.clear_thumbs();
         self.set_status(format!(
             "Novo projeto: {}×{} @ {} qps",
             self.project.settings.width,
