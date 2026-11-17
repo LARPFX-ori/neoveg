@@ -9,6 +9,8 @@ pub mod avi;
 #[forbid(unsafe_code)]
 pub mod convert;
 #[forbid(unsafe_code)]
+pub mod demux;
+#[forbid(unsafe_code)]
 pub mod generate;
 #[forbid(unsafe_code)]
 pub mod img_extra;
