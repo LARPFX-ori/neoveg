@@ -832,3 +832,71 @@ fn kittest_conjunto_de_botoes_visiveis_do_cabecalho() {
     app.prefs.track_header = Default::default();
     let _ = app.prefs.save();
 }
+
+/// Janela Efeitos de Vídeo (manual do VEGAS Pro 21, p. 54): categoria, busca,
+/// escolher o efeito mostra o preset, e o botão Eventos aplica o efeito ao
+/// evento selecionado.
+#[test]
+fn kittest_navegador_de_efeitos_de_video() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ev = {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec::default(),
+        ));
+        app.dlg.gen_editor = None;
+        let id = app
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == crate::model::TrackKind::Video)
+            .flat_map(|t| t.events.iter())
+            .map(|e| e.id)
+            .next()
+            .expect("evento de vídeo");
+        app.sel_events.clear();
+        app.sel_events.insert(id);
+        id
+    };
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.video_fx");
+    harness.run_steps(3);
+
+    // categoria Luz: só Brilho (Glow) e Vinheta
+    harness.get_by_label("Luz").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Vinheta").is_some());
+    assert!(harness.query_by_label("Inverter").is_none());
+
+    // busca em Todos
+    harness.get_by_label("Todos").click();
+    harness.state_mut().fx_browser.search = "inver".into();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Inverter").is_some());
+    assert!(harness.query_by_label("Sépia").is_none());
+
+    harness.get_by_label("Inverter").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().fx_browser.selected,
+        Some(crate::model::FxKind::Invert)
+    );
+    assert!(
+        harness.query_by_label("Padrão").is_some(),
+        "preset do efeito"
+    );
+    harness.get_by_label("Eventos").click();
+    harness.run_steps(2);
+    let fx: Vec<_> = harness
+        .state()
+        .project
+        .event(ev)
+        .map(|e| e.fx.iter().map(|f| f.kind).collect())
+        .unwrap_or_default();
+    assert_eq!(fx, vec![crate::model::FxKind::Invert]);
+}

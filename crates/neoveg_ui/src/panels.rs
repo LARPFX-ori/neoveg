@@ -218,7 +218,7 @@ impl App {
             DockTab::ProjectMedia => self.media_tab(ui),
             DockTab::Explorer => self.explorer_tab(ui),
             DockTab::Transitions => self.transitions_tab(ui),
-            DockTab::VideoFx => self.fx_tab(ui, false),
+            DockTab::VideoFx => self.video_fx_browser(ui),
             DockTab::ColorGrading => self.color_grading_tab(ui),
             DockTab::AudioFx => self.fx_tab(ui, true),
             DockTab::Generators => self.generators_tab(ui),
@@ -915,11 +915,6 @@ impl App {
         } else {
             FxKind::VIDEO.to_vec()
         };
-        let want_kind = if audio {
-            TrackKind::Audio
-        } else {
-            TrackKind::Video
-        };
         egui::Grid::new(("fx_grid", audio))
             .num_columns(4)
             .striped(true)
@@ -939,57 +934,69 @@ impl App {
                             &self.theme,
                         );
                     });
-                    let sel_ev: Vec<Id> = self
-                        .sel_events
-                        .iter()
-                        .filter(|id| {
-                            self.project
-                                .find_event(**id)
-                                .map(|(t, _)| self.project.tracks[t].kind == want_kind)
-                                .unwrap_or(false)
-                        })
-                        .cloned()
-                        .collect();
-                    if ui
-                        .add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos"))
-                        .clicked()
-                    {
-                        self.checkpoint();
-                        for id in &sel_ev {
-                            if let Some(ev) = self.project.event_mut(*id) {
-                                ev.fx.push(FxInstance::new(k));
-                            }
-                        }
-                        self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
-                        self.changed();
-                    }
-                    let tr = self
-                        .sel_track
-                        .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
-                    if let (true, Some(t)) = (
-                        ui.add_enabled(tr.is_some(), egui::Button::new("Trilha"))
-                            .clicked(),
-                        tr,
-                    ) {
-                        self.checkpoint();
-                        self.project.tracks[t].fx.push(FxInstance::new(k));
-                        self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
-                        self.changed();
-                    }
-                    if ui.button("Master").clicked() {
-                        self.checkpoint();
-                        if audio {
-                            self.project.master.fx.push(FxInstance::new(k));
-                            self.dlg.fx_target = Some(FxTarget::MasterAudio);
-                        } else {
-                            self.project.master.video_fx.push(FxInstance::new(k));
-                            self.dlg.fx_target = Some(FxTarget::MasterVideo);
-                        }
-                        self.changed();
-                    }
+                    self.fx_apply_buttons(ui, k, audio);
                     ui.end_row();
                 }
             });
+    }
+
+    /// Botões Eventos, Trilha e Master de um efeito (lista de áudio e
+    /// janela Efeitos de Vídeo): aplicam à seleção do tipo certo, à trilha
+    /// selecionada ou ao Master, com um passo de Desfazer.
+    pub(crate) fn fx_apply_buttons(&mut self, ui: &mut egui::Ui, k: FxKind, audio: bool) {
+        let want_kind = if audio {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        };
+        let sel_ev: Vec<Id> = self
+            .sel_events
+            .iter()
+            .filter(|id| {
+                self.project
+                    .find_event(**id)
+                    .map(|(t, _)| self.project.tracks[t].kind == want_kind)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if ui
+            .add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos"))
+            .clicked()
+        {
+            self.checkpoint();
+            for id in &sel_ev {
+                if let Some(ev) = self.project.event_mut(*id) {
+                    ev.fx.push(FxInstance::new(k));
+                }
+            }
+            self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
+            self.changed();
+        }
+        let tr = self
+            .sel_track
+            .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
+        if let (true, Some(t)) = (
+            ui.add_enabled(tr.is_some(), egui::Button::new("Trilha"))
+                .clicked(),
+            tr,
+        ) {
+            self.checkpoint();
+            self.project.tracks[t].fx.push(FxInstance::new(k));
+            self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
+            self.changed();
+        }
+        if ui.button("Master").clicked() {
+            self.checkpoint();
+            if audio {
+                self.project.master.fx.push(FxInstance::new(k));
+                self.dlg.fx_target = Some(FxTarget::MasterAudio);
+            } else {
+                self.project.master.video_fx.push(FxInstance::new(k));
+                self.dlg.fx_target = Some(FxTarget::MasterVideo);
+            }
+            self.changed();
+        }
     }
 
     fn generators_tab(&mut self, ui: &mut egui::Ui) {
