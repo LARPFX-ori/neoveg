@@ -1,16 +1,29 @@
 """Verifica as licenças das dependências (AGENTS.md, portão de qualidade 4).
 
-Uso: python tools/check_licenses.py
+Uso:
+    python tools/check_licenses.py            # audita os 4 alvos desktop suportados
+    python tools/check_licenses.py --current  # audita apenas o alvo nativo da máquina
+    python tools/check_licenses.py --target <triple>
 
-Lê `cargo metadata` e falha se algum pacote usado pelo projeto tiver licença
-fora da lista SPDX permitida, exceto as exceções autorizadas e documentadas em
-docs/licencas-de-dependencias.md.
+Lê `cargo metadata` e o grafo de `cargo tree --workspace -e normal` por alvo
+desktop suportado (Windows x64, Linux x64, macOS ARM64 e macOS x64 — evitando
+`--target all`, que inclui alvos `wasm32` inativos no editor desktop) e falha se
+algum pacote tiver licença fora da lista SPDX permitida, exceto as exceções
+autorizadas e documentadas em docs/licencas-de-dependencias.md.
 """
 
+import argparse
 import json
 import re
 import subprocess
 import sys
+
+DESKTOP_TARGETS = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
 
 ALLOWED = {
     "MIT",
@@ -60,11 +73,13 @@ def is_ok(name, expr):
     return False
 
 
-def used_packages():
-    """Pacotes realmente presentes no grafo de dependências normais da plataforma atual."""
+def used_packages(target=None):
+    """Pacotes presentes no grafo de dependências normais do workspace no alvo."""
+    cmd = ["cargo", "tree", "--workspace", "-e", "normal", "--prefix", "none", "--format", "{p}"]
+    if target:
+        cmd.extend(["--target", target])
     out = subprocess.run(
-        ["cargo", "tree", "--workspace", "-e", "normal", "--prefix", "none", "--format", "{p}"],
-        capture_output=True, text=True, encoding="utf-8", check=True,
+        cmd, capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout
     names = set()
     for line in out.splitlines():
@@ -75,27 +90,60 @@ def used_packages():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Auditoria SPDX das dependências do Neoveg")
+    parser.add_argument(
+        "--current",
+        action="store_true",
+        help="Audita apenas o grafo da plataforma em execução",
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        help="Audita um triple específico (pode ser repetido)",
+    )
+    args = parser.parse_args()
+
     meta = json.loads(subprocess.run(
         ["cargo", "metadata", "--format-version", "1"],
         capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout)
-    used = used_packages()
     root = {p["name"] for p in meta["packages"] if p.get("source") is None}
-    bad = []
+    by_name = {}
     for p in meta["packages"]:
-        if p["name"] not in used or p["name"] in root:
-            continue
-        lic = p.get("license")
-        if not lic:
-            bad.append((p["name"], "(sem identificador SPDX: verifique license-file)"))
-        elif not is_ok(p["name"], lic):
-            bad.append((p["name"], lic))
+        by_name.setdefault(p["name"], []).append(p)
+
+    if args.target:
+        targets = args.target
+    elif args.current:
+        targets = [None]
+    else:
+        targets = DESKTOP_TARGETS
+
+    used_union = set()
+    bad = {}
+    for tgt in targets:
+        used = used_packages(tgt)
+        used_union.update(used)
+        label = tgt or "host"
+        for pkg_name in used:
+            if pkg_name in root:
+                continue
+            for p in by_name.get(pkg_name, []):
+                lic = p.get("license")
+                if not lic:
+                    bad.setdefault((pkg_name, "(sem identificador SPDX: verifique license-file)"), []).append(label)
+                elif not is_ok(pkg_name, lic):
+                    bad.setdefault((pkg_name, lic), []).append(label)
+
     if bad:
         print("Licenças fora da lista permitida:")
-        for name, lic in sorted(set(bad)):
-            print(f"  {name}: {lic}")
+        for (name, lic), tgts in sorted(bad.items()):
+            tgt_list = ", ".join(sorted(set(tgts)))
+            print(f"  {name}: {lic} [{tgt_list}]")
         return 1
-    print(f"OK: {len(used) - len(root)} dependências com licenças permitidas ou autorizadas.")
+    scope = f"{len(targets)} alvos ({', '.join(t or 'host' for t in targets)})"
+    print(f"OK: {len(used_union - root)} dependências únicas em {scope} com licenças permitidas ou autorizadas.")
     return 0
 
 
