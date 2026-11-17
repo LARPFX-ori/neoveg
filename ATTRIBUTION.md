@@ -38,7 +38,7 @@ interface do próprio Neoveg em `docs/screenshots/` (seção abaixo). Fora elas:
 
 ## Capturas de tela da interface (`docs/screenshots/`)
 
-- **Recurso:** `janela_principal.png`, `efeitos_de_video.png`, `geradores_de_midia.png` e `propriedades_do_evento.png`, usados no `README.md`
-- **Autor / Origem:** `original work` (contribuidores do projeto Neoveg); capturas da interface do próprio Neoveg, renderizadas fora da tela
+- **Recurso:** `janela_principal.png`, `boas_vindas.png`, `efeitos_de_video.png`, `geradores_de_midia.png`, `color_grading.png`, `escopos_de_video.png`, `mixer_e_barramentos.png`, `surround_panner.png`, `medidores_loudness.png`, `propriedades_do_evento.png`, `renderizar_como.png` e `neoveg_encoder.png`, usados no `README.md`
+- **Autor / Origem:** `original work` (contribuidores do projeto Neoveg); capturas da interface do próprio Neoveg, renderizadas fora da tela (`1600×900`)
 - **Licença:** `MIT OR Apache-2.0`
-- **Observações:** Mostram só o Neoveg, com mídia gerada pelo próprio programa (gradiente, barras de cor e texto), conforme o `AGENTS.md` §1.3; cada imagem tem o seu `.attribution` ao lado.
+- **Observações:** Mostram só o Neoveg, com mídia gerada localmente pelo próprio programa ou sintética de teste (gradiente, barras de cor, texto e WAV senoidal), conforme o `AGENTS.md` §1.3; cada imagem tem o seu `.attribution` ao lado.
