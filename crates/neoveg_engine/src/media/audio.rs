@@ -256,23 +256,10 @@ fn decode_extra_audio(path: &Path, ext: &str) -> Result<AudioData> {
 }
 
 fn decode_aac_or_m4a(path: &Path) -> Result<AudioData> {
-    #[cfg(windows)]
-    {
-        decode_via_mf(path)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        bail!("AAC/M4A requer API de mídia do sistema operacional (Media Foundation no Windows)")
-    }
-}
-
-#[cfg(windows)]
-fn decode_via_mf(path: &Path) -> Result<AudioData> {
-    let loaded = super::mf::open_media(path)?;
+    let loaded = super::system::open_media(path)?;
     loaded
         .audio
-        .ok_or_else(|| anyhow!("Media Foundation: nenhuma faixa de áudio encontrada"))
+        .ok_or_else(|| anyhow!("{}: nenhuma faixa de áudio encontrada", loaded.backend))
 }
 
 fn decode_wav_aiff(path: &Path) -> Result<AudioData> {
