@@ -645,6 +645,32 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
         texts.iter().any(|(t, _, _, _)| t == "Tam:"),
         "Área 6 (VEGAS 21) deve exibir o bloco In/Fim/Tam na barra de transporte em largura desktop"
     );
+    // em cada caixa o nome vem antes do valor (antes: "00:00:00;00 Tam:"):
+    // na linha das caixas, da esquerda para a direita, cada nome é seguido
+    // por um timecode
+    let (_, _, tam_r, _) = texts
+        .iter()
+        .find(|(t, _, _, _)| t == "Tam:")
+        .expect("`Tam:` visível");
+    let is_tc = |t: &str| t.chars().filter(|c| c.is_ascii_digit()).count() >= 6;
+    let mut row: Vec<(f32, &str)> = texts
+        .iter()
+        .filter(|(t, _, r, _)| {
+            (r.center().y - tam_r.center().y).abs() < 4.0
+                && (["Pos:", "In:", "Fim:", "Tam:"].contains(&t.as_str()) || is_tc(t))
+        })
+        .map(|(t, _, r, _)| (r.left(), t.as_str()))
+        .collect();
+    row.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let seq: Vec<&str> = row.iter().map(|(_, t)| *t).collect();
+    for (k, t) in seq.iter().enumerate() {
+        if !is_tc(t) {
+            assert!(
+                seq.get(k + 1).is_some_and(|v| is_tc(v)),
+                "`{t}` deve vir logo antes do valor: {seq:?}"
+            );
+        }
+    }
     app.exec_cmd(Some(&ctx), "view.master_bus");
     assert!(!app.master_bus_visible);
     app.exec_cmd(Some(&ctx), "view.master_bus");

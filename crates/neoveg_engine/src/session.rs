@@ -620,6 +620,39 @@ impl EditorSession {
         self.edit_selected_takes(crate::takes::delete_active)
     }
 
+    /// Todos os eventos selecionados (pelo menos um) estão travados?
+    pub fn selection_all_locked(&self) -> bool {
+        !self.sel_events.is_empty()
+            && self
+                .sel_events
+                .iter()
+                .all(|id| self.project.event(*id).is_some_and(|e| e.locked))
+    }
+
+    /// Botão Travar (Lock) da barra de transporte e edição (manual do VEGAS
+    /// Pro 21, p. 77): trava os eventos selecionados; se todos já estão
+    /// travados, destrava. Um passo de Desfazer; devolve quantos mudaram.
+    pub fn toggle_lock_selected(&mut self) -> usize {
+        let lock = !self.selection_all_locked();
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let mut probe = self.project.clone();
+        let mut n = 0;
+        for id in ids {
+            if let Some(e) = probe.event_mut(id) {
+                if e.locked != lock {
+                    e.locked = lock;
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.checkpoint();
+            self.project = probe;
+            self.changed();
+        }
+        n
+    }
+
     /// Algum evento selecionado tem mais de um take?
     pub fn selection_has_takes(&self) -> bool {
         self.sel_events.iter().any(|id| {
@@ -1640,6 +1673,39 @@ mod tests {
             info: String::new(),
             proxy_path: None,
         }
+    }
+
+    #[test]
+    fn travar_selecao_alterna_em_um_passo_de_desfazer() {
+        let mut p = Project::default();
+        p.tracks.push(Track::new(TrackKind::Video, "Vídeo 1"));
+        let m = sample_media(new_id(), 1920, 1080, Some(FrameRate::FPS_30));
+        let a = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(1));
+        let mut b = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(1));
+        b.locked = true;
+        let (ida, idb) = (a.id, b.id);
+        p.media.push(m);
+        p.tracks[0].events = vec![a, b];
+        let mut s = EditorSession::new(p);
+        let locked = |s: &EditorSession, id| s.project.event(id).map(|e| e.locked);
+        // sem seleção, nada muda
+        assert_eq!(s.toggle_lock_selected(), 0);
+        assert!(s.undo.is_empty());
+        s.sel_events.insert(ida);
+        s.sel_events.insert(idb);
+        // um travado e outro não: trava os dois
+        assert!(!s.selection_all_locked());
+        assert_eq!(s.toggle_lock_selected(), 1);
+        assert_eq!((locked(&s, ida), locked(&s, idb)), (Some(true), Some(true)));
+        assert_eq!(s.undo.len(), 1);
+        // todos travados: destrava
+        assert!(s.selection_all_locked());
+        assert_eq!(s.toggle_lock_selected(), 2);
+        assert_eq!(
+            (locked(&s, ida), locked(&s, idb)),
+            (Some(false), Some(false))
+        );
+        assert_eq!(s.undo.len(), 2);
     }
 
     #[test]
