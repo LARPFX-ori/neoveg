@@ -1859,6 +1859,22 @@ impl App {
                     self.cmd_menu_btn(ui, "event.prev_take");
                     self.cmd_menu_btn(ui, "event.delete_active_take");
                 });
+                ui.menu_button("Ferramenta de edição", |ui| {
+                    for id in [
+                        "edit.tool.normal",
+                        "edit.tool.envelope",
+                        "edit.tool.selection",
+                        "edit.tool.zoom",
+                    ] {
+                        self.cmd_menu_btn(ui, id);
+                    }
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.mode.normal");
+                    self.cmd_menu_btn(ui, "edit.tool.mode.slip");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.next");
+                    self.cmd_menu_btn(ui, "edit.tool.prev");
+                });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
                 self.cmd_menu_btn(ui, "edit.insert_time");
@@ -2279,12 +2295,72 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
+            // Ferramentas de edição (manual do VEGAS Pro 21, pp. 75–76 e 236):
+            // Normal (com a seta dos modos), Envelope, Seleção e Zoom.
+            let tool = self.session.edit_tool;
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Normal,
+                Icon::NormalTool,
+                None,
+                "edit.tool.normal",
+            );
+            // A seta é desenhada em vetor: a fonte da interface não tem `▼`.
+            let arrow_btn = egui::Button::new("")
+                .min_size(egui::vec2(12.0, ui.spacing().interact_size.y))
+                .frame(false);
+            let modes = egui::menu::menu_custom_button(ui, arrow_btn, |ui| {
+                for id in ["edit.tool.mode.normal", "edit.tool.mode.slip"] {
+                    let mode = if id == "edit.tool.mode.slip" {
+                        neoveg_engine::session::EditMode::Slip
+                    } else {
+                        neoveg_engine::session::EditMode::Normal
+                    };
+                    let on = tool == neoveg_engine::session::EditTool::Normal
+                        && self.session.edit_mode == mode;
+                    let label = menu_label(id, &self.prefs.shortcuts);
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), id);
+                        ui.close_menu();
+                    }
+                }
+            });
+            crate::scrollbars::paint_arrow_glyph(
+                ui.painter(),
+                modes.response.rect,
+                crate::scrollbars::ArrowDir::Down,
+                ui.visuals().text_color(),
+            );
+            modes.response.on_hover_text("Modo da ferramenta Normal");
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Envelope,
+                Icon::EnvelopeTool,
+                None,
+                "edit.tool.envelope",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Selection,
+                Icon::SelectionTool,
+                None,
+                "edit.tool.selection",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Zoom,
+                Icon::ZoomGlass,
+                None,
+                "edit.tool.zoom",
+            );
+            ui.separator();
+
             // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
             // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
             // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
             // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
-            // sem botão porque a função não existe: Gravar, as ferramentas
-            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
+            // sem botão porque a função não existe: Gravar, os modos Shuffle,
+            // Slide, Stretch e Split Trim da ferramenta Normal, Smart Split,
             // Crossfades automáticos (sempre ligados), Travar envelopes e as
             // linhas do tempo aninhadas.
             for (icon, id) in [
