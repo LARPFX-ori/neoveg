@@ -1014,7 +1014,7 @@ impl App {
     }
 
     /// Índice da trilha de vídeo selecionada, se houver.
-    fn selected_video_track(&self) -> Option<usize> {
+    pub(crate) fn selected_video_track(&self) -> Option<usize> {
         self.sel_track
             .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(TrackKind::Video))
     }

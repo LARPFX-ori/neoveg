@@ -31,6 +31,8 @@ pub mod engine;
 pub mod fcp7xml;
 #[forbid(unsafe_code)]
 pub mod fcpxml;
+#[forbid(unsafe_code)]
+pub mod integrations;
 pub mod media;
 #[forbid(unsafe_code)]
 pub mod model;

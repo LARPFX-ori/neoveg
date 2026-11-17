@@ -48,6 +48,22 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`, bitmaps `BI_RGB`/`DIB `, `YUY2`/`UYVY`, `I420`/`IYUV`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
 - **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`), decodifica `MJPEG`, `BI_RGB`/`DIB ` (24/32 bpp) e YUV (`YUY2`/`UYVY` 4:2:2 e `I420`/`IYUV` 4:2:0) e áudio PCM/G.711. A escrita grava `MJPEG` ou `AVI Não Comprimido RGB24` (`AviVideoCodec::UncompressedRgb24`) em segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
 
+### Integrações ArtCraft & Blender — `src/integrations/`
+
+- **Protocolo de Controle ArtCraft (`craft_rpc.rs`, `discovery.rs`):** implementado em Sala Limpa estrita a partir das especificações públicas `docs/control-protocol.md` dos aplicativos da suíte (`PhotoCraft`, `VectorCraft`, `FilmCraft`, `EffectCraft`, `SoundCraft`), mais CLI headless do `AniCraft` (`anicraft-cli new` / `render-seq`):
+  - Descoberta por caminhos padrão de instalação, `PATH`, preferência explícita do usuário (`ExternalAppsPrefs`) e arquivos de anúncio em loopback `agent-connection.json` + `agent-control.token` (leituras limitadas a `64 KiB` / `256 B`).
+  - Cliente TCP restrito a `127.0.0.1` com limite de linha de `4 MiB`, desafio HMAC-SHA256 em Rust puro (`RFC 2104` / `RFC 6234`, `photocraft-control-v1 server`/`client`) e token por requisição no FilmCraft.
+- **Broadcast Wave Format / `bext` (`workflows.rs`):** gravação WAV BWF segundo **EBU Tech 3285 v2** (bloco `bext` de 602 bytes com `Originator = "Neoveg"` e deslocamento exato de amostras em `TimeReference`) para intercâmbio com precisão de amostra no SoundCraft, além de cópias editáveis vinculadas como *Take* (`Add As Takes`) e observador de modificações no disco.
+- **Blender fora do processo (`blender.rs`):** invocação em segundo plano via `blender -b ... --factory-startup --python ...` sem linkar código GPL (`AGENTS.md` §2.3), renderização direta de sequências PNG para a timeline (`Fra:<N>`), geração de scripts `bpy` com escape JSON seguro e esquema limitado `neoveg.blender.camera.v1` para importar marcadores e keyframes de *Track Motion* / *Pan/Crop* (`16 MiB`, máx. `100 000` quadros).
+
+### Demuxer MP4 / MOV / MKV / WebM — `src/media/demux/`
+
+- **Edição de referência:**
+  - **ISO/IEC 14496-12** (*Information technology — Coding of audio-visual objects — Part 12: ISO Base Media File Format*) e **Apple *QuickTime File Format Specification*** (`ftyp`, `moov`/`mvhd`/`tkhd`/`edts`/`elst`/`mdia`/`mdhd`/`hdlr`/`minf`/`stbl` com `stsd`/`stts`/`ctts`/`stsc`/`stsz`/`stz2`/`stco`/`co64`/`stss`, extensões de fragmentos `mvex`/`trex`/`moof`/`mfhd`/`traf`/`tfhd`/`tfdt`/`trun`, e descriptores `avcC`/`hvcC`/`av1C`/`vpcC`/`esds`/`wave`);
+  - **RFC 8794** (*Extensible Binary Meta Language — EBML*) e **RFC 9559** (*Matroska Media Container Format*) / WebM Container Guidelines (`EBML`, `Segment`, `Info`/`TimestampScale`, `Tracks`/`TrackEntry`/`CodecPrivate`, `Cluster`/`Timestamp`/`SimpleBlock`/`BlockGroup`/`Block`/`BlockDuration`/`ReferenceBlock`, e modos de *lacing* Xiph, Fixed-size e EBML).
+- **Método de implementação:** Leitores em Rust puro (`#[forbid(unsafe_code)]`) sobre `Read + Seek`, limitando profundidade (`32`), trilhas (`64`), tabelas de metadados em memória (`64 MiB`), extradata (`1 MiB`) e número de amostras (`2 000 000`) sem carregar `mdat` ou payloads de mídia para a RAM, com conversão racional exata para `Ticks` em `i128` (`AGENTS.md` §0.4, §3.6 e Regra Rust 5). Validado contra oráculo externo `ffprobe -show_packets` e testes de fuzzing por mutação em `fuzz_demux_mp4_e_mkv`.
+
+
 ### Formatos Extras de Áudio e Extensões RIFF/AIFF — `src/media/wav.rs` e `src/media/audio_extra.rs`
 
 - **Edições de referência:**

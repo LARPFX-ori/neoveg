@@ -253,6 +253,7 @@ pub struct App {
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
+    pub(crate) integrations: crate::integrations_ui::IntegrationsState,
     pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
 }
 
@@ -401,6 +402,7 @@ impl App {
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
+            integrations: crate::integrations_ui::IntegrationsState::default(),
             encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
         };
         if let Some(e) = app.preview.error.clone() {
@@ -1596,6 +1598,11 @@ impl App {
             UiAction::BuildProxySelected => self.build_proxy_selected(),
             UiAction::PrerenderRegion => self.prerender_region(),
             UiAction::RunScriptDialog => self.run_script_dialog(),
+            UiAction::OpenIntegrationsDialog => self.open_integrations_dialog(),
+            UiAction::SendToExternalApp(ext_app) => self.send_to_external_app(ext_app, None, None),
+            UiAction::BlenderRenderSceneDialog => self.blender_render_scene_dialog(),
+            UiAction::BlenderExportScriptDialog => self.workflow_blender_export_script(None),
+            UiAction::BlenderImportCameraDialog => self.blender_import_camera_dialog(),
             UiAction::ExitApp => {
                 if let Some(c) = ctx {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2129,6 +2136,20 @@ impl App {
                 });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.run_script");
+                ui.separator();
+                self.cmd_menu_btn(ui, "tools.integrations");
+                ui.menu_button("Aplicativos externos (ArtCraft & Blender)", |ui| {
+                    self.cmd_menu_btn(ui, "tools.send_photocraft");
+                    self.cmd_menu_btn(ui, "tools.send_vectorcraft");
+                    self.cmd_menu_btn(ui, "tools.send_soundcraft");
+                    self.cmd_menu_btn(ui, "tools.send_effectcraft");
+                    self.cmd_menu_btn(ui, "tools.send_anicraft");
+                    self.cmd_menu_btn(ui, "tools.send_filmcraft");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.blender_render");
+                    self.cmd_menu_btn(ui, "tools.blender_export_script");
+                    self.cmd_menu_btn(ui, "tools.blender_import_camera");
+                });
             });
             ui.menu_button("Opções", |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
@@ -2246,6 +2267,7 @@ impl App {
             );
             ui.separator();
             self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
+            self.cmd_tool_btn(ui, Icon::ExternalApps, None, "tools.integrations");
             if self.loading > 0 {
                 ui.separator();
                 crate::splash::spinner_inline(ui, 15.0, ui.ctx().input(|i| i.time), &self.theme);
@@ -2960,6 +2982,7 @@ impl App {
         self.last_frame = Instant::now();
         self.audio.tick_without_device(dt);
         self.poll_loader();
+        self.poll_integrations();
         self.poll_script_job(ctx);
         self.poll_render();
         if let Some(msg) = self.encoder.tick(ctx, dt, &self.media) {
@@ -2986,6 +3009,8 @@ impl App {
         if self.render_job.is_some()
             || self.prerender_job.is_some()
             || self.loudness_job.is_some()
+            || self.integrations.probing
+            || self.integrations.blender_job.is_some()
             || self.loading > 0
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -3015,6 +3040,7 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.show_integrations_window(ctx);
         self.show_encoder_dialogs(ctx);
         self.crash_report_window(ctx);
         self.recovery_window(ctx);

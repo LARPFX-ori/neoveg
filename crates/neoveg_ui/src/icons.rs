@@ -78,6 +78,7 @@ pub enum Icon {
     TrimEnd,
     InsertMarker,
     InsertRegion,
+    ExternalApps,
     NormalTool,
     EnvelopeTool,
     SelectionTool,
@@ -85,7 +86,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 73] = [
+    pub const ALL: [Icon; 74] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -156,6 +157,7 @@ impl Icon {
         Icon::TrimEnd,
         Icon::InsertMarker,
         Icon::InsertRegion,
+        Icon::ExternalApps,
         Icon::NormalTool,
         Icon::EnvelopeTool,
         Icon::SelectionTool,
@@ -1090,6 +1092,28 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 );
                 c.line(x, 0.32, x, 0.92, pal.green, 0.08);
             }
+        }
+        Icon::ExternalApps => {
+            // dois quadros interligados por elo de ida e volta (integração externa)
+            let back = c.rect(0.12, 0.24, 0.62, 0.78);
+            c.p.rect_filled(back, c.u(0.08), pal.blue.gamma_multiply(0.28));
+            c.p.rect_stroke(
+                back,
+                c.u(0.08),
+                c.stroke(0.08, pal.cyan),
+                StrokeKind::Inside,
+            );
+            let front = c.rect(0.40, 0.14, 0.88, 0.64);
+            c.p.rect_filled(front, c.u(0.08), pal.paper.gamma_multiply(0.18));
+            c.p.rect_stroke(
+                front,
+                c.u(0.08),
+                c.stroke(0.08, pal.amber),
+                StrokeKind::Inside,
+            );
+            c.line(0.46, 0.56, 0.78, 0.24, pal.ink, 0.09);
+            c.line(0.60, 0.24, 0.78, 0.24, pal.ink, 0.09);
+            c.line(0.78, 0.24, 0.78, 0.42, pal.ink, 0.09);
         }
         Icon::NormalTool => {
             // seta de seleção

@@ -41,6 +41,7 @@ enum Cli {
         proj: Option<PathBuf>,
         out: Option<PathBuf>,
     },
+    ProbeIntegrations,
 }
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
@@ -52,6 +53,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         [] => Ok(Cli::Gui(None)),
         ["-h"] | ["--help"] | ["/?"] => Ok(Cli::Help),
         ["--list-commands"] => Ok(Cli::ListCommands),
+        ["--probe-integrations"] => Ok(Cli::ProbeIntegrations),
         ["--open", p] | [p] if !p.starts_with('-') => Ok(Cli::Gui(Some(PathBuf::from(p)))),
         ["--render", proj, out] => Ok(Cli::Render {
             proj: PathBuf::from(proj),
@@ -191,7 +193,8 @@ const HELP: &str = "Uso:
   neoveg --encode entrada saida [predefinicao]  transcodifica via Neoveg Encoder
   neoveg --run-script script.<cs|dll>           executa script C#/.NET (ScriptPortal.Vegas) via netcorehost
   neoveg --command <id> [projeto [saida]]       executa comando da Tabela Única sem interface
-  neoveg --list-commands                        lista os comandos e atalhos disponíveis";
+  neoveg --list-commands                        lista os comandos e atalhos disponíveis
+  neoveg --probe-integrations                   lista aplicativos ArtCraft/Blender e portas RPC em JSON";
 
 /// Imprime o resultado de uma sondagem em JSON e devolve o código de saída.
 fn print_probe<T: serde::Serialize>(res: Result<T, String>) -> i32 {
@@ -317,6 +320,11 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Ok(Cli::ProbeIntegrations) => {
+            let p = prefs::Preferences::load_or_default();
+            let rep = neoveg_engine::integrations::discovery::discover_all(&p.external_apps, true);
+            std::process::exit(print_probe(Ok(rep)));
+        }
         Ok(Cli::Gui(p)) => p,
         Err(msg) => {
             eprintln!("{msg}");
@@ -393,6 +401,10 @@ mod tests {
         assert_eq!(
             parse_args(&a(&["neoveg", "--list-commands"])),
             Ok(Cli::ListCommands)
+        );
+        assert_eq!(
+            parse_args(&a(&["neoveg", "--probe-integrations"])),
+            Ok(Cli::ProbeIntegrations)
         );
         assert!(parse_args(&a(&["neoveg", "--render"])).is_err());
         assert!(parse_args(&a(&["neoveg", "--xyz", "1", "2", "3", "4"])).is_err());
