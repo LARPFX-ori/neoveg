@@ -49,13 +49,12 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Concluído:**
   - *Surround Panner* 5.1 (`engine/surround.rs`, painel `surround_panel.rs`): modo do Master estéreo/5.1, posição 2D por trilha e barramento no anel ITU-R BS.775, LFE, downmix para monitoração e render WAV de 6 canais (`WAVE_FORMAT_EXTENSIBLE`);
   - **Takes múltiplos por evento** (`takes.rs`): adicionar como take, próximo/anterior (`T`/`Shift+T`), escolher/excluir o ativo e *Slip em todos os takes*, com divisão e aparo sincronizados;
-  - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e importação de **AAF** (`aaf.rs`);
+  - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e **AAF** (`.aaf`, `aaf.rs`, `aaf_metadict.rs`, `file.import_aaf` / `file.export_aaf` em Sala Limpa);
   - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores*;
   - Descoberta de plug-ins VST3/OFX nas pastas padrão (`plugins.rs`) e efeitos de vídeo OFX aplicados a eventos pelo host isolado `neoveg --plugin-host` (`plugin_host.rs`, `plugin_host/ofx.rs`);
   - Efeitos OFX com **keyframes de parâmetros** (linear; Boolean/Choice seguram o valor; Integer arredonda), avaliação completa de curvas no host (`getValueAtTime`, `getDerivative`, `getIntegral`, consultas `getNumKeys`/`getKeyTime`/`getKeyIndex`), clipes opcionais desconectados no contexto *General* e tempo na **taxa de quadros do projeto**;
   - **Host VST3 para efeitos de áudio** (`plugin_host/vst3.rs`, VST 3 SDK 3.8 sob MIT pelos bindings `vst3`): efeitos aplicados a eventos, trilhas, barramentos e Master pelo subprocesso `neoveg --plugin-host serve-vst3`, uma instância por mixer e por efeito, abertura assíncrona na reprodução (o sinal passa seco até o plug-in abrir) e síncrona no render, tempo limite de 2 s por bloco com recriação do host, **persistência do estado completo (`IComponent::getState`/`setState`)**, **compensação automática de latência (PDC)** entre ramos paralelos e pré-roll no render offline/loudness, e editor de parâmetros normalizados no diálogo de FX;
 - **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
-- **Intercâmbio aberto restante:** exportação AAF a partir da especificação pública.
 - **Hospedagem de plug-ins externos restantes:** OFX com tiles e múltiplas entradas em contexto *General*; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros em tempo real e instrumentos (MIDI).
 
 ## UI/UX que ainda falta (manual do VEGAS Pro 21)

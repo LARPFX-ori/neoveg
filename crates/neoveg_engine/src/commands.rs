@@ -381,6 +381,7 @@ pub enum UiAction {
     ImportFcp7Dialog,
     ExportFcp7Dialog,
     ImportAafDialog,
+    ExportAafDialog,
     OpenRenderDialog,
     SendToEncoder,
     EncoderStartQueue,
@@ -798,6 +799,19 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::ImportAafDialog, h),
+    },
+    CommandDef {
+        id: "file.export_aaf",
+        label: "Exportar AAF (.aaf)...",
+        menu_path: "Arquivo/Exportar AAF (.aaf)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(s, h, UiAction::ExportAafDialog, "aaf", "AAF", |sess, p| {
+                crate::aaf::export_aaf_file(&sess.project, p)
+            })
+        },
     },
     CommandDef {
         id: "file.import_fcp7",
