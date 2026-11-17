@@ -32,6 +32,11 @@ AUDIO = [
     ("oracle_mp3.mp3", ["-c:a", "libmp3lame", "-b:a", "128k"]),
     ("oracle_aac.m4a", ["-c:a", "aac", "-b:a", "128k"]),
     ("oracle_aac.aac", ["-c:a", "aac", "-b:a", "128k", "-f", "adts"]),
+    ("oracle_au.au", ["-c:a", "pcm_mulaw"]),
+    ("oracle_caf.caf", ["-c:a", "pcm_s16be"]),
+    ("oracle_w64.w64", ["-c:a", "pcm_s16le"]),
+    ("oracle_adpcm.wav", ["-c:a", "adpcm_ima_wav"]),
+    ("oracle_alaw.wav", ["-c:a", "pcm_alaw"]),
 ]
 
 VIDEO = [

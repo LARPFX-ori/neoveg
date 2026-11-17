@@ -27,6 +27,7 @@ pub fn panel_key(tab: DockTab) -> &'static str {
         DockTab::Compositors => "compositors",
         DockTab::Scopes => "scopes",
         DockTab::Notes => "notes",
+        DockTab::Encoder => "encoder",
     }
 }
 
@@ -136,7 +137,7 @@ impl WindowLayout {
         self.px_per_sec = self
             .px_per_sec
             .filter(|v| v.is_finite() && *v > 0.0)
-            .map(|v| v.clamp(2.0, 2000.0));
+            .map(crate::timeline::TimelineState::clamp_pps);
         let pv_on_left = self
             .edit_layout
             .as_ref()
@@ -318,9 +319,16 @@ mod tests {
         assert_eq!(bad.px_per_sec, None);
 
         let mut clamped = bad.clone();
-        clamped.px_per_sec = Some(0.1);
+        clamped.px_per_sec = Some(1.0e-12);
         clamped.sanitize();
-        assert_eq!(clamped.px_per_sec, Some(2.0));
+        assert_eq!(
+            clamped.px_per_sec,
+            Some(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+        );
+        // zoom muito aproximado agora é aceito (sem o antigo teto de 2000 px/s)
+        clamped.px_per_sec = Some(1.0e6);
+        clamped.sanitize();
+        assert_eq!(clamped.px_per_sec, Some(1.0e6));
 
         let path = std::env::temp_dir().join("neoveg_test_layout.neoveglayout");
         save_layout_file(&bad, &path).unwrap();

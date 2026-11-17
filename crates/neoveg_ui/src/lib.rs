@@ -14,14 +14,19 @@
 pub mod app;
 mod color_grading;
 mod convert_dialog;
+mod crash_report;
 mod dialogs;
 mod dock;
 mod edit;
 mod edit_details;
+mod encoder_panel;
+mod fx_browser;
+mod gen_browser;
 mod icons;
 pub mod layout;
 mod panels;
 mod plugin_manager;
+mod script_forms;
 mod scrollbars;
 mod splash;
 mod surround_panel;
@@ -60,12 +65,20 @@ fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
 /// Inicia a janela principal usando `wgpu`; caso não haja adaptador gráfico
 /// compatível (§3.6), cai automaticamente para `glow` (OpenGL/software) e
 /// exibe aviso na barra de status sem entrar em pânico.
-pub fn run_gui(open: Option<PathBuf>) -> eframe::Result<()> {
+pub fn run_gui(
+    open: Option<PathBuf>,
+    crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
+) -> eframe::Result<()> {
     let open_wgpu = open.clone();
+    let crash_wgpu = crash_reports.clone();
     match eframe::run_native(
         "Neoveg",
         native_options(eframe::Renderer::Wgpu),
-        Box::new(move |cc| Ok(Box::new(App::new(cc, open_wgpu.clone())))),
+        Box::new(move |cc| {
+            let mut app = App::new(cc, open_wgpu.clone());
+            app.set_crash_reports(crash_wgpu.clone());
+            Ok(Box::new(app))
+        }),
     ) {
         Ok(()) => Ok(()),
         Err(wgpu_err) => {
@@ -77,6 +90,7 @@ pub fn run_gui(open: Option<PathBuf>) -> eframe::Result<()> {
                 native_options(eframe::Renderer::Glow),
                 Box::new(move |cc| {
                     let mut app = App::new(cc, open.clone());
+                    app.set_crash_reports(crash_reports.clone());
                     app.set_status("Modo gráfico alternativo (OpenGL/software): WGPU indisponível");
                     Ok(Box::new(app))
                 }),

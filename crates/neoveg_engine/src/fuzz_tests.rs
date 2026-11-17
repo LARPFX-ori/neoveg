@@ -650,6 +650,297 @@ fn fuzz_fcpxml() {
 }
 
 #[test]
+fn fuzz_imagens_extras() {
+    use crate::media::img_extra::{
+        decode_extra_image, encode_cineon, encode_dpx, encode_image_for_ext, encode_wbmp,
+        encode_xbm, encode_xpm, open_image_file,
+    };
+
+    let sample = image::RgbaImage::from_fn(8, 8, |x, y| {
+        image::Rgba([
+            ((x * 31) & 0xFF) as u8,
+            ((y * 29) & 0xFF) as u8,
+            (((x + y) * 17) & 0xFF) as u8,
+            255,
+        ])
+    });
+
+    // Semente IFF/ILBM 8x2 mínima válida
+    let mut ilbm = b"FORM\0\0\0\0ILBM".to_vec();
+    let mut bmhd = vec![];
+    bmhd.extend_from_slice(&8u16.to_be_bytes());
+    bmhd.extend_from_slice(&2u16.to_be_bytes());
+    bmhd.extend_from_slice(&0i16.to_be_bytes());
+    bmhd.extend_from_slice(&0i16.to_be_bytes());
+    bmhd.extend_from_slice(&[2, 0, 1, 0, 0, 0, 1, 1]);
+    bmhd.extend_from_slice(&8u16.to_be_bytes());
+    bmhd.extend_from_slice(&2u16.to_be_bytes());
+    for (id, data) in [
+        (*b"BMHD", bmhd.as_slice()),
+        (*b"CMAP", &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]),
+        (*b"BODY", &[0x80, 0, 0, 0, 0, 0, 0x80, 0]),
+    ] {
+        ilbm.extend_from_slice(&id);
+        ilbm.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        ilbm.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            ilbm.push(0);
+        }
+    }
+    let ilbm_len = (ilbm.len() - 8) as u32;
+    ilbm[4..8].copy_from_slice(&ilbm_len.to_be_bytes());
+
+    let extra_seeds: &[(&str, Vec<u8>)] = &[
+        ("dpx", encode_dpx(&sample).unwrap()),
+        ("cin", encode_cineon(&sample).unwrap()),
+        ("wbmp", encode_wbmp(&sample).unwrap()),
+        ("xbm", encode_xbm(&sample, "fz").unwrap()),
+        ("xpm", encode_xpm(&sample, "fz").unwrap()),
+        ("iff", ilbm),
+    ];
+    for (idx, (ext, seed)) in extra_seeds.iter().enumerate() {
+        for (i, m) in mutations(seed, 160, 0x1A00 + idx as u64).iter().enumerate() {
+            assert_no_panic(&format!("img_extra.{ext}"), i, || {
+                let _ = decode_extra_image(ext, m);
+            });
+        }
+    }
+
+    // Formatos adicionados via crate `image` + limites em `open_image_file`
+    let encoded_seeds: &[(&str, Vec<u8>)] = &[
+        ("tga", encode_image_for_ext(&sample, "tga", 90).unwrap()),
+        ("exr", encode_image_for_ext(&sample, "exr", 90).unwrap()),
+        ("qoi", encode_image_for_ext(&sample, "qoi", 90).unwrap()),
+        ("ppm", encode_image_for_ext(&sample, "ppm", 90).unwrap()),
+        ("ico", encode_image_for_ext(&sample, "ico", 90).unwrap()),
+        ("webp", encode_image_for_ext(&sample, "webp", 90).unwrap()),
+    ];
+    let p = tmp("img_fuzz.bin");
+    for (idx, (ext, seed)) in encoded_seeds.iter().enumerate() {
+        let ep = tmp(&format!("img_fuzz.{ext}"));
+        for (i, m) in mutations(seed, 80, 0x2B00 + idx as u64).iter().enumerate() {
+            let _ = std::fs::write(&ep, m);
+            assert_no_panic(&format!("image.{ext}"), i, || {
+                let _ = open_image_file(&ep);
+            });
+        }
+        let _ = std::fs::remove_file(&ep);
+    }
+    for (idx, ext) in ["hdr", "dds", "ff"].iter().enumerate() {
+        let ep = tmp(&format!("img_hostil.{ext}"));
+        let hostile = vec![0xFFu8; 96];
+        for (i, m) in mutations(&hostile, 60, 0x3C00 + idx as u64)
+            .iter()
+            .enumerate()
+        {
+            let _ = std::fs::write(&ep, m);
+            assert_no_panic(&format!("image_hostil.{ext}"), i, || {
+                let _ = open_image_file(&ep);
+            });
+        }
+        let _ = std::fs::remove_file(&ep);
+    }
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn fuzz_audio_extra() {
+    use crate::media::audio_extra::{
+        decode_bytes, AiffWriter, AuWriter, CafWriter, ExtWaveWriter, QoaWriter, W64Writer,
+    };
+    use crate::media::wav;
+    use crate::render::WavBits;
+
+    let sig: Vec<f32> = (0..1024)
+        .flat_map(|i| {
+            let s = ((i as f32) * 0.05).sin() * 0.4;
+            [s, -s]
+        })
+        .collect();
+
+    let gen = |name: &str, f: &dyn Fn(&std::path::Path)| -> Vec<u8> {
+        let p = tmp(name);
+        f(&p);
+        let b = std::fs::read(&p).unwrap_or_default();
+        let _ = std::fs::remove_file(&p);
+        b
+    };
+
+    let au = gen("seed.au", &|p| {
+        let mut w = AuWriter::create(p, 44100, WavBits::Pcm16, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+    let caf = gen("seed.caf", &|p| {
+        let mut w = CafWriter::create(p, 44100, WavBits::Float32, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+    let w64 = gen("seed.w64", &|p| {
+        let mut w = W64Writer::create_with_channels(p, 44100, WavBits::Pcm16, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+    let bwf = gen("seed.bwf", &|p| {
+        let mut w = ExtWaveWriter::create_bwf(p, 44100, WavBits::Pcm16, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+    let rf64 = gen("seed.rf64", &|p| {
+        let mut w = ExtWaveWriter::create_rf64(p, 44100, WavBits::Float32, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+    let aiff = gen("seed.aif", &|p| {
+        let mut w = AiffWriter::create_with_channels(p, 44100, WavBits::Float32, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+    let qoa = gen("seed.qoa", &|p| {
+        let mut w = QoaWriter::create_with_channels(p, 44100, 2).unwrap();
+        w.write(&sig).unwrap();
+        w.finish().unwrap();
+    });
+
+    // VOC v1.20 bloco 9 mínimo válido
+    let mut voc = b"Creative Voice File\x1A".to_vec();
+    voc.extend_from_slice(&26u16.to_le_bytes());
+    let ver = 0x0114u16;
+    voc.extend_from_slice(&ver.to_le_bytes());
+    voc.extend_from_slice(&(!ver).wrapping_add(0x1234).to_le_bytes());
+    let mut blk = vec![];
+    blk.extend_from_slice(&22050u32.to_le_bytes());
+    blk.extend_from_slice(&[16, 1]);
+    blk.extend_from_slice(&4u16.to_le_bytes());
+    blk.extend_from_slice(&0u32.to_le_bytes());
+    blk.extend_from_slice(&16384i16.to_le_bytes());
+    blk.extend_from_slice(&(-16384i16).to_le_bytes());
+    let sz = blk.len() as u32;
+    voc.extend_from_slice(&[
+        9,
+        (sz & 0xFF) as u8,
+        ((sz >> 8) & 0xFF) as u8,
+        ((sz >> 16) & 0xFF) as u8,
+    ]);
+    voc.extend_from_slice(&blk);
+    voc.push(0);
+
+    // 8SVX Fibonacci delta mínimo válido
+    let mut svx = b"FORM\0\0\0\08SVXVHDR".to_vec();
+    svx.extend_from_slice(&20u32.to_be_bytes());
+    let mut vhdr = vec![0u8; 20];
+    vhdr[12..14].copy_from_slice(&11025u16.to_be_bytes());
+    vhdr[14] = 1;
+    vhdr[15] = 1;
+    svx.extend_from_slice(&vhdr);
+    svx.extend_from_slice(b"BODY");
+    svx.extend_from_slice(&4u32.to_be_bytes());
+    svx.extend_from_slice(&[0u8, 10, 0xF8, 0x8F]);
+    let flen = (svx.len() - 8) as u32;
+    svx[4..8].copy_from_slice(&flen.to_be_bytes());
+
+    // WAV µ-law & IMA-ADPCM mínimos
+    let mut ulaw_wav = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+    ulaw_wav.extend_from_slice(&16u32.to_le_bytes());
+    ulaw_wav.extend_from_slice(&7u16.to_le_bytes());
+    ulaw_wav.extend_from_slice(&1u16.to_le_bytes());
+    ulaw_wav.extend_from_slice(&8000u32.to_le_bytes());
+    ulaw_wav.extend_from_slice(&8000u32.to_le_bytes());
+    ulaw_wav.extend_from_slice(&1u16.to_le_bytes());
+    ulaw_wav.extend_from_slice(&8u16.to_le_bytes());
+    ulaw_wav.extend_from_slice(b"data");
+    ulaw_wav.extend_from_slice(&8u32.to_le_bytes());
+    ulaw_wav.extend_from_slice(&[0xFF, 0x80, 0x7F, 0x00, 0xD5, 0x55, 0x2A, 0xAA]);
+    let wlen = (ulaw_wav.len() - 8) as u32;
+    ulaw_wav[4..8].copy_from_slice(&wlen.to_le_bytes());
+
+    let mut ima_wav = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+    ima_wav.extend_from_slice(&20u32.to_le_bytes());
+    ima_wav.extend_from_slice(&0x0011u16.to_le_bytes());
+    ima_wav.extend_from_slice(&1u16.to_le_bytes());
+    ima_wav.extend_from_slice(&16000u32.to_le_bytes());
+    ima_wav.extend_from_slice(&8000u32.to_le_bytes());
+    ima_wav.extend_from_slice(&16u16.to_le_bytes());
+    ima_wav.extend_from_slice(&4u16.to_le_bytes());
+    ima_wav.extend_from_slice(&2u16.to_le_bytes());
+    ima_wav.extend_from_slice(&25u16.to_le_bytes());
+    ima_wav.extend_from_slice(b"data");
+    ima_wav.extend_from_slice(&16u32.to_le_bytes());
+    ima_wav.extend_from_slice(&[0u8; 16]);
+    let ilen = (ima_wav.len() - 8) as u32;
+    ima_wav[4..8].copy_from_slice(&ilen.to_le_bytes());
+
+    for (idx, (ext, seed)) in [
+        ("au", au),
+        ("caf", caf),
+        ("w64", w64),
+        ("voc", voc),
+        ("8svx", svx),
+        ("qoa", qoa),
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (i, m) in mutations(seed, 160, 0x4D00 + idx as u64).iter().enumerate() {
+            assert_no_panic(&format!("audio_extra.{ext}"), i, || {
+                let _ = decode_bytes(ext, m, 2_000_000);
+            });
+        }
+    }
+
+    for (idx, (label, seed)) in [
+        ("bwf", bwf),
+        ("rf64", rf64),
+        ("aiff_c", aiff),
+        ("ulaw", ulaw_wav),
+        ("ima", ima_wav),
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (i, m) in mutations(seed, 160, 0x5E00 + idx as u64).iter().enumerate() {
+            assert_no_panic(&format!("wav_ext.{label}"), i, || {
+                let _ = wav::decode(m, 2_000_000);
+            });
+        }
+    }
+}
+
+#[test]
+fn fuzz_encoder_parsers() {
+    use crate::encoder::effects::CubeLut;
+    use crate::encoder::presets::import_preset_str;
+    use crate::encoder::{load_state, EncoderState};
+
+    let cube_seed =
+        b"TITLE \"Fuzz\"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    for (i, m) in mutations(cube_seed, 200, 0xEC01).iter().enumerate() {
+        let s = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("encoder.cube", i, || {
+            let _ = CubeLut::parse(&s);
+        });
+    }
+
+    let preset_seed = br#"{"magic":"neovegpreset","version":1,"preset":{"id":"usr_1","name":"Teste","category":"Custom","format":"Mp4H264"}}"#;
+    for (i, m) in mutations(preset_seed, 200, 0xEC02).iter().enumerate() {
+        let s = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("encoder.neovegpreset", i, || {
+            let _ = import_preset_str(&s);
+        });
+    }
+
+    let q_json = serde_json::to_vec(&EncoderState::default()).unwrap_or_default();
+    let qp = tmp("encoder_queue_fuzz.json");
+    for (i, m) in mutations(&q_json, 160, 0xEC03).iter().enumerate() {
+        let _ = std::fs::write(&qp, m);
+        assert_no_panic("encoder.queue_json", i, || {
+            let _ = load_state(&qp);
+        });
+    }
+    let _ = std::fs::remove_file(&qp);
+}
+
+#[test]
 fn fuzz_demux_mp4_e_mkv() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

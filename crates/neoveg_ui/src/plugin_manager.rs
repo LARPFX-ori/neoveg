@@ -29,6 +29,30 @@ enum ProbeState<T> {
 }
 
 type ProbeMap<T> = Arc<Mutex<HashMap<PathBuf, ProbeState<T>>>>;
+
+/// Plug-ins OFX já consultados no Plug-In Manager (binário e plug-in), para
+/// a categoria Terceiros da janela Efeitos de Vídeo. Não consulta nada novo.
+pub(crate) fn probed_ofx_plugins(ctx: &egui::Context) -> Vec<(PathBuf, OfxPluginInfo)> {
+    let key = egui::Id::new("plugin_manager_ofx_probes");
+    let Some(map) = ctx.data(|d| d.get_temp::<ProbeMap<OfxPluginInfo>>(key)) else {
+        return Vec::new();
+    };
+    let map = map.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut out: Vec<(PathBuf, OfxPluginInfo)> = map
+        .iter()
+        .filter_map(|(bin, st)| match st {
+            ProbeState::Done(Ok(list)) => Some(
+                list.iter()
+                    .map(|i| (bin.clone(), i.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    out.sort_by(|a, b| a.1.identifier.cmp(&b.1.identifier));
+    out
+}
 type ProbeFn<T> = fn(&Path, &Path, Duration) -> Result<Vec<T>, String>;
 
 type Vst3ParamsState = Option<Result<Arc<Vec<Vst3ParamInfo>>, String>>;
@@ -854,7 +878,7 @@ impl App {
     }
 
     /// Eventos selecionados que estão em trilhas de vídeo.
-    fn selected_video_events(&self) -> Vec<crate::model::Id> {
+    pub(crate) fn selected_video_events(&self) -> Vec<crate::model::Id> {
         self.sel_events
             .iter()
             .filter(|id| {
