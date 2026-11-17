@@ -995,3 +995,35 @@ fn kittest_navegador_de_geradores_de_midia() {
     });
     assert!(radial, "inseriu o preset Gradiente radial");
 }
+
+#[test]
+fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // O botão "Encoder" fica visível diretamente na barra superior ao iniciar.
+    harness.get_by_label("Encoder").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+
+    // Em "Renderizar como", "Enviar para o Encoder" enfileira a timeline e foca o Encoder.
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut();
+        app.exec_cmd(Some(&ctx), "view.tab.project_media");
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.exec_cmd(Some(&ctx), "file.render");
+    }
+    harness.run_steps(2);
+    assert!(harness.state().dlg.render.is_some());
+
+    let before = harness.state().encoder.state.items.len();
+    harness.get_by_label("Enviar para o Encoder").click();
+    harness.run_steps(3);
+
+    assert!(harness.state().dlg.render.is_none());
+    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert_eq!(harness.state().encoder.state.items.len(), before + 1);
+}

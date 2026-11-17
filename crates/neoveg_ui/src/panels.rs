@@ -183,10 +183,14 @@ impl App {
             .collect();
         for tab in detached {
             let key = crate::layout::panel_key(tab);
+            let (inner_size, min_size) = match tab {
+                DockTab::Encoder => ([1120.0, 680.0], [740.0, 440.0]),
+                _ => ([520.0, 360.0], [260.0, 180.0]),
+            };
             let spec = FloatingViewportSpec {
                 title: tab.name(),
-                inner_size: [520.0, 360.0],
-                min_size: [260.0, 180.0],
+                inner_size,
+                min_size,
                 icon: icon.clone(),
                 theme: &theme,
             };

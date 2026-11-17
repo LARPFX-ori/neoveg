@@ -2204,7 +2204,7 @@ impl App {
             self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
             self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
             self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
-            self.cmd_tool_btn(ui, Icon::EncoderQueue, None, "view.tab.encoder");
+            self.cmd_tool_btn(ui, Icon::EncoderQueue, Some("Encoder"), "view.tab.encoder");
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             ui.separator();
             self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
