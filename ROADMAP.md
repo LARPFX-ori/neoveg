@@ -26,7 +26,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Áudio em Rust puro com licenças SPDX permitidas (`media/audio.rs`):** leitor WAVE/AIFF próprio, FLAC (`claxon`, `Apache-2.0`), Ogg Vorbis (`lewton`, `MIT OR Apache-2.0`) e MP3 (`puremp3`, `MIT OR CC0-1.0`), com verificação opcional via oráculo externo `ffprobe` em `target/fixtures/` (sem dependências `MPL-2.0`/`GPL`/`LGPL`).
 - **Media Foundation no Windows (`media/mf.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de vídeo/áudio em MP4, MOV, MKV, WEBM, M4V, M4A, AAC, WMV e ASF.
 - **Experiência VEGAS Pro em `neoveg_ui`:**
-  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **69 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
+  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **72 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
   - Janelas **Trimmer** (`Alt+2`, pré-visualização A/V de mídia, marcação `In`/`Out` com navegação quadro a quadro, seleção *Áudio + Vídeo* / *Apenas Vídeo* / *Apenas Áudio* e envio com Desfazer) e **Detalhes da Edição (*Edit Details*, `Alt+3`)** tabular com edição em linha (*Eventos*, *Marcadores*, *Regiões*, *Trilhas*, *Barramentos*), filtro e cópia TSV;
   - Playhead físico de **1 px** contrastado ao tema e ao Auto Ripple, **Linha do Playhead** com cabeçalho no topo, **retângulos nos números das faixas**, **Visor de Tempo** dedicado acima da lista de faixas (alinhado à régua e marcadores), controle **Taxa (`Playback Rate`)** + botões de trilha abaixo das faixas, **barras de rolagem clássicas com setas (`◀`/`▶`, `▲`/`▼`), botões de zoom horizontal e altura de trilhas (`−`/`+`) e ajuste ao projeto** na timeline e **Barra de Status de Renderização** na base da timeline com faixa indicadora de pré-render no topo;
   - Painéis da área acoplável, **Prévia de Vídeo** e **Master Bus** destacáveis em **janelas nativas do SO/Windows** (`show_viewport_immediate`, com fallback embutido em testes headless) e layouts `.neoveglayout` (4 presets + salvamento/carregamento);
@@ -87,11 +87,12 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Edição na linha do tempo
 
-- **Seletor de ferramenta de edição** na barra de transporte (p. 236):
-  - Normal, com os modos Shuffle, Slip, Slide, Stretch e Split Trim;
-  - as ferramentas Envelope, Seleção e Zoom.
+- **Seletor de ferramenta de edição** na barra de transporte (p. 236), parcial. Já existem:
+  - a ferramenta Normal, com os modos Normal e Slip;
+  - as ferramentas Envelope, Seleção (caixa) e Zoom (caixa e clique);
+  - `D` e `Shift+D` para alternar entre elas.
 
-  O motor já tem `EditMode` (Normal, Slip, Slide, Stretch, Roll, Shuffle, Ripple); falta a interface. Hoje o slip é feito com um modificador durante o arraste.
+  Faltam os modos Shuffle, Slide, Stretch e Split Trim, a seleção só vertical ou só horizontal, o zoom só de tempo ou só de trilhas e o clique direito que alterna o modo.
 - **Inserir evento vazio** (p. 243).
 - **Smart Split** (p. 308) e **juntar eventos divididos** (*healing*, p. 309).
 - **Detecção de cenas/cortes** (p. 300).

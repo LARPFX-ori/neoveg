@@ -49,6 +49,51 @@ impl EditMode {
     }
 }
 
+/// Ferramenta de edição ativa na linha do tempo (manual do VEGAS Pro 21,
+/// p. 236). É estado da sessão: não vai para o projeto nem para o Desfazer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditTool {
+    /// Selecionar, mover e aparar eventos (com o modo em `edit_mode`).
+    #[default]
+    Normal,
+    /// Só pontos de envelope; eventos não se movem nem são aparados.
+    Envelope,
+    /// Caixa de seleção: seleciona os eventos que ela toca.
+    Selection,
+    /// Caixa de zoom; um clique ajusta o projeto à linha do tempo.
+    Zoom,
+}
+
+impl EditTool {
+    pub const ALL: [EditTool; 4] = [
+        EditTool::Normal,
+        EditTool::Envelope,
+        EditTool::Selection,
+        EditTool::Zoom,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            EditTool::Normal => "Normal",
+            EditTool::Envelope => "Envelope",
+            EditTool::Selection => "Seleção",
+            EditTool::Zoom => "Zoom",
+        }
+    }
+
+    /// Próxima ferramenta da lista (D), voltando à primeira depois da última.
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// Ferramenta anterior (Shift+D).
+    pub fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EditorOptions {
     pub snapping: bool,
@@ -131,7 +176,10 @@ pub struct EditorSession {
     pub clipboard: Vec<ClipItem>,
     pub clip_base: Ticks,
     pub opts: EditorOptions,
+    /// Modo da ferramenta Normal (por enquanto Normal ou Slip).
     pub edit_mode: EditMode,
+    /// Ferramenta de edição ativa (Normal, Envelope, Seleção, Zoom).
+    pub edit_tool: EditTool,
     pub status: String,
     pub removed_media_ids: Vec<Id>,
     /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
@@ -165,6 +213,7 @@ impl EditorSession {
             clip_base: Ticks::ZERO,
             opts: EditorOptions::default(),
             edit_mode: EditMode::Normal,
+            edit_tool: EditTool::Normal,
             status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),

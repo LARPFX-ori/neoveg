@@ -999,6 +999,106 @@ pub static COMMANDS: &[CommandDef] = &[
             ok_mutated(s, h)
         },
     },
+    // Ferramentas de edição (manual do VEGAS Pro 21, p. 236): trocar de
+    // ferramenta não muda o projeto nem cria passo de Desfazer.
+    CommandDef {
+        id: "edit.tool.normal",
+        label: "Ferramenta Normal",
+        menu_path: "Editar/Ferramenta de edição/Normal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.envelope",
+        label: "Ferramenta Envelope",
+        menu_path: "Editar/Ferramenta de edição/Envelope",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Envelope;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.selection",
+        label: "Ferramenta Seleção",
+        menu_path: "Editar/Ferramenta de edição/Seleção",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Selection;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.zoom",
+        label: "Ferramenta Zoom",
+        menu_path: "Editar/Ferramenta de edição/Zoom",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Zoom;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.next",
+        label: "Próxima ferramenta",
+        menu_path: "Editar/Ferramenta de edição/Próxima ferramenta",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = s.edit_tool.next();
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.prev",
+        label: "Ferramenta anterior",
+        menu_path: "Editar/Ferramenta de edição/Ferramenta anterior",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = s.edit_tool.prev();
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.normal",
+        label: "Modo Normal",
+        menu_path: "Editar/Ferramenta de edição/Modo Normal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Normal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.slip",
+        label: "Modo Slip",
+        menu_path: "Editar/Ferramenta de edição/Modo Slip",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Slip;
+            Ok(CommandOutcome::Executed)
+        },
+    },
     CommandDef {
         id: "edit.trim_to_selection",
         label: "Aparar para a seleção",
@@ -2245,6 +2345,39 @@ mod tests {
     use super::*;
     use crate::model::Project;
     use std::collections::HashSet;
+
+    /// D e Shift+D percorrem as ferramentas; trocar de ferramenta ou de
+    /// modo não cria passo de Desfazer.
+    #[test]
+    fn ferramentas_de_edicao_alternam_sem_desfazer() {
+        use crate::session::{EditMode, EditTool};
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert_eq!(s.edit_tool, EditTool::Normal);
+        for want in [
+            EditTool::Envelope,
+            EditTool::Selection,
+            EditTool::Zoom,
+            EditTool::Normal,
+        ] {
+            run_command("edit.tool.next", &mut s, &mut h).unwrap();
+            assert_eq!(s.edit_tool, want);
+        }
+        run_command("edit.tool.prev", &mut s, &mut h).unwrap();
+        assert_eq!(s.edit_tool, EditTool::Zoom);
+        run_command("edit.tool.mode.slip", &mut s, &mut h).unwrap();
+        assert_eq!(
+            (s.edit_tool, s.edit_mode),
+            (EditTool::Normal, EditMode::Slip)
+        );
+        run_command("edit.tool.selection", &mut s, &mut h).unwrap();
+        run_command("edit.tool.mode.normal", &mut s, &mut h).unwrap();
+        assert_eq!(
+            (s.edit_tool, s.edit_mode),
+            (EditTool::Normal, EditMode::Normal)
+        );
+        assert!(s.undo.is_empty(), "ferramenta não entra no Desfazer");
+    }
 
     #[test]
     fn ids_da_tabela_sao_unicos() {

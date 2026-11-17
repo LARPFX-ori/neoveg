@@ -77,11 +77,14 @@ pub enum Icon {
     TrimEnd,
     InsertMarker,
     InsertRegion,
+    NormalTool,
+    EnvelopeTool,
+    SelectionTool,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 69] = [
+    pub const ALL: [Icon; 72] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -151,6 +154,9 @@ impl Icon {
         Icon::TrimEnd,
         Icon::InsertMarker,
         Icon::InsertRegion,
+        Icon::NormalTool,
+        Icon::EnvelopeTool,
+        Icon::SelectionTool,
     ];
 }
 
@@ -1071,6 +1077,49 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 );
                 c.line(x, 0.32, x, 0.92, pal.green, 0.08);
             }
+        }
+        Icon::NormalTool => {
+            // seta de seleção
+            c.poly(
+                &[
+                    (0.26, 0.10),
+                    (0.26, 0.78),
+                    (0.42, 0.63),
+                    (0.54, 0.90),
+                    (0.66, 0.84),
+                    (0.54, 0.58),
+                    (0.76, 0.58),
+                ],
+                pal.paper,
+                Some((0.06, pal.ink)),
+            );
+        }
+        Icon::EnvelopeTool => {
+            // linha de envelope com pontos
+            let pts = [(0.10, 0.72), (0.36, 0.34), (0.64, 0.56), (0.90, 0.24)];
+            c.polyline(&pts, pal.green, 0.08);
+            for (x, y) in pts {
+                c.p.circle_filled(c.pt(x, y), c.u(0.08), pal.amber);
+            }
+        }
+        Icon::SelectionTool => {
+            // caixa de seleção tracejada sobre dois eventos
+            c.p.rect_filled(c.rect(0.14, 0.40, 0.48, 0.60), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.54, 0.40, 0.88, 0.60), c.u(0.03), pal.cyan);
+            let r = c.rect(0.08, 0.22, 0.94, 0.80);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            c.p.extend(Shape::dashed_line(
+                &corners,
+                c.stroke(0.06, pal.ink),
+                c.u(0.10),
+                c.u(0.07),
+            ));
         }
     }
 }

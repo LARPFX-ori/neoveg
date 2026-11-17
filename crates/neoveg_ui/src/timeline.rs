@@ -14,6 +14,7 @@ use std::collections::HashSet;
 mod keyframes;
 use keyframes::KfArea;
 use neoveg_engine::media::audio::WaveChannel;
+use neoveg_engine::session::{EditMode, EditTool};
 use neoveg_engine::track_keyframes::KfRowKind;
 
 /// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
@@ -123,6 +124,11 @@ enum Drag {
         origin_t: Ticks,
         orig: Vec<(Id, Ticks)>,
     },
+    /// Caixa das ferramentas Seleção (`zoom: false`) e Zoom.
+    Box {
+        zoom: bool,
+        start: Pos2,
+    },
     EnvPoint {
         owner: EnvOwner,
         kind: EnvKind,
@@ -182,6 +188,11 @@ pub struct TimelineState {
     drop_hint: Option<(usize, Ticks)>,
     /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
     pub kf_collapsed: HashSet<Id>,
+    /// Ponto atual da caixa das ferramentas Seleção e Zoom.
+    box_cur: Option<Pos2>,
+    /// Área das faixas e posição de cada trilha no último quadro.
+    pub(crate) last_lanes: Rect,
+    pub(crate) last_rows: Vec<(f32, f32)>,
 }
 
 impl Default for TimelineState {
@@ -197,6 +208,9 @@ impl Default for TimelineState {
             snap_line: None,
             drop_hint: None,
             kf_collapsed: HashSet::new(),
+            box_cur: None,
+            last_lanes: Rect::NOTHING,
+            last_rows: Vec::new(),
         }
     }
 }
@@ -655,6 +669,60 @@ impl App {
         }
         self.draw_cursors(ui, top.union(lanes));
         self.rename_popup(ui);
+    }
+
+    /// Fim da caixa das ferramentas Seleção e Zoom (manual do VEGAS Pro 21,
+    /// pp. 239–240). Seleção: seleciona os eventos que a caixa toca (Shift ou
+    /// Ctrl somam à seleção). Zoom: o trecho da caixa ocupa a largura da
+    /// linha do tempo.
+    fn finish_box(
+        &mut self,
+        rect: Rect,
+        zoom: bool,
+        lanes: Rect,
+        layout: &[(f32, f32)],
+        mods: egui::Modifiers,
+    ) {
+        let left = lanes.left();
+        if zoom {
+            // caixa muito estreita é um clique (tratado em `clicked`)
+            if rect.width() < 4.0 {
+                return;
+            }
+            let t0 = self.tl.x2t(rect.left().max(left), left);
+            let t1 = self.tl.x2t(rect.right().min(lanes.right()), left);
+            if t1 <= t0 {
+                return;
+            }
+            let secs = (t1 - t0).as_secs_f64() as f32;
+            self.tl.px_per_sec = TimelineState::clamp_pps(lanes.width() / secs);
+            self.tl.scroll_x = t0;
+            return;
+        }
+        let mut hits: Vec<Id> = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            let Some(&(y0, h)) = layout.get(ti) else {
+                continue;
+            };
+            for e in &tr.events {
+                if self.event_rect(e, left, y0, h).intersects(rect) {
+                    hits.push(e.id);
+                }
+            }
+        }
+        if !(mods.shift || mods.command) {
+            self.sel_events.clear();
+        }
+        self.sel_events.extend(hits);
+    }
+
+    /// Retângulo de um evento na tela no último quadro (testes de interface).
+    #[cfg(test)]
+    pub(crate) fn event_screen_rect(&self, id: Id) -> Option<Rect> {
+        let (ti, ei) = self.project.find_event(id)?;
+        let &(y0, h) = self.tl.last_rows.get(ti)?;
+        let e = self.project.tracks.get(ti)?.events.get(ei)?;
+        Some(self.event_rect(e, self.tl.last_lanes.left(), y0, h))
     }
 
     fn fit_project_to_timeline(&mut self, lanes_width: f32) {
@@ -2287,6 +2355,9 @@ impl App {
     fn lanes_interact(&mut self, ui: &mut egui::Ui, lanes: Rect, rows: &TimelineRows) {
         let layout = &rows.track_rects;
         let left = lanes.left();
+        self.tl.last_lanes = lanes;
+        self.tl.last_rows.clone_from(layout);
+        let tool = self.session.edit_tool;
         let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
         let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
             (
@@ -2367,8 +2438,16 @@ impl App {
         }
 
         let hover = pointer.filter(|p| lanes.contains(*p));
-        // cursor do mouse conforme a zona
-        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
+        // cursor do mouse conforme a ferramenta e a zona
+        if let (Some(_), Drag::None, EditTool::Selection) = (hover, &self.tl.drag, tool) {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        } else if let (Some(_), Drag::None, EditTool::Zoom) = (hover, &self.tl.drag, tool) {
+            ui.ctx().set_cursor_icon(CursorIcon::ZoomIn);
+        } else if let (Some(p), Drag::None, EditTool::Envelope) = (hover, &self.tl.drag, tool) {
+            if self.hit_envelope(p, left, rows).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+        } else if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
             if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, rows) {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
@@ -2420,7 +2499,27 @@ impl App {
                 }
             }
         }
+        // caixa das ferramentas Seleção e Zoom
+        if let (Drag::Box { start, .. }, Some(cur)) = (&self.tl.drag, self.tl.box_cur) {
+            let r = Rect::from_two_pos(*start, cur);
+            let stroke = Stroke::new(1.0_f32, self.theme.text_primary);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            ui.painter()
+                .with_clip_rect(lanes)
+                .extend(Shape::dashed_line(&corners, stroke, 4.0, 3.0));
+        }
         if resp.drag_stopped() {
+            if let (Drag::Box { zoom, start }, Some(cur)) = (self.tl.drag.clone(), self.tl.box_cur)
+            {
+                self.finish_box(Rect::from_two_pos(start, cur), zoom, lanes, layout, mods);
+            }
+            self.tl.box_cur = None;
             if matches!(self.tl.drag, Drag::Move { .. } | Drag::Trim { .. }) {
                 self.project.sort_events();
             }
@@ -2431,7 +2530,10 @@ impl App {
         }
 
         if resp.clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+            if tool == EditTool::Zoom {
+                // ferramenta Zoom: um clique mostra o projeto inteiro
+                self.fit_project_to_timeline(lanes.width());
+            } else if let Some(p) = resp.interact_pointer_pos() {
                 self.lane_click(p, left, rows, mods);
             }
         }
@@ -2506,6 +2608,17 @@ impl App {
     ) {
         let layout = &rows.track_rects;
         let ot = self.tl.x2t(origin.x, left);
+        let tool = self.session.edit_tool;
+        // Seleção e Zoom desenham uma caixa e não mexem em nada (p. 239)
+        if matches!(tool, EditTool::Selection | EditTool::Zoom) {
+            self.tl.drag = Drag::Box {
+                zoom: tool == EditTool::Zoom,
+                start: origin,
+            };
+            self.tl.box_cur = Some(origin);
+            return;
+        }
+        let slip_mode = tool == EditTool::Normal && self.session.edit_mode == EditMode::Slip;
         if let Some((ti, row, Some(key), _)) = self.hit_keyframe(origin, left, rows) {
             if let Some(tr) = self.project.tracks.get(ti).filter(|tr| !tr.locked) {
                 self.tl.drag = Drag::Keyframe {
@@ -2523,6 +2636,11 @@ impl App {
             return;
         }
         if let Some((ti, ei, zone)) = self.hit_event(origin, left, layout) {
+            // ferramenta Envelope: eventos não se movem nem são aparados
+            // (p. 239); a volta acontece antes de qualquer checkpoint
+            if tool == EditTool::Envelope {
+                return;
+            }
             let id = self.project.tracks[ti].events[ei].id;
             if self.project.tracks[ti].events[ei].locked || self.project.tracks[ti].locked {
                 return;
@@ -2568,7 +2686,7 @@ impl App {
                     }
                     self.tl.drag = Drag::Trim {
                         left: left_edge,
-                        slip: mods.alt,
+                        slip: mods.alt || slip_mode,
                         origin_t: ot,
                         anchor_id: id,
                         orig,
@@ -2584,7 +2702,8 @@ impl App {
                         self.sel_events.insert(id);
                     }
                     let ids = self.expand_groups(&self.sel_events.clone());
-                    if mods.alt {
+                    // Alt, ou a ferramenta Normal no modo Slip (p. 236)
+                    if mods.alt || slip_mode {
                         let orig = ids
                             .iter()
                             .filter_map(|i| self.project.event(*i).map(|e| (*i, e.offset)))
@@ -2665,6 +2784,10 @@ impl App {
 
     fn update_lane_drag(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
         let t = self.tl.x2t(p.x, left);
+        if matches!(self.tl.drag, Drag::Box { .. }) {
+            self.tl.box_cur = Some(p);
+            return;
+        }
         match self.tl.drag.clone() {
             Drag::Keyframe {
                 track,
