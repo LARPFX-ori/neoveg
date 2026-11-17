@@ -2,6 +2,7 @@
 
 pub mod afx;
 pub mod audio;
+pub mod fx_preview;
 pub mod loudness;
 pub mod surround;
 pub mod transition;

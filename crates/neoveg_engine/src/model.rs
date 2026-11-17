@@ -1684,6 +1684,38 @@ impl Event {
 // Efeitos
 // ---------------------------------------------------------------------------
 
+/// Categoria de um efeito de vídeo na janela Efeitos de Vídeo (manual do
+/// VEGAS Pro 21, p. 54: os efeitos ficam organizados em categorias). As
+/// categorias e os nomes são do Neoveg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FxCategory {
+    Color,
+    Light,
+    BlurSharpen,
+    Stylize,
+    Key,
+}
+
+impl FxCategory {
+    pub const ALL: [FxCategory; 5] = [
+        FxCategory::Color,
+        FxCategory::Light,
+        FxCategory::BlurSharpen,
+        FxCategory::Stylize,
+        FxCategory::Key,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            FxCategory::Color => "Cor",
+            FxCategory::Light => "Luz",
+            FxCategory::BlurSharpen => "Desfoque e nitidez",
+            FxCategory::Stylize => "Estilizar",
+            FxCategory::Key => "Recorte",
+        }
+    }
+}
+
 // Efeitos externos (OFX para vídeo, VST3 para áudio) rodam no host isolado
 // `neoveg --plugin-host` (fronteira FFI §0.3); ver `plugin_host`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -1957,6 +1989,41 @@ const fn tg(name: &'static str, default: f32) -> ParamSpec {
 }
 
 impl FxKind {
+    /// Categoria na janela Efeitos de Vídeo (`None` para áudio e plug-ins
+    /// externos, que ficam em Terceiros).
+    pub fn category(self) -> Option<FxCategory> {
+        match self {
+            FxKind::BrightnessContrast
+            | FxKind::HslAdjust
+            | FxKind::ColorCorrector
+            | FxKind::Levels
+            | FxKind::BlackWhite
+            | FxKind::Sepia
+            | FxKind::Invert
+            | FxKind::Posterize
+            | FxKind::Colorize => Some(FxCategory::Color),
+            FxKind::Glow | FxKind::Vignette => Some(FxCategory::Light),
+            FxKind::GaussianBlur | FxKind::Sharpen => Some(FxCategory::BlurSharpen),
+            FxKind::Pixelate | FxKind::Mirror | FxKind::FilmGrain | FxKind::Emboss => {
+                Some(FxCategory::Stylize)
+            }
+            FxKind::ChromaKeyer => Some(FxCategory::Key),
+            FxKind::Gain
+            | FxKind::ParametricEq
+            | FxKind::HighPass
+            | FxKind::LowPass
+            | FxKind::Compressor
+            | FxKind::NoiseGate
+            | FxKind::Delay
+            | FxKind::Reverb
+            | FxKind::Chorus
+            | FxKind::Distortion
+            | FxKind::Limiter
+            | FxKind::Ofx
+            | FxKind::Vst3 => None,
+        }
+    }
+
     pub const VIDEO: [FxKind; 18] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,

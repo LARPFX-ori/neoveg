@@ -4,7 +4,8 @@
 repositório, conforme o `AGENTS.md` §1. Cada asset `X` tem um arquivo
 `X.attribution` ao lado.
 
-Até o momento o repositório **não contém nenhum asset**:
+Os únicos arquivos de asset do repositório são as capturas de tela da
+interface do próprio Neoveg em `docs/screenshots/` (seção abaixo). Fora elas:
 
 - os ícones da interface são caracteres Unicode desenhados pelas fontes padrão
   do egui (incluídas pela dependência, não copiadas para o repositório);
@@ -16,7 +17,7 @@ Até o momento o repositório **não contém nenhum asset**:
 
 ## Ícones vetoriais nativos (`crates/neoveg_ui/src/icons.rs`)
 
-- **Recurso:** 64 ícones coloridos de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
+- **Recurso:** 70 ícones coloridos de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
 - **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, criados do zero em código Rust sem cópia ou traçado de terceiros)
 - **Licença:** `MIT OR Apache-2.0`
 - **Observações:** Nenhuma imagem ou SVG foi importada de bancos com licença restritiva/não-SPDX; os ícones se adaptam automaticamente aos 7 temas de cor (incluindo Alto Contraste WCAG AAA).
@@ -34,3 +35,10 @@ Até o momento o repositório **não contém nenhum asset**:
 - **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, sem cópia ou importação de bitmaps ou SVG de terceiros)
 - **Licença:** `MIT OR Apache-2.0`
 - **Observações:** Desenho procedural puro em Rust com adaptação automática aos 7 temas de cor e Alto Contraste WCAG AAA.
+
+## Capturas de tela da interface (`docs/screenshots/`)
+
+- **Recurso:** `janela_principal.png`, `efeitos_de_video.png`, `geradores_de_midia.png` e `propriedades_do_evento.png`, usados no `README.md`
+- **Autor / Origem:** `original work` (contribuidores do projeto Neoveg); capturas da interface do próprio Neoveg, renderizadas fora da tela
+- **Licença:** `MIT OR Apache-2.0`
+- **Observações:** Mostram só o Neoveg, com mídia gerada pelo próprio programa (gradiente, barras de cor e texto), conforme o `AGENTS.md` §1.3; cada imagem tem o seu `.attribution` ao lado.
