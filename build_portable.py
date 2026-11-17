@@ -107,6 +107,14 @@ def build_and_package(repo_root: Path, out_dir: Path, skip_build: bool) -> None:
         if src.is_file():
             shutil.copy2(src, out_dir / doc)
 
+    # Catálogos de idiomas em `.json` (pt-BR, en, es, fr, de, ja).
+    i18n_src = repo_root / "i18n"
+    if i18n_src.is_dir():
+        i18n_dst = out_dir / "i18n"
+        i18n_dst.mkdir(exist_ok=True)
+        for lang_file in sorted(i18n_src.glob("*.json")):
+            shutil.copy2(lang_file, i18n_dst / lang_file.name)
+
     # Pastas criadas em tempo de execução ao lado do executável portátil.
     for runtime_dir in ("logs", "autosave", "layouts"):
         (out_dir / runtime_dir).mkdir(exist_ok=True)

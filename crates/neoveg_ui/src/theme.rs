@@ -39,8 +39,8 @@ impl ThemeId {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             ThemeId::VegasEscuro => "VEGAS Escuro (padrão)",
             ThemeId::VegasProfundo => "VEGAS Profundo (Preto)",
             ThemeId::VegasMedio => "VEGAS Médio",
@@ -48,7 +48,12 @@ impl ThemeId {
             ThemeId::VegasArdosia => "VEGAS Ardósia Azul",
             ThemeId::AltoContrasteEscuro => "Alto Contraste AAA (Escuro)",
             ThemeId::AltoContrasteClaro => "Alto Contraste AAA (Claro)",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(neoveg_common::Language::PtBr)
     }
 
     pub fn from_pref(value: &str) -> Self {

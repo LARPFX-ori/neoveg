@@ -8,6 +8,7 @@ use crate::model::{FxInstance, FxKind, Ticks, TrackKind};
 use crate::theme::ThemeColors;
 use eframe::egui;
 use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
+use neoveg_common::{tr, tr_args, Language};
 
 #[derive(Clone, Copy)]
 struct GradingPreset {
@@ -47,6 +48,7 @@ struct ResolvedTarget {
 
 impl App {
     fn resolve_color_grading_target(&self) -> ResolvedTarget {
+        let lang = self.lang();
         if let Some(ev_id) = self.sel_events.iter().copied().next() {
             if let Some((ti, _)) = self.project.find_event(ev_id) {
                 if self
@@ -59,7 +61,7 @@ impl App {
                         let local_t = (self.cursor - ev.start).clamp_safe(Ticks::ZERO, ev.length);
                         return ResolvedTarget {
                             target: FxTarget::Event(ev_id),
-                            label: format!("Evento: {}", ev.name),
+                            label: tr_args(lang, "Evento: {name}", &[("name", &ev.name)]),
                             local_t,
                         };
                     }
@@ -71,7 +73,7 @@ impl App {
                 if t.kind == TrackKind::Video {
                     return ResolvedTarget {
                         target: FxTarget::Track(t.id),
-                        label: format!("Trilha: {}", t.name),
+                        label: tr_args(lang, "Trilha: {name}", &[("name", &t.name)]),
                         local_t: self.cursor,
                     };
                 }
@@ -79,31 +81,38 @@ impl App {
         }
         ResolvedTarget {
             target: FxTarget::MasterVideo,
-            label: "Saída Master de Vídeo".to_string(),
+            label: tr(lang, "Saída Master de Vídeo").to_string(),
             local_t: self.cursor,
         }
     }
 
     /// Conteúdo da aba `Color Grading` no painel acoplável / janela flutuante.
     pub(crate) fn color_grading_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let resolved = self.resolve_color_grading_target();
         let target = resolved.target;
         let local_t = resolved.local_t;
         let tol = self.project.settings.frame_dur().div_i64(2);
 
         ui.horizontal_wrapped(|ui| {
-            icons::icon_label(ui, Icon::ColorWheels, 15.0, "Color Grading", &self.theme);
+            icons::icon_label(
+                ui,
+                Icon::ColorWheels,
+                15.0,
+                tr(lang, "Color Grading"),
+                &self.theme,
+            );
             ui.separator();
             ui.label(egui::RichText::new(&resolved.label).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::small_icon_button(
                     ui,
                     Icon::ScopesWave,
-                    Some("Escopos"),
+                    Some(tr(lang, "Escopos")),
                     self.is_panel_open(DockTab::Scopes),
                     &self.theme,
                 )
-                .on_hover_text("Abrir painel de Escopos")
+                .on_hover_text(tr(lang, "Abrir painel de Escopos"))
                 .clicked()
                 {
                     self.exec_cmd(Some(ui.ctx()), "view.tab.scopes");
@@ -111,11 +120,11 @@ impl App {
                 if icons::small_icon_button(
                     ui,
                     Icon::FxSparkle,
-                    Some("Cadeia FX..."),
+                    Some(tr(lang, "Cadeia FX...")),
                     self.dlg.fx_target == Some(target),
                     &self.theme,
                 )
-                .on_hover_text("Abrir cadeia completa de efeitos do alvo")
+                .on_hover_text(tr(lang, "Abrir cadeia completa de efeitos do alvo"))
                 .clicked()
                 {
                     self.dlg.fx_target = Some(target);
@@ -159,16 +168,20 @@ impl App {
 
         ui.horizontal_wrapped(|ui| {
             if ui
-                .checkbox(&mut fx_work.enabled, "Ativo (Color Corrector)")
+                .checkbox(&mut fx_work.enabled, tr(lang, "Ativo (Color Corrector)"))
                 .changed()
             {
                 checkpoint_op = true;
                 modified = true;
             }
             ui.separator();
-            ui.label(egui::RichText::new("Predefinições:").small().weak());
+            ui.label(
+                egui::RichText::new(tr(lang, "Predefinições:"))
+                    .small()
+                    .weak(),
+            );
             for preset in GRADING_PRESETS {
-                if ui.small_button(preset.label).clicked() {
+                if ui.small_button(tr(lang, preset.label)).clicked() {
                     for (i, &pv) in preset.values.iter().enumerate() {
                         if let Some(slot) = vals.get_mut(i) {
                             *slot = pv;
@@ -178,15 +191,27 @@ impl App {
                     modified = true;
                 }
             }
-            if icons::small_icon_button(ui, Icon::ResetSpin, Some("Zerar"), false, &self.theme)
-                .on_hover_text("Restaurar valores neutros de cor")
-                .clicked()
+            if icons::small_icon_button(
+                ui,
+                Icon::ResetSpin,
+                Some(tr(lang, "Zerar")),
+                false,
+                &self.theme,
+            )
+            .on_hover_text(tr(lang, "Restaurar valores neutros de cor"))
+            .clicked()
             {
                 reset_all = true;
             }
-            if icons::small_icon_button(ui, Icon::CloseX, Some("Remover"), false, &self.theme)
-                .on_hover_text("Remover Color Corrector da cadeia")
-                .clicked()
+            if icons::small_icon_button(
+                ui,
+                Icon::CloseX,
+                Some(tr(lang, "Remover")),
+                false,
+                &self.theme,
+            )
+            .on_hover_text(tr(lang, "Remover Color Corrector da cadeia"))
+            .clicked()
             {
                 remove_fx = true;
             }
@@ -200,7 +225,7 @@ impl App {
                 }
             }
             self.changed();
-            self.set_status("Color Corrector removido.");
+            self.set_status(tr(lang, "Color Corrector removido."));
             return;
         }
 
@@ -227,7 +252,7 @@ impl App {
                         modified |= draw_tone_wheel(
                             ui,
                             "tone_lift",
-                            "Lift (Sombras)",
+                            tr(lang, "Lift (Sombras)"),
                             &mut vals[0],
                             spec.min,
                             spec.max,
@@ -241,7 +266,7 @@ impl App {
                         modified |= draw_tone_wheel(
                             ui,
                             "tone_gamma",
-                            "Gamma (Médios)",
+                            tr(lang, "Gamma (Médios)"),
                             &mut vals[1],
                             spec.min,
                             spec.max,
@@ -255,7 +280,7 @@ impl App {
                         modified |= draw_tone_wheel(
                             ui,
                             "tone_gain",
-                            "Gain (Realces)",
+                            tr(lang, "Gain (Realces)"),
                             &mut vals[2],
                             spec.min,
                             spec.max,
@@ -267,7 +292,7 @@ impl App {
                     }
                     let mut temp = vals[3];
                     let mut tint = vals[4];
-                    if draw_balance_pad(ui, &mut temp, &mut tint, wheel_d, &self.theme) {
+                    if draw_balance_pad(ui, lang, &mut temp, &mut tint, wheel_d, &self.theme) {
                         vals[3] = temp;
                         vals[4] = tint;
                         modified = true;
@@ -276,7 +301,9 @@ impl App {
                     if let Some(sc_tex) = &self.scopes_tex {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("Histograma").small().weak());
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "Histograma")).small().weak(),
+                                );
                                 let s = sc_tex[0].size_vec2();
                                 let w = 132.0_f32;
                                 let h = (w * s.y / s.x.max(1.0)).clamp(60.0, 96.0);
@@ -295,7 +322,7 @@ impl App {
                             let Some(val) = vals.get_mut(i) else {
                                 continue;
                             };
-                            ui.label(spec.name);
+                            ui.label(spec.name_in(lang));
                             let mut cur = *val;
                             let r = ui.add(
                                 egui::Slider::new(&mut cur, spec.min..=spec.max).fixed_decimals(2),
@@ -304,9 +331,14 @@ impl App {
                                 *val = cur.clamp(spec.min, spec.max);
                                 modified = true;
                             }
+                            let def_str = format!("{:.2}", spec.default);
                             if ui
-                                .small_button("Padrão")
-                                .on_hover_text(format!("Restaurar para {:.2}", spec.default))
+                                .small_button(tr(lang, "Padrão"))
+                                .on_hover_text(tr_args(
+                                    lang,
+                                    "Restaurar para {val}",
+                                    &[("val", &def_str)],
+                                ))
                                 .clicked()
                             {
                                 *val = spec.default;
@@ -359,10 +391,12 @@ impl App {
         _local_t: Ticks,
         _tol: Ticks,
     ) {
+        let lang = self.lang();
         ui.label(
-            egui::RichText::new(
+            egui::RichText::new(tr(
+                lang,
                 "O alvo selecionado ainda não possui o efeito Corretor de Cor na cadeia.",
-            )
+            ))
             .weak(),
         );
         ui.add_space(6.0);
@@ -371,7 +405,7 @@ impl App {
             if icons::icon_button(
                 ui,
                 Icon::ColorWheels,
-                Some("Ativar Color Grading"),
+                Some(tr(lang, "Ativar Color Grading")),
                 true,
                 true,
                 &self.theme,
@@ -383,12 +417,12 @@ impl App {
                 }
             }
             ui.label(
-                egui::RichText::new("ou iniciar com predefinição:")
+                egui::RichText::new(tr(lang, "ou iniciar com predefinição:"))
                     .small()
                     .weak(),
             );
             for preset in GRADING_PRESETS.iter().skip(1) {
-                if ui.button(preset.label).clicked() {
+                if ui.button(tr(lang, preset.label)).clicked() {
                     chosen_preset = Some(*preset);
                 }
             }
@@ -405,7 +439,12 @@ impl App {
                 chain.push(inst);
             }
             self.changed();
-            self.set_status(format!("Color Grading ativado ({})", preset.label));
+            let pname = tr(lang, preset.label);
+            self.set_status(tr_args(
+                lang,
+                "Color Grading ativado ({name})",
+                &[("name", &pname)],
+            ));
         }
     }
 }
@@ -555,6 +594,7 @@ fn paint_tone_wheel_art(
 /// Pad bidimensional vetorial original para Temperatura (X) × Tonalidade (Y).
 fn draw_balance_pad(
     ui: &mut egui::Ui,
+    lang: Language,
     temp: &mut f32,
     tint: &mut f32,
     diameter: f32,
@@ -568,7 +608,11 @@ fn draw_balance_pad(
     };
     ui.group(|ui| {
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("Temp × Tinta").small().strong());
+            ui.label(
+                egui::RichText::new(tr(lang, "Temp × Tinta"))
+                    .small()
+                    .strong(),
+            );
             let (rect, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click_and_drag());
             let center = rect.center();
             let radius = (rect.width().min(rect.height()) * 0.44).max(6.0);
@@ -701,7 +745,7 @@ mod tests {
                     );
                     let mut temp = f32::INFINITY;
                     let mut tint = f32::NEG_INFINITY;
-                    let _ = draw_balance_pad(ui, &mut temp, &mut tint, -10.0, &th);
+                    let _ = draw_balance_pad(ui, Language::PtBr, &mut temp, &mut tint, -10.0, &th);
 
                     let tiny = Rect::from_min_size(pos2(0.0, 0.0), vec2(2.0, 2.0));
                     paint_tone_wheel_art(

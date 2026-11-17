@@ -12,6 +12,7 @@ use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
 use egui::{pos2, vec2, Align2, FontId, Pos2, Rect, Stroke};
+use neoveg_common::tr;
 use neoveg_engine::track_keyframes::{self as tkf, KfRow, KfRowKind};
 
 /// Área de quadros-chave abaixo de uma trilha.
@@ -37,7 +38,7 @@ impl App {
         if self.tl.kf_collapsed.contains(&t.id) {
             return vec![];
         }
-        tkf::track_rows(t, self.kf_tol())
+        tkf::track_rows_in(t, self.kf_tol(), self.lang())
     }
 
     pub(super) fn hit_keyframe(&self, pos: Pos2, left: f32, rows: &TimelineRows) -> Option<KfHit> {
@@ -211,24 +212,31 @@ impl App {
         t: Ticks,
         has_curve: bool,
     ) {
+        let lang = self.lang();
         let tol = self.kf_tol();
-        ui.label(egui::RichText::new("Quadro-chave da trilha").strong());
+        ui.label(egui::RichText::new(tr(lang, "Quadro-chave da trilha")).strong());
         if let Some(k) = key {
             ui.label(self.fmt_time(k));
         }
         ui.separator();
-        if ui.button("Adicionar quadro-chave").clicked() {
+        if ui.button(tr(lang, "Adicionar quadro-chave")).clicked() {
             let r = row.clone();
             let at = key.unwrap_or(t);
             self.edit_track_keyframes(track, |tr| tkf::add_key(tr, &r, at, tol));
             ui.close_menu();
         }
-        let del = ui.add_enabled(key.is_some(), egui::Button::new("Excluir quadro-chave"));
+        let del = ui.add_enabled(
+            key.is_some(),
+            egui::Button::new(tr(lang, "Excluir quadro-chave")),
+        );
         let del = if row == KfRowKind::Motion {
-            del.on_disabled_hover_text("Clique sobre um quadro-chave para excluí-lo.")
-                .on_hover_text("O Movimento da trilha sempre mantém pelo menos um quadro-chave.")
+            del.on_disabled_hover_text(tr(lang, "Clique sobre um quadro-chave para excluí-lo."))
+                .on_hover_text(tr(
+                    lang,
+                    "O Movimento da trilha sempre mantém pelo menos um quadro-chave.",
+                ))
         } else {
-            del.on_disabled_hover_text("Clique sobre um quadro-chave para excluí-lo.")
+            del.on_disabled_hover_text(tr(lang, "Clique sobre um quadro-chave para excluí-lo."))
         };
         if del.clicked() {
             if let Some(k) = key {
@@ -246,9 +254,9 @@ impl App {
                     .iter()
                     .find(|x| x.id == track)
                     .and_then(|tr| tkf::motion_curve(tr, k, tol));
-                ui.label(egui::RichText::new("Interpolação até o próximo").small());
+                ui.label(egui::RichText::new(tr(lang, "Interpolação até o próximo")).small());
                 for c in Curve::ALL {
-                    if ui.radio(current == Some(c), c.name()).clicked() {
+                    if ui.radio(current == Some(c), c.name_in(lang)).clicked() {
                         self.edit_track_keyframes(track, |tr| tkf::set_motion_curve(tr, k, c, tol));
                         ui.close_menu();
                     }
@@ -256,16 +264,20 @@ impl App {
             }
             (true, None) => {
                 let _ = ui
-                    .add_enabled(false, egui::Button::new("Interpolação"))
-                    .on_disabled_hover_text("Clique sobre um quadro-chave para mudar a curva.");
+                    .add_enabled(false, egui::Button::new(tr(lang, "Interpolação")))
+                    .on_disabled_hover_text(tr(
+                        lang,
+                        "Clique sobre um quadro-chave para mudar a curva.",
+                    ));
             }
             (false, _) => {
                 let _ = ui
-                    .add_enabled(false, egui::Button::new("Interpolação"))
-                    .on_disabled_hover_text(
+                    .add_enabled(false, egui::Button::new(tr(lang, "Interpolação")))
+                    .on_disabled_hover_text(tr(
+                        lang,
                         "Os parâmetros dos efeitos ainda interpolam só em linha reta; \
                          a curva por quadro-chave existe só no Movimento da trilha.",
-                    );
+                    ));
             }
         }
     }

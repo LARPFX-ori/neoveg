@@ -5,7 +5,7 @@
 use crate::media::MediaCache;
 use crate::model::*;
 use crate::prefs::PreviewQuality;
-use neoveg_common::{NeovegError, Result};
+use neoveg_common::{tr, tr_args, Language, NeovegError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,8 +36,8 @@ impl EditMode {
         EditMode::Ripple,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             EditMode::Normal => "Normal",
             EditMode::Slip => "Slip (deslizar conteúdo)",
             EditMode::Slide => "Slide (deslizar evento)",
@@ -45,7 +45,12 @@ impl EditMode {
             EditMode::Roll => "Roll (ajuste conjunto de corte)",
             EditMode::Shuffle => "Shuffle (reordenar)",
             EditMode::Ripple => "Ripple (ondulação)",
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(Language::PtBr)
     }
 }
 
@@ -132,6 +137,7 @@ pub struct EditorSession {
     pub clip_base: Ticks,
     pub opts: EditorOptions,
     pub edit_mode: EditMode,
+    pub lang: Language,
     pub status: String,
     pub removed_media_ids: Vec<Id>,
     /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
@@ -140,6 +146,10 @@ pub struct EditorSession {
 
 impl EditorSession {
     pub fn new(project: Project) -> Self {
+        Self::new_in(project, neoveg_common::active_language())
+    }
+
+    pub fn new_in(project: Project, lang: Language) -> Self {
         let snapshot = Arc::new(project.clone());
         crate::recovery::remember_snapshot(snapshot.clone());
         let sel_track = if project.tracks.is_empty() {
@@ -165,7 +175,12 @@ impl EditorSession {
             clip_base: Ticks::ZERO,
             opts: EditorOptions::default(),
             edit_mode: EditMode::Normal,
-            status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
+            lang,
+            status: tr(
+                lang,
+                "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.",
+            )
+            .into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),
         }
@@ -245,7 +260,7 @@ impl EditorSession {
         };
         self.redo.push(std::mem::replace(&mut self.project, p));
         self.after_history();
-        self.set_status("Desfazer");
+        self.set_status(tr(self.lang, "Desfazer"));
         true
     }
 
@@ -255,7 +270,7 @@ impl EditorSession {
         };
         self.undo.push(std::mem::replace(&mut self.project, p));
         self.after_history();
-        self.set_status("Refazer");
+        self.set_status(tr(self.lang, "Refazer"));
         true
     }
 
@@ -306,8 +321,8 @@ impl EditorSession {
             .count()
             + 1;
         let name = match kind {
-            TrackKind::Video => format!("Vídeo {n}"),
-            TrackKind::Audio => format!("Áudio {n}"),
+            TrackKind::Video => tr_args(self.lang, "Vídeo {n}", &[("n", &n)]),
+            TrackKind::Audio => tr_args(self.lang, "Áudio {n}", &[("n", &n)]),
         };
         let t = Track::new(kind, &name);
         // vídeo: insere acima das trilhas de áudio; áudio: no final
@@ -344,7 +359,7 @@ impl EditorSession {
         let idx = self.insert_track(TrackKind::Video);
         if let Some(t) = self.project.tracks.get_mut(idx) {
             t.adjustment = true;
-            t.name = format!("Ajuste {n}");
+            t.name = tr_args(self.lang, "Ajuste {n}", &[("n", &n)]);
         }
         self.changed();
         idx
@@ -477,7 +492,12 @@ impl EditorSession {
             }
         }
         self.clip_base = min_t;
-        self.set_status(format!("{} evento(s) copiado(s)", items.len()));
+        let count = items.len();
+        self.set_status(tr_args(
+            self.lang,
+            "{n} evento(s) copiado(s)",
+            &[("n", &count)],
+        ));
         self.clipboard = items;
     }
 
@@ -938,7 +958,10 @@ impl EditorSession {
     /// Insere tempo vazio do tamanho da seleção (Insert Time).
     pub fn insert_time(&mut self) {
         let Some((a, b)) = self.time_sel else {
-            self.set_status("Crie uma seleção de tempo para inserir tempo");
+            self.set_status(tr(
+                self.lang,
+                "Crie uma seleção de tempo para inserir tempo",
+            ));
             return;
         };
         if b <= a {
@@ -1006,7 +1029,7 @@ impl EditorSession {
                 e.group = Some(g);
             }
         }
-        self.set_status("Eventos agrupados");
+        self.set_status(tr(self.lang, "Eventos agrupados"));
         self.changed();
     }
 
@@ -1020,7 +1043,7 @@ impl EditorSession {
                 e.group = None;
             }
         }
-        self.set_status("Eventos desagrupados");
+        self.set_status(tr(self.lang, "Eventos desagrupados"));
         self.changed();
     }
 
@@ -1078,7 +1101,7 @@ impl EditorSession {
         self.project.markers.push(Marker {
             id: new_id(),
             t: self.cursor,
-            label: format!("Marcador {n}"),
+            label: tr_args(self.lang, "Marcador {n}", &[("n", &n)]),
         });
         self.changed();
     }
@@ -1087,7 +1110,10 @@ impl EditorSession {
         let (a, b) = match self.time_sel.or(self.project.loop_region) {
             Some(r) if r.1 > r.0 => r,
             _ => {
-                self.set_status("Crie uma seleção de tempo para inserir uma região");
+                self.set_status(tr(
+                    self.lang,
+                    "Crie uma seleção de tempo para inserir uma região",
+                ));
                 return;
             }
         };
@@ -1097,7 +1123,7 @@ impl EditorSession {
             id: new_id(),
             start: a,
             end: b,
-            label: format!("Região {n}"),
+            label: tr_args(self.lang, "Região {n}", &[("n", &n)]),
         });
         self.changed();
     }
@@ -1183,7 +1209,7 @@ impl EditorSession {
         };
         let c = self.cursor;
         if !e.contains(c) {
-            self.set_status("Posicione o cursor sobre o evento");
+            self.set_status(tr(self.lang, "Posicione o cursor sobre o evento"));
             return;
         }
         let m = self.project.media(e.media_id).cloned();
@@ -1206,7 +1232,7 @@ impl EditorSession {
         fr.group = None;
         fr.fade_in = Fade::default();
         fr.fade_out = Fade::default();
-        fr.name = format!("{} (congelado)", e.name);
+        fr.name = tr_args(self.lang, "{name} (congelado)", &[("name", &e.name)]);
         if let Some(track) = self.project.tracks.get_mut(ti) {
             for ev in &mut track.events {
                 if ev.start >= c {
@@ -1253,7 +1279,7 @@ impl EditorSession {
         self.checkpoint();
         let mut t = orig;
         t.id = new_id();
-        t.name = format!("{} (cópia)", t.name);
+        t.name = tr_args(self.lang, "{name} (cópia)", &[("name", &t.name)]);
         let mut gm: HashMap<Id, Id> = HashMap::new();
         for e in &mut t.events {
             e.id = new_id();
@@ -1358,9 +1384,11 @@ impl EditorSession {
             }
         }
         self.removed_media_ids.extend_from_slice(&removed);
-        self.set_status(format!(
-            "{} mídia(s) removida(s)",
-            n0 - self.project.media.len()
+        let removed_count = n0 - self.project.media.len();
+        self.set_status(tr_args(
+            self.lang,
+            "{n} mídia(s) removida(s)",
+            &[("n", &removed_count)],
         ));
         self.changed();
         removed

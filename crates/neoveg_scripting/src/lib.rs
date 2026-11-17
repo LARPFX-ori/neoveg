@@ -40,8 +40,13 @@ pub struct ScriptContext {
 impl ScriptContext {
     #[forbid(unsafe_code)]
     pub fn new(project: Project) -> Self {
+        Self::new_in(project, neoveg_common::Language::PtBr)
+    }
+
+    #[forbid(unsafe_code)]
+    pub fn new_in(project: Project, lang: neoveg_common::Language) -> Self {
         Self {
-            session: EditorSession::new(project),
+            session: EditorSession::new_in(project, lang),
             host: HeadlessHost,
             messages: Vec::new(),
         }
@@ -136,11 +141,27 @@ pub fn run_command_headless(
     project_path: Option<&Path>,
     save_path: Option<&Path>,
 ) -> Result<String, String> {
+    run_command_headless_in(
+        command_id,
+        project_path,
+        save_path,
+        neoveg_common::Language::PtBr,
+    )
+}
+
+/// Versão localizada de [`run_command_headless`].
+#[forbid(unsafe_code)]
+pub fn run_command_headless_in(
+    command_id: &str,
+    project_path: Option<&Path>,
+    save_path: Option<&Path>,
+    lang: neoveg_common::Language,
+) -> Result<String, String> {
     let project = match project_path {
         Some(p) => Project::load_file(p)?.0,
         None => Project::new_default(),
     };
-    let mut ctx = ScriptContext::new(project);
+    let mut ctx = ScriptContext::new_in(project, lang);
     ctx.session.path = project_path.map(Path::to_path_buf);
     let outcome = ctx.execute(command_id)?;
     if let Some(out) = save_path {
@@ -152,6 +173,25 @@ pub fn run_command_headless(
         ctx.session.project.media.len(),
         ctx.session.project.markers.len(),
     ))
+}
+
+/// Lista todos os comandos disponíveis na Tabela Única no idioma solicitado.
+#[forbid(unsafe_code)]
+pub fn list_commands_in(
+    overrides: &HashMap<String, Option<String>>,
+    lang: neoveg_common::Language,
+) -> Vec<(&'static str, String, &'static str, Option<String>)> {
+    COMMANDS
+        .iter()
+        .map(|c| {
+            (
+                c.id,
+                c.menu_path_in(lang),
+                c.label_in(lang),
+                resolved_shortcut(c, overrides).map(|s| s.format_in(lang)),
+            )
+        })
+        .collect()
 }
 
 /// Lista todos os comandos disponíveis na Tabela Única (para CLI/documentação).

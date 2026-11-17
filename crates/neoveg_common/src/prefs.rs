@@ -1,5 +1,6 @@
 //! Preferências do usuário, matriz de prévia e limites de hardware (§3.2 / §3.6).
 
+use crate::i18n::{tr, Language};
 use crate::time::TimeFormat;
 use crate::util;
 use serde::{Deserialize, Serialize};
@@ -28,13 +29,18 @@ impl PreviewQuality {
         PreviewQuality::Best,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             PreviewQuality::Draft => "Rascunho",
             PreviewQuality::Preview => "Prévia",
             PreviewQuality::Good => "Boa",
             PreviewQuality::Best => "Melhor",
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(Language::PtBr)
     }
 
     pub fn scale(self) -> f32 {
@@ -95,25 +101,35 @@ impl LayoutType {
     /// Nome mostrado na interface. Sem nomes de produtos ou empresas de
     /// terceiros (AGENTS.md §1): o `id` e os aliases de serde continuam os
     /// mesmos, então preferências e atalhos já salvos não mudam.
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             LayoutType::SonicFoundry => "Clássico",
             LayoutType::Sony => "Intermediário",
             LayoutType::Magix => "Atual",
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
     }
 
     /// Resumo curto da disposição, mostrado junto do nome.
-    pub fn era(self) -> &'static str {
-        match self {
+    pub fn era_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             LayoutType::SonicFoundry => "timeline no topo, tema claro",
             LayoutType::Sony => "área acoplável no topo, cinza médio",
             LayoutType::Magix => "3 painéis no topo, tema escuro",
-        }
+        };
+        tr(lang, pt)
     }
 
-    pub fn description(self) -> &'static str {
-        match self {
+    pub fn era(self) -> &'static str {
+        self.era_in(Language::PtBr)
+    }
+
+    pub fn description_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             LayoutType::SonicFoundry => {
                 "Timeline (Track View) no topo, barra de transporte logo abaixo da timeline, \
                  área acoplável na parte inferior com abas na base e tema claro clássico."
@@ -126,7 +142,12 @@ impl LayoutType {
                 "Área acoplável no topo em 3 painéis (Abas, Prévia e Master Bus) com abas na base, \
                  timeline na metade inferior, barra de transporte/edição no rodapé e tema escuro."
             }
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn description(self) -> &'static str {
+        self.description_in(Language::PtBr)
     }
 
     pub fn from_pref(raw: &str) -> Self {
@@ -241,11 +262,16 @@ impl PlaybackScrollMode {
     pub const ALL: [PlaybackScrollMode; 2] =
         [PlaybackScrollMode::Page, PlaybackScrollMode::Continuous];
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             PlaybackScrollMode::Page => "Por página (Page Scroll)",
             PlaybackScrollMode::Continuous => "Contínua (playhead centralizado)",
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
     }
 }
 
@@ -263,13 +289,18 @@ impl TimelineMouseScroll {
         TimelineMouseScroll::HorizontalScroll,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             TimelineMouseScroll::ZoomDefault => "Zoom (Shift = rolar horizontal • Ctrl = vertical)",
             TimelineMouseScroll::HorizontalScroll => {
                 "Rolar horizontal (Ctrl = zoom • Shift = vertical)"
             }
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
     }
 }
 
@@ -615,10 +646,16 @@ impl Preferences {
         self.recent_projects.clear();
     }
 
+    pub fn lang(&self) -> Language {
+        Language::from_pref(&self.language)
+    }
+
+    pub fn set_lang(&mut self, lang: Language) {
+        self.language = lang.code().to_string();
+    }
+
     pub fn sanitize(&mut self) {
-        if self.language.trim().is_empty() || self.language.len() > 16 {
-            self.language = default_lang();
-        }
+        self.language = Language::from_pref(&self.language).code().to_string();
         if self.theme.trim().is_empty() || self.theme.len() > 48 {
             self.theme = default_theme();
         }

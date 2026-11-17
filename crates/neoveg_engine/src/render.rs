@@ -31,13 +31,18 @@ impl RenderFormat {
         RenderFormat::Y4m,
         RenderFormat::Wav,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             RenderFormat::AviMjpeg => "AVI (Motion-JPEG + PCM)",
             RenderFormat::PngSequence => "Sequência de imagens PNG (+ WAV)",
             RenderFormat::Y4m => "YUV4MPEG2 .y4m não comprimido (+ WAV)",
             RenderFormat::Wav => "Somente áudio WAV",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
     pub fn ext(self) -> &'static str {
         match self {

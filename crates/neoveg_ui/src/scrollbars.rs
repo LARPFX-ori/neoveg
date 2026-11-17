@@ -672,6 +672,7 @@ pub fn arrow_scroll_area<R>(
     id: Id,
     theme: &ThemeColors,
     always_show_v: bool,
+    lang: neoveg_common::Language,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     let avail = ui.available_rect_before_wrap();
@@ -747,8 +748,8 @@ pub fn arrow_scroll_area<R>(
             Axis::Vertical,
             v_range,
             step,
-            "Rolar painel para cima",
-            "Rolar painel para baixo",
+            neoveg_common::tr(lang, "Rolar painel para cima"),
+            neoveg_common::tr(lang, "Rolar painel para baixo"),
             theme,
         );
         if let Some(off) = res.new_offset {
@@ -775,8 +776,8 @@ pub fn arrow_scroll_area<R>(
             Axis::Horizontal,
             h_range,
             step,
-            "Rolar painel para a esquerda",
-            "Rolar painel para a direita",
+            neoveg_common::tr(lang, "Rolar painel para a esquerda"),
+            neoveg_common::tr(lang, "Rolar painel para a direita"),
             theme,
         );
         if let Some(off) = res.new_offset {

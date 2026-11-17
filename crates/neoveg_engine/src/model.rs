@@ -51,11 +51,16 @@ impl ChannelLayout {
         }
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             ChannelLayout::Stereo => "Estéreo",
             ChannelLayout::Surround51 => "5.1 Surround",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -878,14 +883,19 @@ impl TextAnim {
         TextAnim::Typewriter,
         TextAnim::FadeInOut,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             TextAnim::None => "Nenhuma",
             TextAnim::ScrollUp => "Rolagem (créditos)",
             TextAnim::CrawlLeft => "Letreiro (crawl)",
             TextAnim::Typewriter => "Máquina de escrever",
             TextAnim::FadeInOut => "Fade in/out",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -943,19 +953,22 @@ impl Default for TextSpec {
 }
 
 impl GenSpec {
-    pub fn label(&self) -> String {
+    pub fn label_in(&self, lang: neoveg_common::Language) -> String {
+        use neoveg_common::{tr, tr_args};
         match self {
-            GenSpec::SolidColor { .. } => "Cor sólida".into(),
-            GenSpec::Gradient { radial, .. } => {
+            GenSpec::SolidColor { .. } => tr(lang, "Cor sólida").into(),
+            GenSpec::Gradient { radial, .. } => tr(
+                lang,
                 if *radial {
-                    "Gradiente radial".into()
+                    "Gradiente radial"
                 } else {
-                    "Gradiente linear".into()
-                }
-            }
-            GenSpec::Checkerboard { .. } => "Xadrez".into(),
-            GenSpec::ColorBars => "Barras de cor".into(),
-            GenSpec::Noise { .. } => "Ruído".into(),
+                    "Gradiente linear"
+                },
+            )
+            .into(),
+            GenSpec::Checkerboard { .. } => tr(lang, "Xadrez").into(),
+            GenSpec::ColorBars => tr(lang, "Barras de cor").into(),
+            GenSpec::Noise { .. } => tr(lang, "Ruído").into(),
             GenSpec::Text(t) => {
                 let first = t
                     .text
@@ -965,9 +978,13 @@ impl GenSpec {
                     .chars()
                     .take(24)
                     .collect::<String>();
-                format!("Texto: {first}")
+                tr_args(lang, "Texto: {first}", &[("first", &first)])
             }
         }
+    }
+
+    pub fn label(&self) -> String {
+        self.label_in(neoveg_common::Language::PtBr)
     }
     pub fn is_animated(&self) -> bool {
         match self {
@@ -1017,8 +1034,8 @@ impl BlendMode {
         BlendMode::Darken,
         BlendMode::Difference,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             BlendMode::SourceAlpha => "Alfa da origem",
             BlendMode::Add => "Adicionar",
             BlendMode::Subtract => "Subtrair",
@@ -1029,7 +1046,12 @@ impl BlendMode {
             BlendMode::Lighten => "Clarear",
             BlendMode::Darken => "Escurecer",
             BlendMode::Difference => "Diferença",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -1046,13 +1068,18 @@ pub enum EnvKind {
 }
 
 impl EnvKind {
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             EnvKind::Volume => "Volume",
             EnvKind::Pan => "Pan",
             EnvKind::Opacity => "Nível de composição",
             EnvKind::FadeToColor => "Fade para cor",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
     pub fn range(self) -> (f32, f32) {
         match self {
@@ -1486,8 +1513,8 @@ impl TransitionKind {
         TransitionKind::Blinds,
         TransitionKind::Checker,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             TransitionKind::Dissolve => "Dissolver (crossfade)",
             TransitionKind::FadeThroughBlack => "Fade pelo preto",
             TransitionKind::WipeLeft => "Wipe para a esquerda",
@@ -1504,7 +1531,12 @@ impl TransitionKind {
             TransitionKind::Zoom => "Zoom",
             TransitionKind::Blinds => "Persianas",
             TransitionKind::Checker => "Tabuleiro",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -1705,14 +1737,19 @@ impl FxCategory {
         FxCategory::Key,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             FxCategory::Color => "Cor",
             FxCategory::Light => "Luz",
             FxCategory::BlurSharpen => "Desfoque e nitidez",
             FxCategory::Stylize => "Estilizar",
             FxCategory::Key => "Recorte",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -1969,6 +2006,12 @@ pub struct ParamSpec {
     pub toggle: bool,
 }
 
+impl ParamSpec {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        neoveg_common::tr(lang, self.name)
+    }
+}
+
 const fn p(name: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
     ParamSpec {
         name,
@@ -2062,8 +2105,8 @@ impl FxKind {
         self == FxKind::Vst3 || Self::AUDIO.contains(&self)
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             FxKind::BrightnessContrast => "Brilho e Contraste",
             FxKind::HslAdjust => "Ajuste HSL",
             FxKind::ColorCorrector => "Corretor de Cor",
@@ -2095,7 +2138,12 @@ impl FxKind {
             FxKind::Limiter => "Limiter",
             FxKind::Ofx => "Plug-in OFX",
             FxKind::Vst3 => "Plug-in VST3",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     pub fn params(self) -> &'static [ParamSpec] {

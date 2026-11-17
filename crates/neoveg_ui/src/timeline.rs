@@ -9,6 +9,7 @@ use eframe::egui;
 use egui::{
     pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
 };
+use neoveg_common::{tr, tr_args};
 use std::collections::HashSet;
 
 mod keyframes;
@@ -724,6 +725,7 @@ impl App {
             content: v_content,
             viewport: lanes_h,
         };
+        let lang = self.lang();
         let step = (lanes_h * 0.18).clamp(28.0, 84.0);
         let res = crate::scrollbars::arrow_scrollbar(
             ui,
@@ -732,8 +734,8 @@ impl App {
             crate::scrollbars::Axis::Vertical,
             v_range,
             step,
-            "Rolar trilhas para cima",
-            "Rolar trilhas para baixo",
+            tr(lang, "Rolar trilhas para cima"),
+            tr(lang, "Rolar trilhas para baixo"),
             &self.theme,
         );
         if let Some(off) = res.new_offset {
@@ -765,8 +767,11 @@ impl App {
                 crate::scrollbars::SymbolGlyph::Plus,
                 crate::scrollbars::Axis::Vertical,
                 can_inc,
-                "Aumentar altura das trilhas",
-                "Aumentar altura das trilhas (clique ou arraste verticalmente)",
+                tr(lang, "Aumentar altura das trilhas"),
+                tr(
+                    lang,
+                    "Aumentar altura das trilhas (clique ou arraste verticalmente)",
+                ),
                 &self.theme,
             );
             let (dec_click, dec_drag) = crate::scrollbars::zoom_button(
@@ -776,8 +781,11 @@ impl App {
                 crate::scrollbars::SymbolGlyph::Minus,
                 crate::scrollbars::Axis::Vertical,
                 can_dec,
-                "Diminuir altura das trilhas",
-                "Diminuir altura das trilhas (clique ou arraste verticalmente)",
+                tr(lang, "Diminuir altura das trilhas"),
+                tr(
+                    lang,
+                    "Diminuir altura das trilhas (clique ou arraste verticalmente)",
+                ),
                 &self.theme,
             );
 
@@ -847,6 +855,7 @@ impl App {
             content: content_secs,
             viewport: view_secs,
         };
+        let lang = self.lang();
         let step_secs = (view_secs * 0.15).max(self.tl.dx_to_ticks(48.0).as_secs_f64() as f32);
         let res = crate::scrollbars::arrow_scrollbar(
             ui,
@@ -855,8 +864,8 @@ impl App {
             crate::scrollbars::Axis::Horizontal,
             h_range,
             step_secs,
-            "Rolar timeline para a esquerda",
-            "Rolar timeline para a direita",
+            tr(lang, "Rolar timeline para a esquerda"),
+            tr(lang, "Rolar timeline para a direita"),
             &self.theme,
         );
         if let Some(secs) = res.new_offset {
@@ -887,8 +896,11 @@ impl App {
                 crate::scrollbars::SymbolGlyph::Minus,
                 crate::scrollbars::Axis::Horizontal,
                 can_out,
-                "Diminuir zoom horizontal",
-                "Afastar zoom horizontal (clique ou arraste horizontalmente)",
+                tr(lang, "Diminuir zoom horizontal"),
+                tr(
+                    lang,
+                    "Afastar zoom horizontal (clique ou arraste horizontalmente)",
+                ),
                 &self.theme,
             );
             let (inc_click, inc_drag) = crate::scrollbars::zoom_button(
@@ -898,8 +910,11 @@ impl App {
                 crate::scrollbars::SymbolGlyph::Plus,
                 crate::scrollbars::Axis::Horizontal,
                 can_in,
-                "Aumentar zoom horizontal",
-                "Aproximar zoom horizontal (clique ou arraste horizontalmente)",
+                tr(lang, "Aumentar zoom horizontal"),
+                tr(
+                    lang,
+                    "Aproximar zoom horizontal (clique ou arraste horizontalmente)",
+                ),
                 &self.theme,
             );
 
@@ -936,8 +951,11 @@ impl App {
                 crate::scrollbars::SymbolGlyph::Fit,
                 crate::scrollbars::Axis::Horizontal,
                 true,
-                "Ajustar projeto à timeline",
-                "Ajustar todo o projeto à largura visível da timeline (ou duplo clique na barra horizontal)",
+                tr(lang, "Ajustar projeto à timeline"),
+                tr(
+                    lang,
+                    "Ajustar todo o projeto à largura visível da timeline (ou duplo clique na barra horizontal)",
+                ),
                 &self.theme,
             );
             if fit_click {
@@ -968,17 +986,18 @@ impl App {
             StrokeKind::Inside,
         );
 
+        let lang = self.lang();
         painter.text(
             pos2(box_r.left() + 6.0, box_r.top() + 3.0),
             Align2::LEFT_TOP,
-            "Visor de tempo",
+            tr(lang, "Visor de tempo"),
             FontId::proportional(9.5),
             self.theme.text_muted,
         );
         painter.text(
             pos2(box_r.right() - 6.0, box_r.top() + 3.0),
             Align2::RIGHT_TOP,
-            self.opts.time_format.name(),
+            self.opts.time_format.name_in(lang),
             FontId::proportional(9.5),
             self.theme.text_muted,
         );
@@ -992,22 +1011,23 @@ impl App {
 
         let resp = ui
             .interact(box_r, ui.id().with("timeline_time_display"), Sense::click())
-            .on_hover_text(
+            .on_hover_text(tr(
+                lang,
                 "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)",
-            );
+            ));
         if resp.double_clicked() {
             self.exec_cmd(Some(ui.ctx()), "edit.goto");
         }
         resp.context_menu(|ui| {
             ui.label(
-                egui::RichText::new("Formato do Visor de Tempo")
+                egui::RichText::new(tr(lang, "Formato do Visor de Tempo"))
                     .small()
                     .strong(),
             );
             ui.separator();
             for fmt in TimeFormat::ALL {
                 if ui
-                    .selectable_label(self.opts.time_format == fmt, fmt.name())
+                    .selectable_label(self.opts.time_format == fmt, fmt.name_in(lang))
                     .clicked()
                 {
                     self.session.opts.time_format = fmt;
@@ -1015,7 +1035,7 @@ impl App {
                 }
             }
             ui.separator();
-            if ui.button("Ir para tempo... (Ctrl+G)").clicked() {
+            if ui.button(tr(lang, "Ir para tempo... (Ctrl+G)")).clicked() {
                 self.dlg.goto_open = true;
                 ui.close_menu();
             }
@@ -1024,6 +1044,7 @@ impl App {
 
     /// Barra de Status de Renderização e Pré-renderização na base da timeline.
     fn render_status_bar_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let lang = self.lang();
         let painter = ui.painter_at(r);
         painter.rect_filled(r, 0.0, self.theme.tl_header_bg);
         painter.line_segment(
@@ -1057,27 +1078,35 @@ impl App {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| job.settings.path.display().to_string());
                 crate::splash::spinner_inline(ui, 13.0, ui.ctx().input(|i| i.time), &self.theme);
+                let done_s = done.to_string();
+                let total_s = total.to_string();
                 ui.label(
-                    egui::RichText::new(format!("Renderizando {name}: {done}/{total}"))
-                        .small()
-                        .strong(),
+                    egui::RichText::new(tr_args(
+                        lang,
+                        "Renderizando {name}: {done}/{total}",
+                        &[("name", &name), ("done", &done_s), ("total", &total_s)],
+                    ))
+                    .small()
+                    .strong(),
                 );
                 ui.add(
                     egui::ProgressBar::new(frac)
                         .desired_width(140.0)
                         .show_percentage(),
                 );
-                if ui.small_button("Cancelar").clicked() {
+                if ui.small_button(tr(lang, "Cancelar")).clicked() {
                     cancel_render = true;
                 }
             } else if let Some((a, b, prog)) = &self.prerender_job {
                 let frac = prog.fraction().clamp(0.0, 1.0);
                 crate::splash::spinner_inline(ui, 13.0, ui.ctx().input(|i| i.time), &self.theme);
+                let a_s = self.fmt_time(*a);
+                let b_s = self.fmt_time(*b);
                 ui.label(
-                    egui::RichText::new(format!(
-                        "Pré-renderizando {} → {}",
-                        self.fmt_time(*a),
-                        self.fmt_time(*b)
+                    egui::RichText::new(tr_args(
+                        lang,
+                        "Pré-renderizando {a} → {b}",
+                        &[("a", &a_s), ("b", &b_s)],
                     ))
                     .small()
                     .strong(),
@@ -1087,15 +1116,24 @@ impl App {
                         .desired_width(130.0)
                         .show_percentage(),
                 );
-                if ui.small_button("Cancelar").clicked() {
+                if ui.small_button(tr(lang, "Cancelar")).clicked() {
                     cancel_prerender = true;
                 }
             } else {
                 let pre_count = self.session.prerendered_ranges.len();
                 let pre_text = if pre_count > 0 {
-                    format!("Status de renderização: {pre_count} trecho(s) pré-renderizado(s)")
+                    let count_s = pre_count.to_string();
+                    tr_args(
+                        lang,
+                        "Status de renderização: {n} trecho(s) pré-renderizado(s)",
+                        &[("n", &count_s)],
+                    )
                 } else {
-                    "Status de renderização: Pronto (sem trechos pré-renderizados)".to_string()
+                    tr(
+                        lang,
+                        "Status de renderização: Pronto (sem trechos pré-renderizados)",
+                    )
+                    .to_string()
                 };
                 let pre_col = if pre_count > 0 {
                     self.theme.tl_marker
@@ -1104,23 +1142,26 @@ impl App {
                 };
                 ui.label(egui::RichText::new(pre_text).small().color(pre_col));
                 if ui
-                    .small_button("Pré-render (Shift+M)")
-                    .on_hover_text("Pré-renderizar região selecionada e marcar no topo da timeline")
+                    .small_button(tr(lang, "Pré-render (Shift+M)"))
+                    .on_hover_text(tr(
+                        lang,
+                        "Pré-renderizar região selecionada e marcar no topo da timeline",
+                    ))
                     .clicked()
                 {
                     trigger_prerender = true;
                 }
                 if ui
-                    .small_button("Renderizar...")
-                    .on_hover_text("Abrir janela Renderizar como (Ctrl+M)")
+                    .small_button(tr(lang, "Renderizar..."))
+                    .on_hover_text(tr(lang, "Abrir janela Renderizar como (Ctrl+M)"))
                     .clicked()
                 {
                     trigger_render = true;
                 }
                 if pre_count > 0
                     && ui
-                        .small_button("Limpar pré-render")
-                        .on_hover_text("Limpar indicações de pré-render da timeline")
+                        .small_button(tr(lang, "Limpar pré-render"))
+                        .on_hover_text(tr(lang, "Limpar indicações de pré-render da timeline"))
                         .clicked()
                 {
                     clear_prerender = true;
@@ -1142,7 +1183,7 @@ impl App {
         }
         if clear_prerender {
             self.session.clear_prerendered();
-            self.set_status("Indicações de pré-renderização limpas.");
+            self.set_status(tr(lang, "Indicações de pré-renderização limpas."));
         }
         if trigger_prerender {
             self.exec_cmd(Some(ui.ctx()), "tools.prerender");
@@ -1154,6 +1195,7 @@ impl App {
 
     /// Rodapé da lista de trilhas: botões rápidos de faixa e controle de Taxa (`Playback Rate`, Manual VEGAS Pro 21, p. 68).
     fn track_list_footer_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let lang = self.lang();
         let painter = ui.painter_at(r);
         painter.rect_filled(r, 0.0, self.theme.tl_header_bg);
         painter.line_segment(
@@ -1172,14 +1214,14 @@ impl App {
         child.set_clip_rect(r);
         child.horizontal_centered(|ui| {
             if icons::small_icon_button(ui, Icon::VideoTrack, None, false, &self.theme)
-                .on_hover_text("Inserir trilha de vídeo (Ctrl+Shift+Q)")
+                .on_hover_text(tr(lang, "Inserir trilha de vídeo (Ctrl+Shift+Q)"))
                 .clicked()
             {
                 self.checkpoint();
                 self.insert_track(TrackKind::Video);
             }
             if icons::small_icon_button(ui, Icon::AudioTrack, None, false, &self.theme)
-                .on_hover_text("Inserir trilha de áudio (Ctrl+Q)")
+                .on_hover_text(tr(lang, "Inserir trilha de áudio (Ctrl+Q)"))
                 .clicked()
             {
                 self.checkpoint();
@@ -1515,9 +1557,10 @@ impl App {
                 };
             }
         }
+        let lang = self.lang();
         resp.context_menu(|ui| match self.tl.ctx_target.clone() {
             CtxTarget::Marker(id) => {
-                if ui.button("Renomear marcador").clicked() {
+                if ui.button(tr(lang, "Renomear marcador")).clicked() {
                     let label = self
                         .project
                         .markers
@@ -1528,7 +1571,7 @@ impl App {
                     self.tl.rename = Some((id, label));
                     ui.close_menu();
                 }
-                if ui.button("Excluir marcador").clicked() {
+                if ui.button(tr(lang, "Excluir marcador")).clicked() {
                     self.checkpoint();
                     self.project.markers.retain(|m| m.id != id);
                     self.changed();
@@ -1536,7 +1579,7 @@ impl App {
                 }
             }
             CtxTarget::Region(id) => {
-                if ui.button("Renomear região").clicked() {
+                if ui.button(tr(lang, "Renomear região")).clicked() {
                     let label = self
                         .project
                         .regions
@@ -1547,7 +1590,7 @@ impl App {
                     self.tl.rename = Some((id, label));
                     ui.close_menu();
                 }
-                if ui.button("Selecionar região").clicked() {
+                if ui.button(tr(lang, "Selecionar região")).clicked() {
                     if let Some((start, end)) = self
                         .session
                         .project
@@ -1561,7 +1604,7 @@ impl App {
                     }
                     ui.close_menu();
                 }
-                if ui.button("Renderizar região...").clicked() {
+                if ui.button(tr(lang, "Renderizar região...")).clicked() {
                     if let Some((start, end)) = self
                         .session
                         .project
@@ -1577,7 +1620,7 @@ impl App {
                     self.dlg.render_use_loop = true;
                     ui.close_menu();
                 }
-                if ui.button("Excluir região").clicked() {
+                if ui.button(tr(lang, "Excluir região")).clicked() {
                     self.checkpoint();
                     self.project.regions.retain(|m| m.id != id);
                     self.changed();
@@ -1585,15 +1628,21 @@ impl App {
                 }
             }
             _ => {
-                if ui.button("Inserir marcador no cursor (M)").clicked() {
+                if ui
+                    .button(tr(lang, "Inserir marcador no cursor (M)"))
+                    .clicked()
+                {
                     self.insert_marker();
                     ui.close_menu();
                 }
-                if ui.button("Inserir região da seleção (R)").clicked() {
+                if ui
+                    .button(tr(lang, "Inserir região da seleção (R)"))
+                    .clicked()
+                {
                     self.insert_region();
                     ui.close_menu();
                 }
-                if ui.button("Limpar região de loop").clicked() {
+                if ui.button(tr(lang, "Limpar região de loop")).clicked() {
                     self.project.loop_region = None;
                     self.time_sel = None;
                     ui.close_menu();
@@ -1603,19 +1652,21 @@ impl App {
     }
 
     fn rename_popup(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let Some((id, mut label)) = self.tl.rename.clone() else {
             return;
         };
         let mut open = true;
         let mut done = false;
-        egui::Window::new("Renomear")
+        egui::Window::new(tr(lang, "Renomear"))
+            .id(egui::Id::new("tl_rename_win"))
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
                 let r = ui.text_edit_singleline(&mut label);
                 r.request_focus();
-                if ui.button("OK").clicked()
+                if ui.button(tr(lang, "OK")).clicked()
                     || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 {
                     done = true;
@@ -1712,6 +1763,7 @@ impl App {
             let kf_open = !self.tl.kf_collapsed.contains(&tid);
             let mut kf_toggle = false;
             let is_video = kind == TrackKind::Video;
+            let lang = self.lang();
             let btns = self.prefs.track_header.get(is_video);
             let mut more: Option<HeaderAction> = None;
             child.horizontal(|ui| {
@@ -1725,33 +1777,44 @@ impl App {
                 };
                 let adj = self.project.tracks[ti].is_adjustment();
                 ui.menu_button(egui::RichText::new("…").small(), |ui| {
-                    if ui.selectable_label(cur_mute, "Mudo (Z)").clicked() {
+                    if ui
+                        .selectable_label(cur_mute, tr(lang, "Mudo (Z)"))
+                        .clicked()
+                    {
                         more = Some(HeaderAction::Mute);
                         ui.close_menu();
                     }
-                    if ui.selectable_label(cur_solo, "Solo (X)").clicked() {
+                    if ui
+                        .selectable_label(cur_solo, tr(lang, "Solo (X)"))
+                        .clicked()
+                    {
                         more = Some(HeaderAction::Solo);
                         ui.close_menu();
                     }
-                    if ui.button("Efeitos da trilha...").clicked() {
+                    if ui.button(tr(lang, "Efeitos da trilha...")).clicked() {
                         more = Some(HeaderAction::Fx);
                         ui.close_menu();
                     }
                     if is_video
                         && !adj
-                        && ui.button("Movimento da trilha (Track Motion)...").clicked()
+                        && ui
+                            .button(tr(lang, "Movimento da trilha (Track Motion)..."))
+                            .clicked()
                     {
                         more = Some(HeaderAction::TrackMotion);
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Editar conjunto de botões visíveis...").clicked() {
+                    if ui
+                        .button(tr(lang, "Editar conjunto de botões visíveis..."))
+                        .clicked()
+                    {
                         more = Some(HeaderAction::EditButtons);
                         ui.close_menu();
                     }
                 })
                 .response
-                .on_hover_text("Mais (botões do cabeçalho, inclusive os ocultos)");
+                .on_hover_text(tr(lang, "Mais (botões do cabeçalho, inclusive os ocultos)"));
                 let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
                 let num_bg = if selected {
                     self.theme.selection_bg
@@ -1790,15 +1853,16 @@ impl App {
                 let is_adjustment = self.project.tracks[ti].is_adjustment();
                 if is_adjustment {
                     ui.label(
-                        egui::RichText::new("AJ")
+                        egui::RichText::new(tr(lang, "AJ"))
                             .small()
                             .strong()
                             .color(self.theme.text_muted),
                     )
-                    .on_hover_text(
+                    .on_hover_text(tr(
+                        lang,
                         "Trilha de ajuste (Adjustment Track): os efeitos desta trilha \
                          valem para todas as trilhas de vídeo abaixo dela",
-                    );
+                    ));
                 }
                 let t = &mut self.project.tracks[ti];
                 let r = ui.add(
@@ -1815,7 +1879,7 @@ impl App {
                 if btns.mute
                     && ui
                         .selectable_label(t.mute, "M")
-                        .on_hover_text("Mudo (Z)")
+                        .on_hover_text(tr(lang, "Mudo (Z)"))
                         .clicked()
                 {
                     more = Some(HeaderAction::Mute);
@@ -1823,7 +1887,7 @@ impl App {
                 if btns.solo
                     && ui
                         .selectable_label(t.solo, "S")
-                        .on_hover_text("Solo (X)")
+                        .on_hover_text(tr(lang, "Solo (X)"))
                         .clicked()
                 {
                     more = Some(HeaderAction::Solo);
@@ -1832,7 +1896,7 @@ impl App {
                 if btns.fx
                     && ui
                         .small_button(fxlabel)
-                        .on_hover_text("Efeitos da trilha")
+                        .on_hover_text(tr(lang, "Efeitos da trilha"))
                         .clicked()
                 {
                     more = Some(HeaderAction::Fx);
@@ -1841,7 +1905,7 @@ impl App {
                     && btns.track_motion
                     && !is_adjustment
                     && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
-                        .on_hover_text("Movimento da trilha (Track Motion)")
+                        .on_hover_text(tr(lang, "Movimento da trilha (Track Motion)"))
                         .clicked()
                 {
                     self.dlg.track_motion = Some(tid);
@@ -1858,7 +1922,7 @@ impl App {
                         kf_open,
                         &self.theme,
                     )
-                    .on_hover_text("Expandir/recolher os quadros-chave da trilha")
+                    .on_hover_text(tr(lang, "Expandir/recolher os quadros-chave da trilha"))
                     .clicked()
                 {
                     kf_toggle = true;
@@ -1891,7 +1955,7 @@ impl App {
                 child.horizontal(|ui| {
                     let t = &mut self.project.tracks[ti];
                     if kind == TrackKind::Audio {
-                        ui.label(egui::RichText::new("Vol").small());
+                        ui.label(egui::RichText::new(tr(lang, "Vol")).small());
                         let r = ui.add(
                             egui::Slider::new(&mut t.volume_db, -60.0..=12.0)
                                 .show_value(true)
@@ -1907,7 +1971,7 @@ impl App {
                         }
                         changed_track |= r.changed() || r.double_clicked();
                     } else {
-                        ui.label(egui::RichText::new("Nível").small());
+                        ui.label(egui::RichText::new(tr(lang, "Nível")).small());
                         let mut pct = t.opacity * 100.0;
                         let r = ui.add(
                             egui::Slider::new(&mut pct, 0.0..=100.0)
@@ -1929,7 +1993,7 @@ impl App {
                 child.horizontal(|ui| {
                     if kind == TrackKind::Audio {
                         let t = &mut self.project.tracks[ti];
-                        ui.label(egui::RichText::new("Pan").small());
+                        ui.label(egui::RichText::new(tr(lang, "Pan")).small());
                         let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
                         if r.drag_started() {
                             want_checkpoint = true;
@@ -1955,13 +2019,17 @@ impl App {
                                         .find(|(id, _)| *id == bid)
                                         .map(|(_, nm)| nm.as_str())
                                 })
-                                .unwrap_or("Master");
+                                .unwrap_or_else(|| tr(lang, "Master"));
                             let before = t.output_bus;
                             egui::ComboBox::from_id_salt(("hdr_out", tid))
                                 .width(64.0)
                                 .selected_text(out_lbl)
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut t.output_bus, None, "Master");
+                                    ui.selectable_value(
+                                        &mut t.output_bus,
+                                        None,
+                                        tr(lang, "Master"),
+                                    );
                                     for (bid, bname) in &bus_list {
                                         ui.selectable_value(&mut t.output_bus, Some(*bid), bname);
                                     }
@@ -1973,14 +2041,14 @@ impl App {
                         }
                     } else {
                         let t = &mut self.project.tracks[ti];
-                        ui.label(egui::RichText::new("Modo").small());
+                        ui.label(egui::RichText::new(tr(lang, "Modo")).small());
                         let before = t.blend;
                         egui::ComboBox::from_id_salt(("blend", tid))
                             .width(120.0)
-                            .selected_text(t.blend.name())
+                            .selected_text(t.blend.name_in(lang))
                             .show_ui(ui, |ui| {
                                 for b in BlendMode::ALL {
-                                    ui.selectable_value(&mut t.blend, b, b.name());
+                                    ui.selectable_value(&mut t.blend, b, b.name_in(lang));
                                 }
                             });
                         if t.blend != before {
@@ -2116,17 +2184,19 @@ impl App {
                     self.project.audio_buses[bi].solo = !b_solo;
                     changed_bus = true;
                 }
+                let lang = self.lang();
                 let fxlabel = if b_fx_empty { "fx" } else { "FX" };
                 if ui
                     .small_button(fxlabel)
-                    .on_hover_text("Efeitos do barramento")
+                    .on_hover_text(tr(lang, "Efeitos do barramento"))
                     .clicked()
                 {
                     self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
                 }
             });
+            let lang = self.lang();
             child.horizontal(|ui| {
-                ui.label(egui::RichText::new("Vol").small());
+                ui.label(egui::RichText::new(tr(lang, "Vol")).small());
                 let mut vol = self.project.audio_buses[bi].volume_db;
                 let sr = ui.add(
                     egui::Slider::new(&mut vol, -60.0..=12.0)
@@ -2163,13 +2233,14 @@ impl App {
     }
 
     pub fn track_menu(&mut self, ui: &mut egui::Ui, ti: usize) {
+        let lang = self.lang();
         let kind = self.project.tracks[ti].kind;
         let tid = self.project.tracks[ti].id;
-        if ui.button("Efeitos da trilha...").clicked() {
+        if ui.button(tr(lang, "Efeitos da trilha...")).clicked() {
             self.dlg.fx_target = Some(FxTarget::Track(tid));
             ui.close_menu();
         }
-        if kind == TrackKind::Video && ui.button("Movimento da trilha...").clicked() {
+        if kind == TrackKind::Video && ui.button(tr(lang, "Movimento da trilha...")).clicked() {
             self.dlg.track_motion = Some(tid);
             ui.close_menu();
         }
@@ -2181,10 +2252,11 @@ impl App {
         };
         for &k in envs {
             let has = self.project.tracks[ti].envelope(k).is_some();
+            let k_name = k.name_in(lang);
             let label = if has {
-                format!("Remover envelope: {}", k.name())
+                tr_args(lang, "Remover envelope: {kind}", &[("kind", &k_name)])
             } else {
-                format!("Inserir envelope: {}", k.name())
+                tr_args(lang, "Inserir envelope: {kind}", &[("kind", &k_name)])
             };
             if ui.button(label).clicked() {
                 self.checkpoint();
@@ -2200,9 +2272,12 @@ impl App {
             }
         }
         if kind == TrackKind::Audio && !self.project.audio_buses.is_empty() {
-            ui.menu_button("Roteamento de saída", |ui| {
+            ui.menu_button(tr(lang, "Roteamento de saída"), |ui| {
                 let cur_out = self.project.tracks[ti].output_bus;
-                if ui.selectable_label(cur_out.is_none(), "Master").clicked() {
+                if ui
+                    .selectable_label(cur_out.is_none(), tr(lang, "Master"))
+                    .clicked()
+                {
                     self.checkpoint();
                     self.project.tracks[ti].output_bus = None;
                     self.changed();
@@ -2225,46 +2300,48 @@ impl App {
             });
         }
         ui.separator();
-        if ui.button("Duplicar trilha").clicked() {
+        if ui.button(tr(lang, "Duplicar trilha")).clicked() {
             self.duplicate_track(ti);
             ui.close_menu();
         }
-        if ui.button("Mover para cima").clicked() {
+        if ui.button(tr(lang, "Mover para cima")).clicked() {
             self.move_track(ti, true);
             ui.close_menu();
         }
-        if ui.button("Mover para baixo").clicked() {
+        if ui.button(tr(lang, "Mover para baixo")).clicked() {
             self.move_track(ti, false);
             ui.close_menu();
         }
-        ui.menu_button("Cor da trilha", |ui| {
+        ui.menu_button(tr(lang, "Cor da trilha"), |ui| {
             let mut c = self.project.tracks[ti].color;
             if ui.color_edit_button_srgb(&mut c).changed() {
                 self.project.tracks[ti].color = c;
             }
         });
         ui.separator();
-        if ui.button("Excluir trilha").clicked() {
+        if ui.button(tr(lang, "Excluir trilha")).clicked() {
             self.delete_track(ti);
             ui.close_menu();
         }
     }
 
     fn bus_menu(&mut self, ui: &mut egui::Ui, bi: usize) {
+        let lang = self.lang();
         let Some(bid) = self.project.audio_buses.get(bi).map(|b| b.id) else {
             return;
         };
-        if ui.button("Efeitos do barramento...").clicked() {
+        if ui.button(tr(lang, "Efeitos do barramento...")).clicked() {
             self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
             ui.close_menu();
         }
         ui.separator();
         for &k in &[EnvKind::Volume, EnvKind::Pan] {
             let has = self.project.audio_buses[bi].envelope(k).is_some();
+            let k_name = k.name_in(lang);
             let label = if has {
-                format!("Remover envelope: {}", k.name())
+                tr_args(lang, "Remover envelope: {kind}", &[("kind", &k_name)])
             } else {
-                format!("Inserir envelope: {}", k.name())
+                tr_args(lang, "Inserir envelope: {kind}", &[("kind", &k_name)])
             };
             if ui.button(label).clicked() {
                 if self.session.toggle_bus_envelope(bid, k) && !has {
@@ -2274,7 +2351,7 @@ impl App {
             }
         }
         ui.separator();
-        if ui.button("Excluir barramento").clicked() {
+        if ui.button(tr(lang, "Excluir barramento")).clicked() {
             self.session.remove_audio_bus(bid);
             ui.close_menu();
         }
@@ -3040,9 +3117,10 @@ impl App {
                         return;
                     }
                 }
-                self.set_status(
+                self.set_status(tr(
+                    self.lang(),
                     "Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio",
-                );
+                ));
             }
             DndPayload::Transition(kind) => {
                 if let Some(eid) = event {
@@ -3053,11 +3131,12 @@ impl App {
     }
 
     pub fn apply_transition(&mut self, eid: Id, kind: TransitionKind) {
+        let lang = self.lang();
         let Some((ti, _)) = self.project.find_event(eid) else {
             return;
         };
         if self.project.tracks[ti].kind != TrackKind::Video {
-            self.set_status("Transições se aplicam a eventos de vídeo");
+            self.set_status(tr(lang, "Transições se aplicam a eventos de vídeo"));
             return;
         }
         self.checkpoint();
@@ -3072,11 +3151,16 @@ impl App {
         if e.fade_in.len <= Ticks::ZERO {
             e.fade_in.len = Ticks::from_secs_i64(1).min(e.length.div_i64(2));
         }
-        self.set_status(format!("Transição \"{}\" aplicada", kind.name()));
+        self.set_status(tr_args(
+            lang,
+            "Transição \"{name}\" aplicada",
+            &[("name", &kind.name_in(lang))],
+        ));
         self.changed();
     }
 
     fn lane_context_menu(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         match self.tl.ctx_target.clone() {
             CtxTarget::Event(id) => self.event_context_menu(ui, id),
             CtxTarget::Keyframe {
@@ -3088,7 +3172,12 @@ impl App {
             } => self.keyframe_context_menu(ui, track, row, key, t, has_curve),
             CtxTarget::EnvPoint(owner, kind, idx) => {
                 ui.label(
-                    egui::RichText::new(format!("Ponto de envelope: {}", kind.name())).strong(),
+                    egui::RichText::new(tr_args(
+                        lang,
+                        "Ponto de envelope: {val}",
+                        &[("val", &kind.name_in(lang))],
+                    ))
+                    .strong(),
                 );
                 if let Some(env) = self
                     .owner_envelopes(owner)
@@ -3100,7 +3189,14 @@ impl App {
                 }
                 ui.separator();
                 for c in Curve::ALL {
-                    if ui.button(format!("Curva: {}", c.name())).clicked() {
+                    if ui
+                        .button(tr_args(
+                            lang,
+                            "Curva: {curve}",
+                            &[("curve", &c.name_in(lang))],
+                        ))
+                        .clicked()
+                    {
                         self.checkpoint();
                         if let Some(env) = self
                             .owner_envelopes_mut(owner)
@@ -3115,7 +3211,7 @@ impl App {
                     }
                 }
                 ui.separator();
-                if ui.button("Redefinir valor").clicked() {
+                if ui.button(tr(lang, "Redefinir valor")).clicked() {
                     self.checkpoint();
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
@@ -3128,7 +3224,7 @@ impl App {
                     self.changed();
                     ui.close_menu();
                 }
-                if ui.button("Excluir ponto").clicked() {
+                if ui.button(tr(lang, "Excluir ponto")).clicked() {
                     self.checkpoint();
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
@@ -3143,7 +3239,7 @@ impl App {
                 }
             }
             CtxTarget::EnvLine(owner, kind, t) => {
-                if ui.button("Adicionar ponto aqui").clicked() {
+                if ui.button(tr(lang, "Adicionar ponto aqui")).clicked() {
                     self.checkpoint();
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
@@ -3160,7 +3256,7 @@ impl App {
                     self.changed();
                     ui.close_menu();
                 }
-                if ui.button("Redefinir todos os pontos").clicked() {
+                if ui.button(tr(lang, "Redefinir todos os pontos")).clicked() {
                     self.checkpoint();
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
@@ -3171,7 +3267,7 @@ impl App {
                     self.changed();
                     ui.close_menu();
                 }
-                if ui.button("Ocultar envelope").clicked() {
+                if ui.button(tr(lang, "Ocultar envelope")).clicked() {
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
                         .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
@@ -3180,7 +3276,7 @@ impl App {
                     }
                     ui.close_menu();
                 }
-                if ui.button("Remover envelope").clicked() {
+                if ui.button(tr(lang, "Remover envelope")).clicked() {
                     self.checkpoint();
                     if let Some(list) = self.owner_envelopes_mut(owner) {
                         list.retain(|e| e.kind != kind);
@@ -3191,7 +3287,10 @@ impl App {
             }
             CtxTarget::Lane(ti, t) => {
                 if ui
-                    .add_enabled(!self.clipboard.is_empty(), egui::Button::new("Colar aqui"))
+                    .add_enabled(
+                        !self.clipboard.is_empty(),
+                        egui::Button::new(tr(lang, "Colar aqui")),
+                    )
                     .clicked()
                 {
                     self.cursor = t;
@@ -3199,12 +3298,12 @@ impl App {
                     self.paste(false);
                     ui.close_menu();
                 }
-                if ui.button("Inserir marcador aqui").clicked() {
+                if ui.button(tr(lang, "Inserir marcador aqui")).clicked() {
                     self.cursor = t;
                     self.insert_marker();
                     ui.close_menu();
                 }
-                if ui.button("Inserir texto aqui").clicked() {
+                if ui.button(tr(lang, "Inserir texto aqui")).clicked() {
                     self.cursor = t;
                     self.sel_track = Some(ti);
                     self.insert_generated(GenSpec::Text(TextSpec::default()));
@@ -3224,35 +3323,46 @@ impl App {
     /// diálogo Take Chooser (que pré-visualiza) por enquanto.
     fn take_submenu(&mut self, ui: &mut egui::Ui, e: &Event) {
         use neoveg_engine::takes;
+        let lang = self.lang();
         let list = takes::takes(e);
         let active = takes::active_index(e);
         let id = e.id;
-        ui.menu_button(format!("Take ({} de {})", active + 1, list.len()), |ui| {
-            for (k, t) in list.iter().enumerate() {
-                let name =
-                    takes::display_name(t, |m| self.project.media(m).map(|x| x.name.clone()));
-                if ui
-                    .radio(k == active, format!("{}. {name}", k + 1))
-                    .clicked()
-                {
-                    if !self.session.set_active_take(id, k) && k != active {
-                        self.set_status("Evento travado: o take não foi trocado.");
+        let idx_s = (active + 1).to_string();
+        let total_s = list.len().to_string();
+        ui.menu_button(
+            tr_args(
+                lang,
+                "Take ({idx} de {total})",
+                &[("idx", &idx_s), ("total", &total_s)],
+            ),
+            |ui| {
+                for (k, t) in list.iter().enumerate() {
+                    let name =
+                        takes::display_name(t, |m| self.project.media(m).map(|x| x.name.clone()));
+                    if ui
+                        .radio(k == active, format!("{}. {name}", k + 1))
+                        .clicked()
+                    {
+                        if !self.session.set_active_take(id, k) && k != active {
+                            self.set_status(tr(lang, "Evento travado: o take não foi trocado."));
+                        }
+                        ui.close_menu();
                     }
-                    ui.close_menu();
                 }
-            }
-            ui.separator();
-            if !self.sel_events.contains(&id) {
-                self.sel_events.clear();
-                self.sel_events.insert(id);
-            }
-            self.cmd_menu_btn(ui, "event.next_take");
-            self.cmd_menu_btn(ui, "event.prev_take");
-            self.cmd_menu_btn(ui, "event.delete_active_take");
-        });
+                ui.separator();
+                if !self.sel_events.contains(&id) {
+                    self.sel_events.clear();
+                    self.sel_events.insert(id);
+                }
+                self.cmd_menu_btn(ui, "event.next_take");
+                self.cmd_menu_btn(ui, "event.prev_take");
+                self.cmd_menu_btn(ui, "event.delete_active_take");
+            },
+        );
     }
 
     fn event_context_menu(&mut self, ui: &mut egui::Ui, id: Id) {
+        let lang = self.lang();
         let Some((ti, ei)) = self.project.find_event(id) else {
             ui.close_menu();
             return;
@@ -3266,53 +3376,53 @@ impl App {
             .unwrap_or(false);
         ui.label(egui::RichText::new(&e.name).strong());
         ui.separator();
-        if ui.button("Propriedades...").clicked() {
+        if ui.button(tr(lang, "Propriedades...")).clicked() {
             self.dlg.event_props = Some(id);
             ui.close_menu();
         }
-        if is_video && ui.button("Pan/Crop do evento...").clicked() {
+        if is_video && ui.button(tr(lang, "Pan/Crop do evento...")).clicked() {
             self.dlg.pan_crop = Some(id);
             ui.close_menu();
         }
-        if ui.button("Efeitos do evento...").clicked() {
+        if ui.button(tr(lang, "Efeitos do evento...")).clicked() {
             self.dlg.fx_target = Some(FxTarget::Event(id));
             ui.close_menu();
         }
-        if media_generated && ui.button("Editar mídia gerada...").clicked() {
+        if media_generated && ui.button(tr(lang, "Editar mídia gerada...")).clicked() {
             self.dlg.gen_editor = Some(e.media_id);
             ui.close_menu();
         }
-        if ui.button("Renomear (F2)").clicked() {
+        if ui.button(tr(lang, "Renomear (F2)")).clicked() {
             self.tl.rename = Some((id, e.name.clone()));
             ui.close_menu();
         }
         self.take_submenu(ui, &e);
         ui.separator();
-        if ui.button("Dividir no cursor (S)").clicked() {
+        if ui.button(tr(lang, "Dividir no cursor (S)")).clicked() {
             self.split_at_cursor();
             ui.close_menu();
         }
-        if ui.button("Copiar").clicked() {
+        if ui.button(tr(lang, "Copiar")).clicked() {
             self.copy_selection();
             ui.close_menu();
         }
-        if ui.button("Recortar").clicked() {
+        if ui.button(tr(lang, "Recortar")).clicked() {
             self.cut_selection();
             ui.close_menu();
         }
-        if ui.button("Excluir").clicked() {
+        if ui.button(tr(lang, "Excluir")).clicked() {
             self.delete_selection();
             ui.close_menu();
         }
         ui.separator();
         let mut flags = (e.mute, e.locked, e.looped, e.reverse, e.maintain_aspect);
         let before = flags;
-        ui.checkbox(&mut flags.0, "Mudo");
-        ui.checkbox(&mut flags.1, "Travado");
-        ui.checkbox(&mut flags.2, "Loop");
-        ui.checkbox(&mut flags.3, "Inverter (reverse)");
+        ui.checkbox(&mut flags.0, tr(lang, "Mudo"));
+        ui.checkbox(&mut flags.1, tr(lang, "Travado"));
+        ui.checkbox(&mut flags.2, tr(lang, "Loop"));
+        ui.checkbox(&mut flags.3, tr(lang, "Inverter (reverse)"));
         if is_video {
-            ui.checkbox(&mut flags.4, "Manter proporção");
+            ui.checkbox(&mut flags.4, tr(lang, "Manter proporção"));
         }
         if flags != before {
             self.checkpoint();
@@ -3338,10 +3448,10 @@ impl App {
             self.changed();
         }
         ui.separator();
-        ui.menu_button("Curva do fade de entrada", |ui| {
+        ui.menu_button(tr(lang, "Curva do fade de entrada"), |ui| {
             for c in Curve::ALL.iter().take(5) {
                 if ui
-                    .selectable_label(e.fade_in.curve == *c, c.name())
+                    .selectable_label(e.fade_in.curve == *c, c.name_in(lang))
                     .clicked()
                 {
                     self.checkpoint();
@@ -3353,10 +3463,10 @@ impl App {
                 }
             }
         });
-        ui.menu_button("Curva do fade de saída", |ui| {
+        ui.menu_button(tr(lang, "Curva do fade de saída"), |ui| {
             for c in Curve::ALL.iter().take(5) {
                 if ui
-                    .selectable_label(e.fade_out.curve == *c, c.name())
+                    .selectable_label(e.fade_out.curve == *c, c.name_in(lang))
                     .clicked()
                 {
                     self.checkpoint();
@@ -3369,9 +3479,9 @@ impl App {
             }
         });
         if is_video {
-            ui.menu_button("Transição de entrada", |ui| {
+            ui.menu_button(tr(lang, "Transição de entrada"), |ui| {
                 if ui
-                    .selectable_label(e.transition.is_none(), "Nenhuma (crossfade)")
+                    .selectable_label(e.transition.is_none(), tr(lang, "Nenhuma (crossfade)"))
                     .clicked()
                 {
                     self.checkpoint();
@@ -3383,14 +3493,14 @@ impl App {
                 }
                 for k in TransitionKind::ALL {
                     let sel = e.transition.as_ref().map(|t| t.kind == k).unwrap_or(false);
-                    if ui.selectable_label(sel, k.name()).clicked() {
+                    if ui.selectable_label(sel, k.name_in(lang)).clicked() {
                         self.apply_transition(id, k);
                         ui.close_menu();
                     }
                 }
             });
         }
-        ui.menu_button("Velocidade", |ui| {
+        ui.menu_button(tr(lang, "Velocidade"), |ui| {
             for (num, den, pct) in [
                 (1, 4, 25),
                 (1, 2, 50),
@@ -3424,19 +3534,19 @@ impl App {
             }
         });
         ui.separator();
-        if ui.button("Agrupar seleção (G)").clicked() {
+        if ui.button(tr(lang, "Agrupar seleção (G)")).clicked() {
             self.group_selected();
             ui.close_menu();
         }
-        if e.group.is_some() && ui.button("Desagrupar (U)").clicked() {
+        if e.group.is_some() && ui.button(tr(lang, "Desagrupar (U)")).clicked() {
             self.ungroup_selected();
             ui.close_menu();
         }
-        if e.group.is_some() && ui.button("Selecionar grupo (Shift+G)").clicked() {
+        if e.group.is_some() && ui.button(tr(lang, "Selecionar grupo (Shift+G)")).clicked() {
             self.select_group();
             ui.close_menu();
         }
-        if is_video && ui.button("Congelar quadro no cursor").clicked() {
+        if is_video && ui.button(tr(lang, "Congelar quadro no cursor")).clicked() {
             self.freeze_frame();
             ui.close_menu();
         }

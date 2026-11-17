@@ -8,8 +8,9 @@ Até o momento o repositório **não contém nenhum asset**:
 
 - os ícones da interface são caracteres Unicode desenhados pelas fontes padrão
   do egui (incluídas pela dependência, não copiadas para o repositório);
-- os títulos usam fontes do sistema operacional carregadas em tempo de execução
-  (`Segoe UI`/`Arial` no Windows, `DejaVu Sans` no Linux), com a fonte padrão
+- os títulos e glifos CJK (japonês) usam fontes do sistema operacional carregadas
+  em tempo de execução (`Segoe UI`/`Arial` e `YuGothic`/`Meiryo`/`MS Gothic` no Windows;
+  `Hiragino`/`Osaka` no macOS; `DejaVu Sans` e `Noto Sans CJK` no Linux), com a fonte padrão
   do egui como alternativa;
 - a mídia de teste é gerada pelos próprios testes ou fica fora do controle de
   versão.
