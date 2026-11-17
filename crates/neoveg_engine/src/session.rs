@@ -133,6 +133,38 @@ impl BoxAxisMode {
     }
 }
 
+/// Foco de aparo no Modo de Edição Expandido (manual do VEGAS Pro 21, p. 329).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ExpandedEdgeFocus {
+    /// Ajusta ambos os lados do corte ao mesmo tempo (Roll).
+    #[default]
+    Both,
+    /// Ajusta a saída do evento esquerdo deslocando os seguintes (ripple Out).
+    LeftOut,
+    /// Ajusta a entrada do evento direito.
+    RightIn,
+}
+
+impl ExpandedEdgeFocus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Both => "Ambos (Roll)",
+            Self::LeftOut => "Saída esquerda (Out)",
+            Self::RightIn => "Entrada direita (In)",
+        }
+    }
+}
+
+/// Estado do Modo de Edição Expandido (estado de sessão, fora do Desfazer).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpandedEditState {
+    pub track_idx: usize,
+    pub left_event_id: Option<Id>,
+    pub right_event_id: Option<Id>,
+    pub edit_point: Ticks,
+    pub focus: ExpandedEdgeFocus,
+}
+
 /// Máscara de seleção para "Colar atributos do evento" (Paste Event Attributes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PasteAttributesMask {
@@ -309,6 +341,8 @@ pub struct EditorSession {
     pub edit_tool: EditTool,
     /// Modo de eixo das ferramentas Seleção e Zoom em caixa (Livre, Horizontal, Vertical).
     pub box_axis: BoxAxisMode,
+    /// Modo de edição expandido (prévia dupla A/B e ajuste preciso de corte, p. 329).
+    pub expanded_edit: Option<ExpandedEditState>,
     pub status: String,
     pub removed_media_ids: Vec<Id>,
     /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
@@ -344,6 +378,7 @@ impl EditorSession {
             edit_mode: EditMode::Normal,
             edit_tool: EditTool::Normal,
             box_axis: BoxAxisMode::Both,
+            expanded_edit: None,
             status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),
@@ -929,46 +964,10 @@ impl EditorSession {
             let Some(track) = self.project.tracks.get_mut(ti) else {
                 continue;
             };
-            let Some(e) = track.events.get_mut(ei) else {
-                continue;
-            };
-            let mut right = e.clone();
-            let left_len = t - e.start;
-            e.length = left_len;
-            e.fade_out = Fade::default();
-            right.id = new_id();
-            right.start = t;
-            right.length -= left_len;
-            right.fade_in = Fade::default();
-            right.transition = None;
-            if !right.reverse {
-                right.shift_offsets(right.rate.scale_ticks(left_len));
+            if let Some(right_id) = split_event_in_track(track, ei, t, &mut group_map) {
+                new_sel.insert(right_id);
+                count += 1;
             }
-            if e.reverse {
-                e.shift_offsets(e.rate.scale_ticks(right.length));
-            }
-            for k in &mut right.pan_crop.keys {
-                k.t -= left_len;
-            }
-            right.group = right
-                .group
-                .map(|g| *group_map.entry(g).or_insert_with(new_id));
-            right.fx = right
-                .fx
-                .iter()
-                .map(|f| {
-                    let mut f = f.duplicate();
-                    for p in &mut f.params {
-                        for k in &mut p.keys {
-                            k.0 -= left_len;
-                        }
-                    }
-                    f
-                })
-                .collect();
-            new_sel.insert(right.id);
-            track.events.push(right);
-            count += 1;
         }
         self.sel_events = new_sel;
         self.changed();
@@ -3142,6 +3141,510 @@ impl EditorSession {
         self.set_status("Evento vazio inserido na timeline.");
         id
     }
+
+    /// Aplica cortes detectados na mídia (`media_cuts` em tempo da mídia) dividindo
+    /// o evento ou criando marcadores na timeline em um único passo de Desfazer.
+    pub fn apply_scene_cuts(
+        &mut self,
+        event_id: Id,
+        media_cuts: &[Ticks],
+        create_markers: bool,
+    ) -> usize {
+        let Some((ti, ei)) = self.project.find_event(event_id) else {
+            return 0;
+        };
+        if self.project.tracks[ti].locked {
+            return 0;
+        }
+        let ev = self.project.tracks[ti].events[ei].clone();
+        if ev.locked {
+            return 0;
+        }
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let mut cuts_timeline: Vec<Ticks> = Vec::new();
+        for &mc in media_cuts {
+            let rel_media = mc - ev.offset;
+            if rel_media <= Ticks::ZERO {
+                continue;
+            }
+            let Some(rel_tl) = ev.rate.unscale_ticks(rel_media) else {
+                continue;
+            };
+            let t = if ev.reverse {
+                ev.end() - rel_tl
+            } else {
+                ev.start + rel_tl
+            };
+            if t > ev.start + fd && t < ev.end() - fd {
+                cuts_timeline.push(t);
+            }
+        }
+        cuts_timeline.sort();
+        cuts_timeline.dedup();
+        if cuts_timeline.is_empty() {
+            return 0;
+        }
+
+        if create_markers {
+            self.checkpoint();
+            let mut count = 0usize;
+            for (idx, t) in cuts_timeline.into_iter().enumerate() {
+                if !self.project.markers.iter().any(|m| m.t.abs_diff(t) < fd) {
+                    self.project.markers.push(Marker {
+                        id: new_id(),
+                        t,
+                        label: format!("Cena {}", idx + 1),
+                    });
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                self.project.markers.sort_by_key(|m| m.t);
+                self.changed();
+                self.set_status(format!("{count} marcador(es) de cena adicionado(s)."));
+            } else {
+                self.undo.pop();
+            }
+            return count;
+        }
+
+        self.checkpoint();
+        let mut group_map: HashMap<Id, Id> = HashMap::new();
+        let mut current_id = event_id;
+        let mut splits = 0usize;
+        for t in cuts_timeline {
+            let Some((cur_ti, cur_ei)) = self.project.find_event(current_id) else {
+                break;
+            };
+            let Some(track) = self.project.tracks.get_mut(cur_ti) else {
+                break;
+            };
+            let cur_ev = &track.events[cur_ei];
+            if t <= cur_ev.start + fd || t >= cur_ev.end() - fd {
+                continue;
+            }
+            if let Some(right_id) = split_event_in_track(track, cur_ei, t, &mut group_map) {
+                current_id = right_id;
+                splits += 1;
+            }
+        }
+        if splits > 0 {
+            self.project.sort_events();
+            self.changed();
+            self.set_status(format!(
+                "Detecção de cenas: evento dividido em {} parte(s).",
+                splits + 1
+            ));
+        } else {
+            self.undo.pop();
+        }
+        splits
+    }
+
+    /// Entra ou sai do Modo de Edição Expandido (`p. 329`), procurando a junção de
+    /// corte mais próxima do cursor (ou da borda direita da seleção).
+    pub fn toggle_expanded_edit(&mut self) -> bool {
+        if self.expanded_edit.is_some() {
+            self.expanded_edit = None;
+            self.set_status("Modo de edição expandido desativado.");
+            return false;
+        }
+        let tol = Ticks::from_millis_i64(2);
+        let mut candidate: Option<(usize, Id, bool, Ticks)> = None;
+        if let Some(&id) = self.sel_events.iter().next() {
+            if let Some((ti, ei)) = self.project.find_event(id) {
+                let tr = &self.project.tracks[ti];
+                if tr.kind == TrackKind::Video && !tr.locked && !tr.events[ei].locked {
+                    let ev = &tr.events[ei];
+                    let use_left = (self.cursor - ev.start).abs() <= (ev.end() - self.cursor).abs();
+                    candidate = Some((
+                        ti,
+                        ev.id,
+                        !use_left,
+                        if use_left { ev.start } else { ev.end() },
+                    ));
+                }
+            }
+        }
+        if candidate.is_none() {
+            let mut best_dist = Ticks::MAX;
+            for (ti, tr) in self.project.tracks.iter().enumerate() {
+                if tr.kind != TrackKind::Video || tr.locked || tr.is_adjustment() {
+                    continue;
+                }
+                for ev in &tr.events {
+                    if ev.locked {
+                        continue;
+                    }
+                    let d_end = (ev.end() - self.cursor).abs();
+                    if d_end < best_dist {
+                        best_dist = d_end;
+                        candidate = Some((ti, ev.id, true, ev.end()));
+                    }
+                    let d_start = (ev.start - self.cursor).abs();
+                    if d_start < best_dist {
+                        best_dist = d_start;
+                        candidate = Some((ti, ev.id, false, ev.start));
+                    }
+                }
+            }
+        }
+        let Some((ti, eid, right_edge, _)) = candidate else {
+            self.set_status("Nenhum evento de vídeo destravado para abrir o modo expandido.");
+            return false;
+        };
+        let _ = tol;
+        self.enter_expanded_edit_at(ti, eid, right_edge)
+    }
+
+    /// Abre o Modo de Edição Expandido focado na borda (`right_edge`) de `event_id` em `track_idx`.
+    pub fn enter_expanded_edit_at(
+        &mut self,
+        track_idx: usize,
+        event_id: Id,
+        right_edge: bool,
+    ) -> bool {
+        let Some(tr) = self.project.tracks.get(track_idx) else {
+            return false;
+        };
+        if tr.locked {
+            return false;
+        }
+        let Some(ev) = tr.events.iter().find(|e| e.id == event_id && !e.locked) else {
+            return false;
+        };
+        let tol = Ticks::from_millis_i64(2);
+        let edit_point = if right_edge { ev.end() } else { ev.start };
+        let (left_event_id, right_event_id) = if right_edge {
+            let neighbor = tr
+                .events
+                .iter()
+                .filter(|other| {
+                    other.id != ev.id && !other.locked && other.start.abs_diff(edit_point) <= tol
+                })
+                .min_by_key(|other| other.start.abs_diff(edit_point))
+                .map(|o| o.id);
+            (Some(ev.id), neighbor)
+        } else {
+            let neighbor = tr
+                .events
+                .iter()
+                .filter(|other| {
+                    other.id != ev.id && !other.locked && other.end().abs_diff(edit_point) <= tol
+                })
+                .min_by_key(|other| other.end().abs_diff(edit_point))
+                .map(|o| o.id);
+            (neighbor, Some(ev.id))
+        };
+        let focus = if left_event_id.is_some() && right_event_id.is_some() {
+            ExpandedEdgeFocus::Both
+        } else if left_event_id.is_some() {
+            ExpandedEdgeFocus::LeftOut
+        } else {
+            ExpandedEdgeFocus::RightIn
+        };
+        self.expanded_edit = Some(ExpandedEditState {
+            track_idx,
+            left_event_id,
+            right_event_id,
+            edit_point,
+            focus,
+        });
+        self.cursor = edit_point;
+        self.sel_track = Some(track_idx);
+        self.set_status("Modo de edição expandido ativo (A/B).");
+        true
+    }
+
+    pub fn set_expanded_focus(&mut self, focus: ExpandedEdgeFocus) -> bool {
+        let Some(exp) = self.expanded_edit.as_mut() else {
+            return false;
+        };
+        exp.focus = focus;
+        true
+    }
+
+    /// Desloca a junção ativa no Modo de Edição Expandido em `delta` ticks em 1 passo de Desfazer.
+    pub fn nudge_expanded_edit(&mut self, delta: Ticks) -> bool {
+        let Some(exp) = self.expanded_edit.clone() else {
+            return false;
+        };
+        let Some(tr) = self.project.tracks.get(exp.track_idx) else {
+            self.expanded_edit = None;
+            return false;
+        };
+        if tr.locked || delta == Ticks::ZERO {
+            return false;
+        }
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let snap: Vec<TrackEventSnapshot> = tr
+            .events
+            .iter()
+            .filter(|e| !e.locked)
+            .map(|e| TrackEventSnapshot {
+                id: e.id,
+                track_idx: exp.track_idx,
+                start: e.start,
+                length: e.length,
+                offset: e.offset,
+                rate: e.rate,
+                reverse: e.reverse,
+                looped: e.looped,
+                media_dur: self.project.media(e.media_id).and_then(|m| m.duration),
+            })
+            .collect();
+
+        match (exp.focus, exp.left_event_id, exp.right_event_id) {
+            (ExpandedEdgeFocus::Both, Some(_lid), Some(rid)) => {
+                let mut probe = self.project.clone();
+                if !apply_roll_from_snapshot(&mut probe, exp.track_idx, &snap, rid, true, delta, fd)
+                {
+                    return false;
+                }
+                self.checkpoint();
+                self.project = probe;
+                let new_pt = self
+                    .project
+                    .event(rid)
+                    .map(|e| e.start)
+                    .unwrap_or(exp.edit_point);
+                if let Some(st) = self.expanded_edit.as_mut() {
+                    st.edit_point = new_pt;
+                }
+                self.cursor = new_pt;
+                self.changed();
+                true
+            }
+            (ExpandedEdgeFocus::LeftOut, Some(lid), _)
+            | (ExpandedEdgeFocus::Both, Some(lid), None) => {
+                let Some(left_snap) = snap.iter().find(|s| s.id == lid) else {
+                    return false;
+                };
+                let min_dt = fd - left_snap.length;
+                let mut clamped_dt = delta.max(min_dt);
+                if !left_snap.looped && !left_snap.reverse {
+                    if let (Some(md), Some(avail)) = (
+                        left_snap.media_dur,
+                        left_snap.rate.unscale_ticks(left_snap.offset),
+                    ) {
+                        if let Some(full) = left_snap.rate.unscale_ticks(md) {
+                            let max_len = (full - avail).max(fd);
+                            clamped_dt = clamped_dt.min(max_len - left_snap.length);
+                        }
+                    }
+                }
+                if clamped_dt == Ticks::ZERO {
+                    return false;
+                }
+                self.checkpoint();
+                if let Some(track) = self.project.tracks.get_mut(exp.track_idx) {
+                    let boundary = left_snap.start + left_snap.length;
+                    for ev in &mut track.events {
+                        if ev.id == lid {
+                            ev.length = (left_snap.length + clamped_dt).max(fd);
+                            ev.fade_in.len = ev.fade_in.len.min(ev.length);
+                            ev.fade_out.len = ev.fade_out.len.min(ev.length - ev.fade_in.len);
+                        } else if !ev.locked && ev.start >= boundary - Ticks::from_millis_i64(2) {
+                            ev.start = (ev.start + clamped_dt).max(Ticks::ZERO);
+                        }
+                    }
+                }
+                let new_pt = self
+                    .project
+                    .event(lid)
+                    .map(|e| e.end())
+                    .unwrap_or(exp.edit_point);
+                if let Some(st) = self.expanded_edit.as_mut() {
+                    st.edit_point = new_pt;
+                }
+                self.cursor = new_pt;
+                self.changed();
+                true
+            }
+            (ExpandedEdgeFocus::RightIn, _, Some(rid))
+            | (ExpandedEdgeFocus::Both, None, Some(rid)) => {
+                let Some(right_snap) = snap.iter().find(|s| s.id == rid) else {
+                    return false;
+                };
+                let max_dt = right_snap.length - fd;
+                let mut clamped_dt = delta.min(max_dt);
+                if right_snap.start + clamped_dt < Ticks::ZERO {
+                    clamped_dt = -right_snap.start;
+                }
+                if !right_snap.looped && !right_snap.reverse {
+                    if let Some(back) = right_snap.rate.unscale_ticks(right_snap.offset) {
+                        clamped_dt = clamped_dt.max(-back);
+                    }
+                }
+                if clamped_dt == Ticks::ZERO {
+                    return false;
+                }
+                self.checkpoint();
+                if let Some(ev) = self.project.event_mut(rid) {
+                    ev.start = right_snap.start + clamped_dt;
+                    ev.length = (right_snap.length - clamped_dt).max(fd);
+                    if !ev.reverse {
+                        let new_off =
+                            (right_snap.offset + ev.rate.scale_ticks(clamped_dt)).max(Ticks::ZERO);
+                        let shift = new_off - ev.offset;
+                        ev.shift_offsets(shift);
+                    }
+                    ev.fade_in.len = ev.fade_in.len.min(ev.length);
+                    ev.fade_out.len = ev.fade_out.len.min(ev.length - ev.fade_in.len);
+                }
+                let new_pt = self
+                    .project
+                    .event(rid)
+                    .map(|e| e.start)
+                    .unwrap_or(exp.edit_point);
+                if let Some(st) = self.expanded_edit.as_mut() {
+                    st.edit_point = new_pt;
+                }
+                self.cursor = new_pt;
+                self.changed();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Alterna armar faixa de áudio para gravação (`Rec`).
+    pub fn toggle_record_arm(&mut self, track_idx: usize) -> bool {
+        let Some(tr) = self.project.tracks.get_mut(track_idx) else {
+            return false;
+        };
+        if tr.kind != TrackKind::Audio || tr.locked {
+            return false;
+        }
+        tr.record_armed = !tr.record_armed;
+        let armed = tr.record_armed;
+        let name = tr.name.clone();
+        self.changed();
+        self.set_status(if armed {
+            format!("Faixa '{name}' armada para gravação.")
+        } else {
+            format!("Gravação desarmada na faixa '{name}'.")
+        });
+        armed
+    }
+
+    /// Lista `(índice_da_trilha, track_id)` de todas as faixas de áudio armadas e destravadas.
+    pub fn armed_audio_tracks(&self) -> Vec<(usize, Id)> {
+        self.project
+            .tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tr)| {
+                (tr.kind == TrackKind::Audio && tr.record_armed && !tr.locked).then_some((i, tr.id))
+            })
+            .collect()
+    }
+
+    /// Adiciona a mídia gravada ao projeto e cria eventos nas faixas de áudio armadas
+    /// em um único passo de Desfazer (§3.3).
+    pub fn commit_recorded_clip(
+        &mut self,
+        item: MediaItem,
+        track_targets: &[Id],
+        start: Ticks,
+        len: Ticks,
+    ) -> Vec<Id> {
+        let valid_targets: Vec<usize> = track_targets
+            .iter()
+            .filter_map(|tid| {
+                self.project
+                    .tracks
+                    .iter()
+                    .position(|tr| tr.id == *tid && tr.kind == TrackKind::Audio && !tr.locked)
+            })
+            .collect();
+        if valid_targets.is_empty() {
+            return Vec::new();
+        }
+        self.checkpoint();
+        let dur = len
+            .max(self.project.settings.frame_dur())
+            .max(Ticks::from_millis_i64(10));
+        let start = start.max(Ticks::ZERO);
+        let mut created = Vec::new();
+        self.project.media.push(item.clone());
+        for ti in valid_targets {
+            let mut ev = Event::new(&item, start, dur);
+            ev.name = item.name.clone();
+            let id = ev.id;
+            self.project.tracks[ti].events.push(ev);
+            created.push(id);
+        }
+        self.project.sort_events();
+        self.sel_events.clear();
+        for &id in &created {
+            self.sel_events.insert(id);
+        }
+        self.cursor = start + dur;
+        self.changed();
+        self.set_status(format!(
+            "Gravação concluída: {} evento(s) adicionado(s).",
+            created.len()
+        ));
+        created
+    }
+}
+
+fn split_event_in_track(
+    track: &mut Track,
+    ei: usize,
+    t: Ticks,
+    group_map: &mut HashMap<Id, Id>,
+) -> Option<Id> {
+    let e = track.events.get_mut(ei)?;
+    if t <= e.start || t >= e.end() || e.locked {
+        return None;
+    }
+    let mut right = e.clone();
+    let left_len = t - e.start;
+    e.length = left_len;
+    e.fade_out = Fade::default();
+    right.id = new_id();
+    right.start = t;
+    right.length -= left_len;
+    right.fade_in = Fade::default();
+    right.transition = None;
+    if !right.reverse {
+        right.shift_offsets(right.rate.scale_ticks(left_len));
+    }
+    if e.reverse {
+        e.shift_offsets(e.rate.scale_ticks(right.length));
+    }
+    for k in &mut right.pan_crop.keys {
+        k.t -= left_len;
+    }
+    right.group = right
+        .group
+        .map(|g| *group_map.entry(g).or_insert_with(new_id));
+    right.fx = right
+        .fx
+        .iter()
+        .map(|f| {
+            let mut f = f.duplicate();
+            for p in &mut f.params {
+                for k in &mut p.keys {
+                    k.0 -= left_len;
+                }
+            }
+            f
+        })
+        .collect();
+    let right_id = right.id;
+    track.events.push(right);
+    Some(right_id)
 }
 
 fn would_create_sync_cycle(project: &Project, follower_id: Id, master_id: Id) -> bool {
@@ -3883,5 +4386,81 @@ mod tests {
         );
         assert!(sess.undo());
         assert!(sess.project.event(ev2_id).is_none());
+    }
+
+    #[test]
+    fn deteccao_cenas_edicao_expandida_e_gravacao_com_desfazer() {
+        let mut p = Project::new_default();
+        let mut mv = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        mv.duration = Some(Ticks::from_secs_i64(20));
+        let mut ma = sample_media(new_id(), 0, 0, None);
+        ma.has_video = false;
+        ma.has_audio = true;
+        ma.duration = Some(Ticks::from_secs_i64(5));
+        p.media.push(mv.clone());
+        p.media.push(ma.clone());
+
+        let ev = Event::new(&mv, Ticks::ZERO, Ticks::from_secs_i64(12));
+        let ev_id = ev.id;
+        p.tracks[0].events.push(ev);
+
+        let mut sess = EditorSession::new(p);
+        // 1. Detecção de cenas em modo split e marcadores
+        let cuts = [Ticks::from_secs_i64(4), Ticks::from_secs_i64(8)];
+        assert_eq!(sess.apply_scene_cuts(ev_id, &cuts, true), 2);
+        assert_eq!(sess.project.markers.len(), 2);
+        assert!(sess.undo());
+        assert_eq!(sess.apply_scene_cuts(ev_id, &cuts, false), 2);
+        assert_eq!(sess.project.tracks[0].events.len(), 3);
+        assert_eq!(
+            sess.project.tracks[0].events[0].end(),
+            Ticks::from_secs_i64(4)
+        );
+        assert_eq!(
+            sess.project.tracks[0].events[1].start,
+            Ticks::from_secs_i64(4)
+        );
+        assert_eq!(
+            sess.project.tracks[0].events[2].start,
+            Ticks::from_secs_i64(8)
+        );
+
+        // 2. Modo de edição expandido + nudge A/B
+        sess.cursor = Ticks::from_secs_i64(4);
+        assert!(sess.toggle_expanded_edit());
+        let fd = sess.project.settings.frame_dur();
+        assert!(sess.nudge_expanded_edit(fd));
+        assert_eq!(
+            sess.project.tracks[0].events[0].end(),
+            Ticks::from_secs_i64(4) + fd
+        );
+        assert_eq!(
+            sess.project.tracks[0].events[1].start,
+            Ticks::from_secs_i64(4) + fd
+        );
+        assert!(sess.set_expanded_focus(ExpandedEdgeFocus::LeftOut));
+        assert!(sess.nudge_expanded_edit(fd));
+        assert_eq!(
+            sess.project.tracks[0].events[1].start,
+            Ticks::from_secs_i64(4) + fd + fd
+        );
+        assert!(sess.undo());
+        assert!(!sess.toggle_expanded_edit());
+
+        // 3. Armar faixa de áudio e gravar clipe
+        assert!(sess.toggle_record_arm(1));
+        assert!(!sess.toggle_record_arm(0)); // vídeo não arma gravação de áudio
+        let armed = sess.armed_audio_tracks();
+        assert_eq!(armed.len(), 1);
+        let created = sess.commit_recorded_clip(
+            ma,
+            &[armed[0].1],
+            Ticks::from_secs_i64(2),
+            Ticks::from_secs_i64(3),
+        );
+        assert_eq!(created.len(), 1);
+        assert_eq!(sess.project.tracks[1].events.len(), 1);
+        assert!(sess.undo());
+        assert!(sess.project.tracks[1].events.is_empty());
     }
 }

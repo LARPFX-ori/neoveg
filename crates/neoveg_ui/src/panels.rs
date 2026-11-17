@@ -306,7 +306,35 @@ impl App {
             {
                 self.preview_detached = true;
             }
+            if self.session.expanded_edit.is_some()
+                && icons::small_icon_button(ui, Icon::ExpandedEdit, Some("A/B"), true, &self.theme)
+                    .on_hover_text("Modo de edição expandido ativo (clique para fechar)")
+                    .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "edit.expanded_edit_mode");
+            }
         });
+        if let Some(exp) = self.session.expanded_edit.clone() {
+            use neoveg_engine::session::ExpandedEdgeFocus;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Expandido:").small().strong());
+                for f in [
+                    ExpandedEdgeFocus::Both,
+                    ExpandedEdgeFocus::LeftOut,
+                    ExpandedEdgeFocus::RightIn,
+                ] {
+                    if ui.selectable_label(exp.focus == f, f.label()).clicked() {
+                        self.session.set_expanded_focus(f);
+                    }
+                }
+                if ui.small_button("< 1q").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "edit.expanded_nudge_left");
+                }
+                if ui.small_button("1q >").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "edit.expanded_nudge_right");
+                }
+            });
+        }
         let avail = ui.available_rect_before_wrap();
         let font = egui::FontId::proportional(10.5);
         let gap_y = ui.spacing().item_spacing.y;
@@ -342,7 +370,40 @@ impl App {
             w = h * aspect;
         }
         let img_rect = Rect::from_center_size(rect.center(), vec2(w, h));
-        if let Some(tex) = &self.preview_tex {
+        if self.session.expanded_edit.is_some() {
+            if let Some((lt_tex, rt_tex)) = &self.expanded_ab_tex {
+                let mid_x = img_rect.center().x;
+                let left_r = Rect::from_min_max(
+                    img_rect.left_top(),
+                    pos2((mid_x - 1.0).max(img_rect.left()), img_rect.bottom()),
+                );
+                let right_r = Rect::from_min_max(
+                    pos2((mid_x + 1.0).min(img_rect.right()), img_rect.top()),
+                    img_rect.right_bottom(),
+                );
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(lt_tex.id(), left_r, uv, Color32::WHITE);
+                painter.image(rt_tex.id(), right_r, uv, Color32::WHITE);
+                painter.line_segment(
+                    [pos2(mid_x, img_rect.top()), pos2(mid_x, img_rect.bottom())],
+                    Stroke::new(2.0_f32, self.theme.accent),
+                );
+                painter.text(
+                    left_r.left_top() + vec2(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "A: Saída",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    right_r.left_top() + vec2(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "B: Entrada",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+            }
+        } else if let Some(tex) = &self.preview_tex {
             painter.image(
                 tex.id(),
                 img_rect,

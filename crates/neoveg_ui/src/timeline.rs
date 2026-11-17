@@ -2004,6 +2004,28 @@ impl App {
                 {
                     self.dlg.track_motion = Some(tid);
                 }
+                if kind == TrackKind::Audio {
+                    let (rec_armed, rec_locked) = {
+                        let tk = &self.project.tracks[ti];
+                        (tk.record_armed, tk.locked)
+                    };
+                    let rec_resp =
+                        icons::small_icon_button(ui, Icon::RecordDot, None, rec_armed, &self.theme);
+                    rec_resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            !rec_locked,
+                            "Armar gravação",
+                        )
+                    });
+                    if rec_resp
+                        .on_hover_text("Armar faixa para gravação (Ctrl+Shift+R)")
+                        .clicked()
+                    {
+                        self.session.toggle_record_arm(ti);
+                        self.sync_status_from_session();
+                    }
+                }
                 if kf_has
                     && icons::small_icon_button(
                         ui,
@@ -2166,9 +2188,15 @@ impl App {
             if changed_track {
                 self.changed();
             }
-            // medidor de nível (áudio)
+            // medidor de nível (áudio / entrada armada durante gravação)
             if kind == TrackKind::Audio {
-                let lv = self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]);
+                let rec_lv = if self.project.tracks[ti].record_armed {
+                    self.recording_peaks.get(&tid).copied()
+                } else {
+                    None
+                };
+                let lv = rec_lv
+                    .unwrap_or_else(|| self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]));
                 let mr = Rect::from_min_max(
                     pos2(r.right() - 11.0, r.top() + 4.0),
                     pos2(r.right() - 3.0, r.bottom() - 4.0),
@@ -2698,11 +2726,23 @@ impl App {
                         env.sort();
                         self.changed();
                     }
-                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
-                    let e = &self.project.tracks[ti].events[ei];
-                    let sel = (e.start, e.end());
-                    self.time_sel = Some(sel);
-                    self.project.loop_region = Some(sel);
+                } else if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
+                    if matches!(zone, Zone::LeftEdge | Zone::RightEdge)
+                        && self.project.tracks[ti].kind == TrackKind::Video
+                    {
+                        let eid = self.project.tracks[ti].events[ei].id;
+                        if self
+                            .session
+                            .enter_expanded_edit_at(ti, eid, zone == Zone::RightEdge)
+                        {
+                            self.sync_status_from_session();
+                        }
+                    } else {
+                        let e = &self.project.tracks[ti].events[ei];
+                        let sel = (e.start, e.end());
+                        self.time_sel = Some(sel);
+                        self.project.loop_region = Some(sel);
+                    }
                 }
             }
         }
@@ -4086,6 +4126,16 @@ impl App {
             self.freeze_frame();
             ui.close_menu();
         }
+        if is_video {
+            if ui.button("Detectar cenas e cortes...").clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.detect_scenes");
+                ui.close_menu();
+            }
+            if ui.button("Modo de edição expandido (A/B)").clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.expanded_edit_mode");
+                ui.close_menu();
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -4691,6 +4741,20 @@ impl App {
                     StrokeKind::Inside,
                 );
                 painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
+            }
+        }
+        // colchetes do Modo de Edição Expandido (p. 329)
+        if let Some(exp) = &self.session.expanded_edit {
+            if let Some(&(y0, h)) = layout.get(exp.track_idx) {
+                let x = self.tl.t2x(exp.edit_point, left);
+                let col = self.theme.accent;
+                let st = Stroke::new(2.0_f32, col);
+                painter.line_segment([pos2(x, y0), pos2(x, y0 + h)], st);
+                painter.line_segment([pos2(x - 6.0, y0 + 2.0), pos2(x + 6.0, y0 + 2.0)], st);
+                painter.line_segment(
+                    [pos2(x - 6.0, y0 + h - 2.0), pos2(x + 6.0, y0 + h - 2.0)],
+                    st,
+                );
             }
         }
         // indicador de soltura

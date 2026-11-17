@@ -479,8 +479,116 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameR
                 mix3(x, tinted, a)
             });
         }
+        FxKind::Stabilization => {
+            // Sem vizinhança temporal (ex.: prévia isolada de efeito), aplica apenas o zoom de borda.
+            let border_zoom = v.get(1).copied().unwrap_or(1.12);
+            apply_stabilization_transform(f, 0.0, 0.0, 0.0, border_zoom);
+        }
         _ => {}
     }
+}
+
+/// Aplica transformação afim de estabilização (deslocamento + micro-rotação + zoom de borda)
+/// mantendo as amostras dentro dos limites válidos do quadro sem bordas pretas.
+pub fn apply_stabilization_transform(
+    f: &mut Frame,
+    dx_px: f32,
+    dy_px: f32,
+    angle_rad: f32,
+    border_zoom: f32,
+) {
+    let (w, h) = (f.w, f.h);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let fin = |val: f32, fallback: f32| if val.is_finite() { val } else { fallback };
+    let zoom = fin(border_zoom, 1.12).clamp(1.0, 1.5);
+    let max_shift_x = (w as f32) * 0.25;
+    let max_shift_y = (h as f32) * 0.25;
+    let dx = fin(dx_px, 0.0).clamp(-max_shift_x, max_shift_x);
+    let dy = fin(dy_px, 0.0).clamp(-max_shift_y, max_shift_y);
+    let ang = fin(angle_rad, 0.0).clamp(-0.35, 0.35);
+    if (zoom - 1.0).abs() < 1e-4 && dx.abs() < 1e-4 && dy.abs() < 1e-4 && ang.abs() < 1e-4 {
+        return;
+    }
+    let src = f.clone();
+    let cx = (w as f32) * 0.5;
+    let cy = (h as f32) * 0.5;
+    let inv_zoom = 1.0 / zoom;
+    let (sn, cs) = ang.sin_cos();
+    let max_sx = (w as f32 - 0.5).max(0.5);
+    let max_sy = (h as f32 - 0.5).max(0.5);
+    f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let oy = (y as f32 + 0.5 - cy) * inv_zoom;
+        for (x, p) in row.iter_mut().enumerate() {
+            let ox = (x as f32 + 0.5 - cx) * inv_zoom;
+            let sx = (ox * cs - oy * sn + cx - dx).clamp(0.5, max_sx);
+            let sy = (ox * sn + oy * cs + cy - dy).clamp(0.5, max_sy);
+            *p = src.sample(sx, sy);
+        }
+    });
+}
+
+/// Estima movimento global `(dx_norm, dy_norm, angle_rad)` de `cur` em relação a `prev`
+/// usando busca de blocos 8x8 em luminância BT.601 em grade 3x3 (Sala Limpa).
+pub fn estimate_global_motion(prev: &image::RgbaImage, cur: &image::RgbaImage) -> (f32, f32, f32) {
+    let (w, h) = (prev.width() as usize, prev.height() as usize);
+    if w < 24 || h < 24 || w != cur.width() as usize || h != cur.height() as usize {
+        return (0.0, 0.0, 0.0);
+    }
+    let pa = prev.as_raw();
+    let pb = cur.as_raw();
+    if pa.len() < w * h * 4 || pb.len() < w * h * 4 {
+        return (0.0, 0.0, 0.0);
+    }
+    let luma_at = |buf: &[u8], x: usize, y: usize| -> i32 {
+        let i = (y * w + x) * 4;
+        (77 * i32::from(buf[i]) + 150 * i32::from(buf[i + 1]) + 29 * i32::from(buf[i + 2])) >> 8
+    };
+    let rx = (w / 10).clamp(2, 8) as isize;
+    let ry = (h / 10).clamp(2, 8) as isize;
+    let bw = 8usize;
+    let mut dxs = [0f32; 9];
+    let mut dys = [0f32; 9];
+    let mut count = 0usize;
+    for by in 0..3 {
+        let cy0 = ((h * (by + 2)) / 6).min(h - bw - 1);
+        for bx in 0..3 {
+            let cx0 = ((w * (bx + 2)) / 6).min(w - bw - 1);
+            let mut best_sad = u32::MAX;
+            let mut best_dx = 0isize;
+            let mut best_dy = 0isize;
+            for dy in (-ry..=ry).step_by(2) {
+                for dx in (-rx..=rx).step_by(2) {
+                    let mut sad = 0u32;
+                    for j in 0..bw {
+                        let py = ((cy0 + j) as isize + dy).clamp(0, h as isize - 1) as usize;
+                        for i in 0..bw {
+                            let px = ((cx0 + i) as isize + dx).clamp(0, w as isize - 1) as usize;
+                            let diff = luma_at(pb, cx0 + i, cy0 + j) - luma_at(pa, px, py);
+                            sad += diff.unsigned_abs();
+                        }
+                    }
+                    if sad < best_sad {
+                        best_sad = sad;
+                        best_dx = dx;
+                        best_dy = dy;
+                    }
+                }
+            }
+            dxs[count] = best_dx as f32;
+            dys[count] = best_dy as f32;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    dxs.sort_by(|a, b| a.total_cmp(b));
+    dys.sort_by(|a, b| a.total_cmp(b));
+    let med_dx = dxs[4];
+    let med_dy = dys[4];
+    (med_dx / w as f32, med_dy / h as f32, 0.0)
 }
 
 #[cfg(test)]
@@ -505,5 +613,36 @@ mod tests {
         let zero = FrameRate { num: 0, den: 0 };
         assert!(ofx_time(Ticks(i64::MAX), zero).0.is_finite());
         assert!(ofx_time(Ticks(i64::MIN), FrameRate::FPS_60).0.is_finite());
+    }
+
+    #[test]
+    fn estabilizador_reduz_tremor_e_protege_bordas_sem_panico() {
+        let mut cur = image::RgbaImage::new(64, 36);
+        let mut nbr = image::RgbaImage::new(64, 36);
+        for y in 0..36u32 {
+            for x in 0..64u32 {
+                let block = |px: i32, py: i32| {
+                    if (20..36).contains(&px) && (12..24).contains(&py) {
+                        image::Rgba([240, 220, 180, 255])
+                    } else {
+                        image::Rgba([30, 40, 50, 255])
+                    }
+                };
+                cur.put_pixel(x, y, block(x as i32, y as i32));
+                nbr.put_pixel(x, y, block(x as i32 - 4, y as i32));
+            }
+        }
+        let (dx, dy, _) = estimate_global_motion(&nbr, &cur);
+        assert!(dx.is_finite() && dy.is_finite());
+        assert!(dx < 0.0, "deve detectar deslocamento relativo dx={dx}");
+
+        let mut frame = Frame::filled(32, 18, [0.5, 0.4, 0.3, 1.0]);
+        apply_stabilization_transform(&mut frame, 3.0, -2.0, 0.02, 1.15);
+        assert!(frame
+            .px
+            .iter()
+            .all(|p| p.iter().all(|c| c.is_finite() && *c > 0.0)));
+        // Entradas extremas/NaN não entram em pânico
+        apply_stabilization_transform(&mut frame, f32::NAN, f32::INFINITY, -99.0, 0.0);
     }
 }

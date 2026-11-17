@@ -247,9 +247,73 @@ fn event_layer_opts(
     let key = e.pan_crop.eval(local);
     let mut f = draw_source(&src, w, h, &key, e.maintain_aspect);
     for fx in &e.fx {
-        vfx::apply(fx, &mut f, local, p.settings.fps);
+        if fx.enabled && fx.kind == FxKind::Stabilization {
+            let vals = fx.values(local);
+            let smooth_k = (vals.first().copied().unwrap_or(65.0) / 100.0).clamp(0.0, 1.0);
+            let border_zoom = vals.get(1).copied().unwrap_or(1.12);
+            let rot_k = vals.get(2).copied().unwrap_or(0.35).clamp(0.0, 1.0);
+            let (mut acc_dx, mut acc_dy, mut acc_ang, mut n_nbr) = (0.0f32, 0.0f32, 0.0f32, 0usize);
+            if smooth_k > 1e-3 {
+                let fd = e
+                    .rate
+                    .scale_ticks(p.settings.frame_dur())
+                    .max(Ticks::from_millis_i64(1));
+                if let Some(cur_s) = media.video_frame_for_quality(m, mt, 64, 36, true) {
+                    for k in [-2i64, -1, 1, 2] {
+                        let nbr_t = t + Ticks::from_raw(fd.0.saturating_mul(k));
+                        if let Some(nbr_mt) = e.media_time(nbr_t, m.duration) {
+                            if let Some(nbr_s) =
+                                media.video_frame_for_quality(m, nbr_mt, 64, 36, true)
+                            {
+                                let (dx_n, dy_n, ang_n) =
+                                    vfx::estimate_global_motion(&nbr_s, &cur_s);
+                                acc_dx += dx_n;
+                                acc_dy += dy_n;
+                                acc_ang += ang_n;
+                                n_nbr += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if n_nbr > 0 {
+                let inv = 1.0 / (n_nbr as f32);
+                vfx::apply_stabilization_transform(
+                    &mut f,
+                    -(acc_dx * inv) * (w as f32) * smooth_k,
+                    -(acc_dy * inv) * (h as f32) * smooth_k,
+                    -(acc_ang * inv) * rot_k * smooth_k,
+                    border_zoom,
+                );
+            } else {
+                vfx::apply_stabilization_transform(&mut f, 0.0, 0.0, 0.0, border_zoom);
+            }
+        } else {
+            vfx::apply(fx, &mut f, local, p.settings.fps);
+        }
     }
     Some(f)
+}
+
+/// Renderiza um único evento isolado no instante `t` (usado na prévia A/B do modo expandido).
+pub fn render_event_still(
+    p: &Project,
+    media: &MediaCache,
+    ev_id: Id,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    prefer_proxy: bool,
+) -> Frame {
+    let w = w.max(1);
+    let h = h.max(1);
+    let Some((ti, ei)) = p.find_event(ev_id) else {
+        return Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]);
+    };
+    let e = &p.tracks[ti].events[ei];
+    let clamped_t = t.clamp_safe(e.start, (e.end() - Ticks::from_raw(1)).max(e.start));
+    event_layer_opts(p, media, e, clamped_t, w, h, prefer_proxy)
+        .unwrap_or_else(|| Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]))
 }
 
 fn render_track(

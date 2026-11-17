@@ -399,6 +399,7 @@ pub enum UiAction {
     OpenEventProps,
     OpenPasteAttributesDialog,
     OpenTakeChooser,
+    OpenSceneDetectDialog,
     OpenPanCrop,
     OpenFxEvent,
     OpenFxMasterAudio,
@@ -424,6 +425,7 @@ pub enum UiAction {
     TogglePreview,
     ToggleMasterBus,
     TogglePlay,
+    ToggleRecord,
     PlayFromStart,
     Play,
     Stop { restore_cursor: bool },
@@ -551,6 +553,30 @@ fn has_selected_audio_events(s: &EditorSession, _h: &dyn CommandHost) -> bool {
             let tr = &s.project.tracks[ti];
             tr.kind == TrackKind::Audio && !tr.locked && !tr.events[ei].locked
         })
+    })
+}
+
+fn has_selected_video_events_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
+    h.supports_ui()
+        && s.sel_events.iter().any(|&id| {
+            s.project.find_event(id).is_some_and(|(ti, ei)| {
+                let tr = &s.project.tracks[ti];
+                tr.kind == TrackKind::Video
+                    && !tr.locked
+                    && !tr.events[ei].locked
+                    && s.project
+                        .media(tr.events[ei].media_id)
+                        .is_some_and(|m| m.has_video)
+            })
+        })
+}
+
+fn has_selected_audio_track(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_track.is_some_and(|ti| {
+        s.project
+            .tracks
+            .get(ti)
+            .is_some_and(|t| t.kind == TrackKind::Audio && !t.locked)
     })
 }
 
@@ -1068,6 +1094,53 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: |s, _| s.can_heal_selection(),
         run: |s, h| {
             s.heal_events();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.detect_scenes",
+        label: "Detectar cenas e cortes...",
+        menu_path: "Editar/Detectar cenas e cortes...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_video_events_ui,
+        run: |_s, h| ui_action(UiAction::OpenSceneDetectDialog, h),
+    },
+    CommandDef {
+        id: "edit.expanded_edit_mode",
+        label: "Modo de edição expandido (A/B)",
+        menu_path: "Editar/Modo de edição expandido",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::E)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.toggle_expanded_edit();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.expanded_nudge_left",
+        label: "Deslocar corte 1 quadro à esquerda",
+        menu_path: "Editar/Expandido: -1 quadro",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::OpenBracket)),
+        needs_ui: false,
+        enabled: |s, _| s.expanded_edit.is_some(),
+        run: |s, h| {
+            let fd = s.project.settings.frame_dur();
+            s.nudge_expanded_edit(-fd);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.expanded_nudge_right",
+        label: "Deslocar corte 1 quadro à direita",
+        menu_path: "Editar/Expandido: +1 quadro",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::CloseBracket)),
+        needs_ui: false,
+        enabled: |s, _| s.expanded_edit.is_some(),
+        run: |s, h| {
+            let fd = s.project.settings.frame_dur();
+            s.nudge_expanded_edit(fd);
             ok_mutated(s, h)
         },
     },
@@ -2118,6 +2191,20 @@ pub static COMMANDS: &[CommandDef] = &[
             ok_mutated(s, h)
         },
     },
+    CommandDef {
+        id: "track.record_arm",
+        label: "Armar trilha para gravação (Rec)",
+        menu_path: "Trilha/Armar gravação",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::R)),
+        needs_ui: false,
+        enabled: has_selected_audio_track,
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.toggle_record_arm(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
     // --- Ferramentas ---
     CommandDef {
         id: "tools.fx_master_audio",
@@ -2521,6 +2608,15 @@ pub static COMMANDS: &[CommandDef] = &[
                 h,
             )
         },
+    },
+    CommandDef {
+        id: "transport.record",
+        label: "Gravar áudio nas trilhas armadas",
+        menu_path: "Transporte/Gravar",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::R)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleRecord, h),
     },
     CommandDef {
         id: "transport.shuttle_rev",
@@ -3047,5 +3143,9 @@ mod tests {
         assert_eq!(s.box_axis, crate::session::BoxAxisMode::Horizontal);
         run_command("insert.empty_event", &mut s, &mut h).unwrap();
         assert_eq!(s.sel_events.len(), 1);
+
+        s.sel_track = Some(1);
+        run_command("track.record_arm", &mut s, &mut h).unwrap();
+        assert!(!s.armed_audio_tracks().is_empty());
     }
 }

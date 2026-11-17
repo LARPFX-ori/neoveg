@@ -1207,3 +1207,64 @@ fn kittest_take_chooser_pitch_evento_vazio_e_eixo() {
     harness.run_steps(2);
     assert_eq!(harness.state().session.box_axis, BoxAxisMode::Horizontal);
 }
+
+#[test]
+fn kittest_modo_expandido_deteccao_cenas_e_armar_gravacao() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    {
+        let app = harness.state_mut();
+        app.session.sel_track = Some(0);
+        app.cursor = crate::model::Ticks::ZERO;
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.cursor = crate::model::Ticks::from_secs_i64(5);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.1, 0.7, 0.2, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let ev0 = app.project.tracks[0].events[0].id;
+        app.sel_events.clear();
+        app.sel_events.insert(ev0);
+    }
+    harness.run_steps(2);
+
+    // 1. Diálogo Detectar cenas e cortes abre e fecha limpo.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "edit.detect_scenes");
+    harness.run_steps(2);
+    assert!(harness.state().dlg.scene_detect.is_some());
+    assert!(harness.query_by_label("Analisar clipe").is_some());
+    harness.get_by_label("Fechar").click();
+    harness.run_steps(2);
+    assert!(harness.state().dlg.scene_detect.is_none());
+
+    // 2. Modo de edição expandido ativa controles A/B na Prévia de Vídeo e nudges.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "edit.expanded_edit_mode");
+    harness.run_steps(4);
+    assert!(harness.state().session.expanded_edit.is_some());
+    assert!(harness.query_by_label("Ambos (Roll)").is_some());
+    harness.get_by_label("Saída esquerda (Out)").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .state()
+            .session
+            .expanded_edit
+            .as_ref()
+            .unwrap()
+            .focus,
+        neoveg_engine::session::ExpandedEdgeFocus::LeftOut
+    );
+
+    // 3. Armar faixa de áudio para gravação no cabeçalho da faixa.
+    harness.get_by_label("Armar gravação").click();
+    harness.run_steps(2);
+    assert!(harness.state().project.tracks[1].record_armed);
+}
