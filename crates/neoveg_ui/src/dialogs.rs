@@ -2281,6 +2281,7 @@ impl App {
         }
         let mut open = true;
         let mut start = false;
+        let mut send_encoder = false;
         let has_loop = self.project.loop_region.is_some();
         let pw = self.project.settings.width;
         let ph = self.project.settings.height;
@@ -2605,7 +2606,7 @@ impl App {
                     });
 
                     right.add_space(6.0);
-                    right.horizontal(|ui| {
+                    right.horizontal_wrapped(|ui| {
                         if icons::icon_button(
                             ui,
                             Icon::RenderClapper,
@@ -2618,6 +2619,19 @@ impl App {
                         {
                             start = true;
                         }
+                        if icons::icon_button(
+                            ui,
+                            Icon::EncoderQueue,
+                            Some("Enviar para o Encoder"),
+                            false,
+                            true,
+                            &self.theme,
+                        )
+                        .on_hover_text("Adiciona a timeline à fila em lote do Neoveg Encoder")
+                        .clicked()
+                        {
+                            send_encoder = true;
+                        }
                         if ui.button("Cancelar").clicked() {
                             cancel_btn = true;
                         }
@@ -2626,6 +2640,10 @@ impl App {
             });
 
         if cancel_btn {
+            open = false;
+        }
+        if send_encoder {
+            self.send_timeline_to_encoder();
             open = false;
         }
 
