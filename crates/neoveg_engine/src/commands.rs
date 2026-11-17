@@ -396,6 +396,11 @@ pub enum UiAction {
     BuildProxySelected,
     PrerenderRegion,
     RunScriptDialog,
+    OpenIntegrationsDialog,
+    SendToExternalApp(crate::integrations::ExternalApp),
+    BlenderRenderSceneDialog,
+    BlenderExportScriptDialog,
+    BlenderImportCameraDialog,
     ExitApp,
     SelectDock(DockPanel),
     TogglePreview,
@@ -1739,6 +1744,126 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::RunScriptDialog, h),
+    },
+    CommandDef {
+        id: "tools.integrations",
+        label: "Integrações (ArtCraft & Blender)...",
+        menu_path: "Ferramentas/Integrações (ArtCraft & Blender)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenIntegrationsDialog, h),
+    },
+    CommandDef {
+        id: "tools.send_photocraft",
+        label: "Editar no PhotoCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Editar no PhotoCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::PhotoCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_vectorcraft",
+        label: "Editar vetor no VectorCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Editar vetor no VectorCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::VectorCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_soundcraft",
+        label: "Editar áudio no SoundCraft (BWF)...",
+        menu_path: "Ferramentas/Aplicativos externos/Editar áudio no SoundCraft (BWF)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::SoundCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_effectcraft",
+        label: "Enviar para composição no EffectCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Enviar para EffectCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::EffectCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_anicraft",
+        label: "Abrir/Criar animação no AniCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Abrir no AniCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::AniCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_filmcraft",
+        label: "Exportar timeline para FilmCraft (OTIO)...",
+        menu_path: "Ferramentas/Aplicativos externos/Exportar timeline para FilmCraft (OTIO)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::FilmCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.blender_render",
+        label: "Renderizar cena do Blender para Timeline...",
+        menu_path: "Ferramentas/Aplicativos externos/Blender: Renderizar cena (.blend)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::BlenderRenderSceneDialog, h),
+    },
+    CommandDef {
+        id: "tools.blender_export_script",
+        label: "Exportar marcadores e câmera para Blender (.py)...",
+        menu_path: "Ferramentas/Aplicativos externos/Blender: Exportar script (.py)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::BlenderExportScriptDialog, h),
+    },
+    CommandDef {
+        id: "tools.blender_import_camera",
+        label: "Importar câmera do Blender (.json)...",
+        menu_path: "Ferramentas/Aplicativos externos/Blender: Importar câmera (.json)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::BlenderImportCameraDialog, h),
     },
     CommandDef {
         id: "tools.remove_unused_media",

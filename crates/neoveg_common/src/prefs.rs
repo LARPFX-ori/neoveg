@@ -331,6 +331,99 @@ impl TrackHeaderPrefs {
     }
 }
 
+fn default_rpc_timeout_secs() -> u64 {
+    60
+}
+
+fn sanitize_exe_path(path: &mut String) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.contains('\0') {
+        path.clear();
+    } else if trimmed.len() != path.len() {
+        *path = trimmed.to_string();
+    }
+}
+
+/// Caminhos manuais e opções de integração com a suíte ArtCraft e o Blender (§0.4).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalAppsPrefs {
+    #[serde(default)]
+    pub photocraft_path: String,
+    #[serde(default)]
+    pub vectorcraft_path: String,
+    #[serde(default)]
+    pub filmcraft_path: String,
+    #[serde(default)]
+    pub effectcraft_path: String,
+    #[serde(default)]
+    pub anicraft_path: String,
+    #[serde(default)]
+    pub soundcraft_path: String,
+    #[serde(default)]
+    pub blender_path: String,
+    /// Tempo limite de espera em segundos para RPC / CLI headless (`5..=300`).
+    #[serde(default = "default_rpc_timeout_secs")]
+    pub rpc_timeout_secs: u64,
+    /// Recarregar automaticamente cópias editadas externamente quando modificadas no disco.
+    #[serde(default = "default_true")]
+    pub watch_edited_copies: bool,
+}
+
+impl Default for ExternalAppsPrefs {
+    fn default() -> Self {
+        Self {
+            photocraft_path: String::new(),
+            vectorcraft_path: String::new(),
+            filmcraft_path: String::new(),
+            effectcraft_path: String::new(),
+            anicraft_path: String::new(),
+            soundcraft_path: String::new(),
+            blender_path: String::new(),
+            rpc_timeout_secs: default_rpc_timeout_secs(),
+            watch_edited_copies: true,
+        }
+    }
+}
+
+impl ExternalAppsPrefs {
+    pub fn path_for(&self, id: &str) -> &str {
+        match id {
+            "photocraft" => &self.photocraft_path,
+            "vectorcraft" => &self.vectorcraft_path,
+            "filmcraft" => &self.filmcraft_path,
+            "effectcraft" => &self.effectcraft_path,
+            "anicraft" => &self.anicraft_path,
+            "soundcraft" => &self.soundcraft_path,
+            "blender" => &self.blender_path,
+            _ => "",
+        }
+    }
+
+    pub fn path_mut(&mut self, id: &str) -> Option<&mut String> {
+        match id {
+            "photocraft" => Some(&mut self.photocraft_path),
+            "vectorcraft" => Some(&mut self.vectorcraft_path),
+            "filmcraft" => Some(&mut self.filmcraft_path),
+            "effectcraft" => Some(&mut self.effectcraft_path),
+            "anicraft" => Some(&mut self.anicraft_path),
+            "soundcraft" => Some(&mut self.soundcraft_path),
+            "blender" => Some(&mut self.blender_path),
+            _ => None,
+        }
+    }
+
+    pub fn sanitize(&mut self) {
+        sanitize_exe_path(&mut self.photocraft_path);
+        sanitize_exe_path(&mut self.vectorcraft_path);
+        sanitize_exe_path(&mut self.filmcraft_path);
+        sanitize_exe_path(&mut self.effectcraft_path);
+        sanitize_exe_path(&mut self.anicraft_path);
+        sanitize_exe_path(&mut self.soundcraft_path);
+        sanitize_exe_path(&mut self.blender_path);
+        self.rpc_timeout_secs = self.rpc_timeout_secs.clamp(5, 300);
+    }
+}
+
 /// Preferências persistidas em JSON com proteção contra entradas hostis (§0.4 / §3.6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
@@ -431,6 +524,9 @@ pub struct Preferences {
     /// Percentual da borda de área segura de títulos (`50..=95`, <= `action_safe_pct`).
     #[serde(default = "default_title_safe_pct")]
     pub title_safe_pct: u8,
+    /// Integração com aplicativos ArtCraft (PhotoCraft, VectorCraft, FilmCraft, EffectCraft, AniCraft, SoundCraft) e Blender.
+    #[serde(default)]
+    pub external_apps: ExternalAppsPrefs,
 }
 
 const MAX_RECENT_PROJECTS: usize = 20;
@@ -571,6 +667,7 @@ impl Default for Preferences {
             default_sample_rate: default_sample_rate(),
             action_safe_pct: default_action_safe_pct(),
             title_safe_pct: default_title_safe_pct(),
+            external_apps: ExternalAppsPrefs::default(),
         }
     }
 }
@@ -653,6 +750,7 @@ impl Preferences {
         sanitize_string_list(&mut self.render_favorites, MAX_RENDER_FAVORITES, 80, false);
         sanitize_string_list(&mut self.fx_favorites, MAX_RENDER_FAVORITES, 80, false);
         sanitize_string_list(&mut self.gen_favorites, MAX_RENDER_FAVORITES, 80, false);
+        self.external_apps.sanitize();
     }
 
     pub fn load_or_default() -> Self {
@@ -831,5 +929,19 @@ mod tests {
         let raw = r#"{"edit_layout":{"layout_type":"Sonic Fonudry"}}"#;
         let p: Preferences = serde_json::from_str(raw).unwrap();
         assert_eq!(p.edit_layout.layout_type, LayoutType::SonicFoundry);
+    }
+
+    #[test]
+    fn external_apps_prefs_sanitizam_entradas_hostis() {
+        let raw = r#"{"external_apps":{"photocraft_path":"  /usr/bin/photocraft  ","blender_path":"bad\u0000path","rpc_timeout_secs":9999}}"#;
+        let mut p: Preferences = serde_json::from_str(raw).unwrap();
+        p.sanitize();
+        assert_eq!(
+            p.external_apps.path_for("photocraft"),
+            "/usr/bin/photocraft"
+        );
+        assert_eq!(p.external_apps.path_for("blender"), "");
+        assert_eq!(p.external_apps.rpc_timeout_secs, 300);
+        assert!(p.external_apps.watch_edited_copies);
     }
 }

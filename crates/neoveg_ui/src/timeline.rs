@@ -3287,6 +3287,31 @@ impl App {
             ui.close_menu();
         }
         self.take_submenu(ui, &e);
+        ui.menu_button("Editar em aplicativo externo", |ui| {
+            use neoveg_engine::integrations::ExternalApp;
+            if is_video {
+                for app in [
+                    ExternalApp::PhotoCraft,
+                    ExternalApp::VectorCraft,
+                    ExternalApp::EffectCraft,
+                    ExternalApp::AniCraft,
+                    ExternalApp::Blender,
+                ] {
+                    if ui.button(format!("{}...", app.name())).clicked() {
+                        self.send_to_external_app(app, Some(id), Some(e.media_id));
+                        ui.close_menu();
+                    }
+                }
+            } else if ui.button("SoundCraft (cópia BWF)...").clicked() {
+                self.send_to_external_app(ExternalApp::SoundCraft, Some(id), Some(e.media_id));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Gerenciar integrações...").clicked() {
+                self.open_integrations_dialog();
+                ui.close_menu();
+            }
+        });
         ui.separator();
         if ui.button("Dividir no cursor (S)").clicked() {
             self.split_at_cursor();

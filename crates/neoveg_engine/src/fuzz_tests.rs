@@ -648,3 +648,22 @@ fn fuzz_fcpxml() {
         });
     }
 }
+
+#[test]
+fn fuzz_blender_camera_e_discovery() {
+    let valid_cam = br#"{"schema":"neoveg.blender.camera.v1","width":1920,"height":1080,"fps_num":24,"fps_den":1,"start_frame":1,"markers":[{"name":"A","frame":10}],"frames":[{"frame":1,"pos":[0,0,0],"rot_euler_deg":[0,0,0],"lens_mm":50}]}"#;
+    for (i, m) in mutations(valid_cam, 200, 0xB1E4).iter().enumerate() {
+        assert_no_panic("BlenderCameraExchange", i, || {
+            let _ = crate::integrations::blender::parse_camera_json_bytes(m);
+        });
+    }
+    let valid_conn = br#"{"version":1,"pid":100,"port":7878,"tokenFile":"t.tok","app":"0.20"}"#;
+    let p = tmp("conn_mut.json");
+    for (i, m) in mutations(valid_conn, 100, 0xC044).iter().enumerate() {
+        assert_no_panic("agent-connection.json", i, || {
+            let _ = std::fs::write(&p, m);
+            let _ = crate::integrations::discovery::read_agent_connection(&p);
+        });
+    }
+    let _ = std::fs::remove_file(&p);
+}
