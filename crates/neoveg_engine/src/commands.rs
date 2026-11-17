@@ -975,6 +975,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "event.lock",
+        label: "Travar eventos",
+        menu_path: "Editar/Travar eventos",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.toggle_lock_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "event.delete_active_take",
         label: "Excluir take ativo",
         menu_path: "Editar/Take/Excluir take ativo",
