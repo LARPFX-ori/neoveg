@@ -65,6 +65,8 @@ pub enum ShortcutKey {
     OpenBracket,
     CloseBracket,
     Backslash,
+    Equals,
+    Minus,
 }
 
 impl ShortcutKey {
@@ -121,6 +123,8 @@ impl ShortcutKey {
             ShortcutKey::OpenBracket => "[",
             ShortcutKey::CloseBracket => "]",
             ShortcutKey::Backslash => "\\",
+            ShortcutKey::Equals => "=",
+            ShortcutKey::Minus => "-",
         }
     }
 
@@ -178,6 +182,8 @@ impl ShortcutKey {
             "[" | "openbracket" => ShortcutKey::OpenBracket,
             "]" | "closebracket" => ShortcutKey::CloseBracket,
             "\\" | "backslash" => ShortcutKey::Backslash,
+            "=" | "+" | "equal" | "equals" | "plus" => ShortcutKey::Equals,
+            "-" | "minus" => ShortcutKey::Minus,
             _ => return None,
         })
     }
@@ -392,6 +398,7 @@ pub enum UiAction {
     OpenProjectProps,
     OpenEventProps,
     OpenPasteAttributesDialog,
+    OpenTakeChooser,
     OpenPanCrop,
     OpenFxEvent,
     OpenFxMasterAudio,
@@ -536,6 +543,37 @@ fn has_selected_events(s: &EditorSession, _h: &dyn CommandHost) -> bool {
 
 fn has_selected_events_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
     h.supports_ui() && !s.sel_events.is_empty()
+}
+
+fn has_selected_audio_events(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_events.iter().any(|&id| {
+        s.project.find_event(id).is_some_and(|(ti, ei)| {
+            let tr = &s.project.tracks[ti];
+            tr.kind == TrackKind::Audio && !tr.locked && !tr.events[ei].locked
+        })
+    })
+}
+
+fn can_create_sync_link(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_events
+        .iter()
+        .filter(|&&id| {
+            s.project.find_event(id).is_some_and(|(ti, ei)| {
+                !s.project.tracks[ti].locked && !s.project.tracks[ti].events[ei].locked
+            })
+        })
+        .take(2)
+        .count()
+        >= 2
+}
+
+fn has_sync_link_in_selection(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_events.iter().any(|&id| {
+        s.project
+            .event(id)
+            .is_some_and(|e| e.sync_link_master.is_some())
+            || s.has_sync_followers(id)
+    })
 }
 
 fn has_clipboard(s: &EditorSession, _h: &dyn CommandHost) -> bool {
@@ -1082,6 +1120,123 @@ pub static COMMANDS: &[CommandDef] = &[
             ok_mutated(s, h)
         },
     },
+    CommandDef {
+        id: "event.take_chooser",
+        label: "Escolher take...",
+        menu_path: "Editar/Take/Escolher take...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_events_ui,
+        run: |_s, h| ui_action(UiAction::OpenTakeChooser, h),
+    },
+    CommandDef {
+        id: "event.pitch_up",
+        label: "Subir tom (+1 semitom)",
+        menu_path: "Editar/Pitch/Subir 1 semitom",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::Equals)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(1.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_down",
+        label: "Descer tom (-1 semitom)",
+        menu_path: "Editar/Pitch/Descer 1 semitom",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::Minus)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(-1.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_up_oct",
+        label: "Subir tom (+1 oitava)",
+        menu_path: "Editar/Pitch/Subir 1 oitava",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Equals)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(12.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_down_oct",
+        label: "Descer tom (-1 oitava)",
+        menu_path: "Editar/Pitch/Descer 1 oitava",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Minus)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(-12.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_reset",
+        label: "Redefinir tom (0 st)",
+        menu_path: "Editar/Pitch/Redefinir tom",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.reset_pitch_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.toggle_pitch_lock",
+        label: "Preservar tom ao esticar",
+        menu_path: "Editar/Pitch/Preservar tom ao esticar",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.toggle_lock_pitch_to_stretch();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.sync_link_create",
+        label: "Criar Sync Link (vincular ao primeiro)",
+        menu_path: "Editar/Sync Link/Criar vínculo",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: can_create_sync_link,
+        run: |s, h| {
+            s.create_sync_links(None);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.sync_link_unlink",
+        label: "Desvincular Sync Link",
+        menu_path: "Editar/Sync Link/Desvincular",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_sync_link_in_selection,
+        run: |s, h| {
+            s.unlink_sync_links();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.sync_link_select",
+        label: "Selecionar eventos com Sync Link",
+        menu_path: "Editar/Sync Link/Selecionar vinculados",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_sync_link_in_selection,
+        run: |s, h| {
+            s.select_sync_linked();
+            ok_mutated(s, h)
+        },
+    },
     // Ferramentas de edição (manual do VEGAS Pro 21, p. 236): trocar de
     // ferramenta não muda o projeto nem cria passo de Desfazer.
     CommandDef {
@@ -1259,6 +1414,42 @@ pub static COMMANDS: &[CommandDef] = &[
             let idx = modes.iter().position(|m| *m == s.edit_mode).unwrap_or(0);
             s.edit_tool = crate::session::EditTool::Normal;
             s.edit_mode = modes[(idx + 1) % modes.len()];
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.axis.both",
+        label: "Eixo de seleção/zoom livre",
+        menu_path: "Editar/Ferramenta de edição/Eixo livre",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.box_axis = crate::session::BoxAxisMode::Both;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.axis.horizontal",
+        label: "Eixo de seleção/zoom horizontal",
+        menu_path: "Editar/Ferramenta de edição/Eixo horizontal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.box_axis = crate::session::BoxAxisMode::Horizontal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.axis.vertical",
+        label: "Eixo de seleção/zoom vertical",
+        menu_path: "Editar/Ferramenta de edição/Eixo vertical",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.box_axis = crate::session::BoxAxisMode::Vertical;
             Ok(CommandOutcome::Executed)
         },
     },
@@ -1839,6 +2030,18 @@ pub static COMMANDS: &[CommandDef] = &[
                     color: [0.1, 0.2, 0.5, 1.0],
                 },
             )?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.empty_event",
+        label: "Evento vazio",
+        menu_path: "Inserir/Evento vazio",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_empty_event();
             ok_mutated(s, h)
         },
     },
@@ -2791,5 +2994,58 @@ mod tests {
         assert_eq!(shortcut_label("edit.split", &map), None);
         map.insert("edit.split".to_string(), Some("???".to_string()));
         assert_eq!(shortcut_label("edit.split", &map).as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn comandos_pitch_sync_link_eixo_e_evento_vazio() {
+        use crate::model::{new_id, Event, MediaItem, MediaSource};
+        use crate::time::Ticks;
+
+        let mut p = Project::new_default();
+        let mut ma = MediaItem {
+            id: new_id(),
+            name: "voz.wav".into(),
+            source: MediaSource::Generated(GenSpec::ColorBars),
+            duration: Some(Ticks::from_secs_i64(10)),
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        ma.has_video = false;
+        p.media.push(ma.clone());
+        let a1 = Event::new(&ma, Ticks::ZERO, Ticks::from_secs_i64(4));
+        let a2 = Event::new(&ma, Ticks::from_secs_i64(5), Ticks::from_secs_i64(4));
+        let (id1, id2) = (a1.id, a2.id);
+        p.tracks[1].events = vec![a1, a2];
+
+        let mut s = EditorSession::new(p);
+        let mut h = HeadlessHost;
+        s.sel_events.insert(id1);
+        run_command("event.pitch_up", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id1).unwrap().pitch_semitones, 1.0);
+        run_command("event.pitch_down_oct", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id1).unwrap().pitch_semitones, -11.0);
+        run_command("event.toggle_pitch_lock", &mut s, &mut h).unwrap();
+        assert!(s.project.event(id1).unwrap().lock_pitch_to_stretch);
+        run_command("event.pitch_reset", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id1).unwrap().pitch_semitones, 0.0);
+
+        s.sel_events = [id1, id2].into_iter().collect();
+        run_command("event.sync_link_create", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id2).unwrap().sync_link_master, Some(id1));
+        s.sel_events = [id2].into_iter().collect();
+        run_command("event.sync_link_select", &mut s, &mut h).unwrap();
+        assert_eq!(s.sel_events.len(), 2);
+        run_command("event.sync_link_unlink", &mut s, &mut h).unwrap();
+        assert!(s.project.event(id2).unwrap().sync_link_master.is_none());
+
+        run_command("edit.tool.axis.horizontal", &mut s, &mut h).unwrap();
+        assert_eq!(s.box_axis, crate::session::BoxAxisMode::Horizontal);
+        run_command("insert.empty_event", &mut s, &mut h).unwrap();
+        assert_eq!(s.sel_events.len(), 1);
     }
 }

@@ -466,6 +466,7 @@ impl Project {
                     e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
                 }
                 e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
+                e.pitch_semitones = clampf(fin32(e.pitch_semitones, 0.0), -24.0, 24.0);
                 e.fade_in.len = e.fade_in.len.clamp_safe(Ticks::ZERO, e.length);
                 e.fade_out.len = e
                     .fade_out
@@ -488,6 +489,42 @@ impl Project {
                 }
                 for f in &mut e.fx {
                     sanitize_fx(f);
+                }
+            }
+        }
+        // Saneamento de Sync Links (§0.4 e §0.5: referências inexistentes ou ciclos).
+        let valid_sync: std::collections::HashMap<Id, Id> = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .filter_map(|e| e.sync_link_master.map(|m| (e.id, m)))
+            .collect();
+        for t in &mut self.tracks {
+            for e in &mut t.events {
+                if let Some(mid) = e.sync_link_master {
+                    let mut cur = mid;
+                    let mut visited = std::collections::HashSet::new();
+                    visited.insert(e.id);
+                    let mut ok = seen_events.contains(&mid);
+                    let mut depth = 0usize;
+                    while ok {
+                        if !visited.insert(cur) || depth >= 32 {
+                            ok = false;
+                            break;
+                        }
+                        depth += 1;
+                        let Some(&next) = valid_sync.get(&cur) else {
+                            break;
+                        };
+                        cur = next;
+                    }
+                    if !ok {
+                        e.sync_link_master = None;
+                        fixes.push(format!(
+                            "Sync Link inválido ou cíclico removido do evento \"{}\"",
+                            e.name
+                        ));
+                    }
                 }
             }
         }
@@ -1573,6 +1610,15 @@ pub struct Event {
     /// Nome do take ativo (vazio = nome da mídia).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub take_name: String,
+    /// Deslocamento de tom em semitons (`-24.0..=24.0`, manual VEGAS Pro 21 p. 363).
+    #[serde(default)]
+    pub pitch_semitones: f32,
+    /// Preserva o tom ao esticar/comprimir o evento (`Event::rate != 1`).
+    #[serde(default)]
+    pub lock_pitch_to_stretch: bool,
+    /// ID do evento mestre para *Sync Link* unidirecional (manual VEGAS Pro 21 p. 351).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_link_master: Option<Id>,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -1614,6 +1660,29 @@ impl Event {
             alt_takes: Vec::new(),
             take_index: 0,
             take_name: String::new(),
+            pitch_semitones: 0.0,
+            lock_pitch_to_stretch: false,
+            sync_link_master: None,
+        }
+    }
+
+    /// Fator efetivo de altura tonal do áudio (`1.0` = tom original), considerando
+    /// `pitch_semitones` e `lock_pitch_to_stretch`.
+    pub fn effective_pitch_factor(&self) -> f64 {
+        let rate = self.rate.as_f64();
+        if rate <= 0.0 || !rate.is_finite() {
+            return 1.0;
+        }
+        let semi = if self.pitch_semitones.is_finite() {
+            f64::from(self.pitch_semitones.clamp(-24.0, 24.0))
+        } else {
+            0.0
+        };
+        let p = 2.0_f64.powf(semi / 12.0);
+        if self.lock_pitch_to_stretch {
+            p
+        } else {
+            p * rate
         }
     }
 

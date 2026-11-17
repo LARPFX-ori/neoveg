@@ -431,10 +431,223 @@ fn timeline_sample_time(idx: i64, sr: u32) -> Ticks {
     }
 }
 
+const WSOLA_WIN: usize = 1536;
+const WSOLA_HOP: usize = WSOLA_WIN / 2;
+const WSOLA_SEARCH: isize = 192;
+
+fn sample_audio_frac(a: &AudioData, fpos: f64, looped: bool) -> (f32, f32) {
+    let frames = a.frames();
+    if frames == 0 || !fpos.is_finite() {
+        return (0.0, 0.0);
+    }
+    let len_f = frames as f64;
+    let p = if looped {
+        fpos.rem_euclid(len_f)
+    } else if fpos < 0.0 || fpos >= len_f {
+        return (0.0, 0.0);
+    } else {
+        fpos
+    };
+    let i0 = p.floor() as isize;
+    let frac = (p - i0 as f64) as f32;
+    let at = |idx: isize| -> (f32, f32) {
+        let fi = if looped {
+            idx.rem_euclid(frames as isize) as usize
+        } else if idx < 0 || (idx as usize) >= frames {
+            return (0.0, 0.0);
+        } else {
+            idx as usize
+        };
+        let l = a.data.get(fi * 2).copied().unwrap_or(0.0);
+        let r = a.data.get(fi * 2 + 1).copied().unwrap_or(0.0);
+        (l, r)
+    };
+    let (l0, r0) = at(i0);
+    let (l1, r1) = at(i0 + 1);
+    (l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac)
+}
+
+/// Deslocador de tom / preservador de tom em escala temporal baseado em WSOLA
+/// (*Waveform Similarity Overlap-Add*) de janela periódica de Hann em Sala Limpa.
+struct WsolaShifter {
+    src_sr: u32,
+    ev_rate: f64,
+    pitch_factor: f64,
+    next_timeline_sample: i64,
+    hop_timeline_pos: i64,
+    ola_tail: Vec<f32>,
+    prev_nat_next: Vec<f32>,
+    has_prev: bool,
+    fifo: VecDeque<f32>,
+    hann: Vec<f32>,
+    cand: Vec<f32>,
+    nat: Vec<f32>,
+}
+
+impl WsolaShifter {
+    fn new(src_sr: u32, ev_rate: f64, pitch_factor: f64) -> Self {
+        let mut hann = Vec::with_capacity(WSOLA_WIN);
+        let two_pi = std::f64::consts::TAU;
+        for i in 0..WSOLA_WIN {
+            let v = 0.5 * (1.0 - (two_pi * i as f64 / WSOLA_WIN as f64).cos());
+            hann.push(v as f32);
+        }
+        Self {
+            src_sr: src_sr.max(1),
+            ev_rate,
+            pitch_factor,
+            next_timeline_sample: i64::MIN,
+            hop_timeline_pos: 0,
+            ola_tail: vec![0.0; WSOLA_HOP * 2],
+            prev_nat_next: vec![0.0; WSOLA_HOP * 2],
+            has_prev: false,
+            fifo: VecDeque::with_capacity(WSOLA_WIN * 4),
+            hann,
+            cand: vec![0.0; WSOLA_WIN * 2],
+            nat: vec![0.0; WSOLA_HOP * 2],
+        }
+    }
+
+    fn reset_at(
+        &mut self,
+        start_timeline: i64,
+        pitch_factor: f64,
+        e: &Event,
+        a: &AudioData,
+        dur: Option<Ticks>,
+        sr: u32,
+    ) {
+        self.src_sr = a.sample_rate.max(1);
+        self.ev_rate = e.rate.as_f64();
+        self.pitch_factor = pitch_factor;
+        self.next_timeline_sample = start_timeline;
+        self.hop_timeline_pos = start_timeline;
+        self.ola_tail.fill(0.0);
+        self.prev_nat_next.fill(0.0);
+        self.has_prev = false;
+        self.fifo.clear();
+
+        // Semeia o meio-grão anterior ao cursor para que a amostra 0 já comece em ganho unitário.
+        let dir = if e.reverse { -1.0 } else { 1.0 };
+        let src0 = Self::source_frame_at(start_timeline, e, a, dur, sr);
+        let p_step = self.pitch_factor * (self.src_sr as f64 / sr.max(1) as f64) * dir;
+        let pre_start = src0 - (WSOLA_HOP as f64) * p_step;
+        for i in 0..WSOLA_HOP {
+            let w = self.hann[WSOLA_HOP + i];
+            let (l, r) =
+                sample_audio_frac(a, pre_start + ((WSOLA_HOP + i) as f64) * p_step, e.looped);
+            self.ola_tail[i * 2] = l * w;
+            self.ola_tail[i * 2 + 1] = r * w;
+            let (nl, nr) =
+                sample_audio_frac(a, pre_start + ((WSOLA_HOP + i) as f64) * p_step, e.looped);
+            self.prev_nat_next[i * 2] = nl;
+            self.prev_nat_next[i * 2 + 1] = nr;
+        }
+        self.has_prev = true;
+    }
+
+    fn source_frame_at(t_idx: i64, e: &Event, a: &AudioData, dur: Option<Ticks>, sr: u32) -> f64 {
+        let t = timeline_sample_time(t_idx, sr);
+        let rate_f = e.rate.as_f64();
+        let off_frames =
+            (e.offset.0 as f64 / crate::model::TICKS_PER_SEC as f64) * a.sample_rate.max(1) as f64;
+        if let Some(mt) = e.media_time(t, dur) {
+            let (idx, frac) = mt.to_sample_pos(a.sample_rate);
+            return idx as f64 + f64::from(frac);
+        }
+        let dt_secs = (t - e.start).0 as f64 / crate::model::TICKS_PER_SEC as f64;
+        if e.reverse {
+            let len_secs = e.length.0 as f64 / crate::model::TICKS_PER_SEC as f64;
+            off_frames + (len_secs - dt_secs) * rate_f * a.sample_rate.max(1) as f64
+        } else {
+            off_frames + dt_secs * rate_f * a.sample_rate.max(1) as f64
+        }
+    }
+
+    fn pump(&mut self, need_frames: usize, e: &Event, a: &AudioData, dur: Option<Ticks>, sr: u32) {
+        let dir = if e.reverse { -1.0 } else { 1.0 };
+        let p_step = self.pitch_factor * (self.src_sr as f64 / sr.max(1) as f64) * dir;
+        while self.fifo.len() < need_frames * 2 {
+            let nom_src = Self::source_frame_at(self.hop_timeline_pos, e, a, dur, sr);
+            let mut best_delta = 0isize;
+            if self.has_prev {
+                let mut best_score = f32::NEG_INFINITY;
+                let mut prev_norm = 0.0_f32;
+                for i in (0..WSOLA_HOP).step_by(2) {
+                    let m = 0.5 * (self.prev_nat_next[i * 2] + self.prev_nat_next[i * 2 + 1]);
+                    prev_norm += m * m;
+                }
+                if prev_norm > 1e-8 {
+                    let score_candidate = |delta: isize| -> f32 {
+                        let base = nom_src + (delta as f64) * p_step;
+                        let mut dot = 0.0_f32;
+                        let mut cand_norm = 0.0_f32;
+                        for i in (0..WSOLA_HOP).step_by(2) {
+                            let (l, r) = sample_audio_frac(a, base + (i as f64) * p_step, e.looped);
+                            let cm = 0.5 * (l + r);
+                            let pm =
+                                0.5 * (self.prev_nat_next[i * 2] + self.prev_nat_next[i * 2 + 1]);
+                            dot += cm * pm;
+                            cand_norm += cm * cm;
+                        }
+                        dot / ((cand_norm * prev_norm).sqrt() + 1e-6)
+                    };
+                    for delta in (-WSOLA_SEARCH..=WSOLA_SEARCH).step_by(2) {
+                        let score = score_candidate(delta);
+                        if score > best_score {
+                            best_score = score;
+                            best_delta = delta;
+                        }
+                    }
+                    // Refinamento fino +-2 amostras.
+                    let center_d = best_delta;
+                    for delta in (center_d - 2)..=(center_d + 2) {
+                        if !(-WSOLA_SEARCH..=WSOLA_SEARCH).contains(&delta) {
+                            continue;
+                        }
+                        let score = score_candidate(delta);
+                        if score > best_score {
+                            best_score = score;
+                            best_delta = delta;
+                        }
+                    }
+                }
+            }
+            let chosen_base = nom_src + (best_delta as f64) * p_step;
+            for i in 0..WSOLA_WIN {
+                let (l, r) = sample_audio_frac(a, chosen_base + (i as f64) * p_step, e.looped);
+                self.cand[i * 2] = l;
+                self.cand[i * 2 + 1] = r;
+            }
+            for i in 0..WSOLA_HOP {
+                let w_in = self.hann[i];
+                let out_l = self.ola_tail[i * 2] + self.cand[i * 2] * w_in;
+                let out_r = self.ola_tail[i * 2 + 1] + self.cand[i * 2 + 1] * w_in;
+                self.fifo.push_back(out_l);
+                self.fifo.push_back(out_r);
+
+                let w_out = self.hann[WSOLA_HOP + i];
+                self.ola_tail[i * 2] = self.cand[(WSOLA_HOP + i) * 2] * w_out;
+                self.ola_tail[i * 2 + 1] = self.cand[(WSOLA_HOP + i) * 2 + 1] * w_out;
+
+                // Guarda continuação natural deste grão escolhida como referência para o próximo hop.
+                let (nl, nr) =
+                    sample_audio_frac(a, chosen_base + ((WSOLA_HOP + i) as f64) * p_step, e.looped);
+                self.nat[i * 2] = nl;
+                self.nat[i * 2 + 1] = nr;
+            }
+            self.prev_nat_next.copy_from_slice(&self.nat);
+            self.has_prev = true;
+            self.hop_timeline_pos = self.hop_timeline_pos.saturating_add(WSOLA_HOP as i64);
+        }
+    }
+}
+
 pub struct Mixer {
     pub sr: u32,
     states: HashMap<Id, FxState>,
     event_resamplers: HashMap<Id, EventResampler>,
+    pitch_shifters: HashMap<Id, WsolaShifter>,
     pub meters: Meters,
     track_buf: Vec<f32>,
     ev_buf: Vec<f32>,
@@ -557,6 +770,7 @@ impl Mixer {
             sr: sr.max(8000),
             states: HashMap::new(),
             event_resamplers: HashMap::new(),
+            pitch_shifters: HashMap::new(),
             meters: Meters::default(),
             track_buf: vec![],
             ev_buf: vec![],
@@ -582,6 +796,7 @@ impl Mixer {
     pub fn reset(&mut self) {
         self.states.clear();
         self.event_resamplers.clear();
+        self.pitch_shifters.clear();
         self.delay_lines.clear();
         crate::plugin_host::vst3_reset_owner(self.vst3_owner);
     }
@@ -774,6 +989,52 @@ impl Mixer {
     ) {
         let sr = self.sr;
         let ev_rate = e.rate.as_f64();
+        let pitch_factor = e.effective_pitch_factor();
+        let tsm_ratio = if ev_rate > 0.0 {
+            pitch_factor / ev_rate
+        } else {
+            1.0
+        };
+        if ev_rate > 0.0 && (tsm_ratio - 1.0).abs() > 1e-4 {
+            let entry = match self.pitch_shifters.get_mut(&e.id) {
+                Some(ws)
+                    if ws.src_sr == a.sample_rate
+                        && (ws.ev_rate - ev_rate).abs() < 1e-6
+                        && (ws.pitch_factor - pitch_factor).abs() < 1e-6 =>
+                {
+                    ws
+                }
+                _ => {
+                    self.pitch_shifters.insert(
+                        e.id,
+                        WsolaShifter::new(a.sample_rate, ev_rate, pitch_factor),
+                    );
+                    let Some(ws) = self.pitch_shifters.get_mut(&e.id) else {
+                        buf.fill(0.0);
+                        return;
+                    };
+                    ws
+                }
+            };
+            if entry.next_timeline_sample != start {
+                entry.reset_at(start, pitch_factor, e, a, media_dur, sr);
+            }
+            entry.pump(n, e, a, media_dur, sr);
+            for i in 0..n {
+                let l = entry.fifo.pop_front().unwrap_or(0.0);
+                let r = entry.fifo.pop_front().unwrap_or(0.0);
+                let t = timeline_sample_time(start.saturating_add(i as i64), sr);
+                if e.contains(t) && e.media_time(t, media_dur).is_some() {
+                    buf[i * 2] = l;
+                    buf[i * 2 + 1] = r;
+                } else {
+                    buf[i * 2] = 0.0;
+                    buf[i * 2 + 1] = 0.0;
+                }
+            }
+            entry.next_timeline_sample = start.saturating_add(n as i64);
+            return;
+        }
         let needs_resamp = (a.sample_rate != sr || !e.rate.is_normal()) && ev_rate > 0.0;
         let ratio = if ev_rate > 0.0 {
             (sr as f64) / (a.sample_rate.max(1) as f64 * ev_rate)
@@ -1591,5 +1852,114 @@ mod tests {
         // Latência hostil gigantesca é limitada sem OOM/pânico (§0.4)
         let hostile = Mixer::compute_pdc_plan(&p, &mut |_| usize::MAX / 2);
         assert_eq!(hostile.total_latency, MAX_PDC_FRAMES);
+    }
+
+    fn estimate_freq_hz(mono: &[f32], sr: u32) -> f64 {
+        let mut crossings = 0usize;
+        for w in mono.windows(2) {
+            if w[0] <= 0.0 && w[1] > 0.0 {
+                crossings += 1;
+            }
+        }
+        crossings as f64 * (sr as f64) / (mono.len().max(1) as f64)
+    }
+
+    #[test]
+    fn wsola_pitch_shift_e_time_stretch_preservam_tom_e_suportam_entrada_hostil() {
+        let sr = 48_000u32;
+        let frames = 48_000 * 2;
+        let freq = 440.0_f64;
+        let mut pcm = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let s = (std::f64::consts::TAU * freq * (i as f64) / (sr as f64)).sin() as f32 * 0.6;
+            pcm.push(s);
+            pcm.push(s);
+        }
+        let media_id = new_id();
+        let item = MediaItem {
+            id: media_id,
+            name: "sine440.wav".into(),
+            source: MediaSource::File {
+                path: "sine440.wav".into(),
+            },
+            duration: Some(Ticks::from_secs_i64(2)),
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mut audio = HashMap::new();
+        audio.insert(media_id, Arc::new(AudioData::from_stereo(sr, pcm)));
+
+        // Caso 1: +12 semitons sem mudar duração -> dobra para ~880 Hz.
+        let mut p = Project::new_default();
+        p.settings.sample_rate = sr;
+        p.media.push(item.clone());
+        let mut ev = Event::new(&item, Ticks::ZERO, Ticks::from_secs_i64(1));
+        ev.pitch_semitones = 12.0;
+        p.tracks[1].events.push(ev);
+        let mut mixer = Mixer::new_offline(sr);
+        let mut out = vec![0.0_f32; sr as usize * 2];
+        mixer.process(&p, &audio, 0, &mut out);
+        let mono_up: Vec<f32> = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .skip(4096)
+            .map(|c| c[0])
+            .collect();
+        let f_up = estimate_freq_hz(&mono_up, sr);
+        assert!(
+            (f_up - 880.0).abs() < 35.0,
+            "esperado ~880 Hz, obtido {f_up}"
+        );
+
+        // Caso 2: -12 semitons -> cai para ~220 Hz.
+        p.tracks[1].events[0].pitch_semitones = -12.0;
+        mixer.reset();
+        out.fill(0.0);
+        mixer.process(&p, &audio, 0, &mut out);
+        let mono_dn: Vec<f32> = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .skip(4096)
+            .map(|c| c[0])
+            .collect();
+        let f_dn = estimate_freq_hz(&mono_dn, sr);
+        assert!(
+            (f_dn - 220.0).abs() < 20.0,
+            "esperado ~220 Hz, obtido {f_dn}"
+        );
+
+        // Caso 3: stretch 0.5x (50%) com lock_pitch_to_stretch preserva ~440 Hz.
+        p.tracks[1].events[0].pitch_semitones = 0.0;
+        p.tracks[1].events[0].lock_pitch_to_stretch = true;
+        p.tracks[1].events[0].rate = Rate::from_ratio(1, 2).unwrap();
+        p.tracks[1].events[0].length = Ticks::from_secs_i64(2);
+        mixer.reset();
+        out.fill(0.0);
+        mixer.process(&p, &audio, 0, &mut out);
+        let mono_lock: Vec<f32> = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .skip(4096)
+            .map(|c| c[0])
+            .collect();
+        let f_lock = estimate_freq_hz(&mono_lock, sr);
+        assert!(
+            (f_lock - 440.0).abs() < 25.0,
+            "esperado ~440 Hz preservado, obtido {f_lock}"
+        );
+
+        // Caso 4: valores hostis (NaN / infinito) não causam NaN nem pânico (§0.4).
+        p.tracks[1].events[0].pitch_semitones = f32::NAN;
+        mixer.reset();
+        mixer.process(&p, &audio, 0, &mut out);
+        assert!(out.iter().all(|s| s.is_finite()));
     }
 }

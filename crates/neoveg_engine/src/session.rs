@@ -89,6 +89,50 @@ impl EditMode {
     }
 }
 
+/// Eixo das ferramentas de seleção e zoom em caixa (manual do VEGAS Pro 21, p. 239).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BoxAxisMode {
+    /// Livre: seleciona nos dois eixos (largura e altura da caixa).
+    #[default]
+    Both,
+    /// Horizontal: seleciona por intervalo de tempo em todas as trilhas visíveis.
+    Horizontal,
+    /// Vertical: seleciona eventos das trilhas cruzadas em toda a largura visível.
+    Vertical,
+}
+
+impl BoxAxisMode {
+    pub const ALL: [BoxAxisMode; 3] = [
+        BoxAxisMode::Both,
+        BoxAxisMode::Horizontal,
+        BoxAxisMode::Vertical,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BoxAxisMode::Both => "Livre (horizontal e vertical)",
+            BoxAxisMode::Horizontal => "Apenas horizontal",
+            BoxAxisMode::Vertical => "Apenas vertical",
+        }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            BoxAxisMode::Both => "Livre",
+            BoxAxisMode::Horizontal => "Horiz",
+            BoxAxisMode::Vertical => "Vert",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            BoxAxisMode::Both => BoxAxisMode::Horizontal,
+            BoxAxisMode::Horizontal => BoxAxisMode::Vertical,
+            BoxAxisMode::Vertical => BoxAxisMode::Both,
+        }
+    }
+}
+
 /// Máscara de seleção para "Colar atributos do evento" (Paste Event Attributes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PasteAttributesMask {
@@ -96,6 +140,7 @@ pub struct PasteAttributesMask {
     pub pan_crop: bool,
     pub gain_db: bool,
     pub rate: bool,
+    pub pitch: bool,
     pub fades: bool,
     pub switches: bool,
     pub transition: bool,
@@ -107,6 +152,7 @@ impl PasteAttributesMask {
         pan_crop: true,
         gain_db: true,
         rate: true,
+        pitch: true,
         fades: true,
         switches: true,
         transition: true,
@@ -117,6 +163,7 @@ impl PasteAttributesMask {
             || self.pan_crop
             || self.gain_db
             || self.rate
+            || self.pitch
             || self.fades
             || self.switches
             || self.transition
@@ -260,6 +307,8 @@ pub struct EditorSession {
     pub edit_mode: EditMode,
     /// Ferramenta de edição ativa (Normal, Envelope, Seleção, Zoom).
     pub edit_tool: EditTool,
+    /// Modo de eixo das ferramentas Seleção e Zoom em caixa (Livre, Horizontal, Vertical).
+    pub box_axis: BoxAxisMode,
     pub status: String,
     pub removed_media_ids: Vec<Id>,
     /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
@@ -294,6 +343,7 @@ impl EditorSession {
             opts: EditorOptions::default(),
             edit_mode: EditMode::Normal,
             edit_tool: EditTool::Normal,
+            box_axis: BoxAxisMode::Both,
             status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),
@@ -2429,6 +2479,14 @@ impl EditorSession {
             if mask.rate {
                 dst.rate = src_ev.rate;
             }
+            if mask.pitch && track_kind == TrackKind::Audio {
+                dst.pitch_semitones = if src_ev.pitch_semitones.is_finite() {
+                    src_ev.pitch_semitones.clamp(-24.0, 24.0)
+                } else {
+                    0.0
+                };
+                dst.lock_pitch_to_stretch = src_ev.lock_pitch_to_stretch;
+            }
             if mask.fades {
                 dst.fade_in = src_ev.fade_in.clone();
                 dst.fade_out = src_ev.fade_out.clone();
@@ -2702,6 +2760,409 @@ impl EditorSession {
             false
         }
     }
+
+    /// Ajusta a transposição de tom (`pitch_semitones`, em `-24.0..=24.0`) nos
+    /// eventos de áudio selecionados (manual do VEGAS Pro 21: teclas `=` / `-`).
+    pub fn shift_pitch_selected(&mut self, semitones: f32) -> usize {
+        if !semitones.is_finite() || semitones == 0.0 || self.sel_events.is_empty() {
+            return 0;
+        }
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let has_target = ids.iter().any(|&id| {
+            self.project.find_event(id).is_some_and(|(ti, ei)| {
+                let tr = &self.project.tracks[ti];
+                tr.kind == TrackKind::Audio && !tr.locked && !tr.events[ei].locked
+            })
+        });
+        if !has_target {
+            return 0;
+        }
+        self.checkpoint();
+        let mut count = 0usize;
+        for id in ids {
+            let Some((ti, _)) = self.project.find_event(id) else {
+                continue;
+            };
+            let tr = &self.project.tracks[ti];
+            if tr.kind != TrackKind::Audio || tr.locked {
+                continue;
+            }
+            if let Some(ev) = self.project.event_mut(id) {
+                if ev.locked {
+                    continue;
+                }
+                let next = (ev.pitch_semitones + semitones).clamp(-24.0, 24.0);
+                let snapped = (next * 100.0).round() / 100.0;
+                if (ev.pitch_semitones - snapped).abs() > 1e-4 {
+                    ev.pitch_semitones = snapped;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            self.changed();
+            self.set_status(format!(
+                "Tom ajustado ({:+.1} st) em {count} evento(s).",
+                semitones
+            ));
+        } else {
+            self.undo.pop();
+        }
+        count
+    }
+
+    /// Redefine `pitch_semitones` para `0.0` nos eventos de áudio selecionados.
+    pub fn reset_pitch_selected(&mut self) -> usize {
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let has_target = ids.iter().any(|&id| {
+            self.project.find_event(id).is_some_and(|(ti, ei)| {
+                let tr = &self.project.tracks[ti];
+                tr.kind == TrackKind::Audio
+                    && !tr.locked
+                    && !tr.events[ei].locked
+                    && tr.events[ei].pitch_semitones.abs() > 1e-4
+            })
+        });
+        if !has_target {
+            return 0;
+        }
+        self.checkpoint();
+        let mut count = 0usize;
+        for id in ids {
+            let Some((ti, _)) = self.project.find_event(id) else {
+                continue;
+            };
+            let tr = &self.project.tracks[ti];
+            if tr.kind != TrackKind::Audio || tr.locked {
+                continue;
+            }
+            if let Some(ev) = self.project.event_mut(id) {
+                if !ev.locked && ev.pitch_semitones.abs() > 1e-4 {
+                    ev.pitch_semitones = 0.0;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            self.changed();
+            self.set_status(format!("Tom redefinido em {count} evento(s)."));
+        } else {
+            self.undo.pop();
+        }
+        count
+    }
+
+    /// Alterna "Preservar tom ao esticar" (`lock_pitch_to_stretch`) nos eventos
+    /// de áudio selecionados e retorna o novo estado aplicado.
+    pub fn toggle_lock_pitch_to_stretch(&mut self) -> Option<bool> {
+        let ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let mut targets = Vec::new();
+        let mut any_unlocked_unpres = false;
+        for id in ids {
+            let Some((ti, ei)) = self.project.find_event(id) else {
+                continue;
+            };
+            let tr = &self.project.tracks[ti];
+            let ev = &tr.events[ei];
+            if tr.kind == TrackKind::Audio && !tr.locked && !ev.locked {
+                if !ev.lock_pitch_to_stretch {
+                    any_unlocked_unpres = true;
+                }
+                targets.push(id);
+            }
+        }
+        if targets.is_empty() {
+            return None;
+        }
+        let target_state = any_unlocked_unpres;
+        self.checkpoint();
+        for id in targets {
+            if let Some(ev) = self.project.event_mut(id) {
+                ev.lock_pitch_to_stretch = target_state;
+            }
+        }
+        self.changed();
+        self.set_status(if target_state {
+            "Preservar tom ao esticar ativado na seleção."
+        } else {
+            "Preservar tom ao esticar desativado na seleção."
+        });
+        Some(target_state)
+    }
+
+    /// Informa se algum evento do projeto segue `master_id` via Sync Link.
+    pub fn has_sync_followers(&self, master_id: Id) -> bool {
+        self.project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .any(|e| e.sync_link_master == Some(master_id))
+    }
+
+    /// Lista todos os seguidores transitivos de `masters` (id e início atual),
+    /// excluindo os próprios elementos de `masters` e eventos/trilhas travadas.
+    pub fn sync_followers_for(&self, masters: &HashSet<Id>) -> Vec<(Id, Ticks)> {
+        let mut active = masters.clone();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for _ in 0..32 {
+            let mut next_layer = HashSet::new();
+            for tr in &self.project.tracks {
+                if tr.locked {
+                    continue;
+                }
+                for ev in &tr.events {
+                    if ev.locked || masters.contains(&ev.id) {
+                        continue;
+                    }
+                    if ev.sync_link_master.is_some_and(|m| active.contains(&m))
+                        && seen.insert(ev.id)
+                    {
+                        out.push((ev.id, ev.start));
+                        next_layer.insert(ev.id);
+                    }
+                }
+            }
+            if next_layer.is_empty() {
+                break;
+            }
+            active = next_layer;
+        }
+        out
+    }
+
+    /// Cria vínculos unidirecionais de sincronização (Sync Links): os demais eventos
+    /// destravados da seleção passam a acompanhar o deslocamento temporal do mestre.
+    pub fn create_sync_links(&mut self, explicit_master: Option<Id>) -> usize {
+        let mut candidates: Vec<(Ticks, usize, Id)> = Vec::new();
+        for &id in &self.sel_events {
+            if let Some((ti, ei)) = self.project.find_event(id) {
+                let tr = &self.project.tracks[ti];
+                let ev = &tr.events[ei];
+                if !tr.locked && !ev.locked {
+                    candidates.push((ev.start, ti, ev.id));
+                }
+            }
+        }
+        if candidates.len() < 2 {
+            return 0;
+        }
+        candidates.sort_by_key(|(start, ti, id)| (*start, *ti, *id));
+        let master_id = explicit_master
+            .filter(|id| candidates.iter().any(|(_, _, cid)| cid == id))
+            .unwrap_or(candidates[0].2);
+        let followers: Vec<Id> = candidates
+            .into_iter()
+            .filter_map(|(_, _, id)| (id != master_id).then_some(id))
+            .collect();
+        if followers.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let mut linked = 0usize;
+        for fid in followers {
+            if would_create_sync_cycle(&self.project, fid, master_id) {
+                continue;
+            }
+            if let Some(ev) = self.project.event_mut(fid) {
+                if ev.sync_link_master != Some(master_id) {
+                    ev.sync_link_master = Some(master_id);
+                    linked += 1;
+                }
+            }
+        }
+        if linked > 0 {
+            self.changed();
+            self.set_status(format!(
+                "Sync Link criado: {linked} evento(s) seguem o evento mestre."
+            ));
+        } else {
+            self.undo.pop();
+        }
+        linked
+    }
+
+    /// Desfaz Sync Links envolvendo a seleção: remove vínculos dos seguidores
+    /// selecionados ou, se nenhum for seguidor, libera os seguidores dos mestres
+    /// selecionados.
+    pub fn unlink_sync_links(&mut self) -> usize {
+        if self.sel_events.is_empty() {
+            return 0;
+        }
+        let sel_ids: Vec<Id> = self.sel_events.iter().copied().collect();
+        let selected_followers: Vec<Id> = sel_ids
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.project.find_event(id).is_some_and(|(ti, ei)| {
+                    !self.project.tracks[ti].locked
+                        && !self.project.tracks[ti].events[ei].locked
+                        && self.project.tracks[ti].events[ei]
+                            .sync_link_master
+                            .is_some()
+                })
+            })
+            .collect();
+        let targets: Vec<Id> = if !selected_followers.is_empty() {
+            selected_followers
+        } else {
+            let masters: HashSet<Id> = sel_ids.iter().copied().collect();
+            self.project
+                .tracks
+                .iter()
+                .filter(|t| !t.locked)
+                .flat_map(|t| t.events.iter())
+                .filter(|e| {
+                    !e.locked && e.sync_link_master.is_some_and(|mid| masters.contains(&mid))
+                })
+                .map(|e| e.id)
+                .collect()
+        };
+        if targets.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let mut count = 0usize;
+        for id in targets {
+            if let Some(ev) = self.project.event_mut(id) {
+                if ev.sync_link_master.take().is_some() {
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            self.changed();
+            self.set_status(format!("Sync Link removido de {count} evento(s)."));
+        } else {
+            self.undo.pop();
+        }
+        count
+    }
+
+    /// Seleciona toda a rede conectada via Sync Link a partir da seleção atual.
+    pub fn select_sync_linked(&mut self) -> usize {
+        let mut acc: HashSet<Id> = self.sel_events.clone();
+        for _ in 0..32 {
+            let mut changed = false;
+            let mut next_add = Vec::new();
+            for tr in &self.project.tracks {
+                for ev in &tr.events {
+                    if let Some(mid) = ev.sync_link_master {
+                        if acc.contains(&ev.id) && !acc.contains(&mid) {
+                            next_add.push(mid);
+                        } else if acc.contains(&mid) && !acc.contains(&ev.id) {
+                            next_add.push(ev.id);
+                        }
+                    }
+                }
+            }
+            for id in next_add {
+                changed |= acc.insert(id);
+            }
+            if !changed {
+                break;
+            }
+        }
+        let added = acc.len().saturating_sub(self.sel_events.len());
+        self.sel_events = acc;
+        if added > 0 {
+            self.set_status(format!("{added} evento(s) vinculado(s) selecionado(s)."));
+        }
+        self.sel_events.len()
+    }
+
+    /// Insere um evento vazio no cursor (ou na seleção de tempo) na trilha selecionada
+    /// (manual do VEGAS Pro 21: `Insert > Empty Event`).
+    pub fn insert_empty_event(&mut self) -> Id {
+        self.checkpoint();
+        let target_track = self
+            .sel_track
+            .filter(|&i| {
+                self.project
+                    .tracks
+                    .get(i)
+                    .is_some_and(|t| !t.locked && !t.is_adjustment())
+            })
+            .or_else(|| {
+                self.project
+                    .tracks
+                    .iter()
+                    .position(|t| !t.locked && !t.is_adjustment())
+            })
+            .unwrap_or_else(|| self.insert_track(TrackKind::Video));
+
+        let empty_item = if let Some(existing) = self.project.media.iter().find(|m| {
+            matches!(
+                &m.source,
+                MediaSource::Generated(GenSpec::SolidColor { color })
+                if color[3] == 0.0 && m.info == "Evento vazio"
+            )
+        }) {
+            existing.clone()
+        } else {
+            let item = MediaItem {
+                id: new_id(),
+                name: "Evento vazio".into(),
+                source: MediaSource::Generated(GenSpec::SolidColor {
+                    color: [0.0, 0.0, 0.0, 0.0],
+                }),
+                duration: None,
+                has_video: false,
+                has_audio: false,
+                width: 0,
+                height: 0,
+                fps: None,
+                info: "Evento vazio".into(),
+                proxy_path: None,
+            };
+            self.project.media.push(item.clone());
+            item
+        };
+
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let (start, len) = match self.time_sel {
+            Some((a, b)) if b > a => (a.max(Ticks::ZERO), (b - a).max(fd)),
+            _ => (self.cursor.max(Ticks::ZERO), Ticks::from_secs_i64(5)),
+        };
+        let mut ev = Event::new(&empty_item, start, len);
+        ev.name = "Evento vazio".into();
+        let id = ev.id;
+        if let Some(tr) = self.project.tracks.get_mut(target_track) {
+            tr.events.push(ev);
+        }
+        self.project.sort_events();
+        self.sel_track = Some(target_track);
+        self.sel_events.clear();
+        self.sel_events.insert(id);
+        self.changed();
+        self.set_status("Evento vazio inserido na timeline.");
+        id
+    }
+}
+
+fn would_create_sync_cycle(project: &Project, follower_id: Id, master_id: Id) -> bool {
+    if follower_id == master_id {
+        return true;
+    }
+    let mut visited = HashSet::new();
+    let mut cur = master_id;
+    for _ in 0..32 {
+        if !visited.insert(cur) {
+            return true;
+        }
+        let Some(parent) = project.event(cur).and_then(|e| e.sync_link_master) else {
+            return false;
+        };
+        if parent == follower_id {
+            return true;
+        }
+        cur = parent;
+    }
+    true
 }
 
 /// Destino de faixa para cada item em um plano de movimentação/cópia (§3.1).
@@ -3307,5 +3768,120 @@ mod tests {
             sess.project.tracks[0].events[1].offset,
             Ticks::from_secs_i64(7)
         );
+    }
+
+    #[test]
+    fn pitch_shift_lock_e_colar_atributos_de_tom() {
+        let mut p = Project::new_default();
+        let mut ma = sample_media(new_id(), 0, 0, None);
+        ma.has_video = false;
+        ma.has_audio = true;
+        ma.duration = Some(Ticks::from_secs_i64(10));
+        p.media.push(ma.clone());
+
+        let e1 = Event::new(&ma, Ticks::ZERO, Ticks::from_secs_i64(4));
+        let mut e2 = Event::new(&ma, Ticks::from_secs_i64(5), Ticks::from_secs_i64(4));
+        e2.rate = Rate::from_f64(2.0).unwrap();
+        let id1 = e1.id;
+        let id2 = e2.id;
+        p.tracks[1].events = vec![e1, e2];
+
+        let mut sess = EditorSession::new(p);
+        sess.sel_events.insert(id1);
+        assert_eq!(sess.shift_pitch_selected(5.0), 1);
+        assert_eq!(sess.shift_pitch_selected(30.0), 1); // satura em +24 st
+        assert_eq!(sess.project.event(id1).unwrap().pitch_semitones, 24.0);
+        // NaN ignorado sem pânico
+        assert_eq!(sess.shift_pitch_selected(f32::NAN), 0);
+
+        sess.copy_selection();
+        sess.sel_events.clear();
+        sess.sel_events.insert(id2);
+        let mask = PasteAttributesMask {
+            fx: false,
+            pan_crop: false,
+            gain_db: false,
+            rate: false,
+            pitch: true,
+            fades: false,
+            switches: false,
+            transition: false,
+        };
+        assert_eq!(sess.paste_attributes(mask), 1);
+        let ev2 = sess.project.event(id2).unwrap();
+        assert_eq!(ev2.pitch_semitones, 24.0);
+        assert_eq!(sess.toggle_lock_pitch_to_stretch(), Some(true));
+        let factor = sess.project.event(id2).unwrap().effective_pitch_factor();
+        // lock=true preserva os +24 st solicitados (4.0x) independentemente de rate=2.0
+        assert!((factor - 4.0).abs() < 1e-6);
+        assert_eq!(sess.reset_pitch_selected(), 1);
+        assert_eq!(sess.project.event(id2).unwrap().pitch_semitones, 0.0);
+    }
+
+    #[test]
+    fn sync_links_transitivos_desvincular_e_rejeicao_de_ciclos_na_sanitizacao() {
+        let mut p = Project::new_default();
+        let m = sample_media(new_id(), 1280, 720, Some(FrameRate::FPS_30));
+        p.media.push(m.clone());
+        let e1 = Event::new(&m, Ticks::from_secs_i64(1), Ticks::from_secs_i64(2));
+        let e2 = Event::new(&m, Ticks::from_secs_i64(4), Ticks::from_secs_i64(2));
+        let e3 = Event::new(&m, Ticks::from_secs_i64(7), Ticks::from_secs_i64(2));
+        let (id1, id2, id3) = (e1.id, e2.id, e3.id);
+        p.tracks[0].events = vec![e1, e2, e3];
+
+        let mut sess = EditorSession::new(p);
+        sess.sel_events = [id1, id2].into_iter().collect();
+        assert_eq!(sess.create_sync_links(Some(id1)), 1);
+        // cria cadeia id1 -> id2 -> id3
+        sess.sel_events = [id2, id3].into_iter().collect();
+        assert_eq!(sess.create_sync_links(Some(id2)), 1);
+        let followers = sess.sync_followers_for(&HashSet::from([id1]));
+        assert_eq!(followers.len(), 2);
+        assert!(sess.has_sync_followers(id1));
+
+        // tentar vincular id1 seguindo id3 (que depende de id1) não cria ciclo
+        sess.sel_events = [id3, id1].into_iter().collect();
+        assert_eq!(sess.create_sync_links(Some(id3)), 0);
+
+        // selecionar todos conectados
+        sess.sel_events = HashSet::from([id3]);
+        assert_eq!(sess.select_sync_linked(), 3);
+
+        // projeto hostil com ciclo manual é limpo no sanitize
+        sess.project.event_mut(id1).unwrap().sync_link_master = Some(id3);
+        sess.project.sanitize();
+        assert!(sess.project.event(id1).unwrap().sync_link_master.is_none());
+        assert!(sess.project.event(id2).unwrap().sync_link_master.is_none());
+        assert!(sess.project.event(id3).unwrap().sync_link_master.is_none());
+
+        // recria vínculo simples id1 -> id2 e testa desvincular
+        sess.sel_events = [id1, id2].into_iter().collect();
+        assert_eq!(sess.create_sync_links(Some(id1)), 1);
+        sess.sel_events = HashSet::from([id2]);
+        assert_eq!(sess.unlink_sync_links(), 1);
+        assert!(sess.project.event(id2).unwrap().sync_link_master.is_none());
+    }
+
+    #[test]
+    fn inserir_evento_vazio_usa_time_sel_e_desfaz() {
+        let p = Project::new_default();
+        let mut sess = EditorSession::new(p.clone());
+        sess.time_sel = Some((Ticks::from_secs_i64(3), Ticks::from_secs_i64(9)));
+        let ev_id = sess.insert_empty_event();
+        let ev = sess.project.event(ev_id).unwrap();
+        assert_eq!(ev.start, Ticks::from_secs_i64(3));
+        assert_eq!(ev.length, Ticks::from_secs_i64(6));
+        assert_eq!(ev.name, "Evento vazio");
+        // segundo evento vazio reutiliza o item de mídia vazio existente
+        sess.time_sel = None;
+        sess.cursor = Ticks::from_secs_i64(12);
+        let ev2_id = sess.insert_empty_event();
+        assert_eq!(sess.project.media.len(), 1);
+        assert_eq!(
+            sess.project.event(ev2_id).unwrap().length,
+            Ticks::from_secs_i64(5)
+        );
+        assert!(sess.undo());
+        assert!(sess.project.event(ev2_id).is_none());
     }
 }
