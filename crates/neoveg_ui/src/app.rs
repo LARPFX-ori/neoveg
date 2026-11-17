@@ -1125,15 +1125,15 @@ impl App {
     }
 
     pub fn import_dialog(&mut self) {
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(media::IMAGE_EXTS);
+        all.extend_from_slice(media::VIDEO_EXTS);
+        all.extend_from_slice(media::AUDIO_EXTS);
+        all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter(
-                "Mídia suportada",
-                &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
-                    "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
-                    "flac", "ogg", "oga", "mp3", "m4a", "aac",
-                ],
-            )
+            .add_filter("Mídia suportada", &all)
+            .add_filter("Imagens", media::IMAGE_EXTS)
+            .add_filter("Áudio", media::AUDIO_EXTS)
             .add_filter("Todos os arquivos", &["*"])
             .pick_files()
         {
@@ -1143,7 +1143,7 @@ impl App {
 
     pub fn import_sequence_dialog(&mut self) {
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter("Imagens", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
+            .add_filter("Imagens", media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -2609,7 +2609,13 @@ impl App {
 
     pub(crate) fn snapshot_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
+            .add_filter(
+                "Imagem",
+                &[
+                    "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
+                    "wbmp", "xbm", "xpm", "ico",
+                ],
+            )
             .set_file_name("quadro.png")
             .save_file()
         {
@@ -3287,6 +3293,7 @@ impl App {
             jpeg_quality: 80,
             include_audio: true,
             wav_bits: crate::render::WavBits::Pcm16,
+            ..RenderSettings::default()
         };
         let tx = self.loader_tx.clone();
         let prog = Arc::new(RenderProgress::default());
