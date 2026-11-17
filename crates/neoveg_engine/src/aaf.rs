@@ -1,12 +1,19 @@
 //! Importação e exportação em sala limpa (*Clean Room*, `AGENTS.md` §2.3) de **AAF**
-//! (*Advanced Authoring Format*), a partir das especificações públicas da AAF
-//! Association / AMWA: *AAF Low-Level Container Specification* (MS-03, formato de
-//! contêiner Compound File Binary), *AAF Stored Format Specification* (MS-02 v1.0.1)
-//! e *AAF Object Specification v1.1* (MS-01, modelo de Mobs, MobSlots, Sequence,
-//! SourceClip, Filler, Transition).
+//! (*Advanced Authoring Format*), a partir das especificações e registros públicos:
+//! - **AMWA MS-03 v1.0.1** (*AAF Low-Level Container Specification*: Compound File Binary);
+//! - **AMWA MS-02 v1.0.1** (*AAF Stored Format Specification*: streams `properties`,
+//!   `/referenced properties`, índices de vetores/conjuntos e assinaturas §1.6);
+//! - **AMWA MS-01 v1.1** (*AAF Object Specification*: §5/§27 `MetaDictionary`, Header,
+//!   Identification, Dictionary, ContentStorage, Mobs, Slots, TimelineMobSlot, Sequence,
+//!   SourceClip, Filler, Transition, OperationGroup, ImportDescriptor e NetworkLocator);
+//! - **AMWA AS-01** (*AAF Edit Protocol*, 2005-04-08, §12.1 *Video Dissolve* e §15);
+//! - **SMPTE Metadata Registers** públicos (`https://registry.smpte-ra.org/`:
+//!   SMPTE ST 395 Grupos/Classes, ST 335 Elementos/`LocalIdentification`, ST 2003 Tipos e
+//!   ST 400 Rótulos `PictureEssenceTrack`, `SoundEssenceTrack` e `AAFEditProtocol`);
+//! - Vetor binário de conformidade em `tools/gen_aaf_fixtures.py` (`OperationDef_VideoDissolve`).
 //!
-//! O contêiner Compound File é lido e gravado pelo crate `cfb` (MIT). Só os streams
-//! de metadados (`properties` e índices) são processados; a essência externa fica
+//! O contêiner Compound File é lido e gravado pelo crate `cfb` (MIT). Só os streams de
+//! metadados (`properties` e índices) são processados; a essência externa fica
 //! referenciada por `NetworkLocator`. Toda a operação é limitada (§0.4–§0.5) e
 //! protegida por `catch_unwind` (§0.6).
 
@@ -35,15 +42,18 @@ const MAX_AAF_CLIPS: usize = 20_000;
 /// Maior posição em unidades de edição aceita (~115 h a 120 fps).
 const MAX_UNITS: i64 = 50_000_000;
 
-// Formas de armazenamento (*stored forms*) da especificação de contêiner.
-const SF_DATA: u16 = 0x82;
-const SF_STRONG_REF: u16 = 0x22;
-const SF_STRONG_REF_VECTOR: u16 = 0x32;
-const SF_STRONG_REF_SET: u16 = 0x3A;
-const SF_WEAK_REF: u16 = 0x02;
+// Formas de armazenamento (*stored forms*, MS-02 §1.4.1).
+pub(crate) const SF_DATA: u16 = 0x82;
+pub(crate) const SF_STRONG_REF: u16 = 0x22;
+pub(crate) const SF_STRONG_REF_VECTOR: u16 = 0x32;
+pub(crate) const SF_STRONG_REF_SET: u16 = 0x3A;
+pub(crate) const SF_WEAK_REF: u16 = 0x02;
+pub(crate) const SF_WEAK_REF_VECTOR: u16 = 0x12;
 
-// Identificadores de propriedade (*pids*) da especificação de objetos.
+// Identificadores de propriedade (*LocalIdentification* / *pid*, SMPTE ST 335).
+const PID_ROOT_METADICT: u16 = 0x0001;
 const PID_ROOT_HEADER: u16 = 0x0002;
+pub(crate) const PID_METADEF_IDENT: u16 = 0x0005;
 const PID_HEADER_CONTENT: u16 = 0x3B03;
 const PID_CONTENT_MOBS: u16 = 0x1901;
 const PID_MOB_ID: u16 = 0x4401;
@@ -62,7 +72,7 @@ const PID_SOURCE_MOB_DESCRIPTOR: u16 = 0x4701;
 const PID_DESCRIPTOR_LOCATOR: u16 = 0x2F01;
 const PID_LOCATOR_URL: u16 = 0x4001;
 
-// Códigos de classe: byte variável do AUID `0d010101-0101-XX00-060e-2b3402060101`.
+// Códigos de classe: byte variável do AUID `0d010101-0101-XX00-060e-2b3402060101` (SMPTE ST 395).
 const CLASS_FILLER: u8 = 0x09;
 const CLASS_SEQUENCE: u8 = 0x0F;
 const CLASS_SOURCE_CLIP: u8 = 0x11;
@@ -70,8 +80,11 @@ const CLASS_TRANSITION: u8 = 0x17;
 const CLASS_COMPOSITION_MOB: u8 = 0x35;
 const CLASS_SOURCE_MOB: u8 = 0x37;
 
-/// AUIDs (bytes como gravados, little-endian nos três primeiros campos) das
-/// definições de dados *Picture* e *Sound*, nas formas SMPTE e legada.
+/// AUIDs em disco (campos LE, meia-troca SMPTE UL) para *DataDefinition* (SMPTE ST 400):
+/// - `PictureEssenceTrack`: `urn:smpte:ul:060e2b34.04010101.01030202.01000000`
+/// - `SoundEssenceTrack`: `urn:smpte:ul:060e2b34.04010101.01030202.02000000`
+///
+/// além das formas legadas v1.0 aceitas apenas na importação.
 const DD_PICTURE: [u8; 16] = [
     0x02, 0x02, 0x03, 0x01, 0x00, 0x01, 0x00, 0x00, 0x06, 0x0E, 0x2B, 0x34, 0x04, 0x01, 0x01, 0x01,
 ];
@@ -693,18 +706,32 @@ pub fn import_aaf_file(path: &Path) -> Result<(Project, Vec<String>), NeovegErro
 }
 
 // ---------------------------------------------------------------------------
-// Exportação AAF (AMWA MS-03 / MS-02 v1.0.1 / MS-01 v1.1)
+// Exportação AAF (AMWA MS-03 / MS-02 v1.0.1 / MS-01 v1.1 / AS-01 + SMPTE)
 // ---------------------------------------------------------------------------
 
 const MAX_EXPORT_UTF16_UNITS: usize = 4096;
 
-// Identificadores de MetaDictionary / referências fracas padrão MS-02.
-const PID_ROOT_METADICT: u16 = 0x0001;
-const PID_METADICT_CLASSES: u16 = 0x0003;
-const PID_METADICT_TYPES: u16 = 0x0004;
-const PID_METADEF_IDENT: u16 = 0x0005;
+// Classes de meta-modelo no AUID `0d010101-XX00-0000-060e-2b3402060101` (SMPTE ST 395).
+pub(crate) const CLASS_CLASS_DEFINITION: [u8; 16] = crate::aaf_metadict::auid(
+    0x0D01_0101,
+    0x0201,
+    0x0000,
+    [0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01, 0x01],
+);
+pub(crate) const CLASS_PROPERTY_DEFINITION: [u8; 16] = crate::aaf_metadict::auid(
+    0x0D01_0101,
+    0x0202,
+    0x0000,
+    [0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01, 0x01],
+);
+pub(crate) const CLASS_METADICT: [u8; 16] = crate::aaf_metadict::auid(
+    0x0D01_0101,
+    0x0225,
+    0x0000,
+    [0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01, 0x01],
+);
 
-// Pids extras de Header, Dictionary, Identification, Transition e MobSlot.
+// PIDs adicionais (SMPTE ST 335 Reg-XML `www-smpte-ra-org-reg-335-2012.xml`).
 const PID_HEADER_BYTE_ORDER: u16 = 0x3B01;
 const PID_HEADER_LAST_MODIFIED: u16 = 0x3B02;
 const PID_HEADER_DICTIONARY: u16 = 0x3B04;
@@ -733,14 +760,15 @@ const PID_OPDEF_NUM_INPUTS: u16 = 0x1E07;
 
 const PID_MOB_LAST_MODIFIED: u16 = 0x4404;
 const PID_MOB_CREATION_TIME: u16 = 0x4405;
-const PID_SLOT_PHYSICAL_TRACK: u16 = 0x4802;
+const PID_SLOT_NAME: u16 = 0x4802;
+const PID_SLOT_PHYSICAL_TRACK: u16 = 0x4804;
 const PID_SLOT_ORIGIN: u16 = 0x4B02;
 
 const PID_TRANSITION_OP_GROUP: u16 = 0x1801;
 const PID_TRANSITION_CUT_POINT: u16 = 0x1802;
 const PID_OPGROUP_OP_DEF: u16 = 0x0B01;
 
-// Códigos de classe adicionais no AUID `0d010101-0101-XX00-060e-2b3402060101`.
+// Códigos de classe adicionais (byte 6 de `0d010101-0101-XX00-060e-2b3402060101`, SMPTE ST 395).
 const CLASS_OPERATION_GROUP: u8 = 0x0A;
 const CLASS_CONTENT_STORAGE: u8 = 0x18;
 const CLASS_DATA_DEFINITION: u8 = 0x1B;
@@ -753,45 +781,62 @@ const CLASS_MASTER_MOB: u8 = 0x36;
 const CLASS_TIMELINE_MOB_SLOT: u8 = 0x3B;
 const CLASS_IMPORT_DESCRIPTOR: u8 = 0x4A;
 
-/// Operational Pattern `OP1a` / AAF Edit Protocol (`0d011201-0100-0000-060e-2b3404010105`).
-const OP_PATTERN_EDIT_PROTOCOL: [u8; 16] = [
-    0x01, 0x12, 0x01, 0x0D, 0x00, 0x01, 0x00, 0x00, 0x06, 0x0E, 0x2B, 0x34, 0x04, 0x01, 0x01, 0x05,
-];
+/// Assinatura da raiz para setores de 512 bytes (MS-02 §1.6 `aafSignature_Aaf_SSBinary`).
+const AAF_SIGNATURE_SSBINARY: Uuid = Uuid::from_fields(
+    0x4246_4141,
+    0x000D,
+    0x4D4F,
+    &[0x06, 0x0E, 0x2B, 0x34, 0x01, 0x01, 0x01, 0xFF],
+);
+/// Assinatura da raiz para setores de 4096 bytes (MS-02 §1.6 `aafSignature_Aaf_SSBin_4K`).
+#[allow(dead_code)]
+const AAF_SIGNATURE_SSBIN_4K: Uuid = Uuid::from_fields(
+    0x0D01_0201,
+    0x0200,
+    0x0000,
+    &[0x06, 0x0E, 0x2B, 0x34, 0x03, 0x02, 0x01, 0x01],
+);
 
-/// Definição de operação padrão "Video Dissolve" (`0c3bea40-fc05-11d2-8a29-0050040ef7d2`).
-const OP_VIDEO_DISSOLVE: [u8; 16] = [
-    0x40, 0xEA, 0x3B, 0x0C, 0x05, 0xFC, 0xD2, 0x11, 0x8A, 0x29, 0x00, 0x50, 0x04, 0x0E, 0xF7, 0xD2,
-];
+/// Rótulo `AAFEditProtocol` (SMPTE ST 400 / AS-01 §15:
+/// `urn:smpte:ul:060e2b34.04010105.0d011201.01000000` em ordem AUID de disco).
+const OP_PATTERN_EDIT_PROTOCOL: [u8; 16] = crate::aaf_metadict::auid(
+    0x0D01_1201,
+    0x0100,
+    0x0000,
+    [0x06, 0x0E, 0x2B, 0x34, 0x04, 0x01, 0x01, 0x05],
+);
 
-/// Definição de operação de crossfade de áudio para transições em trilhas de som.
-const OP_AUDIO_DISSOLVE: [u8; 16] = [
-    0x41, 0xEA, 0x3B, 0x0C, 0x05, 0xFC, 0xD2, 0x11, 0x8A, 0x29, 0x00, 0x50, 0x04, 0x0E, 0xF7, 0xD2,
-];
+/// Identificador da operação *Video Dissolve* (`0c3bea40-fc05-11d2-8a29-0050040ef7d2`),
+/// documentada em AMWA AS-01 §12.1 (`OperationDef_VideoDissolve`) e verificada pelo
+/// vetor de conformidade gerado por `tools/gen_aaf_fixtures.py`.
+const OP_VIDEO_DISSOLVE: [u8; 16] = crate::aaf_metadict::auid(
+    0x0C3B_EA40,
+    0xFC05,
+    0x11D2,
+    [0x8A, 0x29, 0x00, 0x50, 0x04, 0x0E, 0xF7, 0xD2],
+);
 
-fn root_clsid() -> Uuid {
-    // MS-03 CLSID do armazenamento raiz AAF (`b3b398a5-1c90-11d4-8053-080036210804`).
-    Uuid::from_bytes([
-        0xB3, 0xB3, 0x98, 0xA5, 0x1C, 0x90, 0x11, 0xD4, 0x80, 0x53, 0x08, 0x00, 0x36, 0x21, 0x08,
-        0x04,
-    ])
-}
+pub(crate) const REF_IDX_META_CLASSES: u16 = 0;
+pub(crate) const REF_IDX_META_TYPES: u16 = 1;
+const REF_IDX_DATA_DEFS: u16 = 2;
+const REF_IDX_OP_DEFS: u16 = 3;
 
-fn metadict_clsid() -> Uuid {
-    // MS-02 CLSID do armazenamento MetaDictionary (`0d010101-0225-0000-060e-2b3402060101`).
-    Uuid::from_bytes([
-        0x0D, 0x01, 0x01, 0x01, 0x02, 0x25, 0x00, 0x00, 0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01,
-        0x01,
-    ])
+pub(crate) struct SetIndexEntry<'a> {
+    pub(crate) local_key: u32,
+    pub(crate) ref_count: u32,
+    pub(crate) key: &'a [u8],
 }
 
 fn class_clsid(class: u8) -> Uuid {
-    Uuid::from_bytes([
-        0x0D, 0x01, 0x01, 0x01, 0x01, 0x01, class, 0x00, 0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01,
-        0x01,
-    ])
+    Uuid::from_fields(
+        0x0D01_0101,
+        0x0101,
+        u16::from(class) << 8,
+        &[0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01, 0x01],
+    )
 }
 
-fn encode_utf16le_nul(s: &str) -> Vec<u8> {
+pub(crate) fn encode_utf16le_nul(s: &str) -> Vec<u8> {
     let mut units: Vec<u16> = Vec::new();
     for ch in s.chars() {
         if ch == '\0' {
@@ -829,7 +874,7 @@ fn aaf_timestamp() -> [u8; 8] {
 }
 
 fn make_mob_id(tag: &[u8], a: u64, b: u64) -> [u8; 32] {
-    // Prefix SMPTE 330M Material UMID + digest determinístico de 128 bits.
+    // Prefixo SMPTE 330M Material UMID + digest determinístico de 128 bits.
     let mut h1: u64 = 0xCBF2_9CE4_8422_2325;
     let mut h2: u64 = 0xAF63_BD4C_8601_B7DF;
     for &byte in tag
@@ -867,19 +912,16 @@ fn make_uuid_bytes(seed: &str) -> [u8; 16] {
     bytes
 }
 
-fn weak_ref_auid(ref_idx: u16, auid: &[u8; 16]) -> Vec<u8> {
+pub(crate) fn weak_ref_auid(ref_idx: u16, ident_pid: u16, auid: &[u8; 16]) -> Vec<u8> {
     let mut v = Vec::with_capacity(21);
     v.extend_from_slice(&ref_idx.to_le_bytes());
-    v.extend_from_slice(&PID_DEF_IDENT.to_le_bytes());
+    v.extend_from_slice(&ident_pid.to_le_bytes());
     v.push(16);
     v.extend_from_slice(auid);
     v
 }
 
-const REF_IDX_DATA_DEFS: u16 = 2;
-const REF_IDX_OP_DEFS: u16 = 3;
-
-fn write_stream<F: Read + Seek + Write>(
+pub(crate) fn write_stream<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
     path: &str,
     data: &[u8],
@@ -892,20 +934,29 @@ fn write_stream<F: Read + Seek + Write>(
     Ok(())
 }
 
+pub(crate) fn create_object_clsid<F: Read + Seek + Write>(
+    comp: &mut cfb::CompoundFile<F>,
+    path: &str,
+    clsid: Uuid,
+    props: &[(u16, u16, Vec<u8>)],
+) -> Result<(), NeovegError> {
+    comp.create_storage(path)
+        .map_err(|e| err(format!("falha ao criar storage AAF '{path}': {e}")))?;
+    comp.set_storage_clsid(path, clsid)
+        .map_err(|e| err(format!("falha ao definir CLSID de '{path}': {e}")))?;
+    write_properties(comp, path, props)
+}
+
 fn create_object<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
     path: &str,
     class: u8,
     props: &[(u16, u16, Vec<u8>)],
 ) -> Result<(), NeovegError> {
-    comp.create_storage(path)
-        .map_err(|e| err(format!("falha ao criar storage AAF '{path}': {e}")))?;
-    comp.set_storage_clsid(path, class_clsid(class))
-        .map_err(|e| err(format!("falha ao definir CLSID de '{path}': {e}")))?;
-    write_properties(comp, path, props)
+    create_object_clsid(comp, path, class_clsid(class), props)
 }
 
-fn write_properties<F: Read + Seek + Write>(
+pub(crate) fn write_properties<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
     obj_path: &str,
     props: &[(u16, u16, Vec<u8>)],
@@ -913,8 +964,8 @@ fn write_properties<F: Read + Seek + Write>(
     let count = u16::try_from(props.len())
         .map_err(|_| err("objeto AAF excedeu o limite de propriedades"))?;
     let mut buf = Vec::with_capacity(4 + props.len() * 6 + 128);
-    buf.push(0x4C); // 'L' little-endian
-    buf.push(0x20); // versão 0x20
+    buf.push(0x4C); // 'L' little-endian (MS-02 §1.2.1.3.3)
+    buf.push(0x20); // _formatVersion 0x20
     buf.extend_from_slice(&count.to_le_bytes());
     for &(pid, sf, ref val) in props {
         let len = u16::try_from(val.len())
@@ -942,9 +993,9 @@ fn write_vector_index<F: Read + Seek + Write>(
 ) -> Result<(), NeovegError> {
     let n = u32::try_from(count).map_err(|_| err("vetor AAF excedeu o limite"))?;
     let mut buf = Vec::with_capacity(12 + count * 4);
-    buf.extend_from_slice(&n.to_le_bytes()); // count
-    buf.extend_from_slice(&n.to_le_bytes()); // firstFree
-    buf.extend_from_slice(&u32::MAX.to_le_bytes()); // lastFree
+    buf.extend_from_slice(&n.to_le_bytes());
+    buf.extend_from_slice(&n.to_le_bytes());
+    buf.extend_from_slice(&u32::MAX.to_le_bytes());
     for i in 0..n {
         buf.extend_from_slice(&i.to_le_bytes());
     }
@@ -952,25 +1003,30 @@ fn write_vector_index<F: Read + Seek + Write>(
     write_stream(comp, &path, &buf)
 }
 
-fn write_set_index<F: Read + Seek + Write>(
+pub(crate) fn write_set_index<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
     parent_path: &str,
     set_name: &str,
     ident_pid: u16,
     key_size: u8,
-    keys: &[&[u8]],
+    entries: &mut [SetIndexEntry<'_>],
 ) -> Result<(), NeovegError> {
-    let n = u32::try_from(keys.len()).map_err(|_| err("conjunto AAF excedeu o limite"))?;
-    let mut buf = Vec::with_capacity(15 + keys.len() * (8 + key_size as usize));
+    // MS-02 §1.2.1.6.4: entradas aparecem no índice em ordem crescente de chave.
+    entries.sort_by(|a, b| a.key.cmp(b.key));
+    let n = u32::try_from(entries.len()).map_err(|_| err("conjunto AAF excedeu o limite"))?;
+    let mut buf = Vec::with_capacity(15 + entries.len() * (8 + usize::from(key_size)));
     buf.extend_from_slice(&n.to_le_bytes());
     buf.extend_from_slice(&n.to_le_bytes());
     buf.extend_from_slice(&u32::MAX.to_le_bytes());
     buf.extend_from_slice(&ident_pid.to_le_bytes());
     buf.push(key_size);
-    for (idx, k) in keys.iter().enumerate() {
-        buf.extend_from_slice(&(idx as u32).to_le_bytes());
-        buf.extend_from_slice(&1u32.to_le_bytes()); // refCount
-        buf.extend_from_slice(k);
+    for e in entries {
+        if e.key.len() != usize::from(key_size) {
+            return Err(err("tamanho de chave inválido em índice de conjunto AAF"));
+        }
+        buf.extend_from_slice(&e.local_key.to_le_bytes());
+        buf.extend_from_slice(&e.ref_count.to_le_bytes());
+        buf.extend_from_slice(e.key);
     }
     let path = format!("{}/{set_name} index", parent_path.trim_end_matches('/'));
     write_stream(comp, &path, &buf)
@@ -979,13 +1035,9 @@ fn write_set_index<F: Read + Seek + Write>(
 fn write_referenced_properties<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
 ) -> Result<(), NeovegError> {
-    // 0: MetaDictionary -> ClassDefinitions
-    // 1: MetaDictionary -> TypeDefinitions
-    // 2: Header -> Dictionary -> DataDefinitions
-    // 3: Header -> Dictionary -> OperationDefinitions
     let paths: [&[u16]; 4] = [
-        &[PID_ROOT_METADICT, PID_METADICT_CLASSES, 0],
-        &[PID_ROOT_METADICT, PID_METADICT_TYPES, 0],
+        &[PID_ROOT_METADICT, 0x0003, 0],
+        &[PID_ROOT_METADICT, 0x0004, 0],
         &[
             PID_ROOT_HEADER,
             PID_HEADER_DICTIONARY,
@@ -1029,10 +1081,9 @@ fn export_media_path(m: &MediaItem) -> Option<String> {
 
 enum ExportSeg {
     Filler(i64),
-    Transition {
+    VideoDissolve {
         len: i64,
         cut_point: i64,
-        is_picture: bool,
     },
     Clip {
         len: i64,
@@ -1052,7 +1103,6 @@ struct ExportClip {
 }
 
 fn build_track_lanes(
-    project: &Project,
     track: &Track,
     slot_rate: FrameRate,
     master_by_media: &HashMap<Id, ([u8; 32], bool, bool)>,
@@ -1109,9 +1159,9 @@ fn build_track_lanes(
         return Vec::new();
     }
 
-    // Cada pista física no AAF aceita transição entre clipes adjacentes apenas
-    // quando a sobreposição é menor que os dois clipes; sobreposições puras vão
-    // para trilhas extras da mesma camada lógica.
+    // Vídeo suporta `OperationDef_VideoDissolve` (AS-01 §12.1) quando a sobreposição é
+    // estritamente menor que ambos os clipes. Sobreposições de áudio (sem AUID público
+    // nos registros SMPTE/MS-01) e demais sobreposições vão para slots paralelos.
     struct Lane {
         cursor: i64,
         last_clip_len: i64,
@@ -1137,13 +1187,12 @@ fn build_track_lanes(
                 lane.last_clip_len = clip.rec_len;
                 placed = true;
                 break;
-            } else if clip.has_transition && !lane.segs.is_empty() {
+            } else if kind_is_picture && clip.has_transition && !lane.segs.is_empty() {
                 let overlap = lane.cursor - clip.rec_start;
                 if overlap > 0 && overlap < lane.last_clip_len && overlap < clip.rec_len {
-                    lane.segs.push(ExportSeg::Transition {
+                    lane.segs.push(ExportSeg::VideoDissolve {
                         len: overlap,
                         cut_point: overlap / 2,
-                        is_picture: kind_is_picture,
                     });
                     lane.segs.push(ExportSeg::Clip {
                         len: clip.rec_len,
@@ -1176,19 +1225,21 @@ fn build_track_lanes(
             });
         }
     }
-    let _ = project;
     lanes.into_iter().map(|l| l.segs).collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ClipRef<'a> {
+    datadef_auid: &'a [u8; 16],
+    len: i64,
+    start: i64,
+    source_id: &'a [u8; 32],
+    source_slot_id: u32,
+}
+
 fn write_source_clip<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
     path: &str,
-    datadef_auid: &[u8; 16],
-    len: i64,
-    start: i64,
-    source_id: &[u8; 32],
-    source_slot_id: u32,
+    clip: &ClipRef<'_>,
 ) -> Result<(), NeovegError> {
     create_object(
         comp,
@@ -1198,51 +1249,58 @@ fn write_source_clip<F: Read + Seek + Write>(
             (
                 PID_COMPONENT_DATADEF,
                 SF_WEAK_REF,
-                weak_ref_auid(REF_IDX_DATA_DEFS, datadef_auid),
+                weak_ref_auid(REF_IDX_DATA_DEFS, PID_DEF_IDENT, clip.datadef_auid),
             ),
-            (PID_COMPONENT_LENGTH, SF_DATA, len.to_le_bytes().to_vec()),
-            (PID_CLIP_START, SF_DATA, start.to_le_bytes().to_vec()),
-            (PID_SOURCE_ID, SF_DATA, source_id.to_vec()),
+            (
+                PID_COMPONENT_LENGTH,
+                SF_DATA,
+                clip.len.to_le_bytes().to_vec(),
+            ),
+            (PID_CLIP_START, SF_DATA, clip.start.to_le_bytes().to_vec()),
+            (PID_SOURCE_ID, SF_DATA, clip.source_id.to_vec()),
             (
                 PID_SOURCE_SLOT_ID,
                 SF_DATA,
-                source_slot_id.to_le_bytes().to_vec(),
+                clip.source_slot_id.to_le_bytes().to_vec(),
             ),
         ],
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+struct SlotDesc<'a> {
+    slot_id: u32,
+    physical_track: u32,
+    name: Option<&'a str>,
+    edit_rate: FrameRate,
+}
+
 fn write_slot<F: Read + Seek + Write>(
     comp: &mut cfb::CompoundFile<F>,
     slot_path: &str,
-    slot_id: u32,
-    physical_track: u16,
-    edit_rate: FrameRate,
+    desc: &SlotDesc<'_>,
 ) -> Result<(), NeovegError> {
     let mut rate_bytes = Vec::with_capacity(8);
-    rate_bytes.extend_from_slice(&(edit_rate.num as i32).to_le_bytes());
-    rate_bytes.extend_from_slice(&(edit_rate.den as i32).to_le_bytes());
-    create_object(
-        comp,
-        slot_path,
-        CLASS_TIMELINE_MOB_SLOT,
-        &[
-            (PID_SLOT_ID, SF_DATA, slot_id.to_le_bytes().to_vec()),
-            (
-                PID_SLOT_PHYSICAL_TRACK,
-                SF_DATA,
-                physical_track.to_le_bytes().to_vec(),
-            ),
-            (PID_SLOT_ORIGIN, SF_DATA, 0i64.to_le_bytes().to_vec()),
-            (PID_SLOT_EDIT_RATE, SF_DATA, rate_bytes),
-            (
-                PID_SLOT_SEGMENT,
-                SF_STRONG_REF,
-                encode_utf16le_nul("Segment-4803"),
-            ),
-        ],
-    )
+    rate_bytes.extend_from_slice(&(desc.edit_rate.num as i32).to_le_bytes());
+    rate_bytes.extend_from_slice(&(desc.edit_rate.den as i32).to_le_bytes());
+    let mut props = vec![
+        (PID_SLOT_ID, SF_DATA, desc.slot_id.to_le_bytes().to_vec()),
+        (
+            PID_SLOT_PHYSICAL_TRACK,
+            SF_DATA,
+            desc.physical_track.to_le_bytes().to_vec(),
+        ),
+        (PID_SLOT_ORIGIN, SF_DATA, 0i64.to_le_bytes().to_vec()),
+        (PID_SLOT_EDIT_RATE, SF_DATA, rate_bytes),
+        (
+            PID_SLOT_SEGMENT,
+            SF_STRONG_REF,
+            encode_utf16le_nul("Segment-4803"),
+        ),
+    ];
+    if let Some(name) = desc.name.filter(|s| !s.trim().is_empty()) {
+        props.push((PID_SLOT_NAME, SF_DATA, encode_utf16le_nul(name)));
+    }
+    create_object(comp, slot_path, CLASS_TIMELINE_MOB_SLOT, &props)
 }
 
 struct ExportMediaPlan {
@@ -1256,11 +1314,17 @@ struct ExportMediaPlan {
     master_mob_id: [u8; 32],
 }
 
+struct CompSlotPlan {
+    is_pic: bool,
+    phys: u32,
+    name: String,
+    segs: Vec<ExportSeg>,
+}
+
 fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
     let ts = aaf_timestamp();
     let seq_rate = export_slot_rate(project.settings.fps);
 
-    // Mapeia todas as mídias baseadas em arquivo usadas no projeto (ou listadas no Projeto).
     let mut used_ids: HashSet<Id> = HashSet::new();
     for tr in &project.tracks {
         for ev in &tr.events {
@@ -1318,53 +1382,66 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         });
     }
 
-    // Constrói os slots da CompositionMob respeitando a convenção AAF:
-    // camadas de vídeo de baixo para cima (`rev()`), seguidas das trilhas de áudio.
-    let mut comp_slots: Vec<(bool, u16, Vec<ExportSeg>)> = Vec::new();
+    // Camadas de vídeo de baixo para cima (`rev()`), seguidas das trilhas de áudio.
+    let mut comp_slots: Vec<CompSlotPlan> = Vec::new();
     let mut remaining_clips = MAX_AAF_CLIPS;
     let video_tracks: Vec<&Track> = project
         .tracks
         .iter()
         .filter(|t| t.kind == TrackKind::Video && !t.is_adjustment())
         .collect();
-    let mut phys_v: u16 = 0;
+    let mut phys_v: u32 = 0;
     for tr in video_tracks.iter().rev() {
-        let lanes = build_track_lanes(
-            project,
-            tr,
-            seq_rate,
-            &master_by_media,
-            &mut remaining_clips,
-        );
+        let lanes = build_track_lanes(tr, seq_rate, &master_by_media, &mut remaining_clips);
         if lanes.is_empty() {
             phys_v = phys_v.saturating_add(1);
-            comp_slots.push((true, phys_v, Vec::new()));
+            comp_slots.push(CompSlotPlan {
+                is_pic: true,
+                phys: phys_v,
+                name: tr.name.clone(),
+                segs: Vec::new(),
+            });
         } else {
             for segs in lanes {
                 phys_v = phys_v.saturating_add(1);
-                comp_slots.push((true, phys_v, segs));
+                comp_slots.push(CompSlotPlan {
+                    is_pic: true,
+                    phys: phys_v,
+                    name: tr.name.clone(),
+                    segs,
+                });
             }
         }
     }
-    let mut phys_a: u16 = 0;
+    let mut phys_a: u32 = 0;
     for tr in project.tracks.iter().filter(|t| t.kind == TrackKind::Audio) {
-        let lanes = build_track_lanes(
-            project,
-            tr,
-            seq_rate,
-            &master_by_media,
-            &mut remaining_clips,
-        );
+        let lanes = build_track_lanes(tr, seq_rate, &master_by_media, &mut remaining_clips);
         if lanes.is_empty() {
             phys_a = phys_a.saturating_add(1);
-            comp_slots.push((false, phys_a, Vec::new()));
+            comp_slots.push(CompSlotPlan {
+                is_pic: false,
+                phys: phys_a,
+                name: tr.name.clone(),
+                segs: Vec::new(),
+            });
         } else {
             for segs in lanes {
                 phys_a = phys_a.saturating_add(1);
-                comp_slots.push((false, phys_a, segs));
+                comp_slots.push(CompSlotPlan {
+                    is_pic: false,
+                    phys: phys_a,
+                    name: tr.name.clone(),
+                    segs,
+                });
             }
         }
     }
+
+    let has_video_dissolve = comp_slots.iter().any(|slot| {
+        slot.segs
+            .iter()
+            .any(|seg| matches!(seg, ExportSeg::VideoDissolve { .. }))
+    });
 
     let comp_mob_id = make_mob_id(
         b"CMP",
@@ -1379,7 +1456,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
 
     let mut comp = cfb::CompoundFile::create(Cursor::new(Vec::new()))
         .map_err(|e| err(format!("falha ao inicializar contêiner AAF: {e}")))?;
-    comp.set_storage_clsid("/", root_clsid())
+    comp.set_storage_clsid("/", AAF_SIGNATURE_SSBINARY)
         .map_err(|e| err(format!("falha ao gravar CLSID raiz AAF: {e}")))?;
     write_properties(
         &mut comp,
@@ -1398,45 +1475,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         ],
     )?;
     write_referenced_properties(&mut comp)?;
-
-    // /MetaDictionary-1 (conjunto vazio para definições padrão embutidas MS-02)
-    let md = "/MetaDictionary-1";
-    comp.create_storage(md)
-        .map_err(|e| err(format!("falha ao criar storage AAF '{md}': {e}")))?;
-    comp.set_storage_clsid(md, metadict_clsid())
-        .map_err(|e| err(format!("falha ao definir CLSID de '{md}': {e}")))?;
-    write_properties(
-        &mut comp,
-        md,
-        &[
-            (
-                PID_METADICT_CLASSES,
-                SF_STRONG_REF_SET,
-                encode_utf16le_nul("ClassDefinitions-3"),
-            ),
-            (
-                PID_METADICT_TYPES,
-                SF_STRONG_REF_SET,
-                encode_utf16le_nul("TypeDefinitions-4"),
-            ),
-        ],
-    )?;
-    write_set_index(
-        &mut comp,
-        md,
-        "ClassDefinitions-3",
-        PID_METADEF_IDENT,
-        16,
-        &[],
-    )?;
-    write_set_index(
-        &mut comp,
-        md,
-        "TypeDefinitions-4",
-        PID_METADEF_IDENT,
-        16,
-        &[],
-    )?;
+    crate::aaf_metadict::write_meta_dictionary(&mut comp)?;
 
     // /Header-2
     let hdr = "/Header-2";
@@ -1480,7 +1519,6 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         ],
     )?;
 
-    // Identifi-ionList-3b06
     let id_dir = "/Header-2/Identifi-ionList-3b06{0}";
     create_object(
         &mut comp,
@@ -1538,7 +1576,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         (&DD_PICTURE, "DataDef_Picture", "Picture data"),
         (&DD_SOUND, "DataDef_Sound", "Sound data"),
     ];
-    let mut dd_keys: Vec<&[u8]> = Vec::with_capacity(data_defs.len());
+    let mut dd_entries: Vec<SetIndexEntry<'_>> = Vec::with_capacity(data_defs.len());
     for (i, &(auid, name, desc)) in data_defs.iter().enumerate() {
         let p = format!("{dict}/DataDefinitions-2605{{{i:x}}}");
         create_object(
@@ -1551,7 +1589,11 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                 (PID_DEF_DESC, SF_DATA, encode_utf16le_nul(desc)),
             ],
         )?;
-        dd_keys.push(auid);
+        dd_entries.push(SetIndexEntry {
+            local_key: i as u32,
+            ref_count: 1,
+            key: auid,
+        });
     }
     write_set_index(
         &mut comp,
@@ -1559,33 +1601,33 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         "DataDefinitions-2605",
         PID_DEF_IDENT,
         16,
-        &dd_keys,
+        &mut dd_entries,
     )?;
 
-    let op_defs: [(&[u8; 16], &str, &[u8; 16]); 2] = [
-        (&OP_VIDEO_DISSOLVE, "Video Dissolve", &DD_PICTURE),
-        (&OP_AUDIO_DISSOLVE, "Audio Dissolve", &DD_SOUND),
-    ];
-    let mut op_keys: Vec<&[u8]> = Vec::with_capacity(op_defs.len());
-    for (i, &(auid, name, dd_auid)) in op_defs.iter().enumerate() {
-        let p = format!("{dict}/Operatio-nitions-2603{{{i:x}}}");
+    let mut op_entries: Vec<SetIndexEntry<'_>> = Vec::new();
+    if has_video_dissolve {
+        let p = format!("{dict}/Operatio-nitions-2603{{0}}");
         create_object(
             &mut comp,
             &p,
             CLASS_OPERATION_DEFINITION,
             &[
-                (PID_DEF_IDENT, SF_DATA, auid.to_vec()),
-                (PID_DEF_NAME, SF_DATA, encode_utf16le_nul(name)),
-                (PID_DEF_DESC, SF_DATA, encode_utf16le_nul("")),
+                (PID_DEF_IDENT, SF_DATA, OP_VIDEO_DISSOLVE.to_vec()),
+                (PID_DEF_NAME, SF_DATA, encode_utf16le_nul("Video Dissolve")),
+                (PID_DEF_DESC, SF_DATA, encode_utf16le_nul("Video Dissolve")),
                 (
                     PID_OPDEF_DATADEF,
                     SF_WEAK_REF,
-                    weak_ref_auid(REF_IDX_DATA_DEFS, dd_auid),
+                    weak_ref_auid(REF_IDX_DATA_DEFS, PID_DEF_IDENT, &DD_PICTURE),
                 ),
                 (PID_OPDEF_NUM_INPUTS, SF_DATA, 2i32.to_le_bytes().to_vec()),
             ],
         )?;
-        op_keys.push(auid);
+        op_entries.push(SetIndexEntry {
+            local_key: 0,
+            ref_count: 1,
+            key: &OP_VIDEO_DISSOLVE,
+        });
     }
     write_set_index(
         &mut comp,
@@ -1593,7 +1635,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         "Operatio-nitions-2603",
         PID_DEF_IDENT,
         16,
-        &op_keys,
+        &mut op_entries,
     )?;
 
     // /Header-2/Content-3b03
@@ -1609,14 +1651,14 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         )],
     )?;
 
-    let mut mob_idx = 0usize;
-    let mut mob_keys: Vec<[u8; 32]> = Vec::new();
+    let mut mob_entries: Vec<(u32, [u8; 32])> = Vec::new();
+    let mut mob_idx: u32 = 0;
 
     for mp in &media_plans {
-        // 1) SourceMob
-        let src_path = format!("{content}/Mobs-1901{{{mob_idx:x}}}");
+        let src_lk = mob_idx;
         mob_idx += 1;
-        mob_keys.push(mp.source_mob_id);
+        let src_path = format!("{content}/Mobs-1901{{{src_lk:x}}}");
+        mob_entries.push((src_lk, mp.source_mob_id));
         create_object(
             &mut comp,
             &src_path,
@@ -1645,11 +1687,31 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         if mp.has_snd {
             src_slots.push((2, &DD_SOUND));
         }
+        let zero_mob = [0u8; 32];
         for (si, &(slot_id, dd_auid)) in src_slots.iter().enumerate() {
             let sp = format!("{src_path}/Slots-4403{{{si:x}}}");
-            write_slot(&mut comp, &sp, slot_id, 0, mp.rate)?;
+            write_slot(
+                &mut comp,
+                &sp,
+                &SlotDesc {
+                    slot_id,
+                    physical_track: 0,
+                    name: None,
+                    edit_rate: mp.rate,
+                },
+            )?;
             let segp = format!("{sp}/Segment-4803");
-            write_source_clip(&mut comp, &segp, dd_auid, mp.dur_frames, 0, &[0u8; 32], 0)?;
+            write_source_clip(
+                &mut comp,
+                &segp,
+                &ClipRef {
+                    datadef_auid: dd_auid,
+                    len: mp.dur_frames,
+                    start: 0,
+                    source_id: &zero_mob,
+                    source_slot_id: 0,
+                },
+            )?;
         }
         write_vector_index(&mut comp, &src_path, "Slots-4403", src_slots.len())?;
 
@@ -1673,10 +1735,10 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         )?;
         write_vector_index(&mut comp, &desc_path, "Locator-2f01", 1)?;
 
-        // 2) MasterMob
-        let mst_path = format!("{content}/Mobs-1901{{{mob_idx:x}}}");
+        let mst_lk = mob_idx;
         mob_idx += 1;
-        mob_keys.push(mp.master_mob_id);
+        let mst_path = format!("{content}/Mobs-1901{{{mst_lk:x}}}");
+        mob_entries.push((mst_lk, mp.master_mob_id));
         create_object(
             &mut comp,
             &mst_path,
@@ -1695,24 +1757,36 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         )?;
         for (si, &(slot_id, dd_auid)) in src_slots.iter().enumerate() {
             let sp = format!("{mst_path}/Slots-4403{{{si:x}}}");
-            write_slot(&mut comp, &sp, slot_id, 0, mp.rate)?;
+            write_slot(
+                &mut comp,
+                &sp,
+                &SlotDesc {
+                    slot_id,
+                    physical_track: 0,
+                    name: None,
+                    edit_rate: mp.rate,
+                },
+            )?;
             let segp = format!("{sp}/Segment-4803");
             write_source_clip(
                 &mut comp,
                 &segp,
-                dd_auid,
-                mp.dur_frames,
-                0,
-                &mp.source_mob_id,
-                slot_id,
+                &ClipRef {
+                    datadef_auid: dd_auid,
+                    len: mp.dur_frames,
+                    start: 0,
+                    source_id: &mp.source_mob_id,
+                    source_slot_id: slot_id,
+                },
             )?;
         }
         write_vector_index(&mut comp, &mst_path, "Slots-4403", src_slots.len())?;
     }
 
-    // 3) CompositionMob
-    let cmp_path = format!("{content}/Mobs-1901{{{mob_idx:x}}}");
-    mob_keys.push(comp_mob_id);
+    // CompositionMob
+    let cmp_lk = mob_idx;
+    let cmp_path = format!("{content}/Mobs-1901{{{cmp_lk:x}}}");
+    mob_entries.push((cmp_lk, comp_mob_id));
     create_object(
         &mut comp,
         &cmp_path,
@@ -1730,19 +1804,28 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
         ],
     )?;
 
-    for (si, (is_pic, phys, segs)) in comp_slots.iter().enumerate() {
+    for (si, slot) in comp_slots.iter().enumerate() {
         let slot_id = (si + 1) as u32;
-        let dd_auid = if *is_pic { &DD_PICTURE } else { &DD_SOUND };
+        let dd_auid = if slot.is_pic { &DD_PICTURE } else { &DD_SOUND };
         let sp = format!("{cmp_path}/Slots-4403{{{si:x}}}");
-        write_slot(&mut comp, &sp, slot_id, *phys, seq_rate)?;
+        write_slot(
+            &mut comp,
+            &sp,
+            &SlotDesc {
+                slot_id,
+                physical_track: slot.phys,
+                name: Some(&slot.name),
+                edit_rate: seq_rate,
+            },
+        )?;
 
         let mut total_len = 0i64;
-        for seg in segs {
+        for seg in &slot.segs {
             match seg {
                 ExportSeg::Filler(l) | ExportSeg::Clip { len: l, .. } => {
                     total_len = total_len.saturating_add(*l).min(MAX_UNITS);
                 }
-                ExportSeg::Transition { len: l, .. } => {
+                ExportSeg::VideoDissolve { len: l, .. } => {
                     total_len = total_len.saturating_sub(*l).max(0);
                 }
             }
@@ -1756,7 +1839,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                 (
                     PID_COMPONENT_DATADEF,
                     SF_WEAK_REF,
-                    weak_ref_auid(REF_IDX_DATA_DEFS, dd_auid),
+                    weak_ref_auid(REF_IDX_DATA_DEFS, PID_DEF_IDENT, dd_auid),
                 ),
                 (
                     PID_COMPONENT_LENGTH,
@@ -1771,7 +1854,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
             ],
         )?;
 
-        for (ci, seg) in segs.iter().enumerate() {
+        for (ci, seg) in slot.segs.iter().enumerate() {
             let cp = format!("{seq_path}/Components-1001{{{ci:x}}}");
             match seg {
                 ExportSeg::Filler(len) => {
@@ -1783,17 +1866,13 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                             (
                                 PID_COMPONENT_DATADEF,
                                 SF_WEAK_REF,
-                                weak_ref_auid(REF_IDX_DATA_DEFS, dd_auid),
+                                weak_ref_auid(REF_IDX_DATA_DEFS, PID_DEF_IDENT, dd_auid),
                             ),
                             (PID_COMPONENT_LENGTH, SF_DATA, len.to_le_bytes().to_vec()),
                         ],
                     )?;
                 }
-                ExportSeg::Transition {
-                    len,
-                    cut_point,
-                    is_picture,
-                } => {
+                ExportSeg::VideoDissolve { len, cut_point } => {
                     create_object(
                         &mut comp,
                         &cp,
@@ -1802,7 +1881,7 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                             (
                                 PID_COMPONENT_DATADEF,
                                 SF_WEAK_REF,
-                                weak_ref_auid(REF_IDX_DATA_DEFS, dd_auid),
+                                weak_ref_auid(REF_IDX_DATA_DEFS, PID_DEF_IDENT, dd_auid),
                             ),
                             (PID_COMPONENT_LENGTH, SF_DATA, len.to_le_bytes().to_vec()),
                             (
@@ -1818,11 +1897,6 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                         ],
                     )?;
                     let og_path = format!("{cp}/OperationGroup-1801");
-                    let op_auid = if *is_picture {
-                        &OP_VIDEO_DISSOLVE
-                    } else {
-                        &OP_AUDIO_DISSOLVE
-                    };
                     create_object(
                         &mut comp,
                         &og_path,
@@ -1831,13 +1905,13 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                             (
                                 PID_COMPONENT_DATADEF,
                                 SF_WEAK_REF,
-                                weak_ref_auid(REF_IDX_DATA_DEFS, dd_auid),
+                                weak_ref_auid(REF_IDX_DATA_DEFS, PID_DEF_IDENT, dd_auid),
                             ),
                             (PID_COMPONENT_LENGTH, SF_DATA, len.to_le_bytes().to_vec()),
                             (
                                 PID_OPGROUP_OP_DEF,
                                 SF_WEAK_REF,
-                                weak_ref_auid(REF_IDX_OP_DEFS, op_auid),
+                                weak_ref_auid(REF_IDX_OP_DEFS, PID_DEF_IDENT, &OP_VIDEO_DISSOLVE),
                             ),
                         ],
                     )?;
@@ -1848,22 +1922,39 @@ fn export_to_bytes(project: &Project) -> Result<Vec<u8>, NeovegError> {
                     master_mob,
                     slot_id,
                 } => {
-                    write_source_clip(&mut comp, &cp, dd_auid, *len, *start, master_mob, *slot_id)?;
+                    write_source_clip(
+                        &mut comp,
+                        &cp,
+                        &ClipRef {
+                            datadef_auid: dd_auid,
+                            len: *len,
+                            start: *start,
+                            source_id: master_mob,
+                            source_slot_id: *slot_id,
+                        },
+                    )?;
                 }
             }
         }
-        write_vector_index(&mut comp, &seq_path, "Components-1001", segs.len())?;
+        write_vector_index(&mut comp, &seq_path, "Components-1001", slot.segs.len())?;
     }
     write_vector_index(&mut comp, &cmp_path, "Slots-4403", comp_slots.len())?;
 
-    let mob_key_refs: Vec<&[u8]> = mob_keys.iter().map(|k| k.as_slice()).collect();
+    let mut mob_idx_entries: Vec<SetIndexEntry<'_>> = mob_entries
+        .iter()
+        .map(|(lk, id)| SetIndexEntry {
+            local_key: *lk,
+            ref_count: 1,
+            key: id.as_slice(),
+        })
+        .collect();
     write_set_index(
         &mut comp,
         content,
         "Mobs-1901",
         PID_MOB_ID,
         32,
-        &mob_key_refs,
+        &mut mob_idx_entries,
     )?;
 
     comp.flush()
@@ -2018,6 +2109,88 @@ mod tests {
     }
 
     #[test]
+    fn ms02_signature_metadict_sorted_indices_and_audio_parallel_slots() {
+        let mut p = Project::new_default();
+        let fps = FrameRate::FPS_25;
+        p.settings.fps = fps;
+        let m = MediaItem {
+            id: new_id(),
+            name: "audio_v".into(),
+            source: MediaSource::File {
+                path: "C:/midia/a.mov".into(),
+            },
+            duration: Some(fps.frame_to_ticks(200)),
+            has_video: true,
+            has_audio: true,
+            width: 1920,
+            height: 1080,
+            fps: Some(fps),
+            info: String::new(),
+            proxy_path: None,
+        };
+        p.media.push(m.clone());
+        p.tracks[0]
+            .events
+            .push(Event::new(&m, Ticks::ZERO, fps.frame_to_ticks(40)));
+        // Sobreposição de áudio mesmo marcada com transição vai para slot paralelo (sem AUID inventado).
+        let mut a2 = Event::new(&m, fps.frame_to_ticks(10), fps.frame_to_ticks(40));
+        a2.transition = Some(TransitionSpec {
+            kind: TransitionKind::Dissolve,
+            softness: 0.5,
+        });
+        p.tracks[1].events = vec![Event::new(&m, Ticks::ZERO, fps.frame_to_ticks(40)), a2];
+
+        let bytes = export_aaf_bytes(&p).expect("exporta AAF");
+        let mut comp = cfb::CompoundFile::open(Cursor::new(&bytes)).expect("abre CFB");
+        let root_entry = comp.entry("/").expect("raiz");
+        assert_eq!(root_entry.clsid(), &AAF_SIGNATURE_SSBINARY);
+
+        // MetaDictionary populado conforme MS-01 §5 e índices de conjuntos ordenados (MS-02 §1.2.1.6.4).
+        for (idx_path, key_len) in [
+            ("/MetaDictionary-1/ClassDefinitions-3 index", 16usize),
+            ("/MetaDictionary-1/TypeDefinitions-4 index", 16usize),
+            (
+                "/Header-2/Dictionary-3b04/DataDefinitions-2605 index",
+                16usize,
+            ),
+            ("/Header-2/Content-3b03/Mobs-1901 index", 32usize),
+        ] {
+            let mut s = comp.open_stream(idx_path).expect(idx_path);
+            let mut raw = Vec::new();
+            s.read_to_end(&mut raw).expect("lê índice");
+            let cnt = u32::from_le_bytes(raw[..4].try_into().expect("cnt")) as usize;
+            assert!(cnt > 0, "{idx_path} não pode estar vazio");
+            let keys: Vec<&[u8]> = raw[15..]
+                .chunks_exact(8 + key_len)
+                .map(|c| &c[8..])
+                .collect();
+            assert_eq!(keys.len(), cnt);
+            assert!(
+                keys.windows(2).all(|w| w[0] < w[1]),
+                "{idx_path} desordenado"
+            );
+        }
+
+        // Nenhum OperationDefinition inventado quando não há transição de vídeo.
+        let mut op_idx = comp
+            .open_stream("/Header-2/Dictionary-3b04/Operatio-nitions-2603 index")
+            .expect("op index");
+        let mut op_raw = Vec::new();
+        op_idx.read_to_end(&mut op_raw).expect("lê op index");
+        assert_eq!(u32::from_le_bytes(op_raw[..4].try_into().expect("cnt")), 0);
+
+        let (re, warn) = import_aaf_bytes(&bytes).expect("reimporta");
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(
+            re.tracks
+                .iter()
+                .filter(|t| t.kind == TrackKind::Audio)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn roundtrip_video_audio_transitions_and_gaps() {
         let mut p = Project::new_default();
         p.notes = "Projeto AAF Completo".into();
@@ -2103,7 +2276,6 @@ mod tests {
             .filter(|t| t.kind == TrackKind::Video)
             .collect();
         assert_eq!(v_tracks.len(), 2);
-        // Ordem preservada: topo antes da base
         assert_eq!(v_tracks[0].events.len(), 1);
         assert_eq!(v_tracks[0].events[0].start, fps.frame_to_ticks(15));
         assert_eq!(v_tracks[0].events[0].length, fps.frame_to_ticks(30));
@@ -2148,7 +2320,6 @@ mod tests {
         assert_eq!(re.notes, "Neoveg Timeline");
         assert!(!re.tracks.is_empty());
 
-        // Eventos sobrepostos sem transição vão para faixas separadas; NTSC DF é preservado.
         let mut p = Project::new_default();
         p.settings.fps = FrameRate::FPS_29_97;
         p.settings.drop_frame = true;
@@ -2313,13 +2484,18 @@ mod tests {
         let script = concat!(
             "import sys, aaf2\n",
             "with aaf2.open(sys.argv[1], 'r') as f:\n",
+            "    assert len(f.metadict['ClassDefinitions'].value) >= 40\n",
+            "    assert len(f.metadict['TypeDefinitions'].value) >= 50\n",
             "    comps = list(f.content.compositionmobs())\n",
             "    assert len(comps) == 1, len(comps)\n",
             "    assert comps[0].name == 'Oraculo AAF', comps[0].name\n",
             "    slots = list(comps[0].slots)\n",
             "    assert len(slots) == 2, len(slots)\n",
+            "    assert slots[0]['PhysicalTrackNumber'].value == 1\n",
+            "    assert slots[0].name == 'Vídeo 1', slots[0].name\n",
             "    v_comps = list(slots[0].segment.components)\n",
             "    assert len(v_comps) == 3, v_comps\n",
+            "    assert v_comps[1]['OperationGroup'].value['Operation'].value['Name'].value == 'Video Dissolve'\n",
             "    srcs = list(f.content.sourcemobs())\n",
             "    assert len(srcs) == 2, len(srcs)\n",
             "    urls = [l['URLString'].value for s in srcs for l in s.descriptor.locator]\n",
