@@ -428,6 +428,82 @@ pub fn render_frame_preview(
     out
 }
 
+/// Reamostra o retângulo `(sx, sy, sw, sh)` de `src` para o retângulo
+/// `(dx, dy, dw, dh)` dentro de um quadro de dimensões `(w, h)` sobre fundo preto opaco.
+#[allow(clippy::too_many_arguments)]
+pub fn resample_rect(
+    src: &Frame,
+    sx: f32,
+    sy: f32,
+    sw: f32,
+    sh: f32,
+    w: usize,
+    h: usize,
+    dx: f32,
+    dy: f32,
+    dw: f32,
+    dh: f32,
+) -> Frame {
+    let w = w.max(1);
+    let h = h.max(1);
+    let mut out = Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]);
+    if src.w == 0 || src.h == 0 || sw <= 0.0 || sh <= 0.0 || dw <= 0.0 || dh <= 0.0 {
+        return out;
+    }
+    let rx = sw / dw;
+    let ry = sh / dh;
+    let d_x0 = dx.floor().max(0.0) as usize;
+    let d_y0 = dy.floor().max(0.0) as usize;
+    let d_x1 = (dx + dw).ceil().clamp(0.0, w as f32) as usize;
+    let d_y1 = (dy + dh).ceil().clamp(0.0, h as f32) as usize;
+    out.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        if y < d_y0 || y >= d_y1 {
+            return;
+        }
+        let src_y = sy + (y as f32 + 0.5 - dy) * ry;
+        if src_y < 0.0 || src_y > src.h as f32 {
+            return;
+        }
+        for (x, p) in row.iter_mut().enumerate().take(d_x1).skip(d_x0) {
+            let src_x = sx + (x as f32 + 0.5 - dx) * rx;
+            if src_x < 0.0 || src_x > src.w as f32 {
+                continue;
+            }
+            let c = src.sample(src_x, src_y);
+            let ia = (1.0 - c[3]).clamp(0.0, 1.0);
+            *p = [c[0], c[1], c[2], (c[3] + ia).clamp(0.0, 1.0)];
+        }
+    });
+    out
+}
+
+/// Redimensiona proporcionalmente `src` para caber em `(w, h)` mantendo proporção.
+pub fn scale_frame_fit(src: &Frame, w: usize, h: usize) -> Frame {
+    let (w, h) = (w.max(1), h.max(1));
+    if src.w == w && src.h == h {
+        return src.clone();
+    }
+    if src.w == 0 || src.h == 0 {
+        return Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]);
+    }
+    let scale = (w as f32 / src.w as f32).min(h as f32 / src.h as f32);
+    let dw = src.w as f32 * scale;
+    let dh = src.h as f32 * scale;
+    resample_rect(
+        src,
+        0.0,
+        0.0,
+        src.w as f32,
+        src.h as f32,
+        w,
+        h,
+        (w as f32 - dw) * 0.5,
+        (h as f32 - dh) * 0.5,
+        dw,
+        dh,
+    )
+}
+
 #[cfg(test)]
 mod adjustment_tests {
     use super::*;

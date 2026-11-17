@@ -19,6 +19,7 @@ mod dialogs;
 mod dock;
 mod edit;
 mod edit_details;
+mod encoder_panel;
 mod icons;
 pub mod layout;
 mod panels;

@@ -30,6 +30,11 @@ enum Cli {
         proj: PathBuf,
         out: PathBuf,
     },
+    Encode {
+        src: PathBuf,
+        out: PathBuf,
+        preset_id: Option<String>,
+    },
     RunScript(PathBuf),
     RunCommand {
         id: String,
@@ -51,6 +56,16 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         ["--render", proj, out] => Ok(Cli::Render {
             proj: PathBuf::from(proj),
             out: PathBuf::from(out),
+        }),
+        ["--encode", src, out] => Ok(Cli::Encode {
+            src: PathBuf::from(src),
+            out: PathBuf::from(out),
+            preset_id: None,
+        }),
+        ["--encode", src, out, preset] => Ok(Cli::Encode {
+            src: PathBuf::from(src),
+            out: PathBuf::from(out),
+            preset_id: Some((*preset).to_string()),
         }),
         ["--run-script", s] => Ok(Cli::RunScript(PathBuf::from(s))),
         ["--command", id] => Ok(Cli::RunCommand {
@@ -100,12 +115,83 @@ fn render_cli(proj_path: &std::path::Path, out_path: &std::path::Path) -> anyhow
     Ok(())
 }
 
+fn encode_cli(
+    src_path: &std::path::Path,
+    out_path: &std::path::Path,
+    preset_id: Option<&str>,
+) -> anyhow::Result<()> {
+    use neoveg_engine::encoder::presets::PresetCatalog;
+    use neoveg_engine::encoder::worker::encode_item_sync;
+    use neoveg_engine::encoder::{EncoderState, JobStatus};
+
+    let cat = PresetCatalog::default();
+    let mut state = EncoderState::default();
+    let id = if src_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("neoveg") || e.eq_ignore_ascii_case("nvp"))
+        .unwrap_or(false)
+    {
+        let (p, _) = model::Project::load_file(src_path).map_err(anyhow::Error::msg)?;
+        state.add_project_snapshot(
+            src_path.display().to_string(),
+            Some(src_path.to_path_buf()),
+            p,
+            None,
+            &cat,
+        )
+    } else {
+        state.add_media_file(src_path.to_path_buf(), &cat)?
+    };
+    if let Some(pid) = preset_id {
+        if state.apply_preset_or_group(id, &cat, pid, false) == 0 {
+            anyhow::bail!("predefinição ou grupo desconhecido: {pid}");
+        }
+    }
+    if let Some(item) = state.items.iter_mut().find(|i| i.id == id) {
+        for (idx, out) in item.outputs.iter_mut().enumerate() {
+            if idx == 0 && preset_id.is_none() {
+                let fmt = render::RenderFormat::from_path(out_path);
+                out.format = fmt;
+                out.output_path = out_path.to_path_buf();
+            } else if idx == 0 {
+                out.output_path = out_path.to_path_buf();
+            } else {
+                let dir = out_path
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let stem = out_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "saida".into());
+                out.output_path = dir.join(format!("{stem}_{idx}.{}", out.format.ext()));
+            }
+        }
+        let results = encode_item_sync(item, &state.prefs, None);
+        for r in &results {
+            if !matches!(r.status, JobStatus::Done | JobStatus::DoneWithWarnings) {
+                anyhow::bail!(
+                    "falha no Neoveg Encoder ({:?}): {}",
+                    r.status,
+                    r.message.as_deref().unwrap_or("erro desconhecido")
+                );
+            }
+            if let Some(p) = &r.final_output_path {
+                eprintln!("Codificado: {}", p.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 const HELP: &str = "Uso:
-  neoveg [--open] [projeto.neoveg | mídia]  abre a interface gráfica
-  neoveg --render projeto.neoveg saida.ext  renderiza sem interface (.mp4, .mov, .wmv, .avi, .gif, .y4m, sequências ou áudio)
-  neoveg --run-script script.<cs|dll>       executa script C#/.NET (ScriptPortal.Vegas) via netcorehost
-  neoveg --command <id> [projeto [saida]]   executa comando da Tabela Única sem interface
-  neoveg --list-commands                    lista os comandos e atalhos disponíveis";
+  neoveg [--open] [projeto.neoveg | mídia]      abre a interface gráfica
+  neoveg --render projeto.neoveg saida.ext      renderiza sem interface
+  neoveg --encode entrada saida [predefinicao]  transcodifica via Neoveg Encoder
+  neoveg --run-script script.<cs|dll>           executa script C#/.NET (ScriptPortal.Vegas) via netcorehost
+  neoveg --command <id> [projeto [saida]]       executa comando da Tabela Única sem interface
+  neoveg --list-commands                        lista os comandos e atalhos disponíveis";
 
 /// Imprime o resultado de uma sondagem em JSON e devolve o código de saída.
 fn print_probe<T: serde::Serialize>(res: Result<T, String>) -> i32 {
@@ -190,6 +276,17 @@ fn main() -> anyhow::Result<()> {
             }
             return Ok(());
         }
+        Ok(Cli::Encode {
+            src,
+            out,
+            preset_id,
+        }) => {
+            if let Err(e) = encode_cli(&src, &out, preset_id.as_deref()) {
+                eprintln!("erro no Neoveg Encoder: {e:#}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         Ok(Cli::RunScript(s)) => {
             let mut ctx = neoveg_scripting::ScriptContext::new(model::Project::new_default());
             if let Err(e) = neoveg_scripting::run_cs_script(&s, &mut ctx) {
@@ -257,6 +354,28 @@ mod tests {
             Ok(Cli::Render {
                 proj: PathBuf::from("a"),
                 out: PathBuf::from("b"),
+            })
+        );
+        assert_eq!(
+            parse_args(&a(&["neoveg", "--encode", "in.mp4", "out.avi"])),
+            Ok(Cli::Encode {
+                src: PathBuf::from("in.mp4"),
+                out: PathBuf::from("out.avi"),
+                preset_id: None,
+            })
+        );
+        assert_eq!(
+            parse_args(&a(&[
+                "neoveg",
+                "--encode",
+                "a.neoveg",
+                "b.mp4",
+                "sys.web_1080p_hq"
+            ])),
+            Ok(Cli::Encode {
+                src: PathBuf::from("a.neoveg"),
+                out: PathBuf::from("b.mp4"),
+                preset_id: Some("sys.web_1080p_hq".into()),
             })
         );
         assert_eq!(

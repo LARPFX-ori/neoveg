@@ -905,3 +905,37 @@ fn fuzz_audio_extra() {
         }
     }
 }
+
+#[test]
+fn fuzz_encoder_parsers() {
+    use crate::encoder::effects::CubeLut;
+    use crate::encoder::presets::import_preset_str;
+    use crate::encoder::{load_state, EncoderState};
+
+    let cube_seed =
+        b"TITLE \"Fuzz\"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    for (i, m) in mutations(cube_seed, 200, 0xEC01).iter().enumerate() {
+        let s = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("encoder.cube", i, || {
+            let _ = CubeLut::parse(&s);
+        });
+    }
+
+    let preset_seed = br#"{"magic":"neovegpreset","version":1,"preset":{"id":"usr_1","name":"Teste","category":"Custom","format":"Mp4H264"}}"#;
+    for (i, m) in mutations(preset_seed, 200, 0xEC02).iter().enumerate() {
+        let s = String::from_utf8_lossy(m).to_string();
+        assert_no_panic("encoder.neovegpreset", i, || {
+            let _ = import_preset_str(&s);
+        });
+    }
+
+    let q_json = serde_json::to_vec(&EncoderState::default()).unwrap_or_default();
+    let qp = tmp("encoder_queue_fuzz.json");
+    for (i, m) in mutations(&q_json, 160, 0xEC03).iter().enumerate() {
+        let _ = std::fs::write(&qp, m);
+        assert_no_panic("encoder.queue_json", i, || {
+            let _ = load_state(&qp);
+        });
+    }
+    let _ = std::fs::remove_file(&qp);
+}
