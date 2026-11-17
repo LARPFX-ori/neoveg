@@ -290,10 +290,11 @@ pub enum DockPanel {
     Compositors,
     Scopes,
     Notes,
+    Encoder,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 16] = [
+    pub const ALL: [DockPanel; 17] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -310,6 +311,7 @@ impl DockPanel {
         DockPanel::Compositors,
         DockPanel::Scopes,
         DockPanel::Notes,
+        DockPanel::Encoder,
     ];
 
     pub fn name(self) -> &'static str {
@@ -330,6 +332,7 @@ impl DockPanel {
             DockPanel::Compositors => "Compositores",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
+            DockPanel::Encoder => "Neoveg Encoder",
         }
     }
 
@@ -351,6 +354,7 @@ impl DockPanel {
             DockPanel::Compositors => "view.tab.compositors",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
+            DockPanel::Encoder => "view.tab.encoder",
         }
     }
 }
@@ -378,6 +382,11 @@ pub enum UiAction {
     ExportFcp7Dialog,
     ImportAafDialog,
     OpenRenderDialog,
+    SendToEncoder,
+    EncoderStartQueue,
+    EncoderPauseQueue,
+    EncoderStopCurrent,
+    EncoderStopQueue,
     SnapshotDialog,
     OpenProjectProps,
     OpenEventProps,
@@ -827,6 +836,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::OpenRenderDialog, h),
     },
     CommandDef {
+        id: "file.send_to_encoder",
+        label: "Enviar para o Neoveg Encoder...",
+        menu_path: "Arquivo/Enviar para o Neoveg Encoder...",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SendToEncoder, h),
+    },
+    CommandDef {
         id: "file.snapshot",
         label: "Salvar quadro (snapshot) em PNG...",
         menu_path: "Arquivo/Salvar quadro (snapshot) em PNG...",
@@ -971,6 +989,18 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: |s, _| s.selection_has_takes(),
         run: |s, h| {
             s.prev_take_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.lock",
+        label: "Travar eventos",
+        menu_path: "Editar/Travar eventos",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.toggle_lock_selected();
             ok_mutated(s, h)
         },
     },
@@ -1175,8 +1205,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sonic_foundry",
-        label: "Sonic Foundry",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sonic Foundry",
+        label: "Clássico",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Clássico",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1184,8 +1214,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sony",
-        label: "Sony",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sony",
+        label: "Intermediário",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Intermediário",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1193,8 +1223,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.magix",
-        label: "MAGIX",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/MAGIX",
+        label: "Atual",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Atual",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1356,6 +1386,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Notes), h),
+    },
+    CommandDef {
+        id: "view.tab.encoder",
+        label: "Neoveg Encoder",
+        menu_path: "Exibir/Neoveg Encoder",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
     },
     CommandDef {
         id: "view.envelopes",
@@ -1718,6 +1757,42 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
+    },
+    CommandDef {
+        id: "tools.encoder_start",
+        label: "Encoder: Iniciar / Retomar fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Iniciar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStartQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_pause",
+        label: "Encoder: Pausar / Retomar",
+        menu_path: "Ferramentas/Neoveg Encoder/Pausar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderPauseQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_current",
+        label: "Encoder: Interromper item atual",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper arquivo atual",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopCurrent, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_queue",
+        label: "Encoder: Interromper fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopQueue, h),
     },
     CommandDef {
         id: "tools.run_script",

@@ -245,6 +245,21 @@ impl MediaCache {
             .contains_key(&id)
     }
 
+    pub fn clone_entry(&self, id: Id) -> Option<Arc<MediaEntry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+    }
+
+    pub fn insert_arc(&self, id: Id, e: Arc<MediaEntry>) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, e);
+    }
+
     /// Atualiza os limites de cache em execução a partir das Preferências (§3.6).
     pub fn configure_limits(&self, frame_cap: usize, ram_mb: u32) {
         let cap = frame_cap.clamp(4, 512);
