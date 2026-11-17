@@ -2,6 +2,18 @@
 
 Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa em português (`eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
 
+## Imagens
+
+![Janela principal do Neoveg com um projeto de exemplo: área de janelas no alto, prévia de vídeo, Master Bus e a linha do tempo com eventos de vídeo](docs/screenshots/janela_principal.png)
+
+| Efeitos de Vídeo | Geradores de Mídia |
+|---|---|
+| ![Janela Efeitos de Vídeo com categorias, busca, lista de efeitos e miniatura do preset](docs/screenshots/efeitos_de_video.png) | ![Janela Geradores de Mídia com categorias, tipos de gerador e miniaturas dos presets](docs/screenshots/geradores_de_midia.png) |
+
+![Propriedades do evento: nome, início, duração, deslocamento na mídia, velocidade, fades e opções](docs/screenshots/propriedades_do_evento.png)
+
+As imagens mostram só a interface do Neoveg, com mídia gerada pelo próprio programa.
+
 ## Arquitetura do Workspace (5 Crates)
 
 - **`neoveg_common`** (`crates/neoveg_common`): tipos fundamentais, representação exata de tempo (`Ticks`, `FrameRate`, `Rate`, *SMPTE Drop-Frame*), curvas, preferências e utilitários base.
@@ -41,6 +53,67 @@ cargo run -p neoveg -- --render meu_projeto.neoveg saida.avi
 ```
 
 Logs, autosave, preferências (`preferencias.json`), layouts (`.neoveglayout`), proxies e pré-renderizações são gravados ao lado do executável em builds portáteis (ou na pasta temporária do sistema quando executado em diretório somente leitura).
+
+## Como usar
+
+### Primeiros passos
+
+1. Abra o Neoveg (`cargo run -p neoveg` ou o executável do pacote portátil). A tela de boas-vindas oferece *Novo Projeto* (com proporção, resolução e taxa de quadros) e *Abrir Projeto*, com a lista de projetos recentes.
+2. Importe a mídia com *Arquivo → Importar mídia...* (`Ctrl+I`) ou arrastando arquivos para a janela. A mídia aparece em *Mídia do Projeto*; arraste-a para a linha do tempo ou dê um duplo clique para adicioná-la no cursor.
+3. Salve com `Ctrl+S`. O projeto é um arquivo `.neoveg`; o salvamento automático protege o trabalho e, se o programa fechar sem aviso, a próxima abertura oferece a recuperação.
+
+Arquivos que o Neoveg não abre diretamente podem ser convertidos para um formato compatível (no Windows): o programa oferece a conversão ao importar, ou use *Arquivo → Converter mídia para formato compatível...*.
+
+### Editar na linha do tempo
+
+| Ação | Atalho |
+|---|---|
+| Reproduzir / pausar | `Espaço` |
+| Reproduzir do início | `Shift+Espaço` |
+| Parar | `Esc` |
+| Scrub para trás, pausar, para frente | `J`, `K`, `L` |
+| Quadro anterior / próximo | `Alt+←` / `Alt+→` |
+| Dividir o evento no cursor | `S` |
+| Aparar início / fim do evento no cursor | `Alt+[` / `Alt+]` |
+| Aparar para a seleção de tempo | `Ctrl+T` |
+| Excluir | `Delete` |
+| Agrupar / desagrupar | `G` / `U` |
+| Inserir marcador / região | `M` / `R` |
+| Mudo / solo na trilha selecionada | `Z` / `X` |
+| Encaixe (snapping) | `F8` |
+| Ripple automático | `Ctrl+L` |
+| Zoom da linha do tempo | `↑` / `↓` |
+| Desfazer / refazer | `Ctrl+Z` / `Ctrl+Y` |
+| Propriedades do evento | `F2` |
+
+- A barra de transporte e edição, abaixo da linha do tempo, tem os mesmos comandos em botões, na ordem do manual do VEGAS Pro, e as caixas *Pos*, *Fim* e *Tam* da seleção de tempo.
+- Eventos que se sobrepõem na mesma trilha ganham crossfade automático; as alças nos cantos superiores do evento ajustam os fades.
+- O botão *Mais* (`…`) do cabeçalho de cada trilha reúne os comandos da trilha e permite escolher quais botões ficam visíveis.
+- Todos os atalhos podem ser trocados em *Ajuda → Atalhos de teclado*.
+
+### Takes
+
+Um evento pode ter várias mídias alternativas (takes). Na *Mídia do Projeto*, clique com o botão direito numa mídia e use *Adicionar como take aos eventos selecionados*; `T` e `Shift+T` trocam para o próximo take e para o anterior, e o submenu *Take* do evento escolhe o take ativo.
+
+### Efeitos e geradores
+
+- **Efeitos de Vídeo:** escolha a categoria no alto ou busque pelo nome, clique no efeito e arraste a miniatura do preset para um evento ou uma trilha, ou use os botões *Eventos*, *Trilha* e *Master*. A estrela marca o efeito como favorito.
+- **Geradores de Mídia:** texto, títulos, cores sólidas, gradientes e padrões de teste. Arraste a miniatura para a linha do tempo ou use *Inserir no cursor*; o editor do gerador abre para ajustar texto, fonte, cores e animação.
+- **Plug-ins externos (Windows):** efeitos OFX e VST3 instalados aparecem no *Plug-In Manager* e rodam num processo isolado, então uma falha do plug-in não fecha o editor.
+
+### Layout e aparência
+
+- *Editar → Propriedades → Layout* escolhe a disposição (*Clássico*, *Intermediário* ou *Atual*) e a posição da área de janelas e das abas.
+- Os painéis podem ser arrastados pela aba para outra posição ou destacados em janela própria.
+- *Exibir → Tema* tem 7 temas, inclusive dois de Alto Contraste AAA.
+
+### Renderizar
+
+*Arquivo → Renderizar como...* (`Ctrl+M`) abre a lista de formatos e modelos (AVI Motion-JPEG, sequência de imagens PNG, Y4M e WAV), com favoritos e a opção de renderizar só a região de loop. Pela linha de comando: `neoveg --render projeto.neoveg saida.avi`.
+
+### Scripts
+
+*Ferramentas → Executar script (.cs/.dll)...* executa scripts C# no formato dos scripts do VEGAS Pro (exige o .NET instalado). O script pode ler e alterar trilhas, eventos, takes, marcadores, cursor e seleção, e importar mídia; tudo o que ele muda vira um único passo de Desfazer. Pela linha de comando: `neoveg --run-script meu_script.cs`.
 
 ## Empacotamento Portátil e Verificações de Qualidade
 
