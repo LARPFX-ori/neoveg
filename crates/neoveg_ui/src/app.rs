@@ -157,6 +157,28 @@ pub(crate) struct ScriptJob {
     rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
 }
 
+#[cfg(test)]
+impl ScriptJob {
+    /// Script "em andamento" para testes: termina com sucesso, devolvendo a
+    /// sessão dada, quando o teste manda `()` pelo canal devolvido.
+    pub(crate) fn fake(session: EditorSession) -> (Self, std::sync::mpsc::Sender<()>) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if done_rx.recv().is_ok() {
+                let _ = tx.send((ScriptOutcome::Done(Ok(Vec::new())), session));
+            }
+        });
+        let job = Self {
+            path: PathBuf::from("teste.cs"),
+            started: std::time::Instant::now(),
+            media_before: std::collections::HashSet::new(),
+            rx,
+        };
+        (job, done_tx)
+    }
+}
+
 pub struct App {
     pub session: EditorSession,
     pub prefs: Preferences,
@@ -1182,6 +1204,13 @@ impl App {
     }
 
     fn poll_loader(&mut self) {
+        // Com um script rodando, a sessão que vale no fim é a do script
+        // (`poll_script_job` a coloca no lugar desta): o que chegar agora
+        // (importação, mídia recarregada, proxy, pré-renderização) fica no
+        // canal e é aplicado depois, sobre a sessão do script, sem se perder.
+        if self.script_job.is_some() {
+            return;
+        }
         while let Ok(msg) = self.loader_rx.try_recv() {
             self.loading = self.loading.saturating_sub(1);
             match msg {
@@ -2570,6 +2599,8 @@ impl App {
             ScriptOutcome::Done(Ok(msgs)) => {
                 self.session = done;
                 self.sync_after_session();
+                // o que o carregador guardou durante o script entra no próximo quadro
+                ctx.request_repaint();
                 // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
                 let novas: Vec<MediaItem> = self
                     .session

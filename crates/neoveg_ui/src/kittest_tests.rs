@@ -727,3 +727,53 @@ fn kittest_crash_report_janela_e_acoes() {
     assert!(harness.state().crash_reports.is_empty());
     assert!(harness.state().recovery_offer);
 }
+
+/// Antes: um proxy (ou importação, ou mídia recarregada) que ficava pronto
+/// enquanto um script rodava era aplicado na sessão da interface e sumia
+/// quando a sessão do script tomava o lugar dela.
+#[test]
+fn kittest_carregador_espera_o_script_e_nada_se_perde() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let (mid, done) = {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec::default(),
+        ));
+        let mid = app.project.media[0].id;
+        // o script recebe uma cópia da sessão, como em run_script_dialog
+        let (job, done) = crate::app::ScriptJob::fake(app.session.clone());
+        app.script_job = Some(job);
+        let _ = app.loader_tx.send(crate::app::LoadMsg::ProxyBuilt(
+            mid,
+            Ok(std::path::PathBuf::from("proxy.avi")),
+        ));
+        (mid, done)
+    };
+    let proxy = |app: &App| {
+        app.project
+            .media
+            .iter()
+            .find(|m| m.id == mid)
+            .and_then(|m| m.proxy_path.clone())
+    };
+    harness.run_steps(3);
+    assert!(harness.state().script_job.is_some());
+    assert_eq!(proxy(harness.state()), None, "espera o script");
+    done.send(()).expect("script falso");
+    for _ in 0..50 {
+        harness.run_steps(1);
+        if harness.state().script_job.is_none() && proxy(harness.state()).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(harness.state().script_job.is_none(), "o script terminou");
+    assert_eq!(
+        proxy(harness.state()).as_deref(),
+        Some("proxy.avi"),
+        "o proxy entrou sobre a sessão do script"
+    );
+}

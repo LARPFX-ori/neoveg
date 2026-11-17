@@ -206,6 +206,12 @@ fn truncate_str(s: &str, max_bytes: usize) -> String {
     format!("{}...", &s[..end])
 }
 
+/// Projeto dos scripts. `ImplicitUsings` fica desligado, como no .NET
+/// Framework dos scripts do VEGAS: com ele, `System.Threading` entra sozinho e
+/// um script com `using System.Windows.Forms;` e `Timer` não compila (CS0104,
+/// `System.Windows.Forms.Timer` × `System.Threading.Timer`). Com o WinForms
+/// ele também importaria `System.Windows.Forms` sem o script pedir, o que só
+/// funciona no Windows.
 fn cs_project_xml(tfm: &str, winforms: bool) -> String {
     // System.Windows.Forms real no Windows (com o runtime WindowsDesktop)
     let winforms = if winforms {
@@ -219,7 +225,7 @@ fn cs_project_xml(tfm: &str, winforms: bool) -> String {
     <TargetFramework>{tfm}</TargetFramework>
     <OutputType>Library</OutputType>
     <AssemblyName>NeovegScript</AssemblyName>
-    <ImplicitUsings>enable</ImplicitUsings>
+    <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     <UseSharedCompilation>false</UseSharedCompilation>{winforms}
