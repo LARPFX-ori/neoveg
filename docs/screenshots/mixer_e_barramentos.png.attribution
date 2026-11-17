@@ -1,0 +1,9 @@
+asset:        mixer_e_barramentos.png
+title:        Mixer multifaixa do Neoveg com trilhas de áudio, barramentos auxiliares e Master Bus
+author:       contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-11-17 por blackghoust9
+notes:        Captura da interface do próprio Neoveg, renderizada fora da tela (eframe::egui_wgpu, 1600×900).
+              Só mídia sintética gerada localmente; nenhuma imagem, ícone ou tela de outro produto.
