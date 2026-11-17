@@ -2,7 +2,7 @@
 //!
 //! Uso na linha de comando:
 //!   neoveg [--open] [projeto.neoveg | mídia]  abre a interface gráfica
-//!   neoveg --render projeto.neoveg saida.avi  renderiza sem interface (AVI, PNG, Y4M ou WAV)
+//!   neoveg --render projeto.neoveg saida.ext  renderiza sem interface (MP4, MOV, 3GP, WMV, AVI, GIF, Y4M, sequências PNG/JPG/TIF/TGA/BMP/WebP/DPX/EXR/PNM/QOI ou áudio WAV/BWF/RF64/W64/AIFF/AU/CAF/QOA/M4A/WMA/MP3)
 //!   neoveg --run-script script.cs             tenta executar um script C# (.NET Host)
 //!   neoveg --command <id> [projeto [saida]]   executa comando da Tabela Única headless
 //!   neoveg --list-commands                    lista todos os comandos e atalhos
@@ -84,12 +84,7 @@ fn render_cli(proj_path: &std::path::Path, out_path: &std::path::Path) -> anyhow
             media.insert(m.id, imp.entry);
         }
     }
-    let fmt = match out_path.extension().and_then(|e| e.to_str()) {
-        Some(e) if e.eq_ignore_ascii_case("png") => render::RenderFormat::PngSequence,
-        Some(e) if e.eq_ignore_ascii_case("y4m") => render::RenderFormat::Y4m,
-        Some(e) if e.eq_ignore_ascii_case("wav") => render::RenderFormat::Wav,
-        _ => render::RenderFormat::AviMjpeg,
-    };
+    let fmt = render::RenderFormat::from_path(out_path);
     let s = render::RenderSettings {
         format: fmt,
         path: out_path.to_path_buf(),
@@ -97,9 +92,7 @@ fn render_cli(proj_path: &std::path::Path, out_path: &std::path::Path) -> anyhow
         height: p.settings.height,
         start: model::Ticks::ZERO,
         end: p.duration(),
-        jpeg_quality: 90,
-        include_audio: true,
-        wav_bits: render::WavBits::Pcm16,
+        ..render::RenderSettings::default()
     };
     let prog = render::RenderProgress::default();
     render::run(&p, &media, &s, &prog)?;
@@ -109,7 +102,7 @@ fn render_cli(proj_path: &std::path::Path, out_path: &std::path::Path) -> anyhow
 
 const HELP: &str = "Uso:
   neoveg [--open] [projeto.neoveg | mídia]  abre a interface gráfica
-  neoveg --render projeto.neoveg saida.avi  renderiza sem interface (.avi, .png, .y4m ou .wav)
+  neoveg --render projeto.neoveg saida.ext  renderiza sem interface (.mp4, .mov, .wmv, .avi, .gif, .y4m, sequências ou áudio)
   neoveg --run-script script.<cs|dll>       executa script C#/.NET (ScriptPortal.Vegas) via netcorehost
   neoveg --command <id> [projeto [saida]]   executa comando da Tabela Única sem interface
   neoveg --list-commands                    lista os comandos e atalhos disponíveis";
