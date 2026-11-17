@@ -1382,6 +1382,34 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "view.waveform_zoom_in",
+        label: "Ampliar formas de onda (vertical)",
+        menu_path: "Exibir/Ampliar formas de onda",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::ArrowUp)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.waveform_zoom_steps = s
+                .opts
+                .waveform_zoom_steps
+                .saturating_add(1)
+                .min(crate::session::MAX_WAVEFORM_ZOOM_STEPS);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.waveform_zoom_out",
+        label: "Reduzir formas de onda (vertical)",
+        menu_path: "Exibir/Reduzir formas de onda",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::ArrowDown)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.waveform_zoom_steps = s.opts.waveform_zoom_steps.saturating_sub(1);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "view.thumbs",
         label: "Mostrar miniaturas de vídeo",
         menu_path: "Exibir/Mostrar miniaturas de vídeo",
@@ -2214,6 +2242,35 @@ mod tests {
             assert!(!cmd.label.is_empty());
             assert!(!cmd.menu_path.is_empty());
         }
+    }
+
+    #[test]
+    fn zoom_vertical_das_formas_de_onda_sobe_desce_e_nao_mexe_no_projeto() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert_eq!(s.opts.waveform_zoom(), 1.0);
+        // no 1× não desce mais
+        run_command("view.waveform_zoom_out", &mut s, &mut h).unwrap();
+        assert_eq!(s.opts.waveform_zoom_steps, 0);
+        run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        assert_eq!(s.opts.waveform_zoom(), 2.0);
+        // para no máximo (64×)
+        for _ in 0..40 {
+            run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        }
+        assert_eq!(s.opts.waveform_zoom(), 64.0);
+        for _ in 0..40 {
+            run_command("view.waveform_zoom_out", &mut s, &mut h).unwrap();
+        }
+        assert_eq!(s.opts.waveform_zoom(), 1.0, "volta exatamente a 1×");
+        assert!(
+            s.undo.is_empty(),
+            "zoom de exibição não cria passo de Desfazer"
+        );
+        // valor fora do limite (estado hostil) não passa de 64×
+        s.opts.waveform_zoom_steps = u8::MAX;
+        assert_eq!(s.opts.waveform_zoom(), 64.0);
     }
 
     #[test]
