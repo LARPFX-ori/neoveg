@@ -1023,6 +1023,22 @@ impl App {
         self.apply_imported_project("AAF", path, res);
     }
 
+    pub fn export_aaf_dialog(&mut self) {
+        let default_name = self.export_interchange_path("aaf");
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Advanced Authoring Format", &["aaf"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::aaf::export_aaf_file(&self.session.project, &p) {
+            Ok(()) => self.set_status(format!("AAF exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar AAF: {e}")),
+        }
+    }
+
     pub fn import_fcp7_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro 7 XML", &["xml"])
@@ -1535,6 +1551,7 @@ impl App {
             UiAction::ImportFcp7Dialog => self.import_fcp7_dialog(),
             UiAction::ExportFcp7Dialog => self.export_fcp7_dialog(),
             UiAction::ImportAafDialog => self.import_aaf_dialog(),
+            UiAction::ExportAafDialog => self.export_aaf_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -1826,6 +1843,7 @@ impl App {
                     self.cmd_menu_btn(ui, "file.import_fcp7");
                     self.cmd_menu_btn(ui, "file.export_fcp7");
                     self.cmd_menu_btn(ui, "file.import_aaf");
+                    self.cmd_menu_btn(ui, "file.export_aaf");
                     ui.separator();
                     self.cmd_menu_btn(ui, "file.import_edl");
                     self.cmd_menu_btn(ui, "file.export_edl");
