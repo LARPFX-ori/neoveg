@@ -219,6 +219,8 @@ pub struct App {
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
     pub(crate) script_job: Option<ScriptJob>,
+    /// Janela Efeitos de Vídeo (categorias, busca e miniaturas).
+    pub(crate) fx_browser: crate::fx_browser::FxBrowser,
     pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
@@ -365,6 +367,7 @@ impl App {
             explorer_filter: String::new(),
             render_job: None,
             script_job: None,
+            fx_browser: Default::default(),
             prerender_job: None,
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
