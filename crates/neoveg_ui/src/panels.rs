@@ -221,7 +221,7 @@ impl App {
             DockTab::VideoFx => self.video_fx_browser(ui),
             DockTab::ColorGrading => self.color_grading_tab(ui),
             DockTab::AudioFx => self.fx_tab(ui, true),
-            DockTab::Generators => self.generators_tab(ui),
+            DockTab::Generators => self.generators_browser(ui),
             DockTab::Mixer => self.mixer_tab(ui),
             DockTab::Loudness => self.loudness_tab(ui),
             DockTab::SurroundPanner => self.surround_panner_tab(ui),
@@ -997,139 +997,6 @@ impl App {
             }
             self.changed();
         }
-    }
-
-    fn generators_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new(
-                "Arraste um gerador para a timeline ou clique para inserir no cursor.",
-            )
-            .small()
-            .weak(),
-        );
-        ui.separator();
-        let presets: Vec<(&str, GenSpec)> = vec![
-            ("Texto simples", GenSpec::Text(TextSpec::default())),
-            (
-                "Título com contorno",
-                GenSpec::Text(TextSpec {
-                    text: "TÍTULO".into(),
-                    size: 16.0,
-                    outline: 0.6,
-                    outline_color: [0.0, 0.0, 0.0, 1.0],
-                    color: [1.0, 0.85, 0.2, 1.0],
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Terço inferior (lower third)",
-                GenSpec::Text(TextSpec {
-                    text: "Nome Sobrenome\nCargo ou descrição".into(),
-                    size: 5.5,
-                    align: TextAlign::Left,
-                    x: 0.3,
-                    y: 0.82,
-                    background: [0.0, 0.0, 0.0, 0.0],
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Créditos rolando",
-                GenSpec::Text(TextSpec {
-                    text: "Direção\nFulano de Tal\n\nEdição\nNeoveg\n\nObrigado por assistir"
-                        .into(),
-                    size: 6.0,
-                    anim: TextAnim::ScrollUp,
-                    anim_duration: 10.0,
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Letreiro (crawl)",
-                GenSpec::Text(TextSpec {
-                    text: "Notícia urgente: texto passando na parte inferior da tela".into(),
-                    size: 5.0,
-                    y: 0.9,
-                    anim: TextAnim::CrawlLeft,
-                    anim_duration: 8.0,
-                    background: [0.0, 0.0, 0.0, 0.0],
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Máquina de escrever",
-                GenSpec::Text(TextSpec {
-                    text: "Era uma vez...".into(),
-                    anim: TextAnim::Typewriter,
-                    anim_duration: 3.0,
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Cor sólida (preto)",
-                GenSpec::SolidColor {
-                    color: [0.0, 0.0, 0.0, 1.0],
-                },
-            ),
-            (
-                "Cor sólida (branco)",
-                GenSpec::SolidColor {
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-            ),
-            (
-                "Gradiente linear",
-                GenSpec::Gradient {
-                    a: [0.05, 0.1, 0.35, 1.0],
-                    b: [0.6, 0.2, 0.5, 1.0],
-                    angle: 90.0,
-                    radial: false,
-                },
-            ),
-            (
-                "Gradiente radial",
-                GenSpec::Gradient {
-                    a: [1.0, 0.9, 0.6, 1.0],
-                    b: [0.3, 0.05, 0.0, 1.0],
-                    angle: 0.0,
-                    radial: true,
-                },
-            ),
-            (
-                "Xadrez",
-                GenSpec::Checkerboard {
-                    a: [0.85, 0.85, 0.85, 1.0],
-                    b: [0.35, 0.35, 0.35, 1.0],
-                    cells: 9,
-                },
-            ),
-            ("Barras de cor", GenSpec::ColorBars),
-            (
-                "Ruído (estático)",
-                GenSpec::Noise {
-                    mono: true,
-                    animated: true,
-                },
-            ),
-        ];
-        egui::Grid::new("gen_grid")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                for (i, (name, spec)) in presets.into_iter().enumerate() {
-                    ui.dnd_drag_source(
-                        egui::Id::new(("gen", i)),
-                        DndPayload::Generator(spec.clone()),
-                        |ui| {
-                            icons::icon_label(ui, Icon::GeneratorFrame, 14.0, name, &self.theme);
-                        },
-                    );
-                    if ui.button("Inserir no cursor").clicked() {
-                        self.insert_generated(spec);
-                    }
-                    ui.end_row();
-                }
-            });
     }
 
     // -----------------------------------------------------------------

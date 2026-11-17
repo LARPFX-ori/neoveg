@@ -221,6 +221,8 @@ pub struct App {
     pub(crate) script_job: Option<ScriptJob>,
     /// Janela Efeitos de Vídeo (categorias, busca e miniaturas).
     pub(crate) fx_browser: crate::fx_browser::FxBrowser,
+    /// Janela Geradores de Mídia (categorias, busca e miniaturas).
+    pub(crate) gen_browser: crate::gen_browser::GenBrowser,
     pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
@@ -368,6 +370,7 @@ impl App {
             render_job: None,
             script_job: None,
             fx_browser: Default::default(),
+            gen_browser: Default::default(),
             prerender_job: None,
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
