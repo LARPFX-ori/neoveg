@@ -975,6 +975,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "event.lock",
+        label: "Travar eventos",
+        menu_path: "Editar/Travar eventos",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.toggle_lock_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "event.delete_active_take",
         label: "Excluir take ativo",
         menu_path: "Editar/Take/Excluir take ativo",
@@ -1175,8 +1187,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sonic_foundry",
-        label: "Sonic Foundry",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sonic Foundry",
+        label: "Clássico",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Clássico",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1184,8 +1196,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.sony",
-        label: "Sony",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Sony",
+        label: "Intermediário",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Intermediário",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1193,8 +1205,8 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.magix",
-        label: "MAGIX",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/MAGIX",
+        label: "Atual",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Atual",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
@@ -1378,6 +1390,34 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.opts.show_waveforms = !s.opts.show_waveforms;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.waveform_zoom_in",
+        label: "Ampliar formas de onda (vertical)",
+        menu_path: "Exibir/Ampliar formas de onda",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::ArrowUp)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.waveform_zoom_steps = s
+                .opts
+                .waveform_zoom_steps
+                .saturating_add(1)
+                .min(crate::session::MAX_WAVEFORM_ZOOM_STEPS);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.waveform_zoom_out",
+        label: "Reduzir formas de onda (vertical)",
+        menu_path: "Exibir/Reduzir formas de onda",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::ArrowDown)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.waveform_zoom_steps = s.opts.waveform_zoom_steps.saturating_sub(1);
             ok_mutated(s, h)
         },
     },
@@ -2214,6 +2254,35 @@ mod tests {
             assert!(!cmd.label.is_empty());
             assert!(!cmd.menu_path.is_empty());
         }
+    }
+
+    #[test]
+    fn zoom_vertical_das_formas_de_onda_sobe_desce_e_nao_mexe_no_projeto() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert_eq!(s.opts.waveform_zoom(), 1.0);
+        // no 1× não desce mais
+        run_command("view.waveform_zoom_out", &mut s, &mut h).unwrap();
+        assert_eq!(s.opts.waveform_zoom_steps, 0);
+        run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        assert_eq!(s.opts.waveform_zoom(), 2.0);
+        // para no máximo (64×)
+        for _ in 0..40 {
+            run_command("view.waveform_zoom_in", &mut s, &mut h).unwrap();
+        }
+        assert_eq!(s.opts.waveform_zoom(), 64.0);
+        for _ in 0..40 {
+            run_command("view.waveform_zoom_out", &mut s, &mut h).unwrap();
+        }
+        assert_eq!(s.opts.waveform_zoom(), 1.0, "volta exatamente a 1×");
+        assert!(
+            s.undo.is_empty(),
+            "zoom de exibição não cria passo de Desfazer"
+        );
+        // valor fora do limite (estado hostil) não passa de 64×
+        s.opts.waveform_zoom_steps = u8::MAX;
+        assert_eq!(s.opts.waveform_zoom(), 64.0);
     }
 
     #[test]

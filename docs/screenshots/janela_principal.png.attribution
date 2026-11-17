@@ -1,0 +1,10 @@
+asset:        janela_principal.png
+title:        Janela principal do Neoveg com um projeto de exemplo (título sobre fundo em gradiente e barras de cor)
+author:       contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-11-17 por blackghoust9
+notes:        Captura da interface do próprio Neoveg, renderizada fora da tela (egui_kittest + wgpu, 1600×900).
+              Só mídia gerada pelo Neoveg (gradiente, barras de cor e texto); nenhuma imagem, ícone ou
+              tela de outro produto.

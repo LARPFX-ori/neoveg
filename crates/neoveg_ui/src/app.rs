@@ -161,6 +161,28 @@ pub(crate) struct ScriptJob {
     active: Option<crate::script_forms::Active>,
 }
 
+#[cfg(test)]
+impl ScriptJob {
+    /// Script "em andamento" para testes: termina com sucesso, devolvendo a
+    /// sessão dada, quando o teste manda `()` pelo canal devolvido.
+    pub(crate) fn fake(session: EditorSession) -> (Self, std::sync::mpsc::Sender<()>) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if done_rx.recv().is_ok() {
+                let _ = tx.send((ScriptOutcome::Done(Ok(Vec::new())), session));
+            }
+        });
+        let job = Self {
+            path: PathBuf::from("teste.cs"),
+            started: std::time::Instant::now(),
+            media_before: std::collections::HashSet::new(),
+            rx,
+        };
+        (job, done_tx)
+    }
+}
+
 pub struct App {
     pub session: EditorSession,
     pub prefs: Preferences,
@@ -201,6 +223,10 @@ pub struct App {
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
     pub(crate) script_job: Option<ScriptJob>,
+    /// Janela Efeitos de Vídeo (categorias, busca e miniaturas).
+    pub(crate) fx_browser: crate::fx_browser::FxBrowser,
+    /// Janela Geradores de Mídia (categorias, busca e miniaturas).
+    pub(crate) gen_browser: crate::gen_browser::GenBrowser,
     pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
@@ -347,6 +373,8 @@ impl App {
             explorer_filter: String::new(),
             render_job: None,
             script_job: None,
+            fx_browser: Default::default(),
+            gen_browser: Default::default(),
             prerender_job: None,
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
@@ -1101,15 +1129,15 @@ impl App {
     }
 
     pub fn import_dialog(&mut self) {
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(media::IMAGE_EXTS);
+        all.extend_from_slice(media::VIDEO_EXTS);
+        all.extend_from_slice(media::AUDIO_EXTS);
+        all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter(
-                "Mídia suportada",
-                &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
-                    "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
-                    "flac", "ogg", "oga", "mp3", "m4a", "aac",
-                ],
-            )
+            .add_filter("Mídia suportada", &all)
+            .add_filter("Imagens", media::IMAGE_EXTS)
+            .add_filter("Áudio", media::AUDIO_EXTS)
             .add_filter("Todos os arquivos", &["*"])
             .pick_files()
         {
@@ -1119,7 +1147,7 @@ impl App {
 
     pub fn import_sequence_dialog(&mut self) {
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter("Imagens", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
+            .add_filter("Imagens", media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -1186,6 +1214,13 @@ impl App {
     }
 
     fn poll_loader(&mut self) {
+        // Com um script rodando, a sessão que vale no fim é a do script
+        // (`poll_script_job` a coloca no lugar desta): o que chegar agora
+        // (importação, mídia recarregada, proxy, pré-renderização) fica no
+        // canal e é aplicado depois, sobre a sessão do script, sem se perder.
+        if self.script_job.is_some() {
+            return;
+        }
         while let Ok(msg) = self.loader_rx.try_recv() {
             self.loading = self.loading.saturating_sub(1);
             match msg {
@@ -1990,6 +2025,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_chk(ui, self.opts.show_envelopes, "view.envelopes");
                 self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
+                self.cmd_menu_btn(ui, "view.waveform_zoom_in");
+                self.cmd_menu_btn(ui, "view.waveform_zoom_out");
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
@@ -2163,17 +2200,23 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(
-                        egui::RichText::new(label)
-                            .small()
-                            .color(self.theme.text_muted),
-                    );
-                    ui.label(
-                        egui::RichText::new(txt)
-                            .monospace()
-                            .small()
-                            .color(self.theme.text_primary),
-                    );
+                    let name = egui::RichText::new(label)
+                        .small()
+                        .color(self.theme.text_muted);
+                    let value = egui::RichText::new(txt)
+                        .monospace()
+                        .small()
+                        .color(self.theme.text_primary);
+                    // a barra é desenhada da direita para a esquerda e o
+                    // `horizontal` herda isso: aí o valor entra primeiro, para
+                    // o nome ficar à esquerda dele na tela
+                    if ui.layout().prefer_right_to_left() {
+                        ui.label(value);
+                        ui.label(name);
+                    } else {
+                        ui.label(name);
+                        ui.label(value);
+                    }
                 });
             })
             .response
@@ -2206,9 +2249,27 @@ impl App {
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
-            // Bloco 2: Ferramentas de Edição da Timeline (Manual VEGAS Pro 21 §6)
-            self.cmd_tool_btn(ui, Icon::Split, None, "edit.split");
-            self.cmd_tool_btn(ui, Icon::DeleteTrash, None, "edit.delete");
+            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
+            // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
+            // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
+            // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
+            // sem botão porque a função não existe: Gravar, as ferramentas
+            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
+            // Crossfades automáticos (sempre ligados), Travar envelopes e as
+            // linhas do tempo aninhadas.
+            for (icon, id) in [
+                (Icon::DeleteTrash, "edit.delete"),
+                (Icon::TrimSelection, "edit.trim_to_selection"),
+                (Icon::TrimStart, "edit.trim_start"),
+                (Icon::TrimEnd, "edit.trim_end"),
+                (Icon::Split, "edit.split"),
+            ] {
+                self.cmd_tool_btn(ui, icon, None, id);
+            }
+            let all_locked = self.session.selection_all_locked();
+            self.cmd_tool_toggle(ui, all_locked, Icon::LockClosed, None, "event.lock");
+            self.cmd_tool_btn(ui, Icon::InsertMarker, None, "insert.marker");
+            self.cmd_tool_btn(ui, Icon::InsertRegion, None, "insert.region");
             self.cmd_tool_toggle(
                 ui,
                 self.opts.snapping,
@@ -2225,19 +2286,11 @@ impl App {
             );
             self.cmd_tool_toggle(
                 ui,
-                self.opts.show_envelopes,
-                Icon::Envelopes,
-                None,
-                "view.envelopes",
-            );
-            self.cmd_tool_toggle(
-                ui,
                 self.opts.ignore_grouping,
                 Icon::IgnoreGrouping,
                 None,
                 "options.ignore_grouping",
             );
-            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
             self.cmd_tool_toggle(
                 ui,
                 self.is_panel_open(DockTab::ColorGrading),
@@ -2245,6 +2298,16 @@ impl App {
                 None,
                 "view.tab.color_grading",
             );
+            // do Neoveg, depois dos botões do manual
+            ui.separator();
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.show_envelopes,
+                Icon::Envelopes,
+                None,
+                "view.envelopes",
+            );
+            self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
 
             if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
                 ui.label(egui::RichText::new(format!("Shuttle {:+.2}x", self.shuttle)).small());
@@ -2474,7 +2537,13 @@ impl App {
 
     pub(crate) fn snapshot_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
+            .add_filter(
+                "Imagem",
+                &[
+                    "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
+                    "wbmp", "xbm", "xpm", "ico",
+                ],
+            )
             .set_file_name("quadro.png")
             .save_file()
         {
@@ -2595,6 +2664,8 @@ impl App {
             ScriptOutcome::Done(Ok(msgs)) => {
                 self.session = done;
                 self.sync_after_session();
+                // o que o carregador guardou durante o script entra no próximo quadro
+                ctx.request_repaint();
                 // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
                 let novas: Vec<MediaItem> = self
                     .session
@@ -3173,6 +3244,7 @@ impl App {
             jpeg_quality: 80,
             include_audio: true,
             wav_bits: crate::render::WavBits::Pcm16,
+            ..RenderSettings::default()
         };
         let tx = self.loader_tx.clone();
         let prog = Arc::new(RenderProgress::default());

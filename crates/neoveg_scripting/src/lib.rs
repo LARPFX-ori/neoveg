@@ -1380,6 +1380,41 @@ public class EntryPoint
         assert_eq!(ctx.messages.last().map(String::as_str), Some("ok|STA|OK"));
     }
 
+    /// Antes: com `ImplicitUsings`, `System.Threading` entrava sozinho e um
+    /// script com `using System.Windows.Forms;` e `Timer` não compilava
+    /// (CS0104). No .NET Framework do VEGAS ele compila.
+    #[cfg(windows)]
+    #[test]
+    fn script_com_timer_do_winforms_compila_sem_ambiguidade() {
+        let Ok(env) = find_dotnet_env() else {
+            return;
+        };
+        if !env.has_sdk || !env.use_winforms() {
+            return;
+        }
+        let path = temp_cs_path("timer");
+        let src = r#"using System.Windows.Forms;
+using ScriptPortal.Vegas;
+
+public class EntryPoint
+{
+    public void FromVegas(Vegas vegas)
+    {
+        Timer t = new Timer();
+        t.Interval = 250;
+        vegas.ShowMessage("timer " + t.Interval);
+        t.Dispose();
+    }
+}
+"#;
+        std::fs::write(&path, src).unwrap();
+        let mut ctx = ScriptContext::new(Project::new_default());
+        let r = run_cs_script(&path, &mut ctx);
+        let _ = std::fs::remove_file(&path);
+        r.unwrap();
+        assert_eq!(ctx.messages.last().map(String::as_str), Some("timer 250"));
+    }
+
     /// Uma exceção lançada na thread STA continua chegando como erro do
     /// script, sem mudar o projeto.
     #[cfg(windows)]

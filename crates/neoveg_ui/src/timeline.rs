@@ -1711,7 +1711,47 @@ impl App {
                 });
             let kf_open = !self.tl.kf_collapsed.contains(&tid);
             let mut kf_toggle = false;
+            let is_video = kind == TrackKind::Video;
+            let btns = self.prefs.track_header.get(is_video);
+            let mut more: Option<HeaderAction> = None;
             child.horizontal(|ui| {
+                // botão Mais (manual do VEGAS Pro 21, p. 69): os comandos de
+                // todos os botões do cabeçalho, inclusive os ocultos. O manual
+                // o põe acima do número; aqui fica ao lado, para não aumentar
+                // a altura do cabeçalho.
+                let (cur_mute, cur_solo) = {
+                    let t = &self.project.tracks[ti];
+                    (t.mute, t.solo)
+                };
+                let adj = self.project.tracks[ti].is_adjustment();
+                ui.menu_button(egui::RichText::new("…").small(), |ui| {
+                    if ui.selectable_label(cur_mute, "Mudo (Z)").clicked() {
+                        more = Some(HeaderAction::Mute);
+                        ui.close_menu();
+                    }
+                    if ui.selectable_label(cur_solo, "Solo (X)").clicked() {
+                        more = Some(HeaderAction::Solo);
+                        ui.close_menu();
+                    }
+                    if ui.button("Efeitos da trilha...").clicked() {
+                        more = Some(HeaderAction::Fx);
+                        ui.close_menu();
+                    }
+                    if is_video
+                        && !adj
+                        && ui.button("Movimento da trilha (Track Motion)...").clicked()
+                    {
+                        more = Some(HeaderAction::TrackMotion);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Editar conjunto de botões visíveis...").clicked() {
+                        more = Some(HeaderAction::EditButtons);
+                        ui.close_menu();
+                    }
+                })
+                .response
+                .on_hover_text("Mais (botões do cabeçalho, inclusive os ocultos)");
                 let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
                 let num_bg = if selected {
                     self.theme.selection_bg
@@ -1762,34 +1802,43 @@ impl App {
                 }
                 let t = &mut self.project.tracks[ti];
                 let r = ui.add(
+                    // 56 px: o botão Mais ocupa o resto da largura fixa do
+                    // cabeçalho, e com 78 px o último ícone (Track Motion)
+                    // ficava cortado
                     egui::TextEdit::singleline(&mut t.name)
-                        .desired_width(78.0)
+                        .desired_width(56.0)
                         .font(egui::TextStyle::Small),
                 );
                 if r.changed() {
                     changed_track = true;
                 }
-                let m = ui.selectable_label(t.mute, "M").on_hover_text("Mudo (Z)");
-                if m.clicked() {
-                    want_checkpoint = true;
-                    t.mute = !t.mute;
-                    changed_track = true;
+                if btns.mute
+                    && ui
+                        .selectable_label(t.mute, "M")
+                        .on_hover_text("Mudo (Z)")
+                        .clicked()
+                {
+                    more = Some(HeaderAction::Mute);
                 }
-                let s = ui.selectable_label(t.solo, "S").on_hover_text("Solo (X)");
-                if s.clicked() {
-                    want_checkpoint = true;
-                    t.solo = !t.solo;
-                    changed_track = true;
+                if btns.solo
+                    && ui
+                        .selectable_label(t.solo, "S")
+                        .on_hover_text("Solo (X)")
+                        .clicked()
+                {
+                    more = Some(HeaderAction::Solo);
                 }
                 let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
-                if ui
-                    .small_button(fxlabel)
-                    .on_hover_text("Efeitos da trilha")
-                    .clicked()
+                if btns.fx
+                    && ui
+                        .small_button(fxlabel)
+                        .on_hover_text("Efeitos da trilha")
+                        .clicked()
                 {
-                    self.dlg.fx_target = Some(FxTarget::Track(tid));
+                    more = Some(HeaderAction::Fx);
                 }
                 if kind == TrackKind::Video
+                    && btns.track_motion
                     && !is_adjustment
                     && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
                         .on_hover_text("Movimento da trilha (Track Motion)")
@@ -1817,6 +1866,26 @@ impl App {
             });
             if kf_toggle && !self.tl.kf_collapsed.remove(&tid) {
                 self.tl.kf_collapsed.insert(tid);
+            }
+            match more {
+                Some(HeaderAction::Mute) => {
+                    let t = &mut self.project.tracks[ti];
+                    t.mute = !t.mute;
+                    want_checkpoint = true;
+                    changed_track = true;
+                }
+                Some(HeaderAction::Solo) => {
+                    let t = &mut self.project.tracks[ti];
+                    t.solo = !t.solo;
+                    want_checkpoint = true;
+                    changed_track = true;
+                }
+                Some(HeaderAction::Fx) => self.dlg.fx_target = Some(FxTarget::Track(tid)),
+                Some(HeaderAction::TrackMotion) => self.dlg.track_motion = Some(tid),
+                Some(HeaderAction::EditButtons) => {
+                    self.dlg.header_buttons = Some((is_video, btns));
+                }
+                None => {}
             }
             if h >= 50.0 {
                 child.horizontal(|ui| {
@@ -3590,7 +3659,8 @@ impl App {
                             .media(e.media_id)
                             .and_then(|m| m.duration)
                             .or(Some(a.duration()));
-                        let gain = db_to_lin(e.gain_db).min(4.0);
+                        // ganho do evento e zoom vertical das formas de onda (Shift+↑/↓)
+                        let gain = db_to_lin(e.gain_db).min(4.0) * self.opts.waveform_zoom();
                         let alpha = if e.mute { 70 } else { 185 };
                         let gray = if body_light {
                             Color32::from_rgba_unmultiplied(22, 30, 42, alpha)
@@ -4107,4 +4177,14 @@ mod zoom_tests {
         let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
         assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
     }
+}
+
+/// Ação pedida por um botão do cabeçalho de faixa ou pelo menu do botão Mais.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderAction {
+    Mute,
+    Solo,
+    Fx,
+    TrackMotion,
+    EditButtons,
 }
