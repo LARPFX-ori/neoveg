@@ -5,6 +5,7 @@
 
 use crate::engine::audio::Mixer;
 use crate::engine::video::render_frame;
+use crate::engine::Frame;
 use crate::media::audio_extra::{
     AiffWriter, AuWriter, CafWriter, ExtWaveWriter, QoaWriter, W64Writer,
 };
@@ -12,10 +13,11 @@ use crate::media::avi::{AviVideoCodec, AviWriter};
 use crate::media::img_extra::{encode_image_for_ext, encode_seq_frame, ImageSeqFormat};
 use crate::media::y4m::Y4mWriter;
 use crate::media::MediaCache;
-use crate::model::{Project, Ticks, TICKS_PER_SEC};
+use crate::model::{FrameRate, Project, Ticks, TICKS_PER_SEC};
 use crate::util::lock;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RenderFormat {
     Mp4H264,
     Mp4Hevc,
@@ -279,11 +281,43 @@ impl RenderFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WavBits {
     Pcm16,
     Pcm24,
     Float32,
+}
+
+pub type FrameRenderHook = Arc<dyn Fn(u64, Ticks, Frame) -> Frame + Send + Sync>;
+pub type FramePreviewHook = Arc<dyn Fn(u64, &Frame) + Send + Sync>;
+pub type TimeMapHook = Arc<dyn Fn(u64, Ticks) -> Ticks + Send + Sync>;
+
+/// Opções avançadas de pipeline usadas pelo Neoveg Encoder (taxa de quadros
+/// alternativa, resolução de origem antes do corte/escala, efeitos pós-composição,
+/// mapeamento temporal, miniatura ao vivo e pausa cooperativa).
+#[derive(Clone)]
+pub struct RenderOptions {
+    pub fps_override: Option<FrameRate>,
+    pub source_size: Option<(u32, u32)>,
+    pub frame_hook: Option<FrameRenderHook>,
+    pub preview_hook: Option<FramePreviewHook>,
+    pub time_map: Option<TimeMapHook>,
+    pub pause: Option<Arc<AtomicBool>>,
+    pub include_video: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            fps_override: None,
+            source_size: None,
+            frame_hook: None,
+            preview_hook: None,
+            time_map: None,
+            pause: None,
+            include_video: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -499,11 +533,26 @@ fn mf_output_format(fmt: RenderFormat) -> Option<crate::media::mf::encode::MfOut
     }
 }
 
-fn run_audio_only(
+fn wait_if_paused(prog: &RenderProgress, pause: Option<&AtomicBool>) -> Result<()> {
+    let Some(p) = pause else {
+        return Ok(());
+    };
+    while p.load(Ordering::Relaxed) {
+        if prog.cancel.load(Ordering::Relaxed) {
+            bail!("cancelado");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_audio_only_with_pause(
     p: &Project,
     media: &MediaCache,
     s: &RenderSettings,
     prog: &RenderProgress,
+    pause: Option<&AtomicBool>,
     sr: u32,
     start_sample: i64,
     end_sample: i64,
@@ -628,6 +677,7 @@ fn run_audio_only(
         if prog.cancel.load(Ordering::Relaxed) {
             bail!("cancelado");
         }
+        wait_if_paused(prog, pause)?;
         let n = ((end_sample - pos) as usize).min(8192);
         let slice = &mut buf[..n * ch];
         if ch == 2 {
@@ -669,10 +719,20 @@ pub fn run(
     s: &RenderSettings,
     prog: &RenderProgress,
 ) -> Result<()> {
+    run_with_options(p, media, s, prog, &RenderOptions::default())
+}
+
+pub fn run_with_options(
+    p: &Project,
+    media: &MediaCache,
+    s: &RenderSettings,
+    prog: &RenderProgress,
+    opts: &RenderOptions,
+) -> Result<()> {
     if s.end <= s.start {
         bail!("intervalo de renderização vazio");
     }
-    let fps = p.settings.fps;
+    let fps = opts.fps_override.unwrap_or(p.settings.fps);
     let sr = p.settings.sample_rate;
     let dur = (s.end - s.start).0 as i128;
     let den = TICKS_PER_SEC as i128 * fps.den.max(1) as i128;
@@ -681,7 +741,16 @@ pub fn run(
     let sample_at = |i: u64| (s.start + fps.frame_to_ticks(i as i64)).to_samples_round(sr);
 
     if s.format.is_audio_only() {
-        return run_audio_only(p, media, s, prog, sr, sample_at(0), sample_at(n_frames));
+        return run_audio_only_with_pause(
+            p,
+            media,
+            s,
+            prog,
+            opts.pause.as_deref(),
+            sr,
+            sample_at(0),
+            sample_at(n_frames),
+        );
     }
 
     prog.total.store(n_frames, Ordering::Relaxed);
@@ -821,17 +890,45 @@ pub fn run(
     let batch = rayon::current_num_threads().clamp(1, 8) as u64;
     let mut i = 0u64;
     let quality = s.jpeg_quality.clamp(10, 100);
+    let (src_w, src_h) = opts
+        .source_size
+        .map(|(sw, sh)| (sw.max(2) as usize, sh.max(2) as usize))
+        .unwrap_or((render_w, render_h));
     while i < n_frames {
         if prog.cancel.load(Ordering::Relaxed) {
             bail!("cancelado");
         }
+        wait_if_paused(prog, opts.pause.as_deref())?;
         let b_end = (i + batch).min(n_frames);
         // renderiza e codifica um lote de quadros em paralelo
         let encoded: Vec<Result<Vec<u8>>> = (i..b_end)
             .into_par_iter()
             .map(|fi| {
-                let t = s.start + fps.frame_to_ticks(fi as i64);
-                let f = render_frame(p, media, t, render_w, render_h);
+                let out_t = s.start + fps.frame_to_ticks(fi as i64);
+                let mut f = if !opts.include_video {
+                    Frame::filled(render_w, render_h, [0.0, 0.0, 0.0, 1.0])
+                } else {
+                    let t = opts
+                        .time_map
+                        .as_ref()
+                        .map(|tm| tm(fi, out_t))
+                        .unwrap_or(out_t);
+                    let mut raw_f = render_frame(p, media, t, src_w, src_h);
+                    if let Some(hook) = &opts.frame_hook {
+                        raw_f = hook(fi, out_t, raw_f);
+                    }
+                    if raw_f.w != render_w || raw_f.h != render_h {
+                        crate::engine::video::scale_frame_fit(&raw_f, render_w, render_h)
+                    } else {
+                        raw_f
+                    }
+                };
+                if let Some(pv) = &opts.preview_hook {
+                    if fi == 0 || fi.is_multiple_of(3) {
+                        pv(fi, &f);
+                    }
+                }
+                let _ = &mut f;
                 match s.format {
                     RenderFormat::AviMjpeg => {
                         let rgb = f.to_rgb8_opaque();

@@ -19,6 +19,7 @@ mod dialogs;
 mod dock;
 mod edit;
 mod edit_details;
+mod encoder_panel;
 mod fx_browser;
 mod gen_browser;
 mod icons;

@@ -71,3 +71,8 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 
 - **Edição de referência:** Documentação pública da Microsoft Win32 Media Foundation (`IMFSourceReader`, `IMFSinkWriter`, `MFTranscodeGetAudioOutputAvailableTypes`, formato de entrada `MFVideoFormat_NV12`).
 - **Método de implementação:** Fronteira FFI isolada com RAII e `// SAFETY:`, gravação atômica em arquivo temporário com `drop` explícito antes da renomeação e testes locais com oráculo `ffprobe`.
+
+### Neoveg Encoder e LUTs `.cube` 1D/3D — `src/encoder/`
+
+- **Edição de referência:** Especificação pública do formato **Cube LUT v1.0** (`TITLE`, `LUT_1D_SIZE`, `LUT_3D_SIZE`, `DOMAIN_MIN`, `DOMAIN_MAX`) e fluxos de codificação em lote (*Fila*, *Codificação* paralela, *Predefinições* `.neovegpreset`/grupos/apelidos, *Pastas Monitoradas*, Corte/5 modos de escala, sobreposições e registros).
+- **Método de implementação:** 100% Rust seguro (`#[forbid(unsafe_code)]`) com limites rígidos em JSON e tabelas `.cube` (`LUT_1D_SIZE <= 4096`, `LUT_3D_SIZE <= 65`), codificação paralela protegida por `catch_unwind` e testes de fuzzing por mutação (`fuzz_encoder_parsers`).
