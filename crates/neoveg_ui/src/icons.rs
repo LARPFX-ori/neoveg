@@ -91,11 +91,15 @@ pub enum Icon {
     SmartSplit,
     HealEvents,
     PasteAttributes,
+    RecordDot,
+    ExpandedEdit,
+    SceneDetect,
+    StabilizeVideo,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 83] = [
+    pub const ALL: [Icon; 87] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -179,6 +183,10 @@ impl Icon {
         Icon::SmartSplit,
         Icon::HealEvents,
         Icon::PasteAttributes,
+        Icon::RecordDot,
+        Icon::ExpandedEdit,
+        Icon::SceneDetect,
+        Icon::StabilizeVideo,
     ];
 }
 
@@ -1281,6 +1289,41 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.36, 0.14, 0.60, 0.14, pal.ink, 0.10);
             c.line(0.32, 0.46, 0.64, 0.46, pal.blue, 0.08);
             c.line(0.32, 0.64, 0.58, 0.64, pal.amber, 0.08);
+        }
+        Icon::RecordDot => {
+            c.p.circle_filled(c.pt(0.50, 0.50), c.u(0.28), pal.red);
+            c.p.circle_stroke(c.pt(0.50, 0.50), c.u(0.36), c.stroke(0.07, pal.ink));
+        }
+        Icon::ExpandedEdit => {
+            c.p.rect_filled(c.rect(0.10, 0.24, 0.45, 0.76), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.55, 0.24, 0.90, 0.76), c.u(0.03), pal.cyan);
+            c.line(0.49, 0.14, 0.49, 0.86, pal.amber, 0.09);
+            c.line(0.36, 0.18, 0.62, 0.18, pal.ink, 0.07);
+            c.line(0.36, 0.82, 0.62, 0.82, pal.ink, 0.07);
+        }
+        Icon::SceneDetect => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.20, 0.86, 0.80),
+                c.u(0.05),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.42, 0.14, 0.42, 0.86, pal.amber, 0.09);
+            c.line(0.68, 0.14, 0.68, 0.86, pal.amber, 0.09);
+        }
+        Icon::StabilizeVideo => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.18, 0.86, 0.82),
+                c.u(0.05),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.p.rect_stroke(
+                c.rect(0.28, 0.30, 0.72, 0.70),
+                c.u(0.03),
+                c.stroke(0.08, pal.green),
+                StrokeKind::Inside,
+            );
         }
     }
 }

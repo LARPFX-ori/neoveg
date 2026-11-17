@@ -1308,6 +1308,12 @@ pub struct Track {
     /// intensidade dada por opacidade × envelope de opacidade. Ignorado em áudio.
     #[serde(default)]
     pub adjustment: bool,
+    /// Áudio: faixa armada para gravação ao vivo (`Rec`).
+    #[serde(default)]
+    pub record_armed: bool,
+    /// Áudio: monitoração de entrada durante gravação/espera.
+    #[serde(default)]
+    pub input_monitor: bool,
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1415,6 +1421,8 @@ impl Track {
             output_bus: None,
             sends: vec![],
             adjustment: false,
+            record_armed: false,
+            input_monitor: false,
         }
     }
 
@@ -1765,15 +1773,17 @@ pub enum FxCategory {
     Light,
     BlurSharpen,
     Stylize,
+    Transform,
     Key,
 }
 
 impl FxCategory {
-    pub const ALL: [FxCategory; 5] = [
+    pub const ALL: [FxCategory; 6] = [
         FxCategory::Color,
         FxCategory::Light,
         FxCategory::BlurSharpen,
         FxCategory::Stylize,
+        FxCategory::Transform,
         FxCategory::Key,
     ];
 
@@ -1783,6 +1793,7 @@ impl FxCategory {
             FxCategory::Light => "Luz",
             FxCategory::BlurSharpen => "Desfoque e nitidez",
             FxCategory::Stylize => "Estilizar",
+            FxCategory::Transform => "Estabilização",
             FxCategory::Key => "Recorte",
         }
     }
@@ -1811,6 +1822,7 @@ pub enum FxKind {
     Emboss,
     Posterize,
     Colorize,
+    Stabilization,
     // áudio
     Gain,
     ParametricEq,
@@ -2121,6 +2133,7 @@ impl FxKind {
             FxKind::Pixelate | FxKind::Mirror | FxKind::FilmGrain | FxKind::Emboss => {
                 Some(FxCategory::Stylize)
             }
+            FxKind::Stabilization => Some(FxCategory::Transform),
             FxKind::ChromaKeyer => Some(FxCategory::Key),
             FxKind::Gain
             | FxKind::ParametricEq
@@ -2138,7 +2151,7 @@ impl FxKind {
         }
     }
 
-    pub const VIDEO: [FxKind; 18] = [
+    pub const VIDEO: [FxKind; 19] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
         FxKind::ColorCorrector,
@@ -2157,6 +2170,7 @@ impl FxKind {
         FxKind::Emboss,
         FxKind::Posterize,
         FxKind::Colorize,
+        FxKind::Stabilization,
     ];
     pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
@@ -2196,6 +2210,7 @@ impl FxKind {
             FxKind::Emboss => "Relevo",
             FxKind::Posterize => "Posterizar",
             FxKind::Colorize => "Colorir (Tint)",
+            FxKind::Stabilization => "Estabilizador de Vídeo",
             FxKind::Gain => "Ganho",
             FxKind::ParametricEq => "EQ Paramétrico",
             FxKind::HighPass => "Passa-Altas",
@@ -2308,6 +2323,15 @@ impl FxKind {
                         p("Cor G", 0.0, 1.0, 0.6),
                         p("Cor B", 0.0, 1.0, 0.2),
                         p("Intensidade", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::Stabilization => {
+                const {
+                    &[
+                        p("Suavização (%)", 0.0, 100.0, 65.0),
+                        p("Zoom de borda", 1.0, 1.5, 1.12),
+                        p("Compensar rotação", 0.0, 1.0, 0.35),
                     ]
                 }
             }

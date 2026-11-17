@@ -587,6 +587,11 @@ impl PrefsCategory {
     }
 }
 
+struct SceneDetectJob {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rx: std::sync::mpsc::Receiver<Vec<Ticks>>,
+}
+
 #[derive(Default)]
 pub struct Dialogs {
     pub project_props: bool,
@@ -603,6 +608,13 @@ pub struct Dialogs {
     take_chooser_add_media: Option<Id>,
     take_chooser_name_buf: String,
     take_chooser_renamed_idx: Option<(Id, usize)>,
+    pub scene_detect: Option<Id>,
+    pub scene_detect_threshold: f32,
+    pub scene_detect_min_frames: u32,
+    pub scene_detect_markers: bool,
+    pub scene_detect_cuts: Vec<Ticks>,
+    pub scene_detect_analyzed: bool,
+    scene_detect_job: Option<SceneDetectJob>,
     pub shortcuts: bool,
     pub prefs_open: bool,
     pub prefs_tab: PrefsCategory,
@@ -810,6 +822,7 @@ impl App {
         self.gen_editor_window(ctx);
         self.paste_attributes_window(ctx);
         self.take_chooser_window(ctx);
+        self.scene_detect_window(ctx);
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
@@ -1341,6 +1354,210 @@ impl App {
             self.dlg.take_chooser = None;
             self.dlg.take_chooser_tex = None;
             self.dlg.take_chooser_renamed_idx = None;
+        }
+    }
+
+    pub(crate) fn open_scene_detect_for(&mut self, event_id: Id) {
+        self.dlg.scene_detect = Some(event_id);
+        if self.dlg.scene_detect_threshold < 5.0 {
+            self.dlg.scene_detect_threshold = 35.0;
+        }
+        if self.dlg.scene_detect_min_frames == 0 {
+            self.dlg.scene_detect_min_frames = 6;
+        }
+        self.dlg.scene_detect_cuts.clear();
+        self.dlg.scene_detect_analyzed = false;
+        self.dlg.scene_detect_job = None;
+    }
+
+    /// Diálogo **Detecção de Cenas e Cortes** (manual do VEGAS Pro 21, p. 300).
+    fn scene_detect_window(&mut self, ctx: &egui::Context) {
+        use neoveg_engine::engine::scene_detect::{detect_cuts_in_media, SceneDetectConfig};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        // Consulta resultado de análise assíncrona em andamento.
+        let mut finished_cuts: Option<Vec<Ticks>> = None;
+        let mut cancel_job = false;
+        if let Some(job) = &self.dlg.scene_detect_job {
+            match job.rx.try_recv() {
+                Ok(cuts) => {
+                    finished_cuts = Some(cuts);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    finished_cuts = Some(Vec::new());
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        if let Some(cuts) = finished_cuts {
+            self.dlg.scene_detect_cuts = cuts;
+            self.dlg.scene_detect_analyzed = true;
+            self.dlg.scene_detect_job = None;
+        }
+
+        let Some(id) = self.dlg.scene_detect else {
+            return;
+        };
+        let Some((ti, ei)) = self.project.find_event(id) else {
+            self.dlg.scene_detect = None;
+            return;
+        };
+        let ev = self.project.tracks[ti].events[ei].clone();
+        let Some(media_item) = self.project.media(ev.media_id).cloned() else {
+            self.dlg.scene_detect = None;
+            return;
+        };
+
+        let mut open = true;
+        let mut start_scan = false;
+        let mut apply = false;
+        let mut close = false;
+        let running = self.dlg.scene_detect_job.is_some();
+
+        egui::Window::new(format!("Detectar cenas e cortes — {}", ev.name))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(380.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Analisa diferenças visuais entre quadros consecutivos do evento selecionado para localizar mudanças de plano.");
+                ui.separator();
+                egui::Grid::new("scene_detect_grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Sensibilidade ao corte (%)");
+                        ui.add_enabled(
+                            !running,
+                            egui::Slider::new(&mut self.dlg.scene_detect_threshold, 10.0..=90.0)
+                                .fixed_decimals(0)
+                                .suffix(" %"),
+                        );
+                        ui.end_row();
+                        ui.label("Duração mínima da cena");
+                        ui.add_enabled(
+                            !running,
+                            egui::DragValue::new(&mut self.dlg.scene_detect_min_frames)
+                                .range(2..=120)
+                                .suffix(" quadros"),
+                        );
+                        ui.end_row();
+                        ui.label("Ação");
+                        ui.vertical(|ui| {
+                            ui.radio_value(
+                                &mut self.dlg.scene_detect_markers,
+                                false,
+                                "Dividir evento nos cortes detectados",
+                            );
+                            ui.radio_value(
+                                &mut self.dlg.scene_detect_markers,
+                                true,
+                                "Inserir marcadores de cena na timeline",
+                            );
+                        });
+                        ui.end_row();
+                    });
+                ui.separator();
+                if running {
+                    ui.horizontal(|ui| {
+                        crate::splash::spinner_inline(
+                            ui,
+                            ui.input(|i| i.time as f32),
+                            16.0,
+                            &self.theme,
+                        );
+                        ui.label("Analisando quadros do evento...");
+                        if ui.button("Cancelar").clicked() {
+                            cancel_job = true;
+                        }
+                    });
+                } else {
+                    if self.dlg.scene_detect_analyzed {
+                        let msg = if self.dlg.scene_detect_cuts.is_empty() {
+                            "Nenhum corte detectado com esse limiar.".to_string()
+                        } else {
+                            format!(
+                                "{} corte(s) de cena detectado(s).",
+                                self.dlg.scene_detect_cuts.len()
+                            )
+                        };
+                        ui.label(egui::RichText::new(msg).strong());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Analisar clipe").clicked() {
+                            start_scan = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.dlg.scene_detect_cuts.is_empty(),
+                                egui::Button::new("Aplicar na timeline"),
+                            )
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if ui.button("Fechar").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+            });
+
+        if cancel_job {
+            if let Some(job) = self.dlg.scene_detect_job.take() {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        if start_scan {
+            let cancel = std::sync::Arc::new(AtomicBool::new(false));
+            let cancel_w = cancel.clone();
+            let cache = self.media.clone();
+            let fd = self
+                .project
+                .settings
+                .frame_dur()
+                .max(Ticks::from_millis_i64(15));
+            let content_len = ev.rate.scale_ticks(ev.length).max(fd);
+            let range = (ev.offset, ev.offset + content_len);
+            let step = Ticks::from_raw(fd.0.saturating_mul(2)).max(Ticks::from_millis_i64(33));
+            let cfg = SceneDetectConfig {
+                threshold: (self.dlg.scene_detect_threshold / 100.0).clamp(0.1, 0.9),
+                min_scene_ticks: Ticks::from_raw(
+                    fd.0.saturating_mul(i64::from(self.dlg.scene_detect_min_frames.max(2))),
+                ),
+                sample_w: 64,
+                sample_h: 36,
+            };
+            let (tx, rx) = mpsc::channel();
+            self.dlg.scene_detect_analyzed = false;
+            self.dlg.scene_detect_cuts.clear();
+            if crate::util::spawn("scene-detect", move || {
+                let cuts =
+                    detect_cuts_in_media(&media_item, &cache, range, step, cfg, Some(&cancel_w));
+                let _ = tx.send(cuts);
+            })
+            .is_ok()
+            {
+                self.dlg.scene_detect_job = Some(SceneDetectJob { cancel, rx });
+            } else {
+                self.set_status("Não foi possível iniciar o worker de detecção de cenas.");
+            }
+        }
+        if apply {
+            let cuts = self.dlg.scene_detect_cuts.clone();
+            let as_markers = self.dlg.scene_detect_markers;
+            self.session.apply_scene_cuts(id, &cuts, as_markers);
+            self.sync_after_session();
+            self.dlg.scene_detect = None;
+        }
+        if !open || close {
+            if let Some(job) = self.dlg.scene_detect_job.take() {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.dlg.scene_detect = None;
         }
     }
 

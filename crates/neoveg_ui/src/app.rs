@@ -43,6 +43,8 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
         "edit.paste_attributes_selective",
         "edit.smart_split",
         "edit.heal_events",
+        "edit.detect_scenes",
+        "edit.expanded_edit_mode",
         "edit.trim_to_selection",
         "edit.trim_start",
         "edit.trim_end",
@@ -66,6 +68,8 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
     ],
     &[
         "insert.empty_event",
+        "track.record_arm",
+        "transport.record",
         "insert.marker",
         "insert.region",
         "transport.jump_prev_marker",
@@ -203,6 +207,17 @@ impl ScriptJob {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PreviewReqKey {
+    t: Ticks,
+    gen: u64,
+    w: usize,
+    h: usize,
+    scopes: bool,
+    prefer_proxy: bool,
+    expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
+}
+
 pub struct App {
     pub session: EditorSession,
     pub prefs: Preferences,
@@ -210,9 +225,10 @@ pub struct App {
     pub audio: AudioOut,
     pub(crate) preview: Preview,
     pub(crate) preview_tex: Option<TextureHandle>,
+    pub(crate) expanded_ab_tex: Option<(TextureHandle, TextureHandle)>,
     pub(crate) preview_inflight: bool,
     pub(crate) preview_inflight_since: Instant,
-    pub(crate) last_req: (Ticks, u64, usize, usize, bool, bool),
+    pub(crate) last_req: PreviewReqKey,
     pub(crate) preview_ms: f64,
     pub(crate) scopes_tex: Option<[TextureHandle; 4]>,
     pub tl: TimelineState,
@@ -272,6 +288,9 @@ pub struct App {
     pub(crate) pending_welcome_after_splash: bool,
     pub(crate) integrations: crate::integrations_ui::IntegrationsState,
     pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
+    pub(crate) recorder: Option<neoveg_engine::playback::AudioRecorder>,
+    pub(crate) recorder_tracks: Vec<Id>,
+    pub(crate) recording_peaks: HashMap<Id, [f32; 2]>,
 }
 
 impl Deref for App {
@@ -356,9 +375,13 @@ impl App {
             audio,
             preview,
             preview_tex: None,
+            expanded_ab_tex: None,
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
-            last_req: (Ticks::from_raw(-1), 0, 0, 0, false, false),
+            last_req: PreviewReqKey {
+                t: Ticks::from_raw(-1),
+                ..Default::default()
+            },
             detached_tabs: initial_layout.detached_panels(),
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
@@ -421,6 +444,9 @@ impl App {
             pending_welcome_after_splash,
             integrations: crate::integrations_ui::IntegrationsState::default(),
             encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
+            recorder: None,
+            recorder_tracks: Vec::new(),
+            recording_peaks: HashMap::new(),
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -1443,6 +1469,24 @@ impl App {
                         Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR))
                 }
             }
+            if let Some((la, rb)) = res.expanded_ab {
+                let ia = rgba_to_color_image(&la);
+                let ib = rgba_to_color_image(&rb);
+                match &mut self.expanded_ab_tex {
+                    Some((ta, tb)) => {
+                        ta.set(ia, egui::TextureOptions::LINEAR);
+                        tb.set(ib, egui::TextureOptions::LINEAR);
+                    }
+                    None => {
+                        self.expanded_ab_tex = Some((
+                            ctx.load_texture("expanded_a", ia, egui::TextureOptions::LINEAR),
+                            ctx.load_texture("expanded_b", ib, egui::TextureOptions::LINEAR),
+                        ));
+                    }
+                }
+            } else if self.session.expanded_edit.is_none() {
+                self.expanded_ab_tex = None;
+            }
             if let Some(sc) = res.scopes {
                 let opts = egui::TextureOptions::NEAREST;
                 let hist = rgba_to_color_image(&sc.histogram);
@@ -1480,7 +1524,34 @@ impl App {
         let scopes =
             self.is_panel_open(DockTab::Scopes) || self.is_panel_open(DockTab::ColorGrading);
         let prefer_proxy = self.opts.preview_quality.prefer_proxy();
-        let key = (t, self.generation, w, h, scopes, prefer_proxy);
+        let expanded_ab = self.session.expanded_edit.as_ref().map(|exp| {
+            let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+            let (lid, lt) = match exp.left_event_id.and_then(|id| {
+                self.project
+                    .event(id)
+                    .map(|e| (id, (e.end() - fd).max(e.start)))
+            }) {
+                Some((id, ts)) => (Some(id), ts),
+                None => (None, Ticks::ZERO),
+            };
+            let (rid, rt) = match exp
+                .right_event_id
+                .and_then(|id| self.project.event(id).map(|e| (id, e.start)))
+            {
+                Some((id, ts)) => (Some(id), ts),
+                None => (None, Ticks::ZERO),
+            };
+            (lid, lt, rid, rt)
+        });
+        let key = PreviewReqKey {
+            t,
+            gen: self.generation,
+            w,
+            h,
+            scopes,
+            prefer_proxy,
+            expanded_ab,
+        };
         if key != self.last_req {
             self.sync_snapshot();
             self.preview.request(PreviewRequest {
@@ -1490,10 +1561,91 @@ impl App {
                 h,
                 scopes,
                 prefer_proxy,
+                expanded_ab,
             });
             self.last_req = key;
             self.preview_inflight = true;
             self.preview_inflight_since = Instant::now();
+        }
+    }
+
+    /// Inicia ou finaliza a gravação de áudio nas faixas armadas (manual p. 821).
+    pub fn toggle_record(&mut self) {
+        if let Some(rec) = self.recorder.take() {
+            self.recorder_tracks.clear();
+            self.recording_peaks.clear();
+            match rec.stop() {
+                Ok(clip) => {
+                    if clip.frames_written == 0 {
+                        let _ = std::fs::remove_file(&clip.path);
+                        self.set_status("Gravação encerrada sem quadros capturados.");
+                        return;
+                    }
+                    match media::import_file(&clip.path) {
+                        Ok(imp) => {
+                            let id = imp.item.id;
+                            self.media.insert(id, imp.entry);
+                            let dur = Ticks::from_secs_f64(
+                                clip.frames_written as f64 / f64::from(clip.sample_rate.max(1)),
+                            )
+                            .unwrap_or_else(|| self.project.settings.frame_dur());
+                            self.session.commit_recorded_clip(
+                                imp.item,
+                                &clip.target_tracks,
+                                clip.start_cursor,
+                                dur,
+                            );
+                            self.sync_after_session();
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Erro ao importar gravação WAV: {e}"));
+                        }
+                    }
+                }
+                Err(e) => self.set_status(e),
+            }
+            return;
+        }
+        let mut armed = self.session.armed_audio_tracks();
+        if armed.is_empty() {
+            if let Some(ti) = self.sel_track {
+                if self.session.toggle_record_arm(ti) {
+                    armed = self.session.armed_audio_tracks();
+                }
+            }
+        }
+        if armed.is_empty() {
+            self.set_status("Arme uma faixa de áudio (●) antes de iniciar a gravação.");
+            return;
+        }
+        let target_ids: Vec<Id> = armed.iter().map(|(_, id)| *id).collect();
+        let dir = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("Neoveg Recordings"))
+            .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let out_wav = dir.join(format!("gravacao_{stamp}.wav"));
+        match neoveg_engine::playback::AudioRecorder::start(
+            target_ids.clone(),
+            self.cursor,
+            out_wav,
+        ) {
+            Ok(rec) => {
+                let msg = format!(
+                    "Gravando em {} faixa(s) via {}...",
+                    target_ids.len(),
+                    rec.device_name
+                );
+                self.recorder_tracks = target_ids;
+                self.recorder = Some(rec);
+                self.set_status(msg);
+            }
+            Err(e) => self.set_status(e),
         }
     }
 
@@ -1599,6 +1751,19 @@ impl App {
             UiAction::OpenTakeChooser => {
                 self.dlg.take_chooser = self.sel_events.iter().next().copied();
             }
+            UiAction::OpenSceneDetectDialog => {
+                if let Some(&id) = self.sel_events.iter().find(|&&eid| {
+                    self.project.find_event(eid).is_some_and(|(ti, ei)| {
+                        self.project.tracks[ti].kind == TrackKind::Video
+                            && self
+                                .project
+                                .media(self.project.tracks[ti].events[ei].media_id)
+                                .is_some_and(|m| m.has_video)
+                    })
+                }) {
+                    self.open_scene_detect_for(id);
+                }
+            }
             UiAction::OpenPanCrop => {
                 self.dlg.pan_crop = self.sel_events.iter().next().copied();
             }
@@ -1660,6 +1825,7 @@ impl App {
                 }
             }
             UiAction::TogglePlay => self.toggle_play(),
+            UiAction::ToggleRecord => self.toggle_record(),
             UiAction::PlayFromStart => {
                 self.set_cursor(Ticks::ZERO);
                 self.play();
@@ -1906,6 +2072,12 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.split");
                 self.cmd_menu_btn(ui, "edit.smart_split");
                 self.cmd_menu_btn(ui, "edit.heal_events");
+                self.cmd_menu_btn(ui, "edit.detect_scenes");
+                self.cmd_menu_btn(ui, "edit.expanded_edit_mode");
+                if self.session.expanded_edit.is_some() {
+                    self.cmd_menu_btn(ui, "edit.expanded_nudge_left");
+                    self.cmd_menu_btn(ui, "edit.expanded_nudge_right");
+                }
                 ui.menu_button("Take", |ui| {
                     self.cmd_menu_btn(ui, "event.take_chooser");
                     ui.separator();
@@ -2383,6 +2555,13 @@ impl App {
                 "transport.play_toggle",
             );
             self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
+            self.cmd_tool_toggle(
+                ui,
+                self.recorder.is_some(),
+                Icon::RecordDot,
+                None,
+                "transport.record",
+            );
             self.cmd_tool_btn(ui, Icon::GoStart, None, "transport.project_start");
             self.cmd_tool_btn(ui, Icon::GoEnd, None, "transport.project_end");
             self.cmd_tool_btn(ui, Icon::PrevFrame, None, "transport.frame_back");
@@ -3060,6 +3239,9 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // saída normal: a cópia de recuperação não é mais necessária
+        if let Some(rec) = self.recorder.take() {
+            let _ = rec.stop();
+        }
         self.encoder.save_to_disk();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");
@@ -3090,6 +3272,18 @@ impl App {
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(dt as f32);
+        if let Some(rec) = &self.recorder {
+            let pk = rec.take_peaks();
+            let err = rec.last_error();
+            let tids = self.recorder_tracks.clone();
+            for tid in tids {
+                self.recording_peaks.insert(tid, pk);
+            }
+            if let Some(e) = err {
+                self.set_status(e);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
 
         let playing = self.is_playing();
         if playing {

@@ -97,10 +97,10 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 - **Colar atributos do evento** (`Ctrl+Alt+V`) e **Colar atributos seletivamente...** (p. 369) implementados (inclusive **Tom / Pitch**).
 - **Esticar o tempo e mudar o tom (`Time Stretch` / `Pitch Shift`, p. 363):** transposição por semitons (`=`/`-`) e oitavas (`Ctrl+=`/`Ctrl+-`) em `-24..+24 st`, opção *Preservar tom ao esticar* com compensador **WSOLA** em tempo de execução no mixer e coluna *Tom* em *Detalhes da Edição* e *Propriedades do evento* implementados.
 - **Diálogo *Take Chooser*** com prévia de quadro, listagem, renomeação, reordenação, adição e exclusão de takes (`event.take_chooser`, p. 347) implementado.
-- **Detecção de cenas/cortes** (p. 300).
-- **Modo de edição expandido** ao clicar na borda entre dois eventos (p. 329).
-- **Estabilização de vídeo** (p. 341).
-- **Gravação de áudio** nas trilhas, com armar a trilha (p. 821).
+- **Detecção de cenas/cortes** (`edit.detect_scenes`, análise BT.601 + histograma L1 em `engine/scene_detect.rs` para dividir eventos ou inserir marcadores, p. 300) implementada.
+- **Modo de edição expandido** (`Ctrl+Shift+E` / duplo clique na borda, prévia dupla A/B Saída | Entrada, deslocamento quadro a quadro `Ctrl+[`/`Ctrl+]` e ripple Out/In, p. 329) implementado.
+- **Estabilização de vídeo** (`FxKind::Stabilization`, estimativa de movimento global em sala limpa + zoom de borda sem bordas pretas, p. 341) implementada.
+- **Gravação de áudio** nas trilhas armadas (`track.record_arm`, `transport.record`, captura `cpal` em WAV PCM 16 bits + medidor de pico no cabeçalho, p. 821) implementada.
 
 ### Trilhas
 
