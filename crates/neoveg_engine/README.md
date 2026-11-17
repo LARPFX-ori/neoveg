@@ -43,7 +43,36 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** Especificações públicas **SubRip Text (`.srt`)** (`HH:MM:SS,mmm --> HH:MM:SS,mmm`) e **W3C WebVTT — *Web Video Text Tracks Format*** (cabeçalho `WEBVTT`, blocos `NOTE`/`STYLE`/`REGION`, deixas `(HH:)?MM:SS.mmm --> ...`, ajustes `align:` / `line:`).
 - **Método de implementação:** Sala limpa com aritmética exata de milissegundos em `Ticks`, sanitização linear de tags inline sem retrocesso e criação de faixas superiores `GenSpec::Text` compatíveis com Desfazer e exportação bidirecional (`fuzz_subtitles_srt_and_vtt`).
 
-### AVI (`.avi`, MJPEG + PCM) — `src/media/avi.rs`
+### AVI (`.avi`, MJPEG / RGB24 / YUV + PCM / G.711) — `src/media/avi.rs`
 
-- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
-- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`). A escrita grava segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
+- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`, bitmaps `BI_RGB`/`DIB `, `YUY2`/`UYVY`, `I420`/`IYUV`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
+- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`), decodifica `MJPEG`, `BI_RGB`/`DIB ` (24/32 bpp) e YUV (`YUY2`/`UYVY` 4:2:2 e `I420`/`IYUV` 4:2:0) e áudio PCM/G.711. A escrita grava `MJPEG` ou `AVI Não Comprimido RGB24` (`AviVideoCodec::UncompressedRgb24`) em segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
+
+### Formatos Extras de Áudio e Extensões RIFF/AIFF — `src/media/wav.rs` e `src/media/audio_extra.rs`
+
+- **Edições de referência:**
+  - **Microsoft WAVE / RIFF** (`WAVEFORMATEX`, tags `0x0001` PCM, `0x0003` IEEE Float, `0x0006` ITU-T G.711 A-law, `0x0007` ITU-T G.711 µ-law, `0x0011` Microsoft IMA/DVI ADPCM com passo de 89 entradas) e `WAVE_FORMAT_EXTENSIBLE` (`0xFFFE`);
+  - **EBU Tech 3285** (*Broadcast Wave Format — BWF*, chunk `bext`) e **EBU Tech 3306** (*RF64: An Extended File Format for Audio*, chunk `ds64`);
+  - **Apple AIFF 1.3** e **AIFF-C** (`COMM` com `extended80`, `FVER`, `SSND`, codecs `NONE`/`sowt`/`fl32`/`fl64`/`ulaw`/`alaw`);
+  - **Sun / NeXT AU / SND** (`.snd` big-endian: PCM 8/16/24/32, Float 32/64 e ITU-T G.711 µ-law/A-law);
+  - **Apple Core Audio Format (CAF v1)** (`caff`, chunks de 64 bits `desc`, `data`);
+  - **Sony Pictures Digital Wave64** (`.w64`, GUIDs 128-bit `riff`, `wave`, `fmt `, `data`);
+  - **Creative Voice (`.voc`)** (v1.10/v1.20: blocos 0, 1, 2, 6, 7, 8, 9);
+  - **EA IFF 85 `8SVX`** (`.8svx`, `.svx`: `VHDR`, `BODY`, PCM 8 bits e compressão *Fibonacci Delta*);
+  - **Quite OK Audio (`.qoa`, especificação v1)** (cabeçalho `qoaf`, quadros e fatias com preditor *Sign-Sign LMS* de 4 estágios em blocos de até 20 amostras).
+- **Método de implementação:** Sala limpa estrita com limites explícitos de alocação/amostras e suíte de fuzzing por mutação (`fuzz_audio_extra`).
+
+### Formatos Adicionais de Imagem e Sequências — `src/media/img_extra.rs`
+
+- **Edições de referência:** **ANSI/SMPTE 268M-2003** (*DPX File Format*, big/little-endian 8/10/16 bits), **Kodak Cineon File Format v4.5** (`.cin`, cabeçalho 1024 B e empacotamento 10 bits), **WAP Wireless Bitmap Type 0** (`.wbmp`, *uintvar* multibyte + 1 bpp), **X Window System XBM & XPM v3** (`.xbm`, `.xpm` ASCII), **EA IFF 85 ILBM / PBM** (`.iff`, `.ilbm`, `.lbm`, `BMHD`/`CMAP`/`CAMG` EHB/HAM/`BODY` com compressão `ByteRun1`), além dos formatos licenciados do crate `image` 0.25 (`TGA`, `PNM`/`PBM`/`PGM`/`PPM`/`PAM`, `ICO`/`CUR`, `Radiance HDR`, `DDS`, `Farbfeld`, `QOI`, `OpenEXR`, `WebP` estático/animado).
+- **Método de implementação:** Leitores e escritores em sala limpa protegidos por `MAX_DIM` / orçamento de 512 MiB e testados sob mutação (`fuzz_imagens_extras`) e oráculo `ffmpeg`/`ffprobe` (`dpx`).
+
+### Media Foundation no Windows (Decodificação e Codificação) — `src/media/mf/{mod,encode}.rs`
+
+- **Edição de referência:** Documentação pública da Microsoft Win32 Media Foundation (`IMFSourceReader`, `IMFSinkWriter`, `MFTranscodeGetAudioOutputAvailableTypes`, formato de entrada `MFVideoFormat_NV12`).
+- **Método de implementação:** Fronteira FFI isolada com RAII e `// SAFETY:`, gravação atômica em arquivo temporário com `drop` explícito antes da renomeação e testes locais com oráculo `ffprobe`.
+
+### Neoveg Encoder e LUTs `.cube` 1D/3D — `src/encoder/`
+
+- **Edição de referência:** Especificação pública do formato **Cube LUT v1.0** (`TITLE`, `LUT_1D_SIZE`, `LUT_3D_SIZE`, `DOMAIN_MIN`, `DOMAIN_MAX`) e fluxos de codificação em lote (*Fila*, *Codificação* paralela, *Predefinições* `.neovegpreset`/grupos/apelidos, *Pastas Monitoradas*, Corte/5 modos de escala, sobreposições e registros).
+- **Método de implementação:** 100% Rust seguro (`#[forbid(unsafe_code)]`) com limites rígidos em JSON e tabelas `.cube` (`LUT_1D_SIZE <= 4096`, `LUT_3D_SIZE <= 65`), codificação paralela protegida por `catch_unwind` e testes de fuzzing por mutação (`fuzz_encoder_parsers`).

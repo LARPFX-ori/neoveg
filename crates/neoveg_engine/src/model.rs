@@ -413,6 +413,8 @@ impl Project {
         // trilhas e eventos
         let mut seen_tracks = std::collections::HashSet::new();
         let mut seen_events = std::collections::HashSet::new();
+        // ids de mídia do projeto: takes alternativos sem mídia são descartados
+        let media_ids: std::collections::HashSet<Id> = self.media.iter().map(|m| m.id).collect();
         for t in &mut self.tracks {
             if !seen_tracks.insert(t.id) {
                 t.id = new_id();
@@ -459,6 +461,7 @@ impl Project {
                 }
                 e.length = e.length.clamp_safe(Ticks::from_millis_i64(1), Ticks::MAX);
                 e.offset = e.offset.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                fixes.extend(crate::takes::sanitize_takes(e, &media_ids));
                 if e.rate.as_f64() > 100.0 {
                     e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
                 }
@@ -1556,6 +1559,31 @@ pub struct Event {
     /// Transição usada quando este evento se sobrepõe ao anterior (crossfade).
     #[serde(default)]
     pub transition: Option<TransitionSpec>,
+    /// Takes alternativos (não ativos) do evento (manual do VEGAS Pro 21,
+    /// p. 346). O take ativo continua em `media_id` / `offset` /
+    /// `take_name`, então render e edição não mudam.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt_takes: Vec<Take>,
+    /// Posição do take ativo na lista completa de takes (`0..=alt_takes.len()`).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub take_index: u32,
+    /// Nome do take ativo (vazio = nome da mídia).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub take_name: String,
+}
+
+/// Um take de um evento: a mídia, onde ela começa e o nome do take.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    pub media_id: Id,
+    #[serde(default)]
+    pub offset: Ticks,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 impl Event {
@@ -1580,6 +1608,19 @@ impl Event {
             fx: vec![],
             group: None,
             transition: None,
+            alt_takes: Vec::new(),
+            take_index: 0,
+            take_name: String::new(),
+        }
+    }
+
+    /// Desloca a mídia de **todos** os takes por `delta` (ticks de mídia).
+    /// Usado quando o início do evento anda junto com a mídia (dividir,
+    /// aparar à esquerda): os takes continuam sincronizados entre si.
+    pub fn shift_offsets(&mut self, delta: Ticks) {
+        self.offset += delta;
+        for t in &mut self.alt_takes {
+            t.offset = (t.offset + delta).max(Ticks::ZERO);
         }
     }
 
@@ -1642,6 +1683,38 @@ impl Event {
 // ---------------------------------------------------------------------------
 // Efeitos
 // ---------------------------------------------------------------------------
+
+/// Categoria de um efeito de vídeo na janela Efeitos de Vídeo (manual do
+/// VEGAS Pro 21, p. 54: os efeitos ficam organizados em categorias). As
+/// categorias e os nomes são do Neoveg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FxCategory {
+    Color,
+    Light,
+    BlurSharpen,
+    Stylize,
+    Key,
+}
+
+impl FxCategory {
+    pub const ALL: [FxCategory; 5] = [
+        FxCategory::Color,
+        FxCategory::Light,
+        FxCategory::BlurSharpen,
+        FxCategory::Stylize,
+        FxCategory::Key,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            FxCategory::Color => "Cor",
+            FxCategory::Light => "Luz",
+            FxCategory::BlurSharpen => "Desfoque e nitidez",
+            FxCategory::Stylize => "Estilizar",
+            FxCategory::Key => "Recorte",
+        }
+    }
+}
 
 // Efeitos externos (OFX para vídeo, VST3 para áudio) rodam no host isolado
 // `neoveg --plugin-host` (fronteira FFI §0.3); ver `plugin_host`.
@@ -1958,6 +2031,41 @@ const fn tg(name: &'static str, default: f32) -> ParamSpec {
 }
 
 impl FxKind {
+    /// Categoria na janela Efeitos de Vídeo (`None` para áudio e plug-ins
+    /// externos, que ficam em Terceiros).
+    pub fn category(self) -> Option<FxCategory> {
+        match self {
+            FxKind::BrightnessContrast
+            | FxKind::HslAdjust
+            | FxKind::ColorCorrector
+            | FxKind::Levels
+            | FxKind::BlackWhite
+            | FxKind::Sepia
+            | FxKind::Invert
+            | FxKind::Posterize
+            | FxKind::Colorize => Some(FxCategory::Color),
+            FxKind::Glow | FxKind::Vignette => Some(FxCategory::Light),
+            FxKind::GaussianBlur | FxKind::Sharpen => Some(FxCategory::BlurSharpen),
+            FxKind::Pixelate | FxKind::Mirror | FxKind::FilmGrain | FxKind::Emboss => {
+                Some(FxCategory::Stylize)
+            }
+            FxKind::ChromaKeyer => Some(FxCategory::Key),
+            FxKind::Gain
+            | FxKind::ParametricEq
+            | FxKind::HighPass
+            | FxKind::LowPass
+            | FxKind::Compressor
+            | FxKind::NoiseGate
+            | FxKind::Delay
+            | FxKind::Reverb
+            | FxKind::Chorus
+            | FxKind::Distortion
+            | FxKind::Limiter
+            | FxKind::Ofx
+            | FxKind::Vst3 => None,
+        }
+    }
+
     pub const VIDEO: [FxKind; 18] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,

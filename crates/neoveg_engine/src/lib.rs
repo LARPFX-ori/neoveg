@@ -22,6 +22,8 @@ pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;
 #[forbid(unsafe_code)]
+pub mod encoder;
+#[forbid(unsafe_code)]
 pub mod engine;
 #[forbid(unsafe_code)]
 pub mod fcp7xml;
@@ -48,6 +50,8 @@ pub mod scopes;
 pub mod session;
 #[forbid(unsafe_code)]
 pub mod subtitles;
+#[forbid(unsafe_code)]
+pub mod takes;
 #[forbid(unsafe_code)]
 pub mod track_keyframes;
 

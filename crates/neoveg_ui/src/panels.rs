@@ -218,10 +218,10 @@ impl App {
             DockTab::ProjectMedia => self.media_tab(ui),
             DockTab::Explorer => self.explorer_tab(ui),
             DockTab::Transitions => self.transitions_tab(ui),
-            DockTab::VideoFx => self.fx_tab(ui, false),
+            DockTab::VideoFx => self.video_fx_browser(ui),
             DockTab::ColorGrading => self.color_grading_tab(ui),
             DockTab::AudioFx => self.fx_tab(ui, true),
-            DockTab::Generators => self.generators_tab(ui),
+            DockTab::Generators => self.generators_browser(ui),
             DockTab::Mixer => self.mixer_tab(ui),
             DockTab::Loudness => self.loudness_tab(ui),
             DockTab::SurroundPanner => self.surround_panner_tab(ui),
@@ -243,6 +243,7 @@ impl App {
                     self.dirty = true;
                 }
             }
+            DockTab::Encoder => self.encoder_tab(ui),
         }
     }
 
@@ -604,6 +605,8 @@ impl App {
         let ctx = ui.ctx().clone();
         let items: Vec<MediaItem> = self.project.media.clone();
         let mut remove = None;
+        let mut add_as_take = None;
+        let has_event_selection = !self.sel_events.is_empty();
         let mut add = None;
         let mut open_trimmer = None;
         let mut edit_gen = None;
@@ -673,6 +676,20 @@ impl App {
                             open_trimmer = Some(m.id);
                             ui.close_menu();
                         }
+                        // "Add As Takes" (manual do VEGAS Pro 21, p. 346)
+                        if ui
+                            .add_enabled(
+                                has_event_selection,
+                                egui::Button::new("Adicionar como take aos eventos selecionados"),
+                            )
+                            .on_disabled_hover_text(
+                                "Selecione um ou mais eventos na linha do tempo.",
+                            )
+                            .clicked()
+                        {
+                            add_as_take = Some(m.id);
+                            ui.close_menu();
+                        }
                         if m.has_video
                             && !matches!(m.source, MediaSource::Generated(_))
                             && ui.button("Gerar proxy de vídeo").clicked()
@@ -723,16 +740,28 @@ impl App {
         if let Some(id) = edit_gen {
             self.dlg.gen_editor = Some(id);
         }
+        if let Some(id) = add_as_take {
+            let n = self.session.add_media_as_take_to_selected(id);
+            self.set_status(if n == 0 {
+                "Nenhum evento selecionado compatível (vídeo/áudio) recebeu o take.".to_string()
+            } else {
+                format!("Take adicionado a {n} evento(s)")
+            });
+        }
         if let Some(id) = remove {
-            let used = self
-                .project
-                .tracks
-                .iter()
-                .any(|t| t.events.iter().any(|e| e.media_id == id));
+            let used = self.project.tracks.iter().any(|t| {
+                t.events
+                    .iter()
+                    .any(|e| neoveg_engine::takes::uses_media(e, id))
+            });
             self.checkpoint();
             if used {
+                // o take dessa mídia sai; o evento só sai se não tiver outro take
                 for t in &mut self.project.tracks {
-                    t.events.retain(|e| e.media_id != id);
+                    t.events.retain_mut(|e| {
+                        !neoveg_engine::takes::uses_media(e, id)
+                            || neoveg_engine::takes::remove_media(e, id)
+                    });
                 }
             }
             self.project.media.retain(|m| m.id != id);
@@ -887,11 +916,6 @@ impl App {
         } else {
             FxKind::VIDEO.to_vec()
         };
-        let want_kind = if audio {
-            TrackKind::Audio
-        } else {
-            TrackKind::Video
-        };
         egui::Grid::new(("fx_grid", audio))
             .num_columns(4)
             .striped(true)
@@ -911,190 +935,69 @@ impl App {
                             &self.theme,
                         );
                     });
-                    let sel_ev: Vec<Id> = self
-                        .sel_events
-                        .iter()
-                        .filter(|id| {
-                            self.project
-                                .find_event(**id)
-                                .map(|(t, _)| self.project.tracks[t].kind == want_kind)
-                                .unwrap_or(false)
-                        })
-                        .cloned()
-                        .collect();
-                    if ui
-                        .add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos"))
-                        .clicked()
-                    {
-                        self.checkpoint();
-                        for id in &sel_ev {
-                            if let Some(ev) = self.project.event_mut(*id) {
-                                ev.fx.push(FxInstance::new(k));
-                            }
-                        }
-                        self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
-                        self.changed();
-                    }
-                    let tr = self
-                        .sel_track
-                        .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
-                    if let (true, Some(t)) = (
-                        ui.add_enabled(tr.is_some(), egui::Button::new("Trilha"))
-                            .clicked(),
-                        tr,
-                    ) {
-                        self.checkpoint();
-                        self.project.tracks[t].fx.push(FxInstance::new(k));
-                        self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
-                        self.changed();
-                    }
-                    if ui.button("Master").clicked() {
-                        self.checkpoint();
-                        if audio {
-                            self.project.master.fx.push(FxInstance::new(k));
-                            self.dlg.fx_target = Some(FxTarget::MasterAudio);
-                        } else {
-                            self.project.master.video_fx.push(FxInstance::new(k));
-                            self.dlg.fx_target = Some(FxTarget::MasterVideo);
-                        }
-                        self.changed();
-                    }
+                    self.fx_apply_buttons(ui, k, audio);
                     ui.end_row();
                 }
             });
     }
 
-    fn generators_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new(
-                "Arraste um gerador para a timeline ou clique para inserir no cursor.",
-            )
-            .small()
-            .weak(),
-        );
-        ui.separator();
-        let presets: Vec<(&str, GenSpec)> = vec![
-            ("Texto simples", GenSpec::Text(TextSpec::default())),
-            (
-                "Título com contorno",
-                GenSpec::Text(TextSpec {
-                    text: "TÍTULO".into(),
-                    size: 16.0,
-                    outline: 0.6,
-                    outline_color: [0.0, 0.0, 0.0, 1.0],
-                    color: [1.0, 0.85, 0.2, 1.0],
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Terço inferior (lower third)",
-                GenSpec::Text(TextSpec {
-                    text: "Nome Sobrenome\nCargo ou descrição".into(),
-                    size: 5.5,
-                    align: TextAlign::Left,
-                    x: 0.3,
-                    y: 0.82,
-                    background: [0.0, 0.0, 0.0, 0.0],
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Créditos rolando",
-                GenSpec::Text(TextSpec {
-                    text: "Direção\nFulano de Tal\n\nEdição\nNeoveg\n\nObrigado por assistir"
-                        .into(),
-                    size: 6.0,
-                    anim: TextAnim::ScrollUp,
-                    anim_duration: 10.0,
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Letreiro (crawl)",
-                GenSpec::Text(TextSpec {
-                    text: "Notícia urgente: texto passando na parte inferior da tela".into(),
-                    size: 5.0,
-                    y: 0.9,
-                    anim: TextAnim::CrawlLeft,
-                    anim_duration: 8.0,
-                    background: [0.0, 0.0, 0.0, 0.0],
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Máquina de escrever",
-                GenSpec::Text(TextSpec {
-                    text: "Era uma vez...".into(),
-                    anim: TextAnim::Typewriter,
-                    anim_duration: 3.0,
-                    ..TextSpec::default()
-                }),
-            ),
-            (
-                "Cor sólida (preto)",
-                GenSpec::SolidColor {
-                    color: [0.0, 0.0, 0.0, 1.0],
-                },
-            ),
-            (
-                "Cor sólida (branco)",
-                GenSpec::SolidColor {
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-            ),
-            (
-                "Gradiente linear",
-                GenSpec::Gradient {
-                    a: [0.05, 0.1, 0.35, 1.0],
-                    b: [0.6, 0.2, 0.5, 1.0],
-                    angle: 90.0,
-                    radial: false,
-                },
-            ),
-            (
-                "Gradiente radial",
-                GenSpec::Gradient {
-                    a: [1.0, 0.9, 0.6, 1.0],
-                    b: [0.3, 0.05, 0.0, 1.0],
-                    angle: 0.0,
-                    radial: true,
-                },
-            ),
-            (
-                "Xadrez",
-                GenSpec::Checkerboard {
-                    a: [0.85, 0.85, 0.85, 1.0],
-                    b: [0.35, 0.35, 0.35, 1.0],
-                    cells: 9,
-                },
-            ),
-            ("Barras de cor", GenSpec::ColorBars),
-            (
-                "Ruído (estático)",
-                GenSpec::Noise {
-                    mono: true,
-                    animated: true,
-                },
-            ),
-        ];
-        egui::Grid::new("gen_grid")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                for (i, (name, spec)) in presets.into_iter().enumerate() {
-                    ui.dnd_drag_source(
-                        egui::Id::new(("gen", i)),
-                        DndPayload::Generator(spec.clone()),
-                        |ui| {
-                            icons::icon_label(ui, Icon::GeneratorFrame, 14.0, name, &self.theme);
-                        },
-                    );
-                    if ui.button("Inserir no cursor").clicked() {
-                        self.insert_generated(spec);
-                    }
-                    ui.end_row();
+    /// Botões Eventos, Trilha e Master de um efeito (lista de áudio e
+    /// janela Efeitos de Vídeo): aplicam à seleção do tipo certo, à trilha
+    /// selecionada ou ao Master, com um passo de Desfazer.
+    pub(crate) fn fx_apply_buttons(&mut self, ui: &mut egui::Ui, k: FxKind, audio: bool) {
+        let want_kind = if audio {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        };
+        let sel_ev: Vec<Id> = self
+            .sel_events
+            .iter()
+            .filter(|id| {
+                self.project
+                    .find_event(**id)
+                    .map(|(t, _)| self.project.tracks[t].kind == want_kind)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if ui
+            .add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos"))
+            .clicked()
+        {
+            self.checkpoint();
+            for id in &sel_ev {
+                if let Some(ev) = self.project.event_mut(*id) {
+                    ev.fx.push(FxInstance::new(k));
                 }
-            });
+            }
+            self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
+            self.changed();
+        }
+        let tr = self
+            .sel_track
+            .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
+        if let (true, Some(t)) = (
+            ui.add_enabled(tr.is_some(), egui::Button::new("Trilha"))
+                .clicked(),
+            tr,
+        ) {
+            self.checkpoint();
+            self.project.tracks[t].fx.push(FxInstance::new(k));
+            self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
+            self.changed();
+        }
+        if ui.button("Master").clicked() {
+            self.checkpoint();
+            if audio {
+                self.project.master.fx.push(FxInstance::new(k));
+                self.dlg.fx_target = Some(FxTarget::MasterAudio);
+            } else {
+                self.project.master.video_fx.push(FxInstance::new(k));
+                self.dlg.fx_target = Some(FxTarget::MasterVideo);
+            }
+            self.changed();
+        }
     }
 
     // -----------------------------------------------------------------
