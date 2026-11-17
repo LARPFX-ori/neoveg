@@ -55,3 +55,78 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
 - **Intercâmbio aberto restante:** exportação AAF a partir da especificação pública.
 - **Hospedagem de plug-ins externos:** OFX com tiles, contexto General completo e `getValueAtTime` em outros tempos; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros, instrumentos (MIDI), estado completo salvo no projeto e compensação de latência.
+
+## UI/UX que ainda falta (manual do VEGAS Pro 21)
+
+Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21 e conferido no código do `main`. As páginas são as do manual. Cada item entra pela interface do Neoveg, com nomes e desenho próprios (`AGENTS.md` §1 e §2).
+
+### Janela principal e personalização
+
+- **Barra de ferramentas personalizável:** adicionar, remover e reordenar botões (p. 81).
+- **Cabeçalho de faixa:** arrastar a borda para esconder os botões automaticamente; duplo clique na borda alterna entre a largura cheia e só as barras de cor (p. 69). O botão *Mais* já existe.
+- **Régua e grade:** espaçamento da grade e encaixe na grade (p. 87).
+- **Marcadores de CD e de comando** na barra de marcadores (p. 267). Marcadores e regiões já existem.
+
+### Mídia do Projeto
+
+- **Pastas de mídia (*bins*)** com busca (p. 144) e **pastas inteligentes** (*smart bins*, p. 172).
+- **Modos de exibição** (miniaturas, lista, detalhes, p. 142) e **scrub ao passar o mouse** sobre a miniatura (p. 135).
+- **Substituir e trocar mídia** mantendo os eventos (pp. 137 e 144).
+- **Selecionar todos os eventos que usam uma mídia** (p. 144).
+- **Storyboards** (p. 155).
+
+### Prévia de Vídeo
+
+- **Prévia em tela dividida** (antes e depois do efeito, p. 203).
+- **Prévia dinâmica em RAM** (p. 207).
+- **Zoom e deslocamento dentro da prévia** (p. 208).
+- **Copiar o quadro atual para a área de transferência** (p. 200). Salvar o quadro em PNG já existe (`file.snapshot`).
+- **Silenciar todo o áudio ou todo o vídeo** da prévia (p. 200).
+- **Monitor externo** (p. 210).
+- **Soltar efeitos na prévia** para aplicá-los ao vídeo de saída (p. 55).
+
+### Edição na linha do tempo
+
+- **Seletor de ferramenta de edição** na barra de transporte (p. 236):
+  - Normal, com os modos Shuffle, Slip, Slide, Stretch e Split Trim;
+  - as ferramentas Envelope, Seleção e Zoom.
+
+  O motor já tem `EditMode` (Normal, Slip, Slide, Stretch, Roll, Shuffle, Ripple); falta a interface. Hoje o slip é feito com um modificador durante o arraste.
+- **Inserir evento vazio** (p. 243).
+- **Smart Split** (p. 308) e **juntar eventos divididos** (*healing*, p. 309).
+- **Detecção de cenas/cortes** (p. 300).
+- **Modo de edição expandido** ao clicar na borda entre dois eventos (p. 329) e **exibição da duração do evento** (p. 329).
+- **Vínculos de sincronia** entre eventos (*sync links*, p. 351).
+- **Colar atributos do evento seletivamente** (p. 369).
+- **Esticar o tempo ou mudar o tom** de um evento de áudio (p. 363).
+- **Estabilização de vídeo** (p. 341).
+- **Diálogo *Take Chooser*** com prévia (p. 347). Hoje a escolha é por uma lista no submenu *Take*.
+- **Gravação de áudio** nas trilhas, com armar a trilha (p. 821).
+
+### Trilhas
+
+- **Agrupar trilhas** em pastas recolhíveis (p. 382).
+- **Propriedades padrão de trilha** (p. 414).
+- **Renderizar para uma nova trilha** (p. 415).
+- **Composição pai/filho e máscaras** (p. 740).
+- **Linhas do tempo aninhadas** (p. 114).
+- **Edição multicâmera** (p. 416).
+- **Edição 3D estereoscópica** (p. 426).
+
+### Efeitos, cor e legendas
+
+- **Pacotes e cadeias de efeitos salvos** para reutilizar (p. 514).
+- **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56). Hoje há um preset *Padrão* por efeito.
+- **Rastreamento de movimento** (p. 713).
+- ***Color Grading* (pp. 769–781):**
+  - presets de LUT de câmera e de *look*;
+  - curvas de cor e curvas HSL.
+
+  As rodas tonais já existem.
+- **Inserir legendas a partir das regiões** do projeto (p. 722).
+- **Efeitos de áudio fora de tempo real** (p. 940) e **ignorar todos os efeitos de áudio** de uma vez (p. 946).
+
+### Automação e Preferências
+
+- **Modos de automação** dos envelopes (como *Touch* e *Latch*, p. 1008).
+- **Abas das Preferências que ainda não têm equivalente** (pp. 1061–1115): dispositivo de prévia, dispositivo de áudio, MIDI, sincronização, controle externo e entrada/saída de arquivos.
