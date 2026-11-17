@@ -473,8 +473,14 @@ impl Class for MemStream {
 }
 
 impl MemStream {
-    #[cfg(test)]
-    fn bytes(&self) -> Vec<u8> {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let len = bytes.len().min(MAX_STREAM_BYTES);
+        Self {
+            inner: Mutex::new((bytes[..len].to_vec(), 0)),
+        }
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
         lock(&self.inner).0.clone()
     }
 }
@@ -1082,6 +1088,63 @@ impl HostedVst3 {
         self.latency
     }
 
+    /// Serializa o estado completo do componente (`IComponent::getState`).
+    pub fn state_bytes(&self) -> Result<Vec<u8>, String> {
+        let stream = ComWrapper::new(MemStream::default());
+        let Some(s) = stream.to_com_ptr::<IBStream>() else {
+            return Err("não foi possível alocar stream de estado VST3".into());
+        };
+        // SAFETY: `component` e `s` válidos durante a chamada.
+        let st = unsafe { self.component.getState(s.as_ptr()) };
+        if st != kResultOk {
+            return Err(format!(
+                "plug-in não expõe estado serializável (status {st})"
+            ));
+        }
+        Ok(stream.bytes())
+    }
+
+    /// Restaura o estado completo do componente (`IComponent::setState`) e sincroniza o controlador.
+    pub fn set_state_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > MAX_STREAM_BYTES {
+            return Err("estado VST3 excede o tamanho máximo".into());
+        }
+        let was_active = self.active;
+        if was_active {
+            self.deactivate();
+        }
+        let stream = ComWrapper::new(MemStream::from_bytes(bytes));
+        let Some(s) = stream.to_com_ptr::<IBStream>() else {
+            if was_active {
+                let _ = self.activate();
+            }
+            return Err("não foi possível preparar stream de estado VST3".into());
+        };
+        // SAFETY: `component` e `s` são válidos durante a restauração.
+        let st = unsafe { self.component.setState(s.as_ptr()) };
+        if st != kResultOk && st != kNotImplemented {
+            if was_active {
+                let _ = self.activate();
+            }
+            return Err(format!(
+                "plug-in recusou restauração de estado (status {st})"
+            ));
+        }
+        if let Some(c) = &self.controller {
+            // SAFETY: reposiciona o stream e sincroniza a UI/controlador.
+            unsafe {
+                s.seek(0, IBStream_::IStreamSeekMode_::kIBSeekSet, ptr::null_mut());
+                c.setComponentState(s.as_ptr());
+            }
+        }
+        self.sent.clear();
+        if was_active {
+            self.activate()?;
+        }
+        self.params = self.read_params();
+        Ok(())
+    }
+
     /// Texto do plug-in para o valor normalizado de um parâmetro (ex.: "-6.0 dB").
     pub fn param_text(&self, id: u32, value: f64) -> Option<String> {
         let c = self.controller.as_ref()?;
@@ -1335,6 +1398,19 @@ mod tests {
             );
         }
         assert_eq!(w.bytes(), b"abcdef");
+
+        let restored = ComWrapper::new(MemStream::from_bytes(b"xyz"));
+        let rs = restored.to_com_ptr::<IBStream>().expect("IBStream");
+        let mut rbuf = [0u8; 4];
+        let mut rn = 0;
+        unsafe {
+            assert_eq!(
+                rs.read(rbuf.as_mut_ptr() as *mut c_void, 4, &mut rn),
+                kResultOk
+            );
+        }
+        assert_eq!(rn, 3);
+        assert_eq!(&rbuf[..3], b"xyz");
     }
 
     #[test]
