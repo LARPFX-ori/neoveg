@@ -66,6 +66,22 @@ pub struct EditorOptions {
     /// "Slip All Takes" (menu Opções, manual do VEGAS Pro 21 p. 346):
     /// o slip desloca todos os takes do evento, não só o ativo.
     pub slip_all_takes: bool,
+    /// Zoom vertical das formas de onda de áudio, em passos de √2 (0 = 1×):
+    /// Shift+↑/↓ (lista de atalhos do VEGAS Pro: "Zoom waveforms in/out
+    /// vertically (audio only)"). Passos inteiros: subir e descer volta
+    /// exatamente a 1×.
+    pub waveform_zoom_steps: u8,
+}
+
+/// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
+pub const MAX_WAVEFORM_ZOOM_STEPS: u8 = 12;
+
+impl EditorOptions {
+    /// Fator do zoom vertical das formas de onda (1× a 64×).
+    pub fn waveform_zoom(&self) -> f32 {
+        let steps = self.waveform_zoom_steps.min(MAX_WAVEFORM_ZOOM_STEPS);
+        2f32.powf(f32::from(steps) * 0.5)
+    }
 }
 
 impl Default for EditorOptions {
@@ -84,6 +100,7 @@ impl Default for EditorOptions {
             safe_areas: false,
             loop_playback: false,
             slip_all_takes: false,
+            waveform_zoom_steps: 0,
         }
     }
 }
