@@ -92,19 +92,23 @@ impl LayoutType {
         }
     }
 
+    /// Nome mostrado na interface. Sem nomes de produtos ou empresas de
+    /// terceiros (AGENTS.md §1): o `id` e os aliases de serde continuam os
+    /// mesmos, então preferências e atalhos já salvos não mudam.
     pub fn label(self) -> &'static str {
         match self {
-            LayoutType::SonicFoundry => "Sonic Foundry",
-            LayoutType::Sony => "Sony",
-            LayoutType::Magix => "MAGIX",
+            LayoutType::SonicFoundry => "Clássico",
+            LayoutType::Sony => "Intermediário",
+            LayoutType::Magix => "Atual",
         }
     }
 
+    /// Resumo curto da disposição, mostrado junto do nome.
     pub fn era(self) -> &'static str {
         match self {
-            LayoutType::SonicFoundry => "Vegas Pro 1.0–4.0",
-            LayoutType::Sony => "Sony Vegas Pro 8–13",
-            LayoutType::Magix => "MAGIX VEGAS Pro 14–21",
+            LayoutType::SonicFoundry => "timeline no topo, tema claro",
+            LayoutType::Sony => "área acoplável no topo, cinza médio",
+            LayoutType::Magix => "3 painéis no topo, tema escuro",
         }
     }
 
@@ -116,7 +120,7 @@ impl LayoutType {
             }
             LayoutType::Sony => {
                 "Área acoplável (Prévia e painéis) no topo, timeline na parte inferior da janela, \
-                 barra de transporte no rodapé, abas na base e cinza médio Sony."
+                 barra de transporte no rodapé, abas na base e cinza médio."
             }
             LayoutType::Magix => {
                 "Área acoplável no topo em 3 painéis (Abas, Prévia e Master Bus) com abas na base, \
@@ -128,8 +132,8 @@ impl LayoutType {
     pub fn from_pref(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "sonic_foundry" | "sonic-foundry" | "sonic foundry" | "sonic fonudry"
-            | "sonicfoundry" => LayoutType::SonicFoundry,
-            "sony" => LayoutType::Sony,
+            | "sonicfoundry" | "clássico" | "classico" => LayoutType::SonicFoundry,
+            "sony" | "intermediário" | "intermediario" => LayoutType::Sony,
             _ => LayoutType::Magix,
         }
     }
@@ -710,6 +714,11 @@ mod tests {
         assert_eq!(LayoutType::from_pref("Sony"), LayoutType::Sony);
         assert_eq!(LayoutType::from_pref("MAGIX"), LayoutType::Magix);
         assert_eq!(LayoutType::from_pref("desconhecido"), LayoutType::Magix);
+        // os nomes mostrados na interface também são aceitos
+        for lt in LayoutType::ALL {
+            assert_eq!(LayoutType::from_pref(lt.label()), lt);
+            assert_eq!(LayoutType::from_pref(lt.id()), lt);
+        }
 
         let sf = EditLayoutPrefs::for_type(LayoutType::SonicFoundry);
         assert!(!sf.timeline_at_bottom);
