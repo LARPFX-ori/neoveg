@@ -900,3 +900,51 @@ fn kittest_navegador_de_efeitos_de_video() {
         .unwrap_or_default();
     assert_eq!(fx, vec![crate::model::FxKind::Invert]);
 }
+
+/// Janela Geradores de Mídia (manual do VEGAS Pro 21, p. 56): categoria,
+/// busca, escolher o tipo mostra os presets, e "Inserir no cursor" cria a
+/// mídia gerada do preset escolhido.
+#[test]
+fn kittest_navegador_de_geradores_de_midia() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.generators");
+    harness.run_steps(3);
+
+    harness.get_by_label("Utilitários").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Quadriculado").is_some());
+    assert!(harness.query_by_label("Texto").is_none());
+
+    harness.get_by_label("Todos").click();
+    harness.state_mut().gen_browser.search = "grad".into();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Gradiente").is_some());
+    assert!(harness.query_by_label("Cor sólida").is_none());
+    harness.get_by_label("Gradiente").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Gradiente linear").is_some());
+    harness.get_by_label("Gradiente radial").click();
+    harness.run_steps(2);
+
+    let antes = harness.state().project.media.len();
+    harness.get_by_label("Inserir no cursor").click();
+    harness.run_steps(2);
+    let app = harness.state();
+    assert_eq!(app.project.media.len(), antes + 1);
+    let radial = app.project.media.last().is_some_and(|m| {
+        matches!(
+            m.source,
+            crate::model::MediaSource::Generated(crate::model::GenSpec::Gradient {
+                radial: true,
+                ..
+            })
+        )
+    });
+    assert!(radial, "inseriu o preset Gradiente radial");
+}

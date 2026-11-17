@@ -11,20 +11,38 @@ use neoveg_engine::model::{FxCategory, FxInstance, FxKind};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
 
-/// Categoria escolhida no alto da janela.
+/// Categoria escolhida no alto da janela (Efeitos de Vídeo e Geradores
+/// de Mídia): as três especiais do manual e as categorias de cada janela.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum BrowserCat {
+pub(crate) enum BrowserCat<C> {
     #[default]
     All,
     ThirdParty,
     Favorites,
-    Cat(FxCategory),
+    Cat(C),
+}
+
+/// Linha de categorias no alto da janela.
+pub(crate) fn category_row<C: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    cat: &mut BrowserCat<C>,
+    cats: &[(C, &str)],
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(cat, BrowserCat::All, "Todos");
+        ui.selectable_value(cat, BrowserCat::ThirdParty, "Terceiros");
+        ui.selectable_value(cat, BrowserCat::Favorites, "Favoritos");
+        ui.separator();
+        for (c, name) in cats {
+            ui.selectable_value(cat, BrowserCat::Cat(*c), *name);
+        }
+    });
 }
 
 /// Estado da janela Efeitos de Vídeo.
 #[derive(Default)]
 pub(crate) struct FxBrowser {
-    pub(crate) cat: BrowserCat,
+    pub(crate) cat: BrowserCat<FxCategory>,
     pub(crate) search: String,
     pub(crate) selected: Option<FxKind>,
     /// Miniaturas já carregadas (uma textura por efeito, criada uma vez).
@@ -112,17 +130,9 @@ impl App {
         self.fx_browser.start_thumbs();
         self.fx_browser.poll(ui.ctx());
 
-        ui.horizontal_wrapped(|ui| {
-            let mut cat = self.fx_browser.cat;
-            ui.selectable_value(&mut cat, BrowserCat::All, "Todos");
-            ui.selectable_value(&mut cat, BrowserCat::ThirdParty, "Terceiros");
-            ui.selectable_value(&mut cat, BrowserCat::Favorites, "Favoritos");
-            ui.separator();
-            for c in FxCategory::ALL {
-                ui.selectable_value(&mut cat, BrowserCat::Cat(c), c.name());
-            }
-            self.fx_browser.cat = cat;
-        });
+        let cats: Vec<(FxCategory, &str)> =
+            FxCategory::ALL.iter().map(|c| (*c, c.name())).collect();
+        category_row(ui, &mut self.fx_browser.cat, &cats);
         ui.add(
             egui::TextEdit::singleline(&mut self.fx_browser.search)
                 .hint_text("Buscar plug-ins")
@@ -157,6 +167,11 @@ impl App {
         }
 
         let left_w = (ui.available_width() * 0.38).clamp(140.0, 240.0);
+        // o resto da largura visível, para a fileira de miniaturas quebrar
+        // de linha (a aba fica numa área com rolagem horizontal, onde a
+        // largura disponível não tem limite)
+        let visible_w = (ui.clip_rect().right() - ui.cursor().left()).min(ui.available_width());
+        let right_w = (visible_w - left_w - 24.0).max(THUMB_W as f32 + 8.0);
         let mut toggle_fav: Option<FxKind> = None;
         let mut select: Option<FxKind> = None;
         ui.horizontal_top(|ui| {
@@ -197,6 +212,7 @@ impl App {
             ui.separator();
             // direita: as miniaturas dos presets do efeito escolhido
             ui.vertical(|ui| {
+                ui.set_max_width(right_w);
                 let Some(k) = self.fx_browser.selected else {
                     return;
                 };

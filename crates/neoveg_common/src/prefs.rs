@@ -371,6 +371,9 @@ pub struct Preferences {
     /// Efeitos de vídeo marcados com a estrela na janela Efeitos de Vídeo.
     #[serde(default)]
     pub fx_favorites: Vec<String>,
+    /// Tipos de gerador marcados com a estrela na janela Geradores de Mídia.
+    #[serde(default)]
+    pub gen_favorites: Vec<String>,
     /// Quantidade máxima de projetos recentes mantidos no histórico (`1..=20`).
     #[serde(default = "default_max_recent_projects")]
     pub max_recent_projects: usize,
@@ -548,6 +551,7 @@ impl Default for Preferences {
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
             fx_favorites: Vec::new(),
+            gen_favorites: Vec::new(),
             max_recent_projects: default_max_recent_projects(),
             autosave_enabled: true,
             autosave_secs: default_autosave_secs(),
@@ -648,6 +652,7 @@ impl Preferences {
         );
         sanitize_string_list(&mut self.render_favorites, MAX_RENDER_FAVORITES, 80, false);
         sanitize_string_list(&mut self.fx_favorites, MAX_RENDER_FAVORITES, 80, false);
+        sanitize_string_list(&mut self.gen_favorites, MAX_RENDER_FAVORITES, 80, false);
     }
 
     pub fn load_or_default() -> Self {
