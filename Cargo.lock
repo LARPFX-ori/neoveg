@@ -3014,6 +3014,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "cfb",
+ "chrono",
  "claxon",
  "cpal",
  "dasp",
@@ -3028,6 +3029,7 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "uuid",
  "vst3",
  "windows 0.58.0",
 ]
