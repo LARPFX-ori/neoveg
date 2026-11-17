@@ -72,6 +72,7 @@ pub enum Icon {
     SurroundSpeakers,
     PluginPlug,
     Compositors,
+    EncoderQueue,
     TrimSelection,
     TrimStart,
     TrimEnd,
@@ -81,7 +82,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 69] = [
+    pub const ALL: [Icon; 70] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -146,6 +147,7 @@ impl Icon {
         Icon::SurroundSpeakers,
         Icon::PluginPlug,
         Icon::Compositors,
+        Icon::EncoderQueue,
         Icon::TrimSelection,
         Icon::TrimStart,
         Icon::TrimEnd,
@@ -1006,6 +1008,17 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 c.u(0.04),
                 c.stroke(0.05, pal.ink),
                 StrokeKind::Inside,
+            );
+        }
+        Icon::EncoderQueue => {
+            // pilhas de fila + triângulo verde de codificação (arte original)
+            c.p.rect_filled(c.rect(0.14, 0.16, 0.78, 0.34), c.u(0.03), pal.blue);
+            c.p.rect_filled(c.rect(0.14, 0.42, 0.60, 0.60), c.u(0.03), pal.cyan);
+            c.p.rect_filled(c.rect(0.14, 0.68, 0.56, 0.86), c.u(0.03), pal.muted);
+            c.poly(
+                &[(0.64, 0.44), (0.90, 0.64), (0.64, 0.84)],
+                pal.green,
+                Some((0.04, pal.ink)),
             );
         }
         Icon::TrimSelection => {

@@ -251,6 +251,7 @@ impl App {
                     self.dirty = true;
                 }
             }
+            DockTab::Encoder => self.encoder_tab(ui),
         }
     }
 

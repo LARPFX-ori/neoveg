@@ -338,10 +338,11 @@ pub enum DockPanel {
     Compositors,
     Scopes,
     Notes,
+    Encoder,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 16] = [
+    pub const ALL: [DockPanel; 17] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -358,6 +359,7 @@ impl DockPanel {
         DockPanel::Compositors,
         DockPanel::Scopes,
         DockPanel::Notes,
+        DockPanel::Encoder,
     ];
 
     pub fn name_in(self, lang: Language) -> &'static str {
@@ -378,6 +380,7 @@ impl DockPanel {
             DockPanel::Compositors => "Compositores",
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
+            DockPanel::Encoder => "Neoveg Encoder",
         };
         tr(lang, pt)
     }
@@ -404,6 +407,7 @@ impl DockPanel {
             DockPanel::Compositors => "view.tab.compositors",
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
+            DockPanel::Encoder => "view.tab.encoder",
         }
     }
 }
@@ -431,6 +435,11 @@ pub enum UiAction {
     ExportFcp7Dialog,
     ImportAafDialog,
     OpenRenderDialog,
+    SendToEncoder,
+    EncoderStartQueue,
+    EncoderPauseQueue,
+    EncoderStopCurrent,
+    EncoderStopQueue,
     SnapshotDialog,
     OpenProjectProps,
     OpenEventProps,
@@ -897,6 +906,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenRenderDialog, h),
+    },
+    CommandDef {
+        id: "file.send_to_encoder",
+        label: "Enviar para o Neoveg Encoder...",
+        menu_path: "Arquivo/Enviar para o Neoveg Encoder...",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SendToEncoder, h),
     },
     CommandDef {
         id: "file.snapshot",
@@ -1442,6 +1460,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Notes), h),
     },
     CommandDef {
+        id: "view.tab.encoder",
+        label: "Neoveg Encoder",
+        menu_path: "Exibir/Neoveg Encoder",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::M)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
+    },
+    CommandDef {
         id: "view.envelopes",
         label: "Mostrar envelopes",
         menu_path: "Exibir/Mostrar envelopes",
@@ -1802,6 +1829,42 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
+    },
+    CommandDef {
+        id: "tools.encoder_start",
+        label: "Encoder: Iniciar / Retomar fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Iniciar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStartQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_pause",
+        label: "Encoder: Pausar / Retomar",
+        menu_path: "Ferramentas/Neoveg Encoder/Pausar fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderPauseQueue, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_current",
+        label: "Encoder: Interromper item atual",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper arquivo atual",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopCurrent, h),
+    },
+    CommandDef {
+        id: "tools.encoder_stop_queue",
+        label: "Encoder: Interromper fila",
+        menu_path: "Ferramentas/Neoveg Encoder/Interromper fila",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::EncoderStopQueue, h),
     },
     CommandDef {
         id: "tools.run_script",

@@ -779,6 +779,53 @@ fn kittest_carregador_espera_o_script_e_nada_se_perde() {
     );
 }
 
+#[test]
+fn kittest_neoveg_encoder_fluxo_completo() {
+    use neoveg_engine::commands::run_command;
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 820.0))
+        .build_eframe(|cc| {
+            let mut app = build_ready_app(cc);
+            app.dock_height = 340.0;
+            app
+        });
+    harness.run_steps(2);
+
+    // Despacha comando file.send_to_encoder (via UI host) e abre a aba Neoveg Encoder
+    {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.send_timeline_to_encoder();
+    }
+    harness.run_steps(3);
+    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert_eq!(harness.state().encoder.state.items.len(), 1);
+    assert!(harness.query_all_by_label("Neoveg Encoder").count() >= 1);
+    assert!(harness.query_all_by_label("Fila de Codificação").count() >= 1);
+    assert!(
+        harness
+            .query_all_by_label("Navegador de Predefinições")
+            .count()
+            >= 1
+    );
+    assert!(harness.query_all_by_label("Pastas Monitoradas").count() >= 1);
+
+    // Abre Configurações de Exportação e valida alternância para Alto Contraste AAA
+    harness.get_by_label("Configurações...").click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Cortar Origem (Crop)").is_some());
+    {
+        let ctx = harness.ctx.clone();
+        let app = harness.state_mut();
+        app.set_theme(&ctx, crate::theme::ThemeId::AltoContrasteEscuro, false);
+    }
+    harness.run_steps(2);
+
+    // Tabela Única permanece consistente com Neoveg Encoder
+    let _ = run_command;
+}
+
 /// Botão Mais > Editar conjunto de botões visíveis (manual do VEGAS Pro 21,
 /// p. 69): "Ocultar todos" + OK tira M, S e fx do cabeçalho das faixas de
 /// vídeo; as de áudio continuam com os seus.

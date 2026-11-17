@@ -30,7 +30,7 @@ ebur128 = { version = "0.1.11", default-features = false }
 netcorehost = { version = "0.22", default-features = false, features = ["net10_0"] }
 rfd = "0.15"
 cpal = "0.15"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp", "rayon"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp", "tga", "pnm", "ico", "hdr", "dds", "ff", "qoi", "exr", "rayon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ab_glyph = "0.2"

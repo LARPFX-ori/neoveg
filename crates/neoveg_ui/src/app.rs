@@ -247,6 +247,7 @@ pub struct App {
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
+    pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
 }
 
 impl Deref for App {
@@ -408,6 +409,7 @@ impl App {
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
+            encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
         };
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
@@ -1315,15 +1317,15 @@ impl App {
 
     pub fn import_dialog(&mut self) {
         let lang = self.lang();
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(media::IMAGE_EXTS);
+        all.extend_from_slice(media::VIDEO_EXTS);
+        all.extend_from_slice(media::AUDIO_EXTS);
+        all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter(
-                tr(lang, "Mídia suportada"),
-                &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp", "avi", "y4m", "mp4",
-                    "mov", "mkv", "webm", "m4v", "wmv", "asf", "wav", "aif", "aiff", "aifc",
-                    "flac", "ogg", "oga", "mp3", "m4a", "aac",
-                ],
-            )
+            .add_filter(tr(lang, "Mídia suportada"), &all)
+            .add_filter(tr(lang, "Imagens"), media::IMAGE_EXTS)
+            .add_filter(tr(lang, "Áudio"), media::AUDIO_EXTS)
             .add_filter(tr(lang, "Todos os arquivos"), &["*"])
             .pick_files()
         {
@@ -1334,10 +1336,7 @@ impl App {
     pub fn import_sequence_dialog(&mut self) {
         let lang = self.lang();
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter(
-                tr(lang, "Imagens"),
-                &["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
-            )
+            .add_filter(tr(lang, "Imagens"), media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -1773,6 +1772,21 @@ impl App {
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
+            UiAction::SendToEncoder => self.send_timeline_to_encoder(),
+            UiAction::EncoderStartQueue => {
+                let lang = self.lang();
+                self.encoder.start_queue(&self.media);
+                self.set_status(tr(lang, "Fila do Neoveg Encoder iniciada"));
+            }
+            UiAction::EncoderPauseQueue => {
+                self.encoder.runtime.toggle_pause();
+            }
+            UiAction::EncoderStopCurrent => {
+                self.encoder.runtime.stop_current();
+            }
+            UiAction::EncoderStopQueue => {
+                self.encoder.runtime.stop_queue();
+            }
             UiAction::SnapshotDialog => self.snapshot_dialog(),
             UiAction::OpenProjectProps => self.dlg.project_props = true,
             UiAction::OpenEventProps => {
@@ -2064,6 +2078,7 @@ impl App {
                 });
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.render");
+                self.cmd_menu_btn(ui, "file.send_to_encoder");
                 self.cmd_menu_btn(ui, "file.snapshot");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.project_props");
@@ -2349,6 +2364,15 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                ui.menu_button(tr(lang, "Neoveg Encoder"), |ui| {
+                    self.cmd_menu_btn(ui, "view.tab.encoder");
+                    self.cmd_menu_btn(ui, "file.send_to_encoder");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.encoder_start");
+                    self.cmd_menu_btn(ui, "tools.encoder_pause");
+                    self.cmd_menu_btn(ui, "tools.encoder_stop_current");
+                    self.cmd_menu_btn(ui, "tools.encoder_stop_queue");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.run_script");
             });
@@ -2448,6 +2472,7 @@ impl App {
             self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
             self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
             self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
+            self.cmd_tool_btn(ui, Icon::EncoderQueue, None, "view.tab.encoder");
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             ui.separator();
             self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
@@ -2899,7 +2924,13 @@ impl App {
     pub(crate) fn snapshot_dialog(&mut self) {
         let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
+            .add_filter(
+                tr(lang, "Imagem"),
+                &[
+                    "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
+                    "wbmp", "xbm", "xpm", "ico",
+                ],
+            )
             .set_file_name("quadro.png")
             .save_file()
         {
@@ -3178,6 +3209,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // saída normal: a cópia de recuperação não é mais necessária
+        self.encoder.save_to_disk();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");
     }
@@ -3200,6 +3232,10 @@ impl App {
         self.poll_loader();
         self.poll_script_job(ctx);
         self.poll_render();
+        let lang = self.lang();
+        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media, lang) {
+            self.set_status(msg);
+        }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(dt as f32);
@@ -3250,6 +3286,7 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.show_encoder_dialogs(ctx);
         self.crash_report_window(ctx);
         self.recovery_window(ctx);
         self.show_welcome_overlay(ctx);
@@ -3657,6 +3694,7 @@ impl App {
             jpeg_quality: 80,
             include_audio: true,
             wav_bits: crate::render::WavBits::Pcm16,
+            ..RenderSettings::default()
         };
         let tx = self.loader_tx.clone();
         let prog = Arc::new(RenderProgress::default());
