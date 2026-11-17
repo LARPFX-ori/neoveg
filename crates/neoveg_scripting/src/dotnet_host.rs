@@ -24,6 +24,18 @@ pub struct DotnetEnv {
     pub tfm: String,
     pub framework_version: String,
     pub has_sdk: bool,
+    /// Versão do runtime `Microsoft.WindowsDesktop.App` com a mesma versão
+    /// principal do .NET usado (só no Windows). Com ela, os scripts
+    /// compilam com WinForms (`net*-windows`) e o host a carrega.
+    pub windows_desktop_version: Option<String>,
+}
+
+impl DotnetEnv {
+    /// Scripts podem usar `System.Windows.Forms` (Windows com o runtime
+    /// WindowsDesktop instalado).
+    pub fn use_winforms(&self) -> bool {
+        self.windows_desktop_version.is_some()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -212,7 +224,20 @@ pub fn find_dotnet_env() -> Result<DotnetEnv, NeovegError> {
         } else {
             None
         };
-        let tfm = format!("net{}.0", ver.major);
+        // WinForms só existe no Windows; o runtime WindowsDesktop precisa ter a
+        // mesma versão principal do .NET escolhido
+        let windows_desktop_version = if cfg!(windows) {
+            highest_versioned_subdir(&root.join("shared").join("Microsoft.WindowsDesktop.App"))
+                .filter(|(_, sv, _)| sv.major == ver.major)
+                .map(|(name, _, _)| name)
+        } else {
+            None
+        };
+        let tfm = if windows_desktop_version.is_some() {
+            format!("net{}.0-windows", ver.major)
+        } else {
+            format!("net{}.0", ver.major)
+        };
         return Ok(DotnetEnv {
             dotnet_root: root,
             hostfxr_path,
@@ -220,6 +245,7 @@ pub fn find_dotnet_env() -> Result<DotnetEnv, NeovegError> {
             tfm,
             framework_version,
             has_sdk,
+            windows_desktop_version,
         });
     }
     Err(NeovegError::Unsupported(
@@ -259,9 +285,16 @@ fn ensure_host_runtime_config(env: &DotnetEnv) -> Result<PathBuf, NeovegError> {
         "runtimeOptions": {
             "tfm": env.tfm,
             "rollForward": "LatestMajor",
-            "framework": {
-                "name": "Microsoft.NETCore.App",
-                "version": env.framework_version
+            // o WindowsDesktop inclui o Microsoft.NETCore.App
+            "framework": match &env.windows_desktop_version {
+                Some(v) => serde_json::json!({
+                    "name": "Microsoft.WindowsDesktop.App",
+                    "version": v
+                }),
+                None => serde_json::json!({
+                    "name": "Microsoft.NETCore.App",
+                    "version": env.framework_version
+                }),
             }
         }
     });
