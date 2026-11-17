@@ -178,6 +178,9 @@ impl ScriptJob {
             started: std::time::Instant::now(),
             media_before: std::collections::HashSet::new(),
             rx,
+            // Sem remetente: o script de teste não abre janelas.
+            ui_rx: std::sync::mpsc::channel().1,
+            active: None,
         };
         (job, done_tx)
     }
