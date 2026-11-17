@@ -18,10 +18,17 @@ use serde::{Deserialize, Serialize};
 
 /// Maior pedido aceito do script, em bytes de JSON.
 pub(crate) const MAX_UI_REQUEST_BYTES: usize = 1024 * 1024;
+/// Maior resposta que a ponte aceita (`MaxReply` em `NeovegHostCalls.Ui`).
+/// Acima disso, a ponte recebe um tamanho inválido e o script falha depois
+/// de a janela já ter sido preenchida.
+pub(crate) const MAX_UI_REPLY_BYTES: usize = 4 * 1024 * 1024;
 /// Limites de um formulário.
 const MAX_CONTROLS: usize = 256;
 const MAX_ITEMS: usize = 1000;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
+/// Caracteres de um campo de texto do formulário: com até 4 bytes por
+/// caractere em UTF-8, o texto cabe em `MAX_TEXT_BYTES`.
+pub const MAX_TEXT_CHARS: usize = MAX_TEXT_BYTES / 4;
 const MAX_FORM_SIDE: f32 = 4000.0;
 
 /// Quem mostra as janelas do script. Chamado na thread do script; bloqueia
@@ -301,17 +308,52 @@ pub(crate) fn handle_request(ui: Option<&dyn ScriptUi>, raw: &[u8]) -> Vec<u8> {
             .map_err(|e| format!("pedido de janela inválido: {e}"))
             .map(|mut req| {
                 req.sanitize();
-                match ui {
+                let mut reply = match ui {
                     Some(ui) => ui.request(req),
                     None => ScriptUiReply::NoUi,
-                }
+                };
+                reply.clip_texts();
+                reply
             })
     };
     let json = match reply {
         Ok(r) => serde_json::to_vec(&r),
-        Err(e) => serde_json::to_vec(&serde_json::json!({ "kind": "error", "error": e })),
+        Err(e) => Ok(error_json(&e)),
     };
-    json.unwrap_or_else(|_| br#"{"kind":"no_ui"}"#.to_vec())
+    match json {
+        Ok(j) if j.len() <= MAX_UI_REPLY_BYTES => j,
+        Ok(_) => error_json("a resposta da janela passou do tamanho máximo"),
+        Err(_) => br#"{"kind":"no_ui"}"#.to_vec(),
+    }
+}
+
+fn error_json(e: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "kind": "error", "error": e }))
+        .unwrap_or_else(|_| br#"{"kind":"no_ui"}"#.to_vec())
+}
+
+impl ScriptUiReply {
+    /// Limita os textos que voltam ao script (campo colado com megabytes).
+    fn clip_texts(&mut self) {
+        match self {
+            Self::NoUi => {}
+            Self::MessageBox { result } => clip(result),
+            Self::Form { result, values, .. } => {
+                if let Some(r) = result {
+                    clip(r);
+                }
+                for v in values {
+                    clip(&mut v.text);
+                }
+            }
+            Self::File { paths, .. } => {
+                paths.truncate(MAX_ITEMS);
+                for p in paths {
+                    clip(p);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +428,50 @@ mod tests {
         );
         let r: ScriptUiReply = serde_json::from_slice(&ok).expect("resposta");
         assert_eq!(r, ScriptUiReply::NoUi);
+    }
+
+    /// Texto colado com megabytes no formulário: a resposta não pode passar
+    /// do `MaxReply` da ponte, senão o script falha com a janela já fechada.
+    #[test]
+    fn resposta_grande_do_formulario_fica_no_limite_da_ponte() {
+        struct Colado(usize);
+        impl ScriptUi for Colado {
+            fn request(&self, _: ScriptUiRequest) -> ScriptUiReply {
+                ScriptUiReply::Form {
+                    closed: true,
+                    result: Some("OK".into()),
+                    clicked: None,
+                    values: (0..self.0)
+                        .map(|i| ControlValue {
+                            id: i as u32,
+                            text: "é".repeat(3 * 1024 * 1024),
+                            checked: false,
+                            selected: -1,
+                            value: 0.0,
+                        })
+                        .collect(),
+                }
+            }
+        }
+        let raw = br#"{"kind":"form"}"#;
+        // Um campo: o texto é cortado e a resposta chega ao script.
+        let out = handle_request(Some(&Colado(1)), raw);
+        assert!(out.len() <= MAX_UI_REPLY_BYTES, "{} bytes", out.len());
+        let ScriptUiReply::Form { values, .. } =
+            serde_json::from_slice::<ScriptUiReply>(&out).expect("resposta")
+        else {
+            panic!(
+                "formulário: {}",
+                String::from_utf8_lossy(&out[..out.len().min(200)])
+            );
+        };
+        assert!(values[0].text.len() <= MAX_TEXT_BYTES);
+        assert!(values[0].text.chars().all(|c| c == 'é'));
+        // Muitos campos cheios: vira erro legível, nunca passa do limite.
+        let out = handle_request(Some(&Colado(MAX_CONTROLS)), raw);
+        assert!(out.len() <= MAX_UI_REPLY_BYTES);
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(v["kind"], "error");
     }
 
     #[test]

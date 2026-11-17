@@ -243,6 +243,7 @@ fn form(
                     } else {
                         egui::TextEdit::singleline(&mut v.text)
                     };
+                    let te = te.char_limit(neoveg_scripting::MAX_FORM_TEXT_CHARS);
                     let resp = ui.put(r, te.password(c.password).interactive(!c.read_only));
                     changed = resp.changed();
                 }

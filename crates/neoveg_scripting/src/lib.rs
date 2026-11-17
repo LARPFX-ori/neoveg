@@ -19,6 +19,8 @@ mod vegas_cs;
 mod winforms_shim;
 
 pub use dotnet_host::{find_dotnet_env, DotnetEnv};
+/// Caracteres de um campo de texto dos formulários de script.
+pub use script_ui::MAX_TEXT_CHARS as MAX_FORM_TEXT_CHARS;
 pub use script_ui::{
     ControlKind, ControlSpec, ControlValue, FileDialogMode, FileDialogSpec, FormSpec,
     MessageButtons, ScriptUi, ScriptUiReply, ScriptUiRequest,
