@@ -119,6 +119,20 @@ pub(crate) fn vst3_params_editor(
     }
     let filter_key = egui::Id::new(("vst3_param_filter", fx_id));
     let mut filter: String = ui.data(|d| d.get_temp(filter_key)).unwrap_or_default();
+    let state_op_key = egui::Id::new(("vst3_state_capture", fx_id));
+    type CaptureSlot = Arc<Mutex<Option<Result<String, String>>>>;
+    let capture_slot: CaptureSlot = ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<CaptureSlot>(state_op_key)
+            .clone()
+    });
+    let mut changed = false;
+    {
+        let mut g = capture_slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(Ok(hex)) = g.take() {
+            r.state = Some(hex);
+            changed = true;
+        }
+    }
     ui.horizontal(|ui| {
         ui.label(muted(format!("{} parâmetro(s)", infos.len())));
         ui.add(
@@ -126,10 +140,34 @@ pub(crate) fn vst3_params_editor(
                 .hint_text("Filtrar")
                 .desired_width(120.0),
         );
+        if ui
+            .small_button("Capturar estado")
+            .on_hover_text("Salva o estado interno completo do plug-in VST3 no projeto")
+            .clicked()
+        {
+            let r2 = r.clone();
+            let slot2 = capture_slot.clone();
+            let ctx = ui.ctx().clone();
+            let _ = std::thread::Builder::new()
+                .name("vst3-get-state".into())
+                .spawn(move || {
+                    let res = neoveg_engine::plugin_host::default_host_exe()
+                        .ok_or_else(|| "host de plug-ins não encontrado".to_string())
+                        .and_then(|exe| neoveg_engine::plugin_host::vst3_get_state(&exe, &r2));
+                    *slot2.lock().unwrap_or_else(PoisonError::into_inner) = Some(res);
+                    ctx.request_repaint();
+                });
+        }
+        if let Some(hex) = &r.state {
+            ui.label(muted(format!("Estado: {} B", hex.len() / 2)));
+            if ui.small_button("Limpar estado").clicked() {
+                r.state = None;
+                changed = true;
+            }
+        }
     });
     let f = filter.trim().to_lowercase();
     ui.data_mut(|d| d.insert_temp(filter_key, filter));
-    let mut changed = false;
     egui::ScrollArea::vertical()
         .id_salt(("vst3_params_scroll", fx_id))
         .max_height(260.0)

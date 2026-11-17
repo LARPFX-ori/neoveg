@@ -17,7 +17,10 @@ mod ofx;
 #[cfg(windows)]
 mod vst3;
 
-use crate::model::{Id, OfxFxRef, OfxParamValue, Vst3FxRef, Vst3ParamValue};
+use crate::model::{
+    decode_hex_bytes, encode_hex_bytes, Id, OfxFxRef, OfxParamValue, Vst3FxRef, Vst3ParamValue,
+    MAX_VST3_STATE_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uint, c_void};
@@ -359,6 +362,8 @@ struct Worker {
     rx: Receiver<std::io::Result<(serde_json::Value, Vec<u8>)>>,
     /// Primeira mensagem do host (`{"ok": true, ...}`), com os parâmetros.
     hello: serde_json::Value,
+    /// Latência declarada pelo processador em amostras (VST3).
+    latency: u32,
 }
 
 impl Worker {
@@ -399,6 +404,7 @@ impl Worker {
             stdin,
             rx,
             hello: serde_json::Value::Null,
+            latency: 0,
         };
         let (hello, _) = w.recv(WORKER_TIMEOUT)?;
         if hello.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
@@ -410,6 +416,11 @@ impl Worker {
             w.kill();
             return Err(e);
         }
+        w.latency = hello
+            .get("latency")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
         w.hello = hello;
         Ok(w)
     }
@@ -730,7 +741,34 @@ pub fn serve_vst3(binary: &Path, class_id: &str, sample_rate: &str) -> i32 {
                 }
                 "reset" => {
                     let reply = match fx.reset() {
-                        Ok(()) => serde_json::json!({"ok": true}),
+                        Ok(()) => serde_json::json!({"ok": true, "latency": fx.latency()}),
+                        Err(e) => serde_json::json!({"ok": false, "error": e}),
+                    };
+                    write_msg(&mut output, &reply, &[])
+                }
+                "get_state" => match fx.state_bytes() {
+                    Ok(bytes) => {
+                        let capped = &bytes[..bytes.len().min(MAX_VST3_STATE_BYTES)];
+                        write_msg(&mut output, &serde_json::json!({"ok": true}), capped)
+                    }
+                    Err(e) => write_msg(
+                        &mut output,
+                        &serde_json::json!({"ok": false, "error": e}),
+                        &[],
+                    ),
+                },
+                "set_state" => {
+                    let res = if data.len() > MAX_VST3_STATE_BYTES {
+                        Err("estado VST3 excede o limite".to_string())
+                    } else {
+                        fx.set_state_bytes(&data)
+                    };
+                    let reply = match res {
+                        Ok(()) => serde_json::json!({
+                            "ok": true,
+                            "params": fx.params(),
+                            "latency": fx.latency(),
+                        }),
                         Err(e) => serde_json::json!({"ok": false, "error": e}),
                     };
                     write_msg(&mut output, &reply, &[])
@@ -769,10 +807,47 @@ pub fn serve_vst3(binary: &Path, class_id: &str, sample_rate: &str) -> i32 {
     }
 }
 
+fn hash_vst3_state(state: Option<&str>) -> u64 {
+    let Some(s) = state else {
+        return 0;
+    };
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    for &b in s.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
 impl Worker {
     fn spawn_vst3(host_exe: &Path, r: &Vst3FxRef, sr: u32) -> Result<Self, String> {
-        let sr = sr.to_string();
-        Self::spawn(host_exe, &["serve-vst3", &r.binary, &r.class_id, &sr])
+        let sr_str = sr.to_string();
+        let mut w = Self::spawn(host_exe, &["serve-vst3", &r.binary, &r.class_id, &sr_str])?;
+        if let Some(hex) = r.state.as_deref() {
+            let Some(bytes) = decode_hex_bytes(hex) else {
+                w.kill();
+                return Err("estado salvo VST3 inválido".into());
+            };
+            if let Ok((reply, _)) = w.request(
+                &serde_json::json!({"cmd": "set_state"}),
+                &bytes,
+                WORKER_TIMEOUT,
+            ) {
+                if let Some(p) = reply.get("params").cloned() {
+                    if let Some(obj) = w.hello.as_object_mut() {
+                        obj.insert("params".into(), p);
+                    }
+                }
+                if let Some(l) = reply
+                    .get("latency")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                {
+                    w.latency = l;
+                }
+            }
+        }
+        Ok(w)
     }
 
     fn vst3_process(&mut self, buf: &mut [f32], values: &[Vst3ParamValue]) -> Result<(), String> {
@@ -796,6 +871,7 @@ struct Vst3Key {
     binary: String,
     class_id: String,
     sr: u32,
+    state_hash: u64,
 }
 
 enum Vst3Slot {
@@ -873,6 +949,7 @@ pub fn vst3_process(
         binary: r.binary.clone(),
         class_id: r.class_id.clone(),
         sr,
+        state_hash: hash_vst3_state(r.state.as_deref()),
     };
     let worker = {
         let mut pool = lock_vst3_pool();
@@ -994,6 +1071,7 @@ fn vst3_ui_worker(host_exe: &Path, r: &Vst3FxRef) -> Result<Arc<Mutex<Worker>>, 
         binary: r.binary.clone(),
         class_id: r.class_id.clone(),
         sr: 48_000,
+        state_hash: hash_vst3_state(r.state.as_deref()),
     };
     match lock_vst3_pool().get(&key) {
         Some(Vst3Slot::Ready(w)) => Ok(w.clone()),
@@ -1006,6 +1084,75 @@ pub fn vst3_params(host_exe: &Path, r: &Vst3FxRef) -> Result<Vec<Vst3ParamInfo>,
     let w = vst3_ui_worker(host_exe, r)?;
     let w = w.lock().unwrap_or_else(PoisonError::into_inner);
     Ok(w.hello_params())
+}
+
+/// Latência declarada pelo efeito VST3 (`getLatencySamples`) em amostras (48 kHz UI probe).
+pub fn vst3_latency(host_exe: &Path, r: &Vst3FxRef) -> Result<u32, String> {
+    let w = vst3_ui_worker(host_exe, r)?;
+    let w = w.lock().unwrap_or_else(PoisonError::into_inner);
+    Ok(w.latency)
+}
+
+/// Consulta a latência em cache da instância do mixer `owner`; quando `wait_open`
+/// é verdadeiro (modo offline), abre o host de forma síncrona se necessário.
+pub fn vst3_cached_latency(
+    host_exe: &Path,
+    owner: u64,
+    fx: Id,
+    r: &Vst3FxRef,
+    sr: u32,
+    wait_open: bool,
+) -> u32 {
+    let key = Vst3Key {
+        owner,
+        fx,
+        host: host_exe.to_path_buf(),
+        binary: r.binary.clone(),
+        class_id: r.class_id.clone(),
+        sr,
+        state_hash: hash_vst3_state(r.state.as_deref()),
+    };
+    if let Some(Vst3Slot::Ready(w)) = lock_vst3_pool().get(&key) {
+        return w.lock().unwrap_or_else(PoisonError::into_inner).latency;
+    }
+    if !wait_open {
+        return 0;
+    }
+    let mut silence = [0f32; 2];
+    if vst3_process(host_exe, owner, fx, r, sr, &mut silence, true).is_ok() {
+        let pool = lock_vst3_pool();
+        if let Some(Vst3Slot::Ready(w)) = pool.get(&key) {
+            let mut wg = w.lock().unwrap_or_else(PoisonError::into_inner);
+            let lat = wg.latency;
+            let _ = wg.request(
+                &serde_json::json!({"cmd": "reset"}),
+                &[],
+                VST3_BLOCK_TIMEOUT,
+            );
+            return lat;
+        }
+    }
+    0
+}
+
+/// Captura o estado completo do componente VST3 (`IComponent::getState`) em hexadecimal,
+/// aplicando primeiro os parâmetros atuais de `r`.
+pub fn vst3_get_state(host_exe: &Path, r: &Vst3FxRef) -> Result<String, String> {
+    let w = vst3_ui_worker(host_exe, r)?;
+    let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
+    if !r.params.is_empty() {
+        let mut silence = [0f32; 2];
+        w.vst3_process(&mut silence, &r.params)?;
+    }
+    let (_, data) = w.request(
+        &serde_json::json!({"cmd": "get_state"}),
+        &[],
+        VST3_BLOCK_TIMEOUT,
+    )?;
+    if data.is_empty() {
+        return Err("plug-in devolveu estado vazio".into());
+    }
+    Ok(encode_hex_bytes(&data))
 }
 
 /// Texto do plug-in para um valor normalizado (ex.: "-6.0 dB").
