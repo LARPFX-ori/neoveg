@@ -633,11 +633,16 @@ impl App {
                     });
                     ui.end_row();
                     ui.label("Opções");
-                    ui.horizontal_wrapped(|ui| {
-                        changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
-                        changed |= ui.checkbox(&mut e.locked, "Travado").changed();
-                        changed |= ui.checkbox(&mut e.looped, "Loop").changed();
-                        changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                    // linhas fixas: `horizontal_wrapped` dentro da Grid quebra
+                    // depois de a altura da linha ser medida e invade a linha
+                    // de baixo (Transição de entrada)
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
+                            changed |= ui.checkbox(&mut e.locked, "Travado").changed();
+                            changed |= ui.checkbox(&mut e.looped, "Loop").changed();
+                            changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                        });
                         if is_video {
                             changed |= ui
                                 .checkbox(&mut e.maintain_aspect, "Manter proporção")
@@ -1666,9 +1671,13 @@ impl App {
         let fonts = self.gen_fonts.clone();
         let mut open = true;
         let before = spec.clone();
+        // centralizada: sem posição, o egui a punha no primeiro espaço livre,
+        // por cima dos cabeçalhos de faixa
         egui::Window::new("Mídia gerada")
             .open(&mut open)
             .default_width(420.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| match &mut spec {
                 GenSpec::Text(t) => {
                     ui.label("Texto:");
@@ -3297,7 +3306,7 @@ fn edit_layout_checkboxes(
     changed |= ui
         .checkbox(
             &mut cfg.master_bus_docked,
-            "Exibir Master Bus acoplado à direita (padrão VEGAS Pro 21)",
+            "Exibir Master Bus acoplado à direita (padrão)",
         )
         .changed();
     if ui
