@@ -672,3 +672,108 @@ fn kittest_timeline_barras_rolagem_setas_e_zoom() {
         "Ajustar projeto à timeline deve reposicionar scroll_x no início"
     );
 }
+
+#[test]
+fn kittest_crash_report_janela_e_acoes() {
+    use neoveg_engine::session_marker::{CrashReport, PanicNote};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_eframe(|cc| {
+            let mut app = build_ready_app(cc);
+            app.welcome_open = true;
+            app.recovery_offer = true;
+            app.set_crash_reports(vec![CrashReport {
+                started: "2026-11-16 10:00:00".into(),
+                version: "0.1.0".into(),
+                pid: "4242".into(),
+                panics: vec![
+                    PanicNote {
+                        time: "10:01:00".into(),
+                        thread: "decode".into(),
+                        location: "media.rs:12".into(),
+                        message: "isolado".into(),
+                        isolated: true,
+                    },
+                    PanicNote {
+                        time: "10:02:00".into(),
+                        thread: "main".into(),
+                        location: "ui.rs:99".into(),
+                        message: "falha fatal simulada".into(),
+                        isolated: false,
+                    },
+                ],
+            }]);
+            app
+        });
+    harness.run_steps(2);
+
+    assert!(!harness.state().is_welcome_open());
+    assert!(!harness.state().is_splash_open());
+    assert!(harness
+        .query_by_label_contains("falha fatal simulada")
+        .is_some());
+    assert!(harness
+        .query_by_label_contains("Erros internos isolados nesta sessão (1)")
+        .is_some());
+
+    harness.get_by_label("Copiar relatório").click();
+    harness.run_steps(2);
+    assert!(harness.state().status.contains("Relatório copiado"));
+
+    // Fechar o relatório mantém recovery_offer para a janela de recuperação padrão.
+    harness.get_by_label("Fechar").click();
+    harness.run_steps(2);
+    assert!(harness.state().crash_reports.is_empty());
+    assert!(harness.state().recovery_offer);
+}
+
+/// Antes: um proxy (ou importação, ou mídia recarregada) que ficava pronto
+/// enquanto um script rodava era aplicado na sessão da interface e sumia
+/// quando a sessão do script tomava o lugar dela.
+#[test]
+fn kittest_carregador_espera_o_script_e_nada_se_perde() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let (mid, done) = {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec::default(),
+        ));
+        let mid = app.project.media[0].id;
+        // o script recebe uma cópia da sessão, como em run_script_dialog
+        let (job, done) = crate::app::ScriptJob::fake(app.session.clone());
+        app.script_job = Some(job);
+        let _ = app.loader_tx.send(crate::app::LoadMsg::ProxyBuilt(
+            mid,
+            Ok(std::path::PathBuf::from("proxy.avi")),
+        ));
+        (mid, done)
+    };
+    let proxy = |app: &App| {
+        app.project
+            .media
+            .iter()
+            .find(|m| m.id == mid)
+            .and_then(|m| m.proxy_path.clone())
+    };
+    harness.run_steps(3);
+    assert!(harness.state().script_job.is_some());
+    assert_eq!(proxy(harness.state()), None, "espera o script");
+    done.send(()).expect("script falso");
+    for _ in 0..50 {
+        harness.run_steps(1);
+        if harness.state().script_job.is_none() && proxy(harness.state()).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(harness.state().script_job.is_none(), "o script terminou");
+    assert_eq!(
+        proxy(harness.state()).as_deref(),
+        Some("proxy.avi"),
+        "o proxy entrou sobre a sessão do script"
+    );
+}

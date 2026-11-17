@@ -667,7 +667,7 @@ fn import_from<F: Read + Seek>(
 }
 
 fn guarded<T>(f: impl FnOnce() -> Result<T, NeovegError>) -> Result<T, NeovegError> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+    crate::util::catch_isolated(f)
         .unwrap_or_else(|_| Err(err("falha interna isolada ao ler o AAF")))
 }
 

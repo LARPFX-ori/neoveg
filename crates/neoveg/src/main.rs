@@ -234,7 +234,14 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    neoveg_ui::run_gui(open).map_err(|e| anyhow::anyhow!("{e}"))
+    // marcador de sessão: só no modo de interface (CLI, scripts e hosts de
+    // plug-in não criam); detecta sessões anteriores que não fecharam
+    // normalmente e mostra o relatório na janela
+    let crash_reports = neoveg_engine::session_marker::begin(env!("CARGO_PKG_VERSION"));
+    let result = neoveg_ui::run_gui(open, crash_reports).map_err(|e| anyhow::anyhow!("{e}"));
+    // saída normal da janela; um pânico na thread principal não chega aqui
+    neoveg_engine::session_marker::end();
+    result
 }
 
 #[cfg(test)]

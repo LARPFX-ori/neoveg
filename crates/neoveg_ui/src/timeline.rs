@@ -13,6 +13,7 @@ use std::collections::HashSet;
 
 mod keyframes;
 use keyframes::KfArea;
+use neoveg_engine::media::audio::WaveChannel;
 use neoveg_engine::track_keyframes::KfRowKind;
 
 /// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
@@ -201,15 +202,44 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    /// Zoom mínimo (afastado): as 48 h de um projeto (`MAX_SECONDS`) cabem em
+    /// cerca de 35 px.
+    pub const MIN_PX_PER_SEC: f32 = 2.0e-4;
+    /// Zoom máximo (aproximado): cerca de 4 ticks por pixel, onde o tempo
+    /// exato ainda separa cada pixel; bem além de uma amostra por pixel.
+    pub const MAX_PX_PER_SEC: f32 = (neoveg_engine::time::TICKS_PER_SEC / 4) as f32;
+
+    /// Zoom dentro dos limites; valor inválido (NaN, infinito, <= 0) volta ao
+    /// padrão (§0.4).
+    pub fn clamp_pps(v: f32) -> f32 {
+        if v.is_finite() && v > 0.0 {
+            v.clamp(Self::MIN_PX_PER_SEC, Self::MAX_PX_PER_SEC)
+        } else {
+            60.0
+        }
+    }
+
     fn dx_to_ticks(&self, dx: f32) -> Ticks {
-        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(1.0)) as f64)
+        Ticks::from_secs_f64_clamped((dx / self.px_per_sec.max(Self::MIN_PX_PER_SEC)) as f64)
     }
 
     pub fn zoom_by(&mut self, f: f32, anchor: Option<Ticks>) {
         let anchor = anchor.unwrap_or(self.scroll_x + self.dx_to_ticks(self.width / 2.0));
         let ax = (anchor - self.scroll_x).as_secs_f64() as f32 * self.px_per_sec;
-        self.px_per_sec = (self.px_per_sec * f).clamp(2.0, 4000.0);
+        self.px_per_sec = Self::clamp_pps(self.px_per_sec * f);
         self.scroll_x = (anchor - self.dx_to_ticks(ax)).max(Ticks::ZERO);
+    }
+
+    /// Zoom a partir da agulha de reprodução: se ela está na tela, fica no
+    /// mesmo pixel; se não, o zoom acontece e a agulha vai para o centro.
+    pub fn zoom_around_playhead(&mut self, f: f32, playhead: Ticks) {
+        let vis_end = self.scroll_x + self.dx_to_ticks(self.width);
+        if playhead >= self.scroll_x && playhead <= vis_end {
+            self.zoom_by(f, Some(playhead));
+        } else {
+            self.zoom_by(f, None);
+            self.center_on(playhead);
+        }
     }
 
     pub fn center_on(&mut self, t: Ticks) {
@@ -253,6 +283,9 @@ fn shade(c: [u8; 3], k: f32) -> Color32 {
     )
 }
 
+/// Teto de marcas da régua e linhas da grade por quadro.
+const MAX_RULER_MARKS: u32 = 4096;
+
 fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
     let f1 = fps.ticks_per_frame();
     let steps: [(Ticks, i64); 17] = [
@@ -280,10 +313,15 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
             return (s, minor);
         }
     }
-    (
-        Ticks::from_secs_i64(7200),
-        Ticks::from_secs_i64(600).max(f1),
-    )
+    // acima de 1 h: 2 h, 4 h, 8 h... até caber (o tempo satura em 48 h)
+    let mut s = Ticks::from_secs_i64(7200);
+    for _ in 0..48 {
+        if s.as_secs_f64() * pps as f64 >= 90.0 {
+            break;
+        }
+        s = s.saturating_mul(2);
+    }
+    (s, s.div_i64(6).max(f1))
 }
 
 const BUS_TRACK_H: f32 = 58.0;
@@ -619,15 +657,6 @@ impl App {
         self.rename_popup(ui);
     }
 
-    fn timeline_zoom_anchor(&self) -> Option<Ticks> {
-        let vis_end = self.tl.scroll_x + self.tl.dx_to_ticks(self.tl.width);
-        if self.cursor >= self.tl.scroll_x && self.cursor <= vis_end {
-            Some(self.cursor)
-        } else {
-            None
-        }
-    }
-
     fn fit_project_to_timeline(&mut self, lanes_width: f32) {
         let mut target_secs = self.project.duration().as_secs_f64() as f32;
         if target_secs <= 0.05 {
@@ -638,7 +667,7 @@ impl App {
             }
         }
         if target_secs.is_finite() && target_secs > 0.05 {
-            let pps = ((lanes_width - 24.0).max(40.0) / target_secs).clamp(2.0, 4000.0);
+            let pps = TimelineState::clamp_pps((lanes_width - 24.0).max(40.0) / target_secs);
             self.tl.px_per_sec = pps;
         } else {
             self.tl.px_per_sec = 60.0;
@@ -799,7 +828,8 @@ impl App {
             ),
         );
 
-        let view_secs = (lanes_w / self.tl.px_per_sec.max(1.0)).max(0.5);
+        let view_secs =
+            (lanes_w / self.tl.px_per_sec.max(TimelineState::MIN_PX_PER_SEC)).max(1.0e-9);
         let proj_secs = self.project.duration().as_secs_f64() as f32;
         let mut max_end_secs = proj_secs.max(self.cursor.as_secs_f64() as f32);
         if let Some((a, b)) = self.time_sel {
@@ -846,9 +876,9 @@ impl App {
                 pos2(zoom_left + btn_w, inner.top()),
                 pos2(inner.right(), inner.bottom()),
             );
-            let anchor = self.timeline_zoom_anchor();
-            let can_out = self.tl.px_per_sec > 2.01;
-            let can_in = self.tl.px_per_sec < 3999.0;
+            let playhead = self.cursor;
+            let can_out = self.tl.px_per_sec > TimelineState::MIN_PX_PER_SEC * 1.0001;
+            let can_in = self.tl.px_per_sec < TimelineState::MAX_PX_PER_SEC * 0.9999;
 
             let (dec_click, dec_drag) = crate::scrollbars::zoom_button(
                 ui,
@@ -874,15 +904,15 @@ impl App {
             );
 
             if dec_click {
-                self.tl.zoom_by(0.8, anchor);
+                self.tl.zoom_around_playhead(0.8, playhead);
             }
             if inc_click {
-                self.tl.zoom_by(1.25, anchor);
+                self.tl.zoom_around_playhead(1.25, playhead);
             }
             let drag = dec_drag + inc_drag;
             if drag.abs() > 0.01 {
                 let factor = (1.0 + drag * 0.012).clamp(0.5, 2.0);
-                self.tl.zoom_by(factor, anchor);
+                self.tl.zoom_around_playhead(factor, playhead);
             }
         }
 
@@ -1222,7 +1252,13 @@ impl App {
         let t_start = self.tl.scroll_x;
         let t_end = self.tl.x2t(r.right(), left);
         let mut idx = t_start.0 / step;
+        // teto por quadro: nenhum zoom desenha marcas sem fim (§0.5)
+        let mut marks = 0u32;
         loop {
+            marks += 1;
+            if marks > MAX_RULER_MARKS {
+                break;
+            }
             let t = Ticks::from_raw(idx.saturating_mul(step));
             if t > t_end {
                 break;
@@ -2203,8 +2239,9 @@ impl App {
                     == neoveg_common::prefs::TimelineMouseScroll::HorizontalScroll;
                 if horiz_mode {
                     if mods.command {
-                        let t = self.tl.x2t(p.x, left);
-                        self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                        let c = self.cursor;
+                        self.tl
+                            .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                     } else if mods.shift {
                         self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                     } else {
@@ -2216,8 +2253,10 @@ impl App {
                 } else if mods.command {
                     self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
                 } else {
-                    let t = self.tl.x2t(p.x, left);
-                    self.tl.zoom_by((1.0 + d * 0.0025).clamp(0.5, 2.0), Some(t));
+                    // como os botões e as setas: a partir da agulha de reprodução
+                    let c = self.cursor;
+                    self.tl
+                        .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                 }
             }
             // botão do meio: pan
@@ -2650,6 +2689,13 @@ impl App {
             }
             Drag::Slip { origin_t, orig } => {
                 let dt = t - origin_t;
+                let slip_all_takes = self.opts.slip_all_takes;
+                let durations: std::collections::HashMap<Id, Option<Ticks>> = self
+                    .project
+                    .media
+                    .iter()
+                    .map(|m| (m.id, m.duration))
+                    .collect();
                 for (id, off) in orig {
                     let dur = self
                         .project
@@ -2657,6 +2703,7 @@ impl App {
                         .and_then(|e| self.project.media(e.media_id))
                         .and_then(|m| m.duration);
                     if let Some(e) = self.project.event_mut(id) {
+                        let before = e.offset;
                         let mut o = off - e.rate.scale_ticks(dt);
                         if let (Some(d), false) = (dur, e.looped) {
                             let max_o = (d - e.rate.scale_ticks(e.length)).max(Ticks::ZERO);
@@ -2669,6 +2716,12 @@ impl App {
                                     e.offset = e.offset.rem_euclid(d);
                                 }
                             }
+                        }
+                        if slip_all_takes {
+                            let delta = e.offset - before;
+                            neoveg_engine::takes::slip_alt_takes(e, delta, |m| {
+                                durations.get(&m).copied().flatten()
+                            });
                         }
                     }
                 }
@@ -2716,18 +2769,34 @@ impl App {
                         }
                     }
                 }
+                let slip_all_takes = self.opts.slip_all_takes;
+                let durations: std::collections::HashMap<Id, Option<Ticks>> = self
+                    .project
+                    .media
+                    .iter()
+                    .map(|m| (m.id, m.duration))
+                    .collect();
                 for &(id, st, len, off) in &orig {
                     if let Some(e) = self.project.event_mut(id) {
                         if is_left {
                             e.start = st + dt;
                             e.length = (len - dt).max(fd);
                             if !slip && !e.reverse {
-                                e.offset = off + e.rate.scale_ticks(dt);
+                                // todos os takes acompanham o início do evento
+                                let delta = off + e.rate.scale_ticks(dt) - e.offset;
+                                e.shift_offsets(delta);
                             }
                         } else {
                             e.length = (len + dt).max(fd);
                             if slip {
-                                e.offset = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                                let new_off = (off - e.rate.scale_ticks(dt)).max(Ticks::ZERO);
+                                let delta = new_off - e.offset;
+                                e.offset = new_off;
+                                if slip_all_takes {
+                                    neoveg_engine::takes::slip_alt_takes(e, delta, |m| {
+                                        durations.get(&m).copied().flatten()
+                                    });
+                                }
                             }
                         }
                         e.fade_in.len = e.fade_in.len.min(e.length);
@@ -3081,6 +3150,39 @@ impl App {
         }
     }
 
+    /// Submenu Take (manual do VEGAS Pro 21, p. 347): escolher o take ativo,
+    /// próximo/anterior e excluir o ativo. Escolher pela lista substitui o
+    /// diálogo Take Chooser (que pré-visualiza) por enquanto.
+    fn take_submenu(&mut self, ui: &mut egui::Ui, e: &Event) {
+        use neoveg_engine::takes;
+        let list = takes::takes(e);
+        let active = takes::active_index(e);
+        let id = e.id;
+        ui.menu_button(format!("Take ({} de {})", active + 1, list.len()), |ui| {
+            for (k, t) in list.iter().enumerate() {
+                let name =
+                    takes::display_name(t, |m| self.project.media(m).map(|x| x.name.clone()));
+                if ui
+                    .radio(k == active, format!("{}. {name}", k + 1))
+                    .clicked()
+                {
+                    if !self.session.set_active_take(id, k) && k != active {
+                        self.set_status("Evento travado: o take não foi trocado.");
+                    }
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.cmd_menu_btn(ui, "event.next_take");
+            self.cmd_menu_btn(ui, "event.prev_take");
+            self.cmd_menu_btn(ui, "event.delete_active_take");
+        });
+    }
+
     fn event_context_menu(&mut self, ui: &mut egui::Ui, id: Id) {
         let Some((ti, ei)) = self.project.find_event(id) else {
             ui.close_menu();
@@ -3115,6 +3217,7 @@ impl App {
             self.tl.rename = Some((id, e.name.clone()));
             ui.close_menu();
         }
+        self.take_submenu(ui, &e);
         ui.separator();
         if ui.button("Dividir no cursor (S)").clicked() {
             self.split_at_cursor();
@@ -3340,7 +3443,12 @@ impl App {
         let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
         let mut idx = self.tl.scroll_x.0 / step;
+        let mut marks = 0u32;
         loop {
+            marks += 1;
+            if marks > MAX_RULER_MARKS {
+                break;
+            }
             let gt = Ticks::from_raw(idx.saturating_mul(step));
             if gt > t_end {
                 break;
@@ -3482,38 +3590,106 @@ impl App {
                             .media(e.media_id)
                             .and_then(|m| m.duration)
                             .or(Some(a.duration()));
-                        let mid = content.center().y;
-                        let amp = content.height() * 0.48 * db_to_lin(e.gain_db).min(4.0);
+                        // ganho do evento e zoom vertical das formas de onda (Shift+↑/↓)
+                        let gain = db_to_lin(e.gain_db).min(4.0) * self.opts.waveform_zoom();
                         let alpha = if e.mute { 70 } else { 185 };
-                        let col = if body_light {
+                        let gray = if body_light {
                             Color32::from_rgba_unmultiplied(22, 30, 42, alpha)
                         } else {
                             Color32::from_rgba_unmultiplied(220, 230, 240, alpha)
                         };
-                        let mut x = vis.left().floor();
-                        let mut segs = Vec::with_capacity(vis.width() as usize * 2);
-                        let min_span = Ticks::from_raw(TICKS_PER_MS / 10);
+                        // VEGAS: a forma de onda usa a cor da faixa (Track Display
+                        // Color); cinza quando mudo, em alto contraste ou sem contraste
+                        let tinted = shade(track.color, if body_light { 0.45 } else { 1.35 });
+                        let col = if e.mute
+                            || muted
+                            || self.theme.high_contrast
+                            || crate::theme::contrast_ratio(tinted, body) < 3.0
+                        {
+                            gray
+                        } else {
+                            tinted.gamma_multiply(f32::from(alpha) / 255.0)
+                        };
+                        let center_col = col.gamma_multiply(0.45);
+                        // como no VEGAS: fonte estéreo mostra L em cima e R embaixo,
+                        // cada um com sua linha central; evento baixo ou mono, um traço só
+                        let chans: Vec<(WaveChannel, Rect)> =
+                            if !a.mono_source && content.height() >= 30.0 {
+                                let my = content.center().y;
+                                vec![
+                                    (
+                                        WaveChannel::Left,
+                                        Rect::from_min_max(content.min, pos2(content.right(), my)),
+                                    ),
+                                    (
+                                        WaveChannel::Right,
+                                        Rect::from_min_max(pos2(content.left(), my), content.max),
+                                    ),
+                                ]
+                            } else {
+                                vec![(WaveChannel::Mix, content)]
+                            };
                         let last_t = (e.end() - Ticks::from_raw(1)).max(e.start);
-                        while x < vis.right() {
-                            let t0 = self.tl.x2t(x, left);
-                            let t1 = self.tl.x2t(x + 1.0, left);
-                            if let (Some(m0), Some(m1)) =
-                                (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
-                            {
-                                let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
-                                let (lo, hi) = a.peak_range(m0, m1.max(m0 + min_span));
+                        let x_first = vis.left().floor();
+                        // menos de uma amostra por pixel: curva amostra a amostra
+                        let one_sample = Ticks::from_samples(1, a.sample_rate).0.max(1);
+                        let sample_mode = match (
+                            e.media_time(self.tl.x2t(x_first, left), dur),
+                            e.media_time(self.tl.x2t(x_first + 1.0, left).min(last_t), dur),
+                        ) {
+                            (Some(m0), Some(m1)) => (m1 - m0).0.abs() < one_sample,
+                            _ => false,
+                        };
+                        let stroke = Stroke::new(1.0_f32, col);
+                        let curve = Stroke::new(1.2_f32, col);
+                        let mut shapes = Vec::with_capacity(vis.width() as usize * chans.len() + 4);
+                        for (ch, cr) in &chans {
+                            let (ya, yb) = (cr.top().min(cr.bottom()), cr.top().max(cr.bottom()));
+                            let mid = cr.center().y;
+                            let amp = cr.height() * 0.46 * gain;
+                            let y_of = |v: f32| (mid - v * amp).clamp(ya, yb);
+                            shapes.push(Shape::line_segment(
+                                [pos2(vis.left(), mid), pos2(vis.right(), mid)],
+                                Stroke::new(1.0_f32, center_col),
+                            ));
+                            let mut pts: Vec<Pos2> = Vec::new();
+                            let mut x = x_first;
+                            while x < vis.right() {
+                                let t0 = self.tl.x2t(x, left);
                                 let fg = e.fade_gain(t0);
-                                segs.push(Shape::line_segment(
-                                    [
-                                        pos2(x, mid - hi * amp * fg),
-                                        pos2(x, mid - lo * amp * fg + 0.5),
-                                    ],
-                                    Stroke::new(1.0_f32, col),
-                                ));
+                                if sample_mode {
+                                    let tc = self.tl.x2t(x + 0.5, left).min(last_t);
+                                    if let Some(m) = e.media_time(tc, dur) {
+                                        let v = a.sample_channel(*ch, m) * fg;
+                                        pts.push(pos2(x + 0.5, y_of(v)));
+                                    } else if pts.len() > 1 {
+                                        shapes.push(Shape::line(std::mem::take(&mut pts), curve));
+                                    } else {
+                                        pts.clear();
+                                    }
+                                } else {
+                                    let t1 = self.tl.x2t(x + 1.0, left);
+                                    if let (Some(m0), Some(m1)) =
+                                        (e.media_time(t0, dur), e.media_time(t1.min(last_t), dur))
+                                    {
+                                        let (m0, m1) = if m0 <= m1 { (m0, m1) } else { (m1, m0) };
+                                        let (lo, hi) = a.channel_range(*ch, m0, m1);
+                                        shapes.push(Shape::line_segment(
+                                            [
+                                                pos2(x + 0.5, y_of(hi * fg)),
+                                                pos2(x + 0.5, y_of(lo * fg) + 0.5),
+                                            ],
+                                            stroke,
+                                        ));
+                                    }
+                                }
+                                x += 1.0;
                             }
-                            x += 1.0;
+                            if pts.len() > 1 {
+                                shapes.push(Shape::line(pts, curve));
+                            }
                         }
-                        painter.with_clip_rect(vis).extend(segs);
+                        painter.with_clip_rect(vis).extend(shapes);
                     }
                 }
                 // nome e indicadores
@@ -3846,5 +4022,90 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
             pos2(x0 + w, r.bottom()),
         );
         painter.rect_filled(bar, 0.0, col);
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    #[test]
+    fn zoom_aceita_extremos_e_recusa_valores_hostis() {
+        type S = TimelineState;
+        assert_eq!(S::clamp_pps(f32::NAN), 60.0);
+        assert_eq!(S::clamp_pps(f32::INFINITY), 60.0);
+        assert_eq!(S::clamp_pps(-3.0), 60.0);
+        assert_eq!(S::clamp_pps(0.0), 60.0);
+        assert_eq!(S::clamp_pps(1.0e-30), S::MIN_PX_PER_SEC);
+        assert_eq!(S::clamp_pps(1.0e30), S::MAX_PX_PER_SEC);
+        // o antigo teto (4000 px/s) e o antigo piso (2 px/s) ficaram para trás
+        assert_eq!(S::clamp_pps(1.0e6), 1.0e6);
+        assert_eq!(S::clamp_pps(0.01), 0.01);
+    }
+
+    // no zoom máximo, uma amostra a 48 kHz ocupa milhares de pixels
+    const _: () = assert!(TimelineState::MAX_PX_PER_SEC / 48_000.0 > 1000.0);
+
+    #[test]
+    fn regua_cabe_nos_dois_extremos() {
+        let fps = FrameRate::FPS_25;
+        for pps in [
+            TimelineState::MIN_PX_PER_SEC,
+            1.0e-3,
+            0.01,
+            0.5,
+            60.0,
+            1.0e5,
+            TimelineState::MAX_PX_PER_SEC,
+        ] {
+            let (major, minor) = nice_step(pps, fps);
+            assert!(minor.0 > 0 && major >= minor, "{pps}");
+            // tela de 4000 px (o tempo para em 48 h): marcas abaixo do teto
+            let view_secs = (4000.0 / f64::from(pps)).min(neoveg_engine::time::MAX_SECONDS as f64);
+            let marks = view_secs / minor.as_secs_f64();
+            assert!(marks <= f64::from(MAX_RULER_MARKS), "{pps}: {marks} marcas");
+        }
+    }
+
+    #[test]
+    fn zoom_ida_e_volta_mantem_a_ancora() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            ..Default::default()
+        };
+        let anchor = Ticks::from_secs_i64(90);
+        for _ in 0..200 {
+            tl.zoom_by(2.0, Some(anchor));
+        }
+        assert_eq!(tl.px_per_sec, TimelineState::MAX_PX_PER_SEC);
+        for _ in 0..400 {
+            tl.zoom_by(0.5, Some(anchor));
+        }
+        assert_eq!(tl.px_per_sec, TimelineState::MIN_PX_PER_SEC);
+        assert!(tl.scroll_x >= Ticks::ZERO);
+    }
+
+    #[test]
+    fn zoom_parte_da_agulha_de_reproducao() {
+        let mut tl = TimelineState {
+            width: 1000.0,
+            px_per_sec: 100.0,
+            scroll_x: Ticks::from_secs_i64(10),
+            ..Default::default()
+        };
+        // agulha visível, a 2 s do início da tela (200 px): fica no mesmo pixel
+        let agulha = Ticks::from_secs_i64(12);
+        for f in [4.0, 0.3, 50.0, 0.01] {
+            tl.zoom_around_playhead(f, agulha);
+            let px = (agulha - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+            assert!((px - 200.0).abs() < 1.0, "zoom {f}: agulha em {px} px");
+        }
+        // agulha fora da tela: vai para o centro
+        tl.px_per_sec = 100.0;
+        tl.scroll_x = Ticks::ZERO;
+        let longe = Ticks::from_secs_i64(600);
+        tl.zoom_around_playhead(2.0, longe);
+        let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
+        assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
     }
 }

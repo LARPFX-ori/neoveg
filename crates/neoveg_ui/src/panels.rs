@@ -604,6 +604,8 @@ impl App {
         let ctx = ui.ctx().clone();
         let items: Vec<MediaItem> = self.project.media.clone();
         let mut remove = None;
+        let mut add_as_take = None;
+        let has_event_selection = !self.sel_events.is_empty();
         let mut add = None;
         let mut open_trimmer = None;
         let mut edit_gen = None;
@@ -673,6 +675,20 @@ impl App {
                             open_trimmer = Some(m.id);
                             ui.close_menu();
                         }
+                        // "Add As Takes" (manual do VEGAS Pro 21, p. 346)
+                        if ui
+                            .add_enabled(
+                                has_event_selection,
+                                egui::Button::new("Adicionar como take aos eventos selecionados"),
+                            )
+                            .on_disabled_hover_text(
+                                "Selecione um ou mais eventos na linha do tempo.",
+                            )
+                            .clicked()
+                        {
+                            add_as_take = Some(m.id);
+                            ui.close_menu();
+                        }
                         if m.has_video
                             && !matches!(m.source, MediaSource::Generated(_))
                             && ui.button("Gerar proxy de vídeo").clicked()
@@ -723,16 +739,28 @@ impl App {
         if let Some(id) = edit_gen {
             self.dlg.gen_editor = Some(id);
         }
+        if let Some(id) = add_as_take {
+            let n = self.session.add_media_as_take_to_selected(id);
+            self.set_status(if n == 0 {
+                "Nenhum evento selecionado compatível (vídeo/áudio) recebeu o take.".to_string()
+            } else {
+                format!("Take adicionado a {n} evento(s)")
+            });
+        }
         if let Some(id) = remove {
-            let used = self
-                .project
-                .tracks
-                .iter()
-                .any(|t| t.events.iter().any(|e| e.media_id == id));
+            let used = self.project.tracks.iter().any(|t| {
+                t.events
+                    .iter()
+                    .any(|e| neoveg_engine::takes::uses_media(e, id))
+            });
             self.checkpoint();
             if used {
+                // o take dessa mídia sai; o evento só sai se não tiver outro take
                 for t in &mut self.project.tracks {
-                    t.events.retain(|e| e.media_id != id);
+                    t.events.retain_mut(|e| {
+                        !neoveg_engine::takes::uses_media(e, id)
+                            || neoveg_engine::takes::remove_media(e, id)
+                    });
                 }
             }
             self.project.media.retain(|m| m.id != id);
@@ -1574,7 +1602,7 @@ impl App {
         });
         self.set_status("Analisando loudness EBU R128 do projeto...");
         if let Err(e) = util::spawn("loudness-scan", move || {
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let res = crate::util::catch_isolated(|| {
                 analyze_project_loudness(
                     &proj,
                     &media,
@@ -1583,7 +1611,7 @@ impl App {
                     &cancel_bg,
                     Some((&done_bg, &total_bg)),
                 )
-            }));
+            });
             let msg = match res {
                 Ok(r) => r,
                 Err(_) => Err("falha interna isolada ao analisar loudness".into()),

@@ -139,6 +139,46 @@ pub struct RenderJob {
     pub settings: RenderSettings,
 }
 
+/// Resultado de um script .NET que rodou em segundo plano.
+enum ScriptOutcome {
+    Done(Result<Vec<String>, String>),
+    /// Pânico isolado na ponte (§0.6); a sessão da interface não mudou.
+    Panicked,
+}
+
+/// Script .NET em execução. Ele roda numa thread própria, sobre uma cópia da
+/// sessão: a interface continua viva (e atende as janelas do WinForms que o
+/// script abre, que travariam com a interface parada), mas a edição fica
+/// bloqueada até o fim, quando a cópia vira a sessão (§0, nada pela metade).
+pub(crate) struct ScriptJob {
+    path: PathBuf,
+    started: std::time::Instant,
+    media_before: std::collections::HashSet<u64>,
+    rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+}
+
+#[cfg(test)]
+impl ScriptJob {
+    /// Script "em andamento" para testes: termina com sucesso, devolvendo a
+    /// sessão dada, quando o teste manda `()` pelo canal devolvido.
+    pub(crate) fn fake(session: EditorSession) -> (Self, std::sync::mpsc::Sender<()>) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if done_rx.recv().is_ok() {
+                let _ = tx.send((ScriptOutcome::Done(Ok(Vec::new())), session));
+            }
+        });
+        let job = Self {
+            path: PathBuf::from("teste.cs"),
+            started: std::time::Instant::now(),
+            media_before: std::collections::HashSet::new(),
+            rx,
+        };
+        (job, done_tx)
+    }
+}
+
 pub struct App {
     pub session: EditorSession,
     pub prefs: Preferences,
@@ -178,6 +218,7 @@ pub struct App {
     pub explorer_dir: PathBuf,
     pub explorer_filter: String,
     pub render_job: Option<RenderJob>,
+    pub(crate) script_job: Option<ScriptJob>,
     pub(crate) prerender_job: Option<(Ticks, Ticks, Arc<RenderProgress>)>,
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
@@ -195,6 +236,8 @@ pub struct App {
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
     pub(crate) recovery_offer: bool,
+    /// Sessões anteriores que não fecharam normalmente (janela de relatório).
+    pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
@@ -270,7 +313,8 @@ impl App {
         );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let recovery_offer = recovery::find_existing_recovery().is_some();
+        let recovery_offer = recovery::find_existing_recovery().is_some()
+            && !neoveg_engine::session_marker::other_instance_active();
         let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
         let want_welcome = prefs.show_welcome && open.is_none() && !recovery_offer;
         let welcome_open = want_welcome && !splash.active;
@@ -320,6 +364,7 @@ impl App {
             explorer_dir,
             explorer_filter: String::new(),
             render_job: None,
+            script_job: None,
             prerender_job: None,
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
@@ -337,6 +382,7 @@ impl App {
             gen_fonts: vec![],
             last_autosave: Instant::now(),
             recovery_offer,
+            crash_reports: Vec::new(),
             splash,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
@@ -413,7 +459,8 @@ impl App {
 
     /// Salvamento automático para recuperação após falha (§0.7).
     fn autosave(&mut self) {
-        if !self.prefs.autosave_enabled
+        if self.recovery_offer
+            || !self.prefs.autosave_enabled
             || !self.dirty
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
@@ -426,7 +473,8 @@ impl App {
     }
 
     fn recovery_window(&mut self, ctx: &egui::Context) {
-        if !self.recovery_offer {
+        // com relatório de travamento, a recuperação é oferecida na janela dele
+        if !self.recovery_offer || !self.crash_reports.is_empty() {
             return;
         }
         let mut choice = None;
@@ -445,21 +493,24 @@ impl App {
                     }
                 });
             });
-        match choice {
-            Some(true) => {
-                self.recovery_offer = false;
-                if let Some(p) = recovery::find_existing_recovery() {
-                    self.open_project_path(p);
-                    self.path = None;
-                    self.dirty = true;
-                    self.set_status("Projeto recuperado. Salve-o com Salvar como...");
-                }
+        if let Some(recover) = choice {
+            self.resolve_recovery(recover);
+        }
+    }
+
+    /// Recupera (`true`) ou descarta (`false`) a cópia automática da sessão
+    /// anterior.
+    pub(crate) fn resolve_recovery(&mut self, recover: bool) {
+        self.recovery_offer = false;
+        if recover {
+            if let Some(p) = recovery::find_existing_recovery() {
+                self.open_project_path(p);
+                self.path = None;
+                self.dirty = true;
+                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
             }
-            Some(false) => {
-                self.recovery_offer = false;
-                recovery::clear_recovery();
-            }
-            None => {}
+        } else {
+            recovery::clear_recovery();
         }
     }
 
@@ -670,6 +721,14 @@ impl App {
         let items = self.project.media.clone();
         for m in items {
             self.media.remove(m.id);
+            self.spawn_media_load(m);
+        }
+    }
+
+    /// Abre em segundo plano a mídia de um item do projeto; o resultado
+    /// volta como `LoadMsg::Reloaded`.
+    fn spawn_media_load(&mut self, m: MediaItem) {
+        {
             let tx = self.loader_tx.clone();
             self.loading += 1;
             let spawned = util::spawn("recarregar-midia", move || {
@@ -1161,6 +1220,13 @@ impl App {
     }
 
     fn poll_loader(&mut self) {
+        // Com um script rodando, a sessão que vale no fim é a do script
+        // (`poll_script_job` a coloca no lugar desta): o que chegar agora
+        // (importação, mídia recarregada, proxy, pré-renderização) fica no
+        // canal e é aplicado depois, sobre a sessão do script, sem se perder.
+        if self.script_job.is_some() {
+            return;
+        }
         while let Ok(msg) = self.loader_rx.try_recv() {
             self.loading = self.loading.saturating_sub(1);
             match msg {
@@ -1547,7 +1613,10 @@ impl App {
                 let c = self.cursor;
                 self.tl.center_on(c);
             }
-            UiAction::ZoomBy(f) => self.tl.zoom_by(f, None),
+            UiAction::ZoomBy(f) => {
+                let c = self.cursor;
+                self.tl.zoom_around_playhead(f, c);
+            }
             UiAction::JumpMarker(forward) => self.jump_marker(forward),
             UiAction::JumpMarkerIndex(idx) => {
                 if let Some(t) = self.session.jump_to_marker_index(idx) {
@@ -1562,7 +1631,12 @@ impl App {
     // -----------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.splash.active || self.welcome_open || ctx.wants_keyboard_input() {
+        // com um script rodando, a sessão é dele até o fim
+        if self.splash.active
+            || self.welcome_open
+            || self.script_job.is_some()
+            || ctx.wants_keyboard_input()
+        {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
@@ -1598,15 +1672,27 @@ impl App {
         // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
         if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                    .max(Ticks::from_raw(1));
+                let dt = Ticks::from_secs_f64_clamped(
+                    1.0 / self
+                        .tl
+                        .px_per_sec
+                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+                        as f64,
+                )
+                .max(Ticks::from_raw(1));
                 let c = self.cursor;
                 self.set_cursor(c - dt);
                 return;
             }
             if pressed(Key::ArrowRight) {
-                let dt = Ticks::from_secs_f64_clamped(1.0 / self.tl.px_per_sec.max(1.0) as f64)
-                    .max(Ticks::from_raw(1));
+                let dt = Ticks::from_secs_f64_clamped(
+                    1.0 / self
+                        .tl
+                        .px_per_sec
+                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
+                        as f64,
+                )
+                .max(Ticks::from_raw(1));
                 let c = self.cursor;
                 self.set_cursor(c + dt);
                 return;
@@ -1667,7 +1753,7 @@ impl App {
     // Barras de menu e ferramentas (despachadas pela Tabela Única)
     // -----------------------------------------------------------------
 
-    fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
         let label = menu_label(id, &self.prefs.shortcuts);
         if ui
             .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
@@ -1756,6 +1842,11 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.delete");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.split");
+                ui.menu_button("Take", |ui| {
+                    self.cmd_menu_btn(ui, "event.next_take");
+                    self.cmd_menu_btn(ui, "event.prev_take");
+                    self.cmd_menu_btn(ui, "event.delete_active_take");
+                });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
                 self.cmd_menu_btn(ui, "edit.insert_time");
@@ -1942,6 +2033,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_chk(ui, self.opts.show_envelopes, "view.envelopes");
                 self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
+                self.cmd_menu_btn(ui, "view.waveform_zoom_in");
+                self.cmd_menu_btn(ui, "view.waveform_zoom_out");
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
@@ -1987,6 +2080,7 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
+                self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
                 ui.separator();
                 ui.label(format!(
@@ -2262,13 +2356,17 @@ impl App {
                     if ui
                         .add_sized(
                             [72.0, 16.0],
-                            egui::Slider::new(&mut z, (2.0f32).ln()..=(2000.0f32).ln())
-                                .show_value(false),
+                            egui::Slider::new(
+                                &mut z,
+                                crate::timeline::TimelineState::MIN_PX_PER_SEC.ln()
+                                    ..=crate::timeline::TimelineState::MAX_PX_PER_SEC.ln(),
+                            )
+                            .show_value(false),
                         )
                         .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
                         .changed()
                     {
-                        self.tl.px_per_sec = z.exp();
+                        self.tl.px_per_sec = crate::timeline::TimelineState::clamp_pps(z.exp());
                     }
                     if ui
                         .small_button("-")
@@ -2433,28 +2531,116 @@ impl App {
     }
 
     pub(crate) fn run_script_dialog(&mut self) {
+        if self.script_job.is_some() {
+            self.set_status("Já há um script em execução.");
+            return;
+        }
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Scripts VEGAS / .NET", &["cs", "dll"])
             .pick_file()
         else {
             return;
         };
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            neoveg_scripting::run_cs_script_on_session(&p, &mut self.session)
-        }));
-        self.sync_after_session();
-        match res {
-            Ok(Ok(msgs)) => {
+        // o script trabalha sobre uma cópia: a reprodução não pode mexer no cursor
+        if self.is_playing() {
+            self.stop(true);
+        }
+        let media_before: std::collections::HashSet<u64> =
+            self.session.project.media.iter().map(|m| m.id).collect();
+        let mut work = self.session.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let script = p.clone();
+        let spawned = crate::util::spawn("script-net", move || {
+            let outcome = match crate::util::catch_isolated(|| {
+                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+            }) {
+                Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
+                Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
+                Err(_) => ScriptOutcome::Panicked,
+            };
+            let _ = tx.send((outcome, work));
+        });
+        match spawned {
+            Ok(()) => {
+                self.set_status(format!("Executando script: {}", p.display()));
+                self.script_job = Some(ScriptJob {
+                    path: p,
+                    started: std::time::Instant::now(),
+                    media_before,
+                    rx,
+                });
+            }
+            Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
+        }
+    }
+
+    /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
+    /// modal; ao terminar, aplica a sessão do script (ou só o erro).
+    fn poll_script_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.script_job else {
+            return;
+        };
+        let (outcome, done) = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                let el = job.started.elapsed().as_secs_f64();
+                let path = job.path.display().to_string();
+                let theme = self.theme.clone();
+                egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        crate::splash::spinner_inline(ui, 20.0, el, &theme);
+                        ui.strong("Executando script...");
+                    });
+                    ui.label(path);
+                    ui.label(
+                        egui::RichText::new(
+                            "A edição volta quando o script terminar. Se o script abriu uma \
+                             janela, ela pode estar atrás do Neoveg.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.script_job = None;
+                self.set_status("Erro interno: o script terminou sem resposta.");
+                return;
+            }
+        };
+        let Some(job) = self.script_job.take() else {
+            return;
+        };
+        match outcome {
+            ScriptOutcome::Done(Ok(msgs)) => {
+                self.session = done;
+                self.sync_after_session();
+                // o que o carregador guardou durante o script entra no próximo quadro
+                ctx.request_repaint();
+                // mídia importada pelo script (MediaPool.AddMedia) ainda não foi aberta
+                let novas: Vec<MediaItem> = self
+                    .session
+                    .project
+                    .media
+                    .iter()
+                    .filter(|m| !job.media_before.contains(&m.id) && !self.media.contains(m.id))
+                    .cloned()
+                    .collect();
+                for m in novas {
+                    self.spawn_media_load(m);
+                }
                 if let Some(last) = msgs.last() {
                     self.set_status(format!("Script executado: {last}"));
                 } else {
-                    self.set_status(format!("Script executado: {}", p.display()));
+                    self.set_status(format!("Script executado: {}", job.path.display()));
                 }
             }
-            Ok(Err(e)) => self.set_status(format!("Erro no script: {e}")),
-            Err(_) => {
-                let _ = self.session.project.sanitize();
-                self.set_status("Erro interno isolado ao executar script .NET/C#.");
+            // a sessão da interface não foi tocada: nada a desfazer
+            ScriptOutcome::Done(Err(e)) => self.set_status(format!("Erro no script: {e}")),
+            ScriptOutcome::Panicked => {
+                self.set_status("Erro interno isolado ao executar script .NET/C#.")
             }
         }
     }
@@ -2483,6 +2669,10 @@ impl App {
                 .collect()
         });
         if files.is_empty() {
+            return;
+        }
+        if self.script_job.is_some() {
+            self.set_status("Aguarde o script terminar para soltar arquivos.");
             return;
         }
         let t = self.cursor;
@@ -2598,6 +2788,7 @@ impl App {
         self.last_frame = Instant::now();
         self.audio.tick_without_device(dt);
         self.poll_loader();
+        self.poll_script_job(ctx);
         self.poll_render();
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
@@ -2649,6 +2840,7 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.crash_report_window(ctx);
         self.recovery_window(ctx);
         self.show_welcome_overlay(ctx);
         self.show_splash_overlay(ctx);
