@@ -92,19 +92,23 @@ impl LayoutType {
         }
     }
 
+    /// Nome mostrado na interface. Sem nomes de produtos ou empresas de
+    /// terceiros (AGENTS.md §1): o `id` e os aliases de serde continuam os
+    /// mesmos, então preferências e atalhos já salvos não mudam.
     pub fn label(self) -> &'static str {
         match self {
-            LayoutType::SonicFoundry => "Sonic Foundry",
-            LayoutType::Sony => "Sony",
-            LayoutType::Magix => "MAGIX",
+            LayoutType::SonicFoundry => "Clássico",
+            LayoutType::Sony => "Intermediário",
+            LayoutType::Magix => "Atual",
         }
     }
 
+    /// Resumo curto da disposição, mostrado junto do nome.
     pub fn era(self) -> &'static str {
         match self {
-            LayoutType::SonicFoundry => "Vegas Pro 1.0–4.0",
-            LayoutType::Sony => "Sony Vegas Pro 8–13",
-            LayoutType::Magix => "MAGIX VEGAS Pro 14–21",
+            LayoutType::SonicFoundry => "timeline no topo, tema claro",
+            LayoutType::Sony => "área acoplável no topo, cinza médio",
+            LayoutType::Magix => "3 painéis no topo, tema escuro",
         }
     }
 
@@ -116,7 +120,7 @@ impl LayoutType {
             }
             LayoutType::Sony => {
                 "Área acoplável (Prévia e painéis) no topo, timeline na parte inferior da janela, \
-                 barra de transporte no rodapé, abas na base e cinza médio Sony."
+                 barra de transporte no rodapé, abas na base e cinza médio."
             }
             LayoutType::Magix => {
                 "Área acoplável no topo em 3 painéis (Abas, Prévia e Master Bus) com abas na base, \
@@ -128,8 +132,8 @@ impl LayoutType {
     pub fn from_pref(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "sonic_foundry" | "sonic-foundry" | "sonic foundry" | "sonic fonudry"
-            | "sonicfoundry" => LayoutType::SonicFoundry,
-            "sony" => LayoutType::Sony,
+            | "sonicfoundry" | "clássico" | "classico" => LayoutType::SonicFoundry,
+            "sony" | "intermediário" | "intermediario" => LayoutType::Sony,
             _ => LayoutType::Magix,
         }
     }
@@ -269,6 +273,64 @@ impl TimelineMouseScroll {
     }
 }
 
+/// Botões visíveis no cabeçalho de um tipo de faixa: botão Mais >
+/// *Editar conjunto de botões visíveis* (manual do VEGAS Pro 21, p. 69).
+/// Os ocultos continuam no menu do botão Mais.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeaderButtons {
+    pub mute: bool,
+    pub solo: bool,
+    pub fx: bool,
+    /// Só em faixas de vídeo.
+    pub track_motion: bool,
+}
+
+impl HeaderButtons {
+    /// Todos visíveis (`true`) ou todos ocultos (`false`).
+    pub fn all(on: bool) -> Self {
+        Self {
+            mute: on,
+            solo: on,
+            fx: on,
+            track_motion: on,
+        }
+    }
+}
+
+impl Default for HeaderButtons {
+    fn default() -> Self {
+        Self::all(true)
+    }
+}
+
+/// Conjuntos de botões visíveis dos cabeçalhos, um para vídeo e um para
+/// áudio, lembrados entre as sessões.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackHeaderPrefs {
+    pub video: HeaderButtons,
+    pub audio: HeaderButtons,
+}
+
+impl TrackHeaderPrefs {
+    pub fn get(&self, video: bool) -> HeaderButtons {
+        if video {
+            self.video
+        } else {
+            self.audio
+        }
+    }
+
+    pub fn set(&mut self, video: bool, b: HeaderButtons) {
+        if video {
+            self.video = b;
+        } else {
+            self.audio = b;
+        }
+    }
+}
+
 /// Preferências persistidas em JSON com proteção contra entradas hostis (§0.4 / §3.6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
@@ -291,6 +353,9 @@ pub struct Preferences {
     /// Tipo e disposição clássica de layout configurados em `Editar > Propriedades > Layout`.
     #[serde(default)]
     pub edit_layout: EditLayoutPrefs,
+    /// Botões visíveis nos cabeçalhos de faixa (botão Mais).
+    #[serde(default)]
+    pub track_header: TrackHeaderPrefs,
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
@@ -480,6 +545,7 @@ impl Default for Preferences {
             shortcuts: HashMap::new(),
             window_layout: None,
             edit_layout: EditLayoutPrefs::default(),
+            track_header: TrackHeaderPrefs::default(),
             show_splash: default_show_splash(),
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),
@@ -707,6 +773,24 @@ mod tests {
     }
 
     #[test]
+    fn botoes_do_cabecalho_tem_padrao_e_sobrevivem_a_ida_e_volta() {
+        // preferências antigas, sem o campo: todos os botões visíveis
+        let p: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.track_header, TrackHeaderPrefs::default());
+        assert!(p.track_header.get(true).solo && p.track_header.get(false).fx);
+        // campo parcial: o que falta fica visível
+        let p: Preferences =
+            serde_json::from_str(r#"{"track_header":{"audio":{"mute":false}}}"#).unwrap();
+        assert!(!p.track_header.audio.mute && p.track_header.audio.solo);
+        assert_eq!(p.track_header.video, HeaderButtons::all(true));
+        let mut p = Preferences::default();
+        p.track_header.set(true, HeaderButtons::all(false));
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.track_header.get(true), HeaderButtons::all(false));
+        assert_eq!(back.track_header.get(false), HeaderButtons::all(true));
+    }
+
+    #[test]
     fn tipos_de_layout_e_aliases_funcionam() {
         assert_eq!(LayoutType::ALL.len(), 3);
         assert_eq!(
@@ -720,6 +804,11 @@ mod tests {
         assert_eq!(LayoutType::from_pref("Sony"), LayoutType::Sony);
         assert_eq!(LayoutType::from_pref("MAGIX"), LayoutType::Magix);
         assert_eq!(LayoutType::from_pref("desconhecido"), LayoutType::Magix);
+        // os nomes mostrados na interface também são aceitos
+        for lt in LayoutType::ALL {
+            assert_eq!(LayoutType::from_pref(lt.label()), lt);
+            assert_eq!(LayoutType::from_pref(lt.id()), lt);
+        }
 
         let sf = EditLayoutPrefs::for_type(LayoutType::SonicFoundry);
         assert!(!sf.timeline_at_bottom);

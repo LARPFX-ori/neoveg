@@ -254,6 +254,9 @@ pub struct Dialogs {
     pub convert_offer: Option<crate::convert_dialog::ConvertOffer>,
     /// Conversão em andamento.
     pub convert_job: Option<crate::convert_dialog::ConvertJob>,
+    /// *Editar conjunto de botões visíveis* (botão Mais do cabeçalho de
+    /// faixa): `true` = faixas de vídeo, e o rascunho dos botões.
+    pub header_buttons: Option<(bool, neoveg_common::prefs::HeaderButtons)>,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -415,7 +418,73 @@ impl App {
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
+        self.header_buttons_window(ctx);
         self.misc_windows(ctx);
+    }
+
+    /// *Editar conjunto de botões visíveis* (manual do VEGAS Pro 21, p. 69):
+    /// quais botões aparecem no cabeçalho das faixas de vídeo ou de áudio.
+    fn header_buttons_window(&mut self, ctx: &egui::Context) {
+        use neoveg_common::prefs::HeaderButtons;
+        let Some((video, mut draft)) = self.dlg.header_buttons else {
+            return;
+        };
+        let mut open = true;
+        let mut done: Option<bool> = None;
+        let title = if video {
+            "Botões visíveis: faixas de vídeo"
+        } else {
+            "Botões visíveis: faixas de áudio"
+        };
+        egui::Window::new(title)
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.checkbox(&mut draft.mute, "Mudo");
+                ui.checkbox(&mut draft.solo, "Solo");
+                ui.checkbox(&mut draft.fx, "Efeitos da trilha (fx)");
+                if video {
+                    ui.checkbox(
+                        &mut draft.track_motion,
+                        "Movimento da trilha (Track Motion)",
+                    );
+                }
+                ui.label(
+                    egui::RichText::new("Os botões ocultos continuam no botão Mais (…).")
+                        .small()
+                        .weak(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Mostrar todos").clicked() {
+                        draft = HeaderButtons::all(true);
+                    }
+                    if ui.button("Ocultar todos").clicked() {
+                        draft = HeaderButtons::all(false);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        done = Some(true);
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        done = Some(false);
+                    }
+                });
+            });
+        match done {
+            Some(true) => {
+                self.prefs.track_header.set(video, draft);
+                let _ = self.prefs.save();
+                self.dlg.header_buttons = None;
+            }
+            Some(false) => self.dlg.header_buttons = None,
+            None if !open => self.dlg.header_buttons = None,
+            None => self.dlg.header_buttons = Some((video, draft)),
+        }
     }
 
     // -----------------------------------------------------------------
@@ -633,11 +702,16 @@ impl App {
                     });
                     ui.end_row();
                     ui.label("Opções");
-                    ui.horizontal_wrapped(|ui| {
-                        changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
-                        changed |= ui.checkbox(&mut e.locked, "Travado").changed();
-                        changed |= ui.checkbox(&mut e.looped, "Loop").changed();
-                        changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                    // linhas fixas: `horizontal_wrapped` dentro da Grid quebra
+                    // depois de a altura da linha ser medida e invade a linha
+                    // de baixo (Transição de entrada)
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut e.mute, "Mudo").changed();
+                            changed |= ui.checkbox(&mut e.locked, "Travado").changed();
+                            changed |= ui.checkbox(&mut e.looped, "Loop").changed();
+                            changed |= ui.checkbox(&mut e.reverse, "Reverso").changed();
+                        });
                         if is_video {
                             changed |= ui
                                 .checkbox(&mut e.maintain_aspect, "Manter proporção")
@@ -1666,9 +1740,13 @@ impl App {
         let fonts = self.gen_fonts.clone();
         let mut open = true;
         let before = spec.clone();
+        // centralizada: sem posição, o egui a punha no primeiro espaço livre,
+        // por cima dos cabeçalhos de faixa
         egui::Window::new("Mídia gerada")
             .open(&mut open)
             .default_width(420.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| match &mut spec {
                 GenSpec::Text(t) => {
                     ui.label("Texto:");
@@ -3297,7 +3375,7 @@ fn edit_layout_checkboxes(
     changed |= ui
         .checkbox(
             &mut cfg.master_bus_docked,
-            "Exibir Master Bus acoplado à direita (padrão VEGAS Pro 21)",
+            "Exibir Master Bus acoplado à direita (padrão)",
         )
         .changed();
     if ui
