@@ -101,6 +101,8 @@ fn ui_smoke() {
 
     let ctx = egui::Context::default();
     let mut app = App::with_context(&ctx, None);
+    // o teste de fumaça percorre todas as abas do dock
+    app.closed_tabs.clear();
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>, mods: Modifiers| {
         t += 1.0 / 60.0;
@@ -519,7 +521,8 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     }
 
     let mut row_tops = Vec::new();
-    for tab_label in ["Mídia do Projeto", "Explorer", "Destacar"] {
+    // as duas primeiras abas da ordem padrão (o rodapé rola na horizontal)
+    for tab_label in ["Mídia do Projeto", "Transições", "Destacar"] {
         let tab = texts
             .iter()
             .find(|(txt, _, _, _)| txt == tab_label)
@@ -1276,4 +1279,77 @@ fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
         app.dock_maximized, None,
         "destacado, deixa de estar maximizado"
     );
+}
+
+/// Layout novo: à esquerda da Prévia só Mídia do Projeto, Transições, Efeitos
+/// de Vídeo, Geradores de Mídia e Plug-In Manager; o Trimmer no grupo da
+/// Prévia; os outros painéis fechados até o menu Exibir abrir. "Fechar
+/// painel" fecha de verdade e o layout salvo lembra. O zoom de teclado do
+/// egui fica desligado (Ctrl+= / Ctrl+- são do tom em oitavas).
+#[test]
+fn dock_padrao_cinco_paineis_trimmer_na_previa_e_fechar_painel() {
+    use crate::dock::{build_dock_tree, find_pane_tile, DockPane};
+    use crate::layout::{builtin_presets, WindowLayout, DEFAULT_DOCK_TABS};
+
+    let novo = WindowLayout::default();
+    let fechados = novo.closed_panels();
+    for t in DEFAULT_DOCK_TABS {
+        assert!(!fechados.contains(&t), "{t:?} deve abrir no dock");
+    }
+    assert!(!fechados.contains(&DockTab::Trimmer));
+    for t in [
+        DockTab::Explorer,
+        DockTab::Mixer,
+        DockTab::Notes,
+        DockTab::Encoder,
+    ] {
+        assert!(fechados.contains(&t), "{t:?} deve começar fechado");
+    }
+    // preset que abre nos Escopos mostra os Escopos
+    let cor = builtin_presets()
+        .into_iter()
+        .find(|l| l.active_panel() == DockTab::Scopes)
+        .expect("preset de cor");
+    assert!(!cor.closed_panels().contains(&DockTab::Scopes));
+
+    let tree = build_dock_tree(0.40, DockTab::ProjectMedia, false);
+    let grupo = |p: DockPane| find_pane_tile(&tree, p).and_then(|id| tree.tiles.parent_of(id));
+    assert_eq!(
+        grupo(DockPane::Tab(DockTab::Trimmer)),
+        grupo(DockPane::Preview)
+    );
+    assert_ne!(
+        grupo(DockPane::Tab(DockTab::ProjectMedia)),
+        grupo(DockPane::Preview)
+    );
+
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    assert!(!ctx.options(|o| o.zoom_with_keyboard));
+    app.apply_window_layout(WindowLayout::default());
+    assert!(app.closed_tabs.contains(&DockTab::Mixer));
+    assert!(!app.is_panel_open(DockTab::Mixer));
+
+    app.exec_cmd(Some(&ctx), "view.tab.mixer");
+    assert!(!app.closed_tabs.contains(&DockTab::Mixer));
+    assert_eq!(app.dock_tab, DockTab::Mixer);
+
+    app.close_dock_tab(DockTab::Mixer);
+    assert!(app.closed_tabs.contains(&DockTab::Mixer));
+    assert_ne!(app.dock_tab, DockTab::Mixer);
+    let salvo = app.current_window_layout("teste");
+    assert!(salvo.closed_panels().contains(&DockTab::Mixer));
+    assert!(!salvo.closed_panels().contains(&DockTab::ProjectMedia));
+
+    // destacado e depois fechado: some da janela própria também
+    app.detach_dock_tab(DockTab::Transitions);
+    app.close_dock_tab(DockTab::Transitions);
+    assert!(!app.detached_tabs.contains(&DockTab::Transitions));
+    assert!(app.closed_tabs.contains(&DockTab::Transitions));
 }

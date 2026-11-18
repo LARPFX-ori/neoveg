@@ -368,8 +368,9 @@ mod tests {
     fn soltar_no_proprio_grupo_sozinho_nao_muda_nada() {
         let mut t = tree();
         let opts = dock_simplification();
-        let pv = find_pane_tile(&t, DockPane::Preview).expect("prévia");
-        let g = group_of(&t, DockPane::Preview);
+        // o Master Bus fica sozinho no grupo (a Prévia divide o dela com o Trimmer)
+        let pv = find_pane_tile(&t, DockPane::MasterBus).expect("master");
+        let g = group_of(&t, DockPane::MasterBus);
         for zone in [
             DropZone::Center,
             DropZone::Left,
@@ -379,7 +380,7 @@ mod tests {
         ] {
             assert!(!apply_drop(&mut t, pv, g, zone, &opts), "{zone:?}");
         }
-        assert_eq!(group_of(&t, DockPane::Preview), g);
+        assert_eq!(group_of(&t, DockPane::MasterBus), g);
     }
 
     #[test]
