@@ -104,13 +104,12 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Trilhas
 
-- **Agrupar trilhas** em pastas recolhíveis (p. 382).
-- **Propriedades padrão de trilha** (p. 414).
-- **Renderizar para uma nova trilha** (p. 415).
-- **Composição pai/filho e máscaras** (p. 740).
-- **Linhas do tempo aninhadas** (p. 114).
-- **Edição multicâmera** (p. 416).
-- **Edição 3D estereoscópica** (p. 426).
+- **Agrupar trilhas** em pastas recolhíveis (`insert.track_folder` / `track.toggle_folder`, indentação hierárquica e cascata de mudo na timeline e no mixer, p. 382) implementado.
+- **Propriedades padrão de trilha** (`track.set_defaults` persistido nas Preferências, p. 414) e **Renderizar para uma nova trilha** (`track.render_to_new_track`, p. 415) implementados.
+- **Composição pai/filho e máscaras** (`parent_track_id`, `parent_motion` de grupo no *Movimento da trilha* e modos de máscara por luminância/alfa, p. 740) implementados.
+- **Linhas do tempo aninhadas** (`MediaSource::NestedProject` / `insert.nested_timeline` com detecção de ciclos em profundidade limitada e pré-mixagem de áudio, p. 114) implementadas.
+- **Edição multicâmera** (`tools.multicam_create`, `tools.multicam_mode` / `Ctrl+Shift+D`, grade ao vivo na Prévia e corte por clique ou teclas `1..9`, p. 416) implementada.
+- **Edição 3D estereoscópica** (`Stereo3dMode` — Anáglifo, Lado a lado e Acima/Abaixo — mais disposição e convergência por evento nas Propriedades, p. 426) implementada.
 
 ### Efeitos, cor e legendas
 

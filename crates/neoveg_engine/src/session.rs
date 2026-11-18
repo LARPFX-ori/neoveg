@@ -285,6 +285,8 @@ pub struct EditorOptions {
     pub preview_mute_audio: bool,
     /// Silencia toda a imagem na monitoração da prévia (p. 200).
     pub preview_mute_video: bool,
+    /// Modo de edição multicâmera (grade de ângulos na Prévia + corte por tecla 1..9, p. 416).
+    pub multicam_mode: bool,
 }
 
 /// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
@@ -320,6 +322,7 @@ impl Default for EditorOptions {
             preview_split_horizontal: false,
             preview_mute_audio: false,
             preview_mute_video: false,
+            multicam_mode: false,
         }
     }
 }
@@ -4241,6 +4244,593 @@ impl EditorSession {
         ));
         true
     }
+
+    // -----------------------------------------------------------------
+    // Trilhas: pastas, composição Pai/Filho, máscaras, aninhamento,
+    // multicâmera, padrões e renderizar para nova trilha (p. 382–426, 740)
+    // -----------------------------------------------------------------
+
+    /// Insere uma nova trilha aplicando propriedades padrão configuradas pelo usuário (p. 414).
+    pub fn insert_track_with_defaults(
+        &mut self,
+        kind: TrackKind,
+        defaults: &crate::prefs::DefaultTrackPrefs,
+    ) -> usize {
+        let idx = self.insert_track(kind);
+        self.apply_default_track_props(idx, defaults);
+        idx
+    }
+
+    /// Aplica `defaults` à trilha `ti`.
+    pub fn apply_default_track_props(
+        &mut self,
+        ti: usize,
+        defaults: &crate::prefs::DefaultTrackPrefs,
+    ) -> bool {
+        let Some(t) = self.project.tracks.get_mut(ti) else {
+            return false;
+        };
+        t.mute = defaults.mute;
+        t.solo = defaults.solo;
+        match t.kind {
+            TrackKind::Video => {
+                t.height = defaults.video_height.clamp(28.0, 400.0);
+                t.opacity = defaults.video_opacity.clamp(0.0, 1.0);
+                t.blend = BlendMode::from_id(&defaults.video_blend);
+            }
+            TrackKind::Audio => {
+                t.height = defaults.audio_height.clamp(28.0, 400.0);
+                t.volume_db = defaults.audio_volume_db.clamp(-120.0, 24.0);
+                t.pan = defaults.audio_pan.clamp(-1.0, 1.0);
+            }
+        }
+        self.changed();
+        true
+    }
+
+    /// Captura as propriedades da trilha `ti` como padrão para futuras trilhas (p. 414).
+    pub fn capture_default_track_props(
+        &self,
+        ti: usize,
+        base: &crate::prefs::DefaultTrackPrefs,
+    ) -> Option<crate::prefs::DefaultTrackPrefs> {
+        let t = self.project.tracks.get(ti)?;
+        let mut out = base.clone();
+        out.mute = t.mute;
+        out.solo = t.solo;
+        match t.kind {
+            TrackKind::Video => {
+                out.video_height = t.height.clamp(28.0, 400.0);
+                out.video_opacity = t.opacity.clamp(0.0, 1.0);
+                out.video_blend = t.blend.id().to_string();
+            }
+            TrackKind::Audio => {
+                out.audio_height = t.height.clamp(28.0, 400.0);
+                out.audio_volume_db = t.volume_db.clamp(-120.0, 24.0);
+                out.audio_pan = t.pan.clamp(-1.0, 1.0);
+            }
+        }
+        out.sanitize();
+        Some(out)
+    }
+
+    /// Insere uma pasta recolhível de trilhas (Track Group, p. 382), envolvendo
+    /// a trilha selecionada caso ela ainda não tenha pai.
+    pub fn insert_track_folder(&mut self, kind: TrackKind) -> usize {
+        self.checkpoint();
+        let n = self.project.tracks.iter().filter(|t| t.is_folder).count() + 1;
+        let sel_info = self.sel_track.and_then(|i| {
+            self.project
+                .tracks
+                .get(i)
+                .map(|t| (i, t.id, t.kind, t.parent_track_id, t.is_folder))
+        });
+        let insert_idx = sel_info
+            .map(|(i, _, _, _, _)| i)
+            .unwrap_or_else(|| match kind {
+                TrackKind::Video => self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|t| t.kind == TrackKind::Audio)
+                    .unwrap_or(self.project.tracks.len()),
+                TrackKind::Audio => self.project.tracks.len(),
+            });
+        let folder_kind = sel_info.map(|(_, _, k, _, _)| k).unwrap_or(kind);
+        let mut folder = Track::new(folder_kind, &format!("Pasta {n}"));
+        folder.is_folder = true;
+        folder.height = 44.0;
+        if let Some((_, _, _, cur_parent, _)) = sel_info {
+            folder.parent_track_id = cur_parent;
+        }
+        let folder_id = folder.id;
+        self.project.tracks.insert(insert_idx, folder);
+        if let Some((_, child_id, _, cur_parent, is_folder)) = sel_info {
+            if !is_folder && cur_parent.is_none() {
+                if let Some(child_idx) = self.project.track_index(child_id) {
+                    if self
+                        .project
+                        .validate_track_parent(child_id, Some(folder_id))
+                        .is_ok()
+                    {
+                        self.project.tracks[child_idx].parent_track_id = Some(folder_id);
+                    }
+                }
+            }
+        }
+        self.sel_track = Some(insert_idx);
+        self.changed();
+        self.set_status(format!("Pasta de trilhas \"Pasta {n}\" criada."));
+        insert_idx
+    }
+
+    /// Alterna o estado recolhido/expandido da pasta `ti` (ou da pasta pai, se `ti` estiver dentro dela).
+    pub fn toggle_track_folder(&mut self, ti: usize) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        let target_id = if t.is_folder {
+            t.id
+        } else if let Some(pid) = t.parent_track_id.filter(|pid| {
+            self.project
+                .tracks
+                .iter()
+                .any(|p| p.id == *pid && p.is_folder)
+        }) {
+            pid
+        } else {
+            return false;
+        };
+        let Some(fi) = self.project.track_index(target_id) else {
+            return false;
+        };
+        let collapsed = !self.project.tracks[fi].collapsed;
+        self.project.tracks[fi].collapsed = collapsed;
+        self.changed();
+        self.set_status(if collapsed {
+            format!("Pasta \"{}\" recolhida.", self.project.tracks[fi].name)
+        } else {
+            format!("Pasta \"{}\" expandida.", self.project.tracks[fi].name)
+        });
+        true
+    }
+
+    /// Vincula a trilha `ti` como filha da trilha/pasta acima mais próxima ou `parent_id` explícito.
+    pub fn set_track_parent(&mut self, ti: usize, parent_id: Option<Id>) -> Result<()> {
+        let Some(child_id) = self.project.tracks.get(ti).map(|t| t.id) else {
+            return Err(NeovegError::InvalidInput("trilha inválida".into()));
+        };
+        self.project
+            .validate_track_parent(child_id, parent_id)
+            .map_err(NeovegError::InvalidInput)?;
+        self.checkpoint();
+        self.project.tracks[ti].parent_track_id = parent_id;
+        self.changed();
+        Ok(())
+    }
+
+    /// Torna a trilha `ti` filha de composição da trilha acima compatível mais próxima (p. 740).
+    pub fn make_compositing_child(&mut self, ti: usize) -> Result<()> {
+        let Some(child) = self.project.tracks.get(ti) else {
+            return Err(NeovegError::InvalidInput("trilha inválida".into()));
+        };
+        let child_id = child.id;
+        let child_kind = child.kind;
+        let cur_parent = child.parent_track_id;
+        let mut candidate: Option<Id> = None;
+        for up in (0..ti).rev() {
+            let t = &self.project.tracks[up];
+            if t.id == child_id || Some(t.id) == cur_parent {
+                continue;
+            }
+            if !t.is_folder && t.kind != child_kind {
+                continue;
+            }
+            if t.parent_track_id == cur_parent && !t.is_adjustment() {
+                candidate = Some(t.id);
+                break;
+            }
+        }
+        let pid = candidate.ok_or_else(|| {
+            NeovegError::InvalidInput(
+                "não há trilha superior compatível para composição pai/filho".into(),
+            )
+        })?;
+        self.set_track_parent(ti, Some(pid))?;
+        self.set_status(format!(
+            "Trilha \"{}\" definida como filha de composição.",
+            self.project.tracks[ti].name
+        ));
+        Ok(())
+    }
+
+    /// Remove o vínculo Pai/Filho da trilha `ti`, promovendo-a a trilha raiz.
+    pub fn unmake_compositing_child(&mut self, ti: usize) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        if t.parent_track_id.is_none() {
+            return false;
+        }
+        self.checkpoint();
+        self.project.tracks[ti].parent_track_id = None;
+        self.changed();
+        self.set_status(format!(
+            "Trilha \"{}\" promovida para o nível raiz.",
+            self.project.tracks[ti].name
+        ));
+        true
+    }
+
+    /// Define o modo de máscara de composição da trilha `ti`.
+    pub fn set_track_mask_mode(&mut self, ti: usize, mode: TrackMaskMode) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        if t.mask_mode == mode {
+            return false;
+        }
+        self.checkpoint();
+        self.project.tracks[ti].mask_mode = mode;
+        self.changed();
+        true
+    }
+
+    /// Insere um projeto `.neoveg` importado como evento de linha do tempo aninhada (p. 114).
+    pub fn insert_nested_project_event(
+        &mut self,
+        imported: crate::media::Imported,
+        cache: &MediaCache,
+        at: Ticks,
+    ) -> Vec<Id> {
+        self.checkpoint();
+        let item = imported.item.clone();
+        let dur = item.duration.unwrap_or_else(|| {
+            self.project
+                .settings
+                .frame_dur()
+                .max(Ticks::from_secs_i64(5))
+        });
+        let media_id = item.id;
+        cache.insert(media_id, imported.entry);
+        let registered_id = self.register_imported_media(item, None);
+
+        let mut created = Vec::new();
+        let group = (self
+            .project
+            .media(registered_id)
+            .is_some_and(|m| m.has_video && m.has_audio))
+        .then(new_id);
+        let m_clone = self.project.media(registered_id).cloned();
+        if let Some(m) = m_clone {
+            if m.has_video {
+                let v_ti = self
+                    .sel_track
+                    .filter(|&i| {
+                        self.project
+                            .tracks
+                            .get(i)
+                            .is_some_and(|t| t.accepts(TrackKind::Video))
+                    })
+                    .or_else(|| {
+                        self.project
+                            .tracks
+                            .iter()
+                            .position(|t| t.accepts(TrackKind::Video))
+                    })
+                    .unwrap_or_else(|| self.insert_track(TrackKind::Video));
+                let mut ev = Event::new(&m, at, dur);
+                ev.group = group;
+                created.push(ev.id);
+                self.project.tracks[v_ti].events.push(ev);
+            }
+            if m.has_audio {
+                let a_ti = self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|t| t.accepts(TrackKind::Audio))
+                    .unwrap_or_else(|| self.insert_track(TrackKind::Audio));
+                let mut ev = Event::new(&m, at, dur);
+                ev.group = group;
+                created.push(ev.id);
+                self.project.tracks[a_ti].events.push(ev);
+            }
+        }
+        self.project.sort_events();
+        self.sel_events = created.iter().copied().collect();
+        self.changed();
+        self.set_status(format!(
+            "Projeto aninhado inserido na timeline ({} evento(s)).",
+            created.len()
+        ));
+        created
+    }
+
+    /// Renderiza o intervalo selecionado (ou o projeto inteiro) e insere em uma nova trilha (p. 415).
+    pub fn render_to_new_track(
+        &mut self,
+        cache: &MediaCache,
+        range: Option<(Ticks, Ticks)>,
+        out_dir: &std::path::Path,
+    ) -> Result<Vec<Id>> {
+        let (start, end) = range
+            .or(self.time_sel)
+            .filter(|(a, b)| b > a)
+            .unwrap_or((Ticks::ZERO, self.project.duration()));
+        if end <= start {
+            return Err(NeovegError::InvalidInput(
+                "projeto ou seleção vazia para renderizar em nova trilha".into(),
+            ));
+        }
+        std::fs::create_dir_all(out_dir).map_err(|e| {
+            NeovegError::InvalidInput(format!("erro criando pasta temporária: {e}"))
+        })?;
+        let any_video_solo = self.project.any_solo(TrackKind::Video);
+        let has_video = self.project.tracks.iter().any(|t| {
+            t.kind == TrackKind::Video
+                && !t.is_folder
+                && !t.is_adjustment()
+                && !self.project.is_track_effectively_muted(t.id)
+                && (!any_video_solo || t.solo)
+                && t.events
+                    .iter()
+                    .any(|e| !e.mute && e.end() > start && e.start < end)
+        });
+        let any_audio_solo = self.project.any_solo(TrackKind::Audio);
+        let has_audio = self.project.tracks.iter().any(|t| {
+            t.kind == TrackKind::Audio
+                && !t.is_folder
+                && !self.project.is_track_effectively_muted(t.id)
+                && (!any_audio_solo || t.solo)
+                && t.events
+                    .iter()
+                    .any(|e| !e.mute && e.end() > start && e.start < end)
+        });
+        let ext = if has_video { "avi" } else { "wav" };
+        let path = out_dir.join(format!("render_nova_trilha_{}.{}", new_id(), ext));
+        let rs = crate::render::RenderSettings {
+            path: path.clone(),
+            format: if has_video {
+                crate::render::RenderFormat::AviMjpeg
+            } else {
+                crate::render::RenderFormat::Wav
+            },
+            width: self.project.settings.width.clamp(16, 1920),
+            height: self.project.settings.height.clamp(16, 1080),
+            start,
+            end,
+            include_audio: has_audio,
+            ..Default::default()
+        };
+        let prog = crate::render::RenderProgress::default();
+        crate::render::run(&self.project, cache, &rs, &prog).map_err(|e| {
+            NeovegError::InvalidInput(format!("falha ao renderizar nova trilha: {e}"))
+        })?;
+
+        let imported = crate::media::import_file(&path)
+            .map_err(|e| NeovegError::InvalidInput(format!("falha ao reimportar render: {e}")))?;
+        self.checkpoint();
+        let media_id = imported.item.id;
+        cache.insert(media_id, imported.entry);
+        let reg_id = self.register_imported_media(imported.item, None);
+        let Some(m) = self.project.media(reg_id).cloned() else {
+            return Err(NeovegError::InvalidInput(
+                "mídia renderizada indisponível".into(),
+            ));
+        };
+        let dur = end - start;
+        let group = (m.has_video && m.has_audio).then(new_id);
+        let mut created = Vec::new();
+        if m.has_video {
+            let mut tr = Track::new(TrackKind::Video, "Trilha Renderizada");
+            let mut ev = Event::new(&m, start, dur);
+            ev.group = group;
+            created.push(ev.id);
+            tr.events.push(ev);
+            self.project.tracks.insert(0, tr);
+            self.sel_track = Some(0);
+        }
+        if m.has_audio {
+            let mut tr = Track::new(TrackKind::Audio, "Áudio Renderizado");
+            let mut ev = Event::new(&m, start, dur);
+            ev.group = group;
+            created.push(ev.id);
+            tr.events.push(ev);
+            self.project.tracks.push(tr);
+            if created.len() == 1 {
+                self.sel_track = Some(self.project.tracks.len().saturating_sub(1));
+            }
+        }
+        self.project.sort_events();
+        self.sel_events = created.iter().copied().collect();
+        self.changed();
+        self.set_status(format!(
+            "Trecho renderizado para nova trilha ({} evento(s)).",
+            created.len()
+        ));
+        Ok(created)
+    }
+
+    /// Agrupa trilhas de vídeo em uma nova trilha multicâmera com múltiplos *takes* sincronizados (p. 416).
+    pub fn create_multicam_track(&mut self) -> Result<usize> {
+        let mut sources: Vec<(usize, Event)> = Vec::new();
+        if !self.sel_events.is_empty() {
+            for (ti, t) in self.project.tracks.iter().enumerate() {
+                if t.kind != TrackKind::Video || t.is_folder || t.is_adjustment() {
+                    continue;
+                }
+                if let Some(ev) = t.events.iter().find(|e| self.sel_events.contains(&e.id)) {
+                    sources.push((ti, ev.clone()));
+                }
+            }
+        }
+        if sources.len() < 2 {
+            sources.clear();
+            for (ti, t) in self.project.tracks.iter().enumerate() {
+                if t.kind != TrackKind::Video || t.is_folder || t.is_adjustment() {
+                    continue;
+                }
+                if let Some(ev) = t
+                    .events
+                    .iter()
+                    .find(|e| !e.mute && e.contains(self.cursor))
+                    .or_else(|| t.events.first())
+                {
+                    sources.push((ti, ev.clone()));
+                }
+            }
+        }
+        if sources.len() < 2 {
+            return Err(NeovegError::InvalidInput(
+                "são necessárias pelo menos 2 trilhas/eventos de vídeo para criar trilha multicâmera"
+                    .into(),
+            ));
+        }
+        sources.truncate(crate::takes::MAX_TAKES.min(16));
+        let start = sources
+            .iter()
+            .map(|(_, e)| e.start)
+            .min()
+            .unwrap_or(Ticks::ZERO);
+        let end = sources
+            .iter()
+            .map(|(_, e)| e.end())
+            .max()
+            .unwrap_or(start + self.project.settings.frame_dur());
+        let len = (end - start).max(self.project.settings.frame_dur());
+
+        self.checkpoint();
+        let mut mc_track = Track::new(TrackKind::Video, "Multicâmera");
+        mc_track.multicam = true;
+        let first = &sources[0].1;
+        let first_media = self
+            .project
+            .media(first.media_id)
+            .cloned()
+            .unwrap_or_else(|| MediaItem {
+                id: first.media_id,
+                name: first.name.clone(),
+                source: MediaSource::Generated(GenSpec::ColorBars),
+                duration: Some(len),
+                width: self.project.settings.width,
+                height: self.project.settings.height,
+                fps: Some(self.project.settings.fps),
+                has_video: true,
+                has_audio: false,
+                info: String::new(),
+                proxy_path: None,
+            });
+        let mut mc_event = Event::new(&first_media, start, len);
+        mc_event.offset = if first.start <= start {
+            first.offset + first.rate.scale_ticks(start - first.start)
+        } else {
+            first.offset
+        };
+        mc_event.rate = first.rate;
+        mc_event.take_name = format!("Câm 1 — {}", first.name);
+        mc_event.name = mc_event.take_name.clone();
+        for (idx, (_, src_ev)) in sources.iter().enumerate().skip(1) {
+            let take_off = if src_ev.start <= start {
+                src_ev.offset + src_ev.rate.scale_ticks(start - src_ev.start)
+            } else {
+                src_ev.offset
+            };
+            let _ = crate::takes::add_take(
+                &mut mc_event,
+                Take {
+                    media_id: src_ev.media_id,
+                    offset: take_off,
+                    name: format!("Câm {} — {}", idx + 1, src_ev.name),
+                },
+                false,
+            );
+        }
+        let mc_ev_id = mc_event.id;
+        mc_track.events.push(mc_event);
+        for (src_ti, _) in &sources {
+            if let Some(t) = self.project.tracks.get_mut(*src_ti) {
+                t.mute = true;
+            }
+        }
+        self.project.tracks.insert(0, mc_track);
+        self.sel_track = Some(0);
+        self.sel_events.clear();
+        self.sel_events.insert(mc_ev_id);
+        self.opts.multicam_mode = true;
+        self.changed();
+        self.set_status(format!(
+            "Trilha Multicâmera criada com {} câmeras.",
+            sources.len()
+        ));
+        Ok(0)
+    }
+
+    /// Retorna `(track_idx, event_idx, event_id, active_take, take_count)` para o evento multicâmera sob `t`.
+    pub fn active_multicam_event_at(&self, t: Ticks) -> Option<(usize, usize, Id, usize, usize)> {
+        let mut best: Option<(usize, usize, Id, usize, usize)> = None;
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            if tr.kind != TrackKind::Video || tr.is_folder || tr.mute {
+                continue;
+            }
+            for (ei, ev) in tr.events.iter().enumerate() {
+                let count = crate::takes::take_count(ev);
+                if count > 1 && ev.contains(t) {
+                    let item = (ti, ei, ev.id, crate::takes::active_index(ev), count);
+                    if tr.multicam || self.sel_track == Some(ti) {
+                        return Some(item);
+                    }
+                    if best.is_none() {
+                        best = Some(item);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Alterna o ângulo multicâmera em `t` dividindo o evento no cursor se necessário e ativando `angle_idx`.
+    pub fn switch_multicam_angle(&mut self, t: Ticks, angle_idx: usize) -> bool {
+        let Some((ti, ei, ev_id, cur_take, count)) = self.active_multicam_event_at(t) else {
+            return false;
+        };
+        if angle_idx >= count {
+            return false;
+        }
+        let fd = self.project.settings.frame_dur();
+        let (ev_start, ev_end) = {
+            let e = &self.project.tracks[ti].events[ei];
+            (e.start, e.end())
+        };
+        if t <= ev_start + fd && cur_take == angle_idx {
+            return false;
+        }
+        self.checkpoint();
+        let mut target_id = ev_id;
+        if t > ev_start + fd && t < ev_end - fd {
+            let mut gm = HashMap::new();
+            if let Some(new_id_val) =
+                split_event_in_track(&mut self.project.tracks[ti], ei, t, &mut gm)
+            {
+                target_id = new_id_val;
+            }
+        }
+        if let Some(ev) = self.project.event_mut(target_id) {
+            if crate::takes::set_active(ev, angle_idx) {
+                ev.name = if ev.take_name.is_empty() {
+                    format!("Câm {}", angle_idx + 1)
+                } else {
+                    ev.take_name.clone()
+                };
+            }
+        }
+        self.sel_track = Some(ti);
+        self.sel_events.clear();
+        self.sel_events.insert(target_id);
+        self.changed();
+        self.set_status(format!("Multicâmera: Câmera {}", angle_idx + 1));
+        true
+    }
 }
 
 fn split_event_in_track(
@@ -5166,5 +5756,89 @@ mod tests {
         assert_eq!(sess.cursor, Ticks::from_secs_i64(17));
         assert!(sess.undo());
         assert_eq!(sess.project.tracks[0].events.len(), 1);
+    }
+
+    #[test]
+    fn trilhas_pastas_pai_filho_padroes_multicam_e_render_nova_trilha() {
+        let mut p = Project::new_default();
+        let mut m1 = sample_media(101, 64, 36, Some(FrameRate::FPS_30));
+        m1.source = MediaSource::Generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        });
+        m1.has_audio = false;
+        let mut m2 = sample_media(102, 64, 36, Some(FrameRate::FPS_30));
+        m2.source = MediaSource::Generated(GenSpec::SolidColor {
+            color: [0.0, 0.0, 1.0, 1.0],
+        });
+        m2.has_audio = false;
+        p.media = vec![m1.clone(), m2.clone()];
+
+        let ev1 = Event::new(&m1, Ticks::ZERO, Ticks::from_secs_i64(4));
+        p.tracks[0].events.push(ev1);
+        let mut v2 = Track::new(TrackKind::Video, "Vídeo 2");
+        v2.events
+            .push(Event::new(&m2, Ticks::ZERO, Ticks::from_secs_i64(4)));
+        p.tracks.insert(1, v2);
+
+        let mut sess = EditorSession::new(p);
+        sess.sel_track = Some(0);
+
+        // 1. Pasta de trilhas + recolher/expandir + validação anti-ciclo
+        let fi = sess.insert_track_folder(TrackKind::Video);
+        assert!(sess.project.tracks[fi].is_folder);
+        let folder_id = sess.project.tracks[fi].id;
+        let child_id = sess.project.tracks[fi + 1].id;
+        assert_eq!(sess.project.tracks[fi + 1].parent_track_id, Some(folder_id));
+        assert!(sess
+            .project
+            .validate_track_parent(folder_id, Some(child_id))
+            .is_err());
+        assert!(sess.toggle_track_folder(fi));
+        assert!(sess.project.is_track_hidden_by_folder(child_id));
+        assert!(sess.toggle_track_folder(fi));
+        assert!(!sess.project.is_track_hidden_by_folder(child_id));
+
+        // 2. Pai/Filho composição e promoção
+        sess.sel_track = Some(2);
+        assert!(sess.make_compositing_child(2).is_ok());
+        assert!(sess.project.tracks[2].parent_track_id.is_some());
+        assert!(sess.unmake_compositing_child(2));
+        assert!(sess.project.tracks[2].parent_track_id.is_none());
+
+        // 3. Propriedades padrão da trilha
+        sess.project.tracks[1].height = 120.0;
+        let defs = sess
+            .capture_default_track_props(1, &crate::prefs::DefaultTrackPrefs::default())
+            .unwrap();
+        let nt = sess.insert_track_with_defaults(TrackKind::Video, &defs);
+        assert!((sess.project.tracks[nt].height - 120.0).abs() < 0.01);
+
+        // 4. Multicâmera: cria trilha multicâmera e corta para Câmera 2 aos 2 s
+        sess.sel_events.clear();
+        let mc_ti = sess.create_multicam_track().unwrap();
+        assert!(sess.project.tracks[mc_ti].multicam);
+        assert!(sess.opts.multicam_mode);
+        let mid = Ticks::from_secs_i64(2);
+        assert!(sess.switch_multicam_angle(mid, 1));
+        let (_, _, _, active, count) = sess.active_multicam_event_at(mid).unwrap();
+        assert_eq!(active, 1);
+        assert!(count >= 2);
+
+        // 5. Renderizar para nova trilha (AVI + Undo em 1 passo)
+        let out_dir = std::env::temp_dir().join(format!("neoveg_rtn_{}", new_id()));
+        let cache = MediaCache::default();
+        let before_tracks = sess.project.tracks.len();
+        let created = sess
+            .render_to_new_track(
+                &cache,
+                Some((Ticks::ZERO, Ticks::from_secs_i64(1))),
+                &out_dir,
+            )
+            .unwrap();
+        assert!(!created.is_empty());
+        assert_eq!(sess.project.tracks.len(), before_tracks + 1);
+        assert!(sess.undo());
+        assert_eq!(sess.project.tracks.len(), before_tracks);
+        let _ = std::fs::remove_dir_all(&out_dir);
     }
 }

@@ -51,6 +51,17 @@ pub const UNSUPPORTED_CONTAINERS: &[&str] = &["mp4", "mov", "mkv", "webm", "m4v"
 
 /// Memória máxima para os quadros de um GIF animado.
 const MAX_GIF_BYTES: u64 = 512 << 20;
+/// Profundidade máxima ao aninhar projetos `.neoveg` em outros projetos (§0.5).
+pub const MAX_NESTED_PROJECT_DEPTH: usize = 8;
+/// Duração máxima (segundos) pré-mixada em RAM ao carregar áudio de uma timeline aninhada (§0.4).
+const MAX_NESTED_AUDIO_SECS: i64 = 900;
+
+/// Estado decodificado em memória para uma linha do tempo aninhada (`.neoveg`).
+pub struct NestedProjectEntry {
+    pub project: Box<crate::model::Project>,
+    pub media: Arc<MediaCache>,
+    pub path: PathBuf,
+}
 
 pub fn is_supported(path: &Path) -> bool {
     let ext = ext_of(path);
@@ -137,6 +148,8 @@ pub enum VideoSource {
     System(Arc<dyn system::SystemVideoReader>, Mutex<FrameCache>),
     Sequence(Vec<String>, FrameRate, Mutex<FrameCache>),
     Generated,
+    /// Linha do tempo aninhada (`.neoveg`) com cache próprio de quadros renderizados.
+    Nested(Arc<NestedProjectEntry>, Mutex<FrameCache>),
 }
 
 impl VideoSource {
@@ -145,7 +158,8 @@ impl VideoSource {
             VideoSource::Avi(_, c)
             | VideoSource::Y4m(_, c)
             | VideoSource::System(_, c)
-            | VideoSource::Sequence(_, _, c) => {
+            | VideoSource::Sequence(_, _, c)
+            | VideoSource::Nested(_, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .set_budget(cap, max_bytes);
@@ -162,7 +176,8 @@ impl VideoSource {
             VideoSource::Avi(_, c)
             | VideoSource::Y4m(_, c)
             | VideoSource::System(_, c)
-            | VideoSource::Sequence(_, _, c) => {
+            | VideoSource::Sequence(_, _, c)
+            | VideoSource::Nested(_, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clear();
@@ -531,6 +546,38 @@ impl MediaCache {
                     .put(idx, img.clone());
                 Some(img)
             }
+            VideoSource::Nested(nested, cache) => {
+                let fps = item.fps.unwrap_or(nested.project.settings.fps);
+                let max_idx = item
+                    .duration
+                    .map(|d| fps.ticks_to_frame_floor(d).max(0))
+                    .unwrap_or(i64::MAX / 2);
+                let idx = fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
+                if let Some(img) = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(idx)
+                {
+                    return Some(img);
+                }
+                let rw = nested.project.settings.width.clamp(16, 1920) as usize;
+                let rh = nested.project.settings.height.clamp(16, 1080) as usize;
+                let ft = fps.frame_to_ticks(idx as i64);
+                let frame = crate::engine::video::render_frame_preview(
+                    &nested.project,
+                    &nested.media,
+                    ft,
+                    rw,
+                    rh,
+                    true,
+                );
+                let img = Arc::new(frame.to_image()?);
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .put(idx, img.clone());
+                Some(img)
+            }
         }
     }
 
@@ -710,23 +757,58 @@ pub fn import_file(path: &Path) -> Result<Imported> {
     Ok(imp)
 }
 
+/// Importa um projeto `.neoveg` como linha do tempo aninhada (manual p. 114).
+pub fn import_nested_project(path: &Path) -> Result<Imported> {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Projeto aninhado".into());
+    let mut item = base_item(
+        name,
+        MediaSource::NestedProject {
+            path: path.to_string_lossy().to_string(),
+        },
+    );
+    let mut imp = load_entry(&mut item)?;
+    imp.item = item;
+    Ok(imp)
+}
+
 /// Carrega (ou recarrega, ao abrir um projeto) os dados de um item de mídia.
 /// Atualiza as informações do item (duração, dimensões...). Pânicos dos
 /// decodificadores são isolados e viram erro (§0.6).
 pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
-    match crate::util::guard("importação de mídia", || load_entry_inner(item)) {
+    let mut stack = std::collections::HashSet::new();
+    load_entry_with_stack(item, &mut stack, 0)
+}
+
+fn load_entry_with_stack(
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> Result<Imported> {
+    match crate::util::guard("importação de mídia", || {
+        load_entry_inner(item, stack, depth)
+    }) {
         Ok(r) => r,
         Err(e) => bail!("{e}"),
     }
 }
 
-fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
+fn load_entry_inner(
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> Result<Imported> {
     let mut warning = None;
     let entry = match item.source.clone() {
-        MediaSource::Generated(_) => MediaEntry {
-            video: VideoSource::Generated,
-            audio: None,
-        },
+        MediaSource::Generated(_) => {
+            item.has_video = true;
+            MediaEntry {
+                video: VideoSource::Generated,
+                audio: None,
+            }
+        }
         MediaSource::ImageSequence { paths, fps } => {
             if paths.is_empty() {
                 bail!("sequência vazia");
@@ -859,11 +941,128 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                 }
             }
         }
+        MediaSource::NestedProject { path } => {
+            if depth >= MAX_NESTED_PROJECT_DEPTH {
+                bail!(
+                    "profundidade máxima de projetos aninhados ({MAX_NESTED_PROJECT_DEPTH}) excedida"
+                );
+            }
+            let p = PathBuf::from(&path);
+            if !p.exists() {
+                bail!("projeto aninhado não encontrado: {path}");
+            }
+            let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if !stack.insert(canon.clone()) {
+                bail!("referência cíclica detectada no projeto aninhado: {path}");
+            }
+            let res = load_nested_project_entry(&p, item, stack, depth + 1, &mut warning);
+            stack.remove(&canon);
+            res?
+        }
     };
     Ok(Imported {
         item: item.clone(),
         entry,
         warning,
+    })
+}
+
+fn load_nested_project_entry(
+    p: &Path,
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    next_depth: usize,
+    warning: &mut Option<String>,
+) -> Result<MediaEntry> {
+    let (mut sub_proj, _) = crate::model::Project::load_file(p).map_err(anyhow::Error::msg)?;
+    let base_dir = p.parent().unwrap_or_else(|| Path::new("."));
+    let sub_cache = Arc::new(MediaCache::default());
+    let mut sub_warnings = Vec::new();
+    for sm in &mut sub_proj.media {
+        if let MediaSource::File { path: sp } | MediaSource::NestedProject { path: sp } =
+            &mut sm.source
+        {
+            let sp_path = Path::new(sp.as_str());
+            if sp_path.is_relative() {
+                let candidate = base_dir.join(sp_path);
+                if candidate.exists() {
+                    *sp = candidate.to_string_lossy().to_string();
+                }
+            }
+        }
+        match load_entry_with_stack(sm, stack, next_depth) {
+            Ok(imp) => {
+                if let Some(w) = imp.warning {
+                    sub_warnings.push(w);
+                }
+                sub_cache.insert(sm.id, imp.entry);
+            }
+            Err(e) => {
+                sub_warnings.push(format!("{}: {e}", sm.name));
+            }
+        }
+    }
+    let dur = sub_proj.duration().max(sub_proj.settings.frame_dur());
+    let has_video = sub_proj.tracks.iter().any(|t| {
+        t.kind == crate::model::TrackKind::Video
+            && !t.is_folder
+            && !t.events.is_empty()
+            && !sub_proj.is_track_effectively_muted(t.id)
+    });
+    let has_audio_events = sub_proj.tracks.iter().any(|t| {
+        t.kind == crate::model::TrackKind::Audio
+            && !t.is_folder
+            && !t.events.is_empty()
+            && !sub_proj.is_track_effectively_muted(t.id)
+    });
+    let audio = if has_audio_events {
+        let sr = sub_proj.settings.sample_rate.clamp(8000, 192_000);
+        let audio_dur = dur.min(Ticks::from_secs_i64(MAX_NESTED_AUDIO_SECS));
+        let total_samples = audio_dur.to_samples_round(sr).max(1) as usize;
+        let capped_samples =
+            total_samples.min((sr as usize).saturating_mul(MAX_NESTED_AUDIO_SECS as usize));
+        let audio_map = sub_cache.audio_map();
+        let mut mixer = crate::engine::audio::Mixer::new_offline(sr);
+        let pdc = mixer.total_latency(&sub_proj) as i64;
+        let mut stereo = Vec::with_capacity(capped_samples.saturating_mul(2));
+        let mut pos = 0usize;
+        let chunk = 2048usize;
+        while pos < capped_samples {
+            let n = (capped_samples - pos).min(chunk);
+            let mut blk = vec![0.0f32; n * 2];
+            mixer.process(&sub_proj, &audio_map, pos as i64 + pdc, &mut blk);
+            stereo.extend_from_slice(&blk);
+            pos += n;
+        }
+        Some(Arc::new(AudioData::from_stereo(sr, stereo)))
+    } else {
+        None
+    };
+
+    item.width = sub_proj.settings.width;
+    item.height = sub_proj.settings.height;
+    item.fps = Some(sub_proj.settings.fps);
+    item.duration = Some(dur);
+    item.has_video = has_video || !has_audio_events;
+    item.has_audio = audio.is_some();
+    item.info = format!(
+        "Projeto aninhado {}x{}, {}, {:.2} s",
+        item.width,
+        item.height,
+        sub_proj.settings.fps.label(),
+        dur.as_secs_f64()
+    );
+    if !sub_warnings.is_empty() {
+        *warning = Some(sub_warnings.join(" | "));
+    }
+    let nested = Arc::new(NestedProjectEntry {
+        project: Box::new(sub_proj),
+        media: sub_cache,
+        path: p.to_path_buf(),
+    });
+    Ok(MediaEntry {
+        video: VideoSource::Nested(nested, Mutex::new(FrameCache::new(16))),
+        audio,
     })
 }
 
@@ -1160,5 +1359,68 @@ mod system_contract_tests {
         let mut bad_item = item;
         bad_item.id = bad_id;
         assert!(cache.video_frame(&bad_item, Ticks::ZERO, 16, 16).is_none());
+    }
+
+    #[test]
+    fn projeto_aninhado_carrega_quadros_e_bloqueia_ciclos() {
+        let dir = std::env::temp_dir().join(format!("neoveg_nested_test_{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sub_path = dir.join("sub.neoveg");
+        let cyc_a = dir.join("cyc_a.neoveg");
+        let cyc_b = dir.join("cyc_b.neoveg");
+
+        let mut sub = crate::model::Project::new_default();
+        sub.settings.width = 64;
+        sub.settings.height = 36;
+        let gm = import_generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        })
+        .item;
+        let ev = crate::model::Event::new(&gm, Ticks::ZERO, Ticks::from_secs_i64(2));
+        sub.media.push(gm);
+        sub.tracks[0].events.push(ev);
+        sub.save_file(&sub_path).unwrap();
+
+        let imp = import_nested_project(&sub_path).expect("importa projeto aninhado válido");
+        let cache = MediaCache::default();
+        let item = imp.item.clone();
+        assert!(item.has_video);
+        cache.insert(item.id, imp.entry);
+        let frame = cache
+            .video_frame(&item, Ticks::from_secs_i64(1), 64, 36)
+            .expect("decodifica quadro aninhado");
+        assert_eq!(frame.get_pixel(32, 18).0[0], 255);
+
+        // Ciclo A -> B -> A deve falhar com erro controlado (zero estouro de pilha, §0.5).
+        let mut pa = crate::model::Project::new_default();
+        let ma_b = base_item(
+            "B".into(),
+            MediaSource::NestedProject {
+                path: cyc_b.to_string_lossy().to_string(),
+            },
+        );
+        pa.media.push(ma_b);
+        pa.save_file(&cyc_a).unwrap();
+
+        let mut pb = crate::model::Project::new_default();
+        let mb_a = base_item(
+            "A".into(),
+            MediaSource::NestedProject {
+                path: cyc_a.to_string_lossy().to_string(),
+            },
+        );
+        pb.media.push(mb_a);
+        pb.save_file(&cyc_b).unwrap();
+
+        let mut root_item = base_item(
+            "Ciclo".into(),
+            MediaSource::NestedProject {
+                path: cyc_a.to_string_lossy().to_string(),
+            },
+        );
+        let res = load_entry(&mut root_item);
+        assert!(res.is_ok());
+        assert!(res.unwrap().warning.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

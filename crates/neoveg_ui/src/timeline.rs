@@ -390,6 +390,12 @@ impl App {
         let mut track_spans = Vec::with_capacity(n);
         let mut kf_areas = Vec::with_capacity(n);
         for t in &self.project.tracks {
+            if self.project.is_track_hidden_by_folder(t.id) {
+                track_rects.push((y, 0.0));
+                track_spans.push((y, 0.0));
+                kf_areas.push(None);
+                continue;
+            }
             let kf = self.kf_visible_rows(t);
             let kf_h = kf.len() as f32 * KF_ROW_H;
             track_rects.push((y, t.height));
@@ -1818,12 +1824,24 @@ impl App {
         let n = self.project.tracks.len();
         for ti in 0..n {
             let (y0, h) = rows.track_rects[ti];
+            if h <= 0.0 {
+                continue;
+            }
             let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
             if r.bottom() < area.top() || r.top() > area.bottom() {
                 continue;
             }
             let selected = self.sel_track == Some(ti);
             let track = &self.project.tracks[ti];
+            let tid = track.id;
+            let depth = self.project.track_depth(tid);
+            let indent = (depth.min(4) as f32) * 8.0;
+            let is_folder = track.is_folder;
+            let folder_collapsed = track.collapsed;
+            let has_parent = track.parent_track_id.is_some();
+            let has_children = self.project.has_track_children(tid);
+            let mask_mode = track.mask_mode;
+            let is_multicam = track.multicam;
             let bg = if selected {
                 self.theme.tl_header_sel
             } else {
@@ -1835,13 +1853,24 @@ impl App {
                 0.0,
                 shade(track.color, 1.0),
             );
+            if depth > 0 {
+                let gx = r.left() + 6.0 + indent * 0.5;
+                let mid_y = r.center().y;
+                painter.line_segment(
+                    [pos2(gx, r.top()), pos2(gx, mid_y)],
+                    Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                );
+                painter.line_segment(
+                    [pos2(gx, mid_y), pos2(r.left() + 9.0 + indent, mid_y)],
+                    Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                );
+            }
             painter.line_segment(
                 [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
                 Stroke::new(1.0_f32, self.theme.border),
             );
 
             // clique no fundo seleciona a trilha
-            let tid = track.id;
             let bresp = ui.interact(r, ui.id().with(("thdr", tid)), Sense::click());
             if bresp.clicked() {
                 self.session.sel_track = Some(ti);
@@ -1854,7 +1883,7 @@ impl App {
             }
 
             let inner = Rect::from_min_max(
-                pos2(r.left() + 10.0, r.top() + 3.0),
+                pos2(r.left() + 10.0 + indent, r.top() + 3.0),
                 pos2(r.right() - 14.0, r.bottom() - 3.0),
             );
             let mut child =
@@ -1937,7 +1966,9 @@ impl App {
                 );
                 icons::paint_inline(
                     ui,
-                    if kind == TrackKind::Video {
+                    if is_folder {
+                        Icon::TrackFolder
+                    } else if kind == TrackKind::Video {
                         Icon::VideoTrack
                     } else {
                         Icon::AudioTrack
@@ -1945,6 +1976,21 @@ impl App {
                     14.0,
                     &self.theme,
                 );
+                if is_folder {
+                    let toggle_lbl = if folder_collapsed { ">" } else { "v" };
+                    if ui
+                        .small_button(toggle_lbl)
+                        .on_hover_text(if folder_collapsed {
+                            "Expandir pasta de trilhas"
+                        } else {
+                            "Recolher pasta de trilhas"
+                        })
+                        .clicked()
+                    {
+                        self.session.toggle_track_folder(ti);
+                        self.sync_status_from_session();
+                    }
+                }
                 let is_adjustment = self.project.tracks[ti].is_adjustment();
                 if is_adjustment {
                     ui.label(
@@ -1957,6 +2003,37 @@ impl App {
                         "Trilha de ajuste (Adjustment Track): os efeitos desta trilha \
                          valem para todas as trilhas de vídeo abaixo dela",
                     );
+                } else if !is_folder && is_video && has_children {
+                    ui.label(
+                        egui::RichText::new("PAI")
+                            .small()
+                            .strong()
+                            .color(self.theme.accent),
+                    )
+                    .on_hover_text("Trilha pai em composição Pai/Filho (Track Motion de grupo)");
+                }
+                if !is_folder && is_video && mask_mode != neoveg_engine::model::TrackMaskMode::None
+                {
+                    ui.label(
+                        egui::RichText::new("MSK")
+                            .small()
+                            .strong()
+                            .color(self.theme.accent),
+                    )
+                    .on_hover_text(mask_mode.label());
+                }
+                if is_multicam {
+                    ui.label(
+                        egui::RichText::new("MC")
+                            .small()
+                            .strong()
+                            .color(self.theme.accent),
+                    )
+                    .on_hover_text("Trilha Multicâmera");
+                }
+                if has_parent && !is_folder {
+                    ui.label(egui::RichText::new("↳").small().weak())
+                        .on_hover_text("Filha vinculada à trilha/pasta pai");
                 }
                 let t = &mut self.project.tracks[ti];
                 let r = ui.add(
@@ -1979,6 +2056,7 @@ impl App {
                     more = Some(HeaderAction::Mute);
                 }
                 if btns.solo
+                    && !is_folder
                     && ui
                         .selectable_label(t.solo, "S")
                         .on_hover_text("Solo (X)")
@@ -1988,6 +2066,7 @@ impl App {
                 }
                 let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
                 if btns.fx
+                    && !is_folder
                     && ui
                         .small_button(fxlabel)
                         .on_hover_text("Efeitos da trilha")
@@ -1998,13 +2077,14 @@ impl App {
                 if kind == TrackKind::Video
                     && btns.track_motion
                     && !is_adjustment
+                    && !is_folder
                     && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
                         .on_hover_text("Movimento da trilha (Track Motion)")
                         .clicked()
                 {
                     self.dlg.track_motion = Some(tid);
                 }
-                if kind == TrackKind::Audio {
+                if kind == TrackKind::Audio && !is_folder {
                     let (rec_armed, rec_locked) = {
                         let tk = &self.project.tracks[ti];
                         (tk.record_armed, tk.locked)
@@ -2409,6 +2489,71 @@ impl App {
                     }
                 }
             });
+        }
+        ui.separator();
+        let is_folder = self.project.tracks[ti].is_folder;
+        let folder_collapsed = self.project.tracks[ti].collapsed;
+        let has_parent = self.project.tracks[ti].parent_track_id.is_some();
+        if is_folder {
+            if ui
+                .button(if folder_collapsed {
+                    "Expandir pasta de trilhas"
+                } else {
+                    "Recolher pasta de trilhas"
+                })
+                .clicked()
+            {
+                self.session.toggle_track_folder(ti);
+                self.sync_status_from_session();
+                ui.close_menu();
+            }
+        } else {
+            if ti > 0
+                && ui
+                    .button("Tornar filho de composição (Pai/Filho)")
+                    .clicked()
+            {
+                if let Err(e) = self.session.make_compositing_child(ti) {
+                    self.set_status(format!("{e}"));
+                } else {
+                    self.sync_after_session();
+                }
+                ui.close_menu();
+            }
+            if has_parent && ui.button("Promover filho para trilha raiz").clicked() {
+                self.session.unmake_compositing_child(ti);
+                self.sync_after_session();
+                ui.close_menu();
+            }
+            if ui.button("Agrupar em pasta de trilhas").clicked() {
+                self.session.sel_track = Some(ti);
+                self.session.insert_track_folder(kind);
+                self.sync_after_session();
+                ui.close_menu();
+            }
+        }
+        if kind == TrackKind::Video && !is_folder {
+            ui.menu_button("Modo de máscara (Pai/Filho)", |ui| {
+                let cur_mask = self.project.tracks[ti].mask_mode;
+                for m in neoveg_engine::model::TrackMaskMode::ALL {
+                    if ui.selectable_label(cur_mask == m, m.label()).clicked() {
+                        self.session.set_track_mask_mode(ti, m);
+                        self.sync_after_session();
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        ui.separator();
+        if ui.button("Definir propriedades padrão da trilha").clicked() {
+            self.session.sel_track = Some(ti);
+            self.exec_cmd(Some(ui.ctx()), "track.set_defaults");
+            ui.close_menu();
+        }
+        if ui.button("Renderizar para nova trilha...").clicked() {
+            self.session.sel_track = Some(ti);
+            self.exec_cmd(Some(ui.ctx()), "track.render_to_new_track");
+            ui.close_menu();
         }
         ui.separator();
         if ui.button("Duplicar trilha").clicked() {
@@ -4243,15 +4388,18 @@ impl App {
             .collect();
         for ti in 0..self.project.tracks.len() {
             let (y0, h) = layout[ti];
-            if y0 + h < lanes.top() || y0 > lanes.bottom() {
+            if h <= 0.0 || y0 + h < lanes.top() || y0 > lanes.bottom() {
                 continue;
             }
             let lane = Rect::from_min_max(pos2(lanes.left(), y0), pos2(lanes.right(), y0 + h));
             let selected = self.sel_track == Some(ti);
+            let track_is_folder = self.project.tracks[ti].is_folder;
             painter.rect_filled(
                 lane,
                 0.0,
-                if selected {
+                if track_is_folder {
+                    shade(self.project.tracks[ti].color, 0.32)
+                } else if selected {
                     self.theme.tl_lane_even
                 } else {
                     self.theme.tl_lane_odd

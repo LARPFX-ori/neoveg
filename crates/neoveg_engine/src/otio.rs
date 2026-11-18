@@ -1005,7 +1005,7 @@ fn export_media_ref(item: Option<&MediaItem>, fps: FrameRate, sr: Option<u32>) -
         .map(|d| ticks_range(Ticks::ZERO, d, fps, sr));
 
     match &m.source {
-        MediaSource::File { path } => serde_json::json!({
+        MediaSource::File { path } | MediaSource::NestedProject { path } => serde_json::json!({
             "OTIO_SCHEMA": "ExternalReference.1",
             "name": m.name,
             "target_url": encode_target_url(path),

@@ -638,6 +638,7 @@ pub struct Dialogs {
     pub pc_animate: bool,
     pub tm_animate: bool,
     tm_lock_aspect: bool,
+    pub tm_parent_mode: bool,
     edit_in_progress: bool,
     /// Arquivos aguardando confirmação para conversão.
     pub convert_offer: Option<crate::convert_dialog::ConvertOffer>,
@@ -1654,6 +1655,17 @@ impl App {
                             }
                         });
                     ui.end_row();
+                    ui.label("Modo 3D Estereoscópico");
+                    egui::ComboBox::from_id_salt("stereo_3d_mode")
+                        .selected_text(s.stereo_3d.label())
+                        .show_ui(ui, |ui| {
+                            for m3d in Stereo3dMode::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.stereo_3d, m3d, m3d.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
                     ui.label("Cor de fundo");
                     changed |= ui.color_edit_button_rgb(&mut s.background).changed();
                     ui.end_row();
@@ -1856,6 +1868,35 @@ impl App {
                                     )
                                     .changed();
                             }
+                        });
+                        ui.end_row();
+                        ui.label("3D Estereoscópico");
+                        ui.vertical(|ui| {
+                            egui::ComboBox::from_id_salt(("ep_s3d", id))
+                                .selected_text(e.stereo_3d.layout.label())
+                                .show_ui(ui, |ui| {
+                                    for l in Stereo3dSourceLayout::ALL {
+                                        changed |= ui
+                                            .selectable_value(&mut e.stereo_3d.layout, l, l.label())
+                                            .changed();
+                                    }
+                                });
+                            changed |= ui
+                                .checkbox(
+                                    &mut e.stereo_3d.swap_lr,
+                                    "Inverter olho esquerdo/direito",
+                                )
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::Slider::new(
+                                        &mut e.stereo_3d.horizontal_offset,
+                                        -0.25..=0.25,
+                                    )
+                                    .step_by(0.002)
+                                    .text("Convergência"),
+                                )
+                                .changed();
                         });
                         ui.end_row();
                     }
@@ -2335,13 +2376,18 @@ impl App {
         let s = self.project.settings.clone();
         let t = self.cursor;
         let tol = s.frame_dur().div_i64(2);
-        let cur = self.project.tracks[ti].motion.eval(t);
-        let keys: Vec<(Ticks, Curve)> = self.project.tracks[ti]
-            .motion
-            .keys
-            .iter()
-            .map(|k| (k.t, k.curve))
-            .collect();
+        let has_children = self.project.has_track_children(tid);
+        if !has_children {
+            self.dlg.tm_parent_mode = false;
+        }
+        let use_parent = has_children && self.dlg.tm_parent_mode;
+        let motion_ref = if use_parent {
+            &self.project.tracks[ti].parent_motion
+        } else {
+            &self.project.tracks[ti].motion
+        };
+        let cur = motion_ref.eval(t);
+        let keys: Vec<(Ticks, Curve)> = motion_ref.keys.iter().map(|k| (k.t, k.curve)).collect();
         let mut open = true;
         let mut new_key: Option<MotionKey> = None;
         let mut action: Option<&str> = None;
@@ -2351,6 +2397,22 @@ impl App {
             .open(&mut open)
             .default_size([720.0, 420.0])
             .show(ctx, |ui| {
+                if has_children {
+                    ui.horizontal(|ui| {
+                        ui.label("Alvo:");
+                        ui.selectable_value(
+                            &mut self.dlg.tm_parent_mode,
+                            false,
+                            "Movimento da trilha",
+                        );
+                        ui.selectable_value(
+                            &mut self.dlg.tm_parent_mode,
+                            true,
+                            "Movimento Pai/Filho (Grupo)",
+                        );
+                    });
+                    ui.separator();
+                }
                 ui.horizontal(|ui| {
                     let size = vec2(420.0, 420.0 * s.height as f32 / s.width as f32)
                         .min(vec2(420.0, 360.0));
@@ -2515,17 +2577,27 @@ impl App {
         let mut changed = false;
         if let Some(k) = new_key {
             let tr = &mut self.session.project.tracks[ti];
-            if self.dlg.tm_animate || tr.motion.keys.len() > 1 {
-                tr.motion.set(t, k, tol);
-            } else if let Some(f) = tr.motion.keys.first_mut() {
+            let dst_motion = if use_parent {
+                &mut tr.parent_motion
+            } else {
+                &mut tr.motion
+            };
+            if self.dlg.tm_animate || dst_motion.keys.len() > 1 {
+                dst_motion.set(t, k, tol);
+            } else if let Some(f) = dst_motion.keys.first_mut() {
                 f.value = k;
             }
             changed = true;
         }
         if let Some(a) = action {
             let tr = &mut self.project.tracks[ti];
+            let dst_motion = if use_parent {
+                &mut tr.parent_motion
+            } else {
+                &mut tr.motion
+            };
             match a {
-                "reset" => tr.motion = Keyframes::default(),
+                "reset" => *dst_motion = Keyframes::default(),
                 "pip" => {
                     let k = MotionKey {
                         x: 0.3,
@@ -2534,15 +2606,15 @@ impl App {
                         scale_y: 0.33,
                         rot: 0.0,
                     };
-                    if tr.motion.keys.len() > 1 {
-                        tr.motion.set(t, k, tol);
-                    } else {
-                        tr.motion.keys[0].value = k;
+                    if dst_motion.keys.len() > 1 {
+                        dst_motion.set(t, k, tol);
+                    } else if let Some(f) = dst_motion.keys.first_mut() {
+                        f.value = k;
                     }
                 }
-                "add" => tr.motion.set(t, cur.clone(), tol),
-                "del" if tr.motion.keys.len() > 1 => {
-                    tr.motion.keys.retain(|k| k.t.abs_diff(t) > tol);
+                "add" => dst_motion.set(t, cur.clone(), tol),
+                "del" if dst_motion.keys.len() > 1 => {
+                    dst_motion.keys.retain(|k| k.t.abs_diff(t) > tol);
                 }
                 _ => {}
             }

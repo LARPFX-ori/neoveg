@@ -1236,10 +1236,10 @@ impl Mixer {
         pad_buf.resize(n * 2, 0.0);
 
         for (ti, track) in p.tracks.iter().enumerate() {
-            if track.kind != TrackKind::Audio {
+            if track.kind != TrackKind::Audio || track.is_folder {
                 continue;
             }
-            if !track.is_audible(any_solo) {
+            if p.is_track_effectively_muted(track.id) || (any_solo && !track.solo) {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
                 continue;
             }

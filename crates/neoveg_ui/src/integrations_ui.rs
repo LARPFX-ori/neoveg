@@ -424,17 +424,23 @@ impl App {
         }
     }
 
+    fn media_item_primary_path(m: &MediaItem) -> Option<PathBuf> {
+        match &m.source {
+            MediaSource::File { path } | MediaSource::NestedProject { path } => {
+                Some(PathBuf::from(path))
+            }
+            MediaSource::ImageSequence { paths, .. } => paths.first().map(PathBuf::from),
+            MediaSource::Generated(_) => None,
+        }
+    }
+
     fn workflow_photocraft(
         &mut self,
         status: &AppDiscoveryStatus,
         event: Option<Event>,
         media_item: Option<MediaItem>,
     ) {
-        let src_path = media_item.as_ref().and_then(|m| match &m.source {
-            MediaSource::File { path } => Some(PathBuf::from(path)),
-            MediaSource::ImageSequence { paths, .. } => paths.first().map(PathBuf::from),
-            MediaSource::Generated(_) => None,
-        });
+        let src_path = media_item.as_ref().and_then(Self::media_item_primary_path);
         let stem = event
             .as_ref()
             .map(|e| e.name.as_str())
@@ -588,11 +594,7 @@ impl App {
         event: Option<Event>,
         media_item: Option<MediaItem>,
     ) {
-        let media_path = media_item.as_ref().and_then(|m| match &m.source {
-            MediaSource::File { path } => Some(PathBuf::from(path)),
-            MediaSource::ImageSequence { paths, .. } => paths.first().map(PathBuf::from),
-            MediaSource::Generated(_) => None,
-        });
+        let media_path = media_item.as_ref().and_then(Self::media_item_primary_path);
 
         let target = if let Some(p) = media_path.filter(|p| p.exists()) {
             p
@@ -791,11 +793,7 @@ impl App {
         let plate_opt = event_ref.as_ref().and_then(|ev| {
             self.project
                 .media(ev.media_id)
-                .and_then(|m| match &m.source {
-                    MediaSource::File { path } => Some(PathBuf::from(path)),
-                    MediaSource::ImageSequence { paths, .. } => paths.first().map(PathBuf::from),
-                    MediaSource::Generated(_) => None,
-                })
+                .and_then(Self::media_item_primary_path)
         });
 
         match generate_export_to_blender_py(

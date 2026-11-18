@@ -512,6 +512,48 @@ impl App {
             {
                 self.exec_cmd(Some(ui.ctx()), "preview.external_monitor");
             }
+            let mc_resp = icons::small_icon_button(
+                ui,
+                Icon::Multicam,
+                if self.opts.multicam_mode {
+                    Some("MC")
+                } else {
+                    None
+                },
+                self.opts.multicam_mode,
+                &self.theme,
+            );
+            mc_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edição Multicâmera")
+            });
+            if mc_resp
+                .on_hover_text("Alternar modo de edição multicâmera (Ctrl+Shift+D)")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "tools.multicam_mode");
+            }
+            let s3d_mode = self.project.settings.stereo_3d;
+            let s3d_lbl = if s3d_mode == neoveg_engine::model::Stereo3dMode::Off {
+                None
+            } else {
+                Some(s3d_mode.short_label())
+            };
+            let s3d_resp = icons::small_icon_button(
+                ui,
+                Icon::Stereo3d,
+                s3d_lbl,
+                s3d_mode != neoveg_engine::model::Stereo3dMode::Off,
+                &self.theme,
+            );
+            s3d_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Modo 3D Estereoscópico")
+            });
+            if s3d_resp
+                .on_hover_text("Alternar modo de prévia 3D Estereoscópico")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "view.stereo_3d");
+            }
             if !is_floating
                 && icons::small_icon_button(ui, Icon::PopOut, None, false, &self.theme)
                     .on_hover_text("Destacar Prévia de Vídeo em janela normal do Windows")
@@ -920,19 +962,174 @@ impl App {
                 egui::FontId::proportional(13.0),
                 self.theme.offline_fg,
             );
-        } else if let Some(job) = &self.ram_preview_job {
-            let done = job.done.load(Ordering::Relaxed);
-            let total = job.total.load(Ordering::Relaxed).max(1);
-            let pct = (done.saturating_mul(100) / total).min(100);
-            painter.text(
-                rect.left_bottom() + vec2(6.0, -4.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!("RAM Preview: {pct}% ({done}/{total})"),
-                egui::FontId::proportional(10.0),
-                Color32::WHITE,
-            );
+        } else {
+            let mc_drawn = if interactive && self.opts.multicam_mode {
+                if let Some((_, _, ev_id, active_idx, count)) =
+                    self.session.active_multicam_event_at(self.cursor)
+                {
+                    self.draw_multicam_grid(ui, &painter, img_rect, ev_id, active_idx, count);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !mc_drawn {
+                if let Some(job) = &self.ram_preview_job {
+                    let done = job.done.load(Ordering::Relaxed);
+                    let total = job.total.load(Ordering::Relaxed).max(1);
+                    let pct = (done.saturating_mul(100) / total).min(100);
+                    painter.text(
+                        rect.left_bottom() + vec2(6.0, -4.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("RAM Preview: {pct}% ({done}/{total})"),
+                        egui::FontId::proportional(10.0),
+                        Color32::WHITE,
+                    );
+                }
+            }
         }
         img_rect
+    }
+
+    fn draw_multicam_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        ev_id: Id,
+        active_idx: usize,
+        count: usize,
+    ) {
+        let shown = count.clamp(1, 16);
+        let cols = if shown <= 4 {
+            2
+        } else if shown <= 9 {
+            3
+        } else {
+            4
+        };
+        let rows = shown.div_ceil(cols).max(1);
+        let gap = 3.0_f32;
+        let cell_w = ((rect.width() - gap * (cols as f32 - 1.0)) / cols as f32).max(16.0);
+        let cell_h = ((rect.height() - gap * (rows as f32 - 1.0)) / rows as f32).max(16.0);
+        painter.rect_filled(rect, 0.0, Color32::BLACK);
+        let qt = self.project.settings.quantize(self.cursor).0;
+        let take_names: Vec<String> = self
+            .project
+            .event(ev_id)
+            .map(|e| {
+                neoveg_engine::takes::takes(e)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, tk)| {
+                        if tk.name.is_empty() {
+                            format!("Câm {}", i + 1)
+                        } else {
+                            tk.name
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if self.multicam_thumbs.len() > 64 {
+            self.multicam_thumbs.clear();
+        }
+        let mut clicked_angle: Option<usize> = None;
+        for angle_i in 0..shown {
+            let col = angle_i % cols;
+            let row = angle_i / cols;
+            let x0 = rect.left() + col as f32 * (cell_w + gap);
+            let y0 = rect.top() + row as f32 * (cell_h + gap);
+            let cr = Rect::from_min_size(pos2(x0, y0), vec2(cell_w, cell_h));
+            let key = (ev_id, angle_i, qt);
+            if !self.multicam_thumbs.contains_key(&key) {
+                let frame = neoveg_engine::engine::video::render_event_take_still(
+                    &self.project,
+                    &self.media,
+                    ev_id,
+                    angle_i,
+                    Ticks::from_raw(qt),
+                    160,
+                    90,
+                    true,
+                );
+                if let Some(rgba) = frame.to_image() {
+                    let ci = crate::app::rgba_to_color_image(&rgba);
+                    let tex = ui.ctx().load_texture(
+                        format!("mc_{ev_id}_{angle_i}_{qt}"),
+                        ci,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.multicam_thumbs.insert(key, tex);
+                }
+            }
+            if let Some(tex) = self.multicam_thumbs.get(&key) {
+                painter.image(
+                    tex.id(),
+                    cr,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            let active = angle_i == active_idx;
+            let border_col = if active {
+                Color32::from_rgb(250, 210, 50)
+            } else {
+                Color32::from_gray(95)
+            };
+            painter.rect_stroke(
+                cr,
+                0.0,
+                Stroke::new(if active { 2.5_f32 } else { 1.0_f32 }, border_col),
+                StrokeKind::Inside,
+            );
+            let lbl = take_names
+                .get(angle_i)
+                .cloned()
+                .unwrap_or_else(|| format!("Câm {}", angle_i + 1));
+            painter.rect_filled(
+                Rect::from_min_size(
+                    cr.left_top() + vec2(3.0, 3.0),
+                    vec2((cell_w - 6.0).min(120.0), 15.0),
+                ),
+                2.0,
+                Color32::from_black_alpha(180),
+            );
+            painter.text(
+                cr.left_top() + vec2(6.0, 5.0),
+                egui::Align2::LEFT_TOP,
+                format!("[{}] {}", angle_i + 1, lbl),
+                egui::FontId::proportional(10.0),
+                if active {
+                    Color32::from_rgb(255, 225, 90)
+                } else {
+                    Color32::WHITE
+                },
+            );
+            let resp = ui.interact(
+                cr,
+                ui.id().with(("mc_cell", ev_id, angle_i)),
+                Sense::click(),
+            );
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("Câmera {}", angle_i + 1),
+                )
+            });
+            if resp.clicked() {
+                clicked_angle = Some(angle_i);
+            }
+        }
+        if let Some(angle_i) = clicked_angle {
+            if self.session.switch_multicam_angle(self.cursor, angle_i) {
+                self.sync_after_session();
+            }
+        }
     }
 
     fn master_bus_controls(&mut self, ui: &mut egui::Ui, tall_dock: bool) {

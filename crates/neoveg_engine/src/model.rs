@@ -30,6 +30,121 @@ pub struct ProjectSettings {
     /// Layout de canais da mixagem (estéreo ou 5.1 surround).
     #[serde(default)]
     pub channel_layout: ChannelLayout,
+    /// Modo de visualização/renderização 3D estereoscópica (manual p. 426).
+    #[serde(default)]
+    pub stereo_3d: Stereo3dMode,
+}
+
+/// Modo 3D estereoscópico do projeto (*Project Properties → Video → Stereoscopic 3D mode*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Stereo3dMode {
+    #[default]
+    Off,
+    AnaglyphRedCyan,
+    SideBySideHalf,
+    SideBySideFull,
+    TopBottomHalf,
+    LeftOnly,
+    RightOnly,
+}
+
+impl Stereo3dMode {
+    pub const ALL: [Stereo3dMode; 7] = [
+        Stereo3dMode::Off,
+        Stereo3dMode::AnaglyphRedCyan,
+        Stereo3dMode::SideBySideHalf,
+        Stereo3dMode::SideBySideFull,
+        Stereo3dMode::TopBottomHalf,
+        Stereo3dMode::LeftOnly,
+        Stereo3dMode::RightOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stereo3dMode::Off => "Desligado (2D)",
+            Stereo3dMode::AnaglyphRedCyan => "Anáglifo (Vermelho / Ciano)",
+            Stereo3dMode::SideBySideHalf => "Lado a lado (50% largura)",
+            Stereo3dMode::SideBySideFull => "Lado a lado (largura cheia)",
+            Stereo3dMode::TopBottomHalf => "Acima / Abaixo (50% altura)",
+            Stereo3dMode::LeftOnly => "Somente olho esquerdo",
+            Stereo3dMode::RightOnly => "Somente olho direito",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Stereo3dMode::Off => "2D",
+            Stereo3dMode::AnaglyphRedCyan => "3D Anáglifo",
+            Stereo3dMode::SideBySideHalf => "3D L/R 50%",
+            Stereo3dMode::SideBySideFull => "3D L/R 100%",
+            Stereo3dMode::TopBottomHalf => "3D Cima/Baixo",
+            Stereo3dMode::LeftOnly => "3D Esq.",
+            Stereo3dMode::RightOnly => "3D Dir.",
+        }
+    }
+}
+
+/// Disposição de origem dos dois olhos em um clipe/evento 3D estereoscópico.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Stereo3dSourceLayout {
+    #[default]
+    Mono2D,
+    SideBySideHalf,
+    SideBySideFull,
+    TopBottomHalf,
+}
+
+impl Stereo3dSourceLayout {
+    pub const ALL: [Stereo3dSourceLayout; 4] = [
+        Stereo3dSourceLayout::Mono2D,
+        Stereo3dSourceLayout::SideBySideHalf,
+        Stereo3dSourceLayout::SideBySideFull,
+        Stereo3dSourceLayout::TopBottomHalf,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stereo3dSourceLayout::Mono2D => "2D padrão (sintetizar profundidade)",
+            Stereo3dSourceLayout::SideBySideHalf => "Lado a lado (50%)",
+            Stereo3dSourceLayout::SideBySideFull => "Lado a lado (completo)",
+            Stereo3dSourceLayout::TopBottomHalf => "Acima / Abaixo (50%)",
+        }
+    }
+}
+
+/// Ajuste 3D estereoscópico por evento de vídeo (convergência horizontal e inversão L/R).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Stereo3dClip {
+    pub layout: Stereo3dSourceLayout,
+    pub swap_lr: bool,
+    /// Deslocamento horizontal relativo à largura do quadro (`-0.25..=0.25`).
+    pub horizontal_offset: f32,
+}
+
+impl Stereo3dClip {
+    pub fn sanitized(self) -> Self {
+        let off = if self.horizontal_offset.is_finite() {
+            self.horizontal_offset.clamp(-0.25, 0.25)
+        } else {
+            0.0
+        };
+        Self {
+            layout: self.layout,
+            swap_lr: self.swap_lr,
+            horizontal_offset: off,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.layout == Stereo3dSourceLayout::Mono2D
+            && !self.swap_lr
+            && self.horizontal_offset.abs() <= 1e-6
+    }
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Layout de canais do projeto (*Project Properties → Audio → Master bus mode*).
@@ -117,6 +232,7 @@ impl Default for ProjectSettings {
             background: default_bg(),
             manually_configured: false,
             channel_layout: ChannelLayout::Stereo,
+            stereo_3d: Stereo3dMode::Off,
         }
     }
 }
@@ -310,6 +426,124 @@ impl Project {
         order
     }
 
+    /// Índice da trilha por ID.
+    pub fn track_index(&self, track_id: Id) -> Option<usize> {
+        self.tracks.iter().position(|t| t.id == track_id)
+    }
+
+    /// Profundidade hierárquica da trilha (0 = raiz), protegida contra ciclos (§0.5).
+    pub fn track_depth(&self, track_id: Id) -> usize {
+        let mut depth = 0usize;
+        let mut cur = track_id;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(cur);
+        while depth < MAX_TRACK_DEPTH {
+            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+                break;
+            };
+            let Some(pid) = tr.parent_track_id else {
+                break;
+            };
+            if !visited.insert(pid) || !self.tracks.iter().any(|t| t.id == pid) {
+                break;
+            }
+            depth += 1;
+            cur = pid;
+        }
+        depth
+    }
+
+    /// Valida atribuição acíclica de `parent_id` para `child_id` dentro de `MAX_TRACK_DEPTH` (§0.5).
+    pub fn validate_track_parent(&self, child_id: Id, parent_id: Option<Id>) -> Result<(), String> {
+        let Some(pid) = parent_id else {
+            return Ok(());
+        };
+        if pid == child_id {
+            return Err("uma trilha não pode ser pai de si mesma".into());
+        }
+        let Some(child) = self.tracks.iter().find(|t| t.id == child_id) else {
+            return Err("trilha filha inexistente".into());
+        };
+        let Some(parent) = self.tracks.iter().find(|t| t.id == pid) else {
+            return Err("trilha pai inexistente".into());
+        };
+        if !parent.is_folder && parent.kind != child.kind {
+            return Err("composição pai/filho requer trilhas do mesmo tipo (ou uma pasta)".into());
+        }
+        let mut cur = pid;
+        let mut depth = 1usize;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(child_id);
+        while depth <= MAX_TRACK_DEPTH {
+            if !visited.insert(cur) {
+                return Err("vínculo pai/filho criaria ciclo".into());
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+                return Err("ancestral inexistente".into());
+            };
+            let Some(next) = tr.parent_track_id else {
+                return Ok(());
+            };
+            cur = next;
+            depth += 1;
+        }
+        Err(format!(
+            "hierarquia de trilhas excede o limite de {MAX_TRACK_DEPTH} níveis"
+        ))
+    }
+
+    /// Verdadeiro se alguma pasta ancestral da trilha está recolhida.
+    pub fn is_track_hidden_by_folder(&self, track_id: Id) -> bool {
+        let mut cur = self
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.parent_track_id);
+        let mut steps = 0usize;
+        while let Some(pid) = cur {
+            if steps >= MAX_TRACK_DEPTH || pid == track_id {
+                break;
+            }
+            let Some(anc) = self.tracks.iter().find(|t| t.id == pid) else {
+                break;
+            };
+            if anc.is_folder && anc.collapsed {
+                return true;
+            }
+            cur = anc.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se a trilha ou alguma pasta/pai ancestral estiver em mudo.
+    pub fn is_track_effectively_muted(&self, track_id: Id) -> bool {
+        let mut cur = Some(track_id);
+        let mut steps = 0usize;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(tid) = cur {
+            if steps > MAX_TRACK_DEPTH || !visited.insert(tid) {
+                break;
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == tid) else {
+                break;
+            };
+            if tr.mute {
+                return true;
+            }
+            cur = tr.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se houver pelo menos uma trilha filha apontando para `track_id`.
+    pub fn has_track_children(&self, track_id: Id) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.parent_track_id == Some(track_id))
+    }
+
     /// Maior id usado em qualquer objeto do projeto (para continuar a numeração
     /// após carregar um arquivo).
     pub fn max_id(&self) -> Id {
@@ -487,7 +721,7 @@ impl Project {
                     }
                 }
                 MediaSource::Generated(g) => sanitize_gen(g),
-                MediaSource::File { .. } => {}
+                MediaSource::File { .. } | MediaSource::NestedProject { .. } => {}
             }
         }
 
@@ -506,19 +740,23 @@ impl Project {
             t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
             t.surround = t.surround.sanitized();
             t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
-            for k in &mut t.motion.keys {
-                k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                let v = &mut k.value;
-                v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
-                v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
-                v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
-                v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
-                v.rot = fin32(v.rot, 0.0) % 3600.0;
-            }
-            t.motion.keys.sort_by_key(|k| k.t);
-            if t.motion.keys.is_empty() {
-                t.motion = Keyframes::default();
-            }
+            let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
+                for k in &mut mk.keys {
+                    k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                    let v = &mut k.value;
+                    v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
+                    v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
+                    v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
+                    v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
+                    v.rot = fin32(v.rot, 0.0) % 3600.0;
+                }
+                mk.keys.sort_by_key(|k| k.t);
+                if mk.keys.is_empty() {
+                    *mk = Keyframes::default();
+                }
+            };
+            sanitize_motion_list(&mut t.motion);
+            sanitize_motion_list(&mut t.parent_motion);
             sanitize_envelopes(
                 &mut t.envelopes,
                 &[
@@ -571,6 +809,23 @@ impl Project {
                 for f in &mut e.fx {
                     sanitize_fx(f);
                 }
+                e.stereo_3d = e.stereo_3d.sanitized();
+            }
+        }
+        // Saneamento da hierarquia pai/filho de trilhas (§0.5: referências inexistentes ou ciclos).
+        let track_ids: Vec<Id> = self.tracks.iter().map(|t| t.id).collect();
+        for ti in 0..track_ids.len() {
+            let tid = track_ids[ti];
+            if self.tracks[ti].parent_track_id.is_some()
+                && self
+                    .validate_track_parent(tid, self.tracks[ti].parent_track_id)
+                    .is_err()
+            {
+                let name = self.tracks[ti].name.clone();
+                self.tracks[ti].parent_track_id = None;
+                fixes.push(format!(
+                    "vínculo pai/filho inválido ou cíclico removido da trilha \"{name}\""
+                ));
             }
         }
         // Saneamento de Sync Links (§0.4 e §0.5: referências inexistentes ou ciclos).
@@ -1032,9 +1287,18 @@ pub struct MediaItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MediaSource {
-    File { path: String },
-    ImageSequence { paths: Vec<String>, fps: FrameRate },
+    File {
+        path: String,
+    },
+    ImageSequence {
+        paths: Vec<String>,
+        fps: FrameRate,
+    },
     Generated(GenSpec),
+    /// Linha do tempo aninhada (projeto `.neoveg` inserido como evento, p. 114).
+    NestedProject {
+        path: String,
+    },
 }
 
 pub const MAX_MEDIA_BINS: usize = 256;
@@ -1346,6 +1610,36 @@ impl BlendMode {
             BlendMode::Difference => "Diferença",
         }
     }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            BlendMode::SourceAlpha => "SourceAlpha",
+            BlendMode::Add => "Add",
+            BlendMode::Subtract => "Subtract",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::HardLight => "HardLight",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::Darken => "Darken",
+            BlendMode::Difference => "Difference",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Self {
+        match raw.trim() {
+            "Add" => BlendMode::Add,
+            "Subtract" => BlendMode::Subtract,
+            "Multiply" => BlendMode::Multiply,
+            "Screen" => BlendMode::Screen,
+            "Overlay" => BlendMode::Overlay,
+            "HardLight" => BlendMode::HardLight,
+            "Lighten" => BlendMode::Lighten,
+            "Darken" => BlendMode::Darken,
+            "Difference" => BlendMode::Difference,
+            _ => BlendMode::SourceAlpha,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -1539,6 +1833,44 @@ impl Lerp for MotionKey {
     }
 }
 
+/// Profundidade máxima permitida na hierarquia de pastas e trilhas pai/filho (§0.5).
+pub const MAX_TRACK_DEPTH: usize = 16;
+
+/// Modo de máscara em composição Pai/Filho (VEGAS Pro p. 740).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum TrackMaskMode {
+    #[default]
+    None,
+    /// Usa luminância × alfa da trilha como máscara sobre a composição.
+    MultiplyMask,
+    /// Inverte a máscara de luminância (`1 - luma * alpha`).
+    InvertedMultiplyMask,
+    /// Usa exclusivamente o canal alfa da trilha como máscara.
+    AlphaMask,
+    /// Inverte a máscara de canal alfa (`1 - alpha`).
+    InvertedAlphaMask,
+}
+
+impl TrackMaskMode {
+    pub const ALL: [TrackMaskMode; 5] = [
+        TrackMaskMode::None,
+        TrackMaskMode::MultiplyMask,
+        TrackMaskMode::InvertedMultiplyMask,
+        TrackMaskMode::AlphaMask,
+        TrackMaskMode::InvertedAlphaMask,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackMaskMode::None => "Normal (sem máscara)",
+            TrackMaskMode::MultiplyMask => "Máscara por luminância",
+            TrackMaskMode::InvertedMultiplyMask => "Máscara por luminância invertida",
+            TrackMaskMode::AlphaMask => "Máscara por alfa",
+            TrackMaskMode::InvertedAlphaMask => "Máscara por alfa invertido",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub id: Id,
@@ -1592,6 +1924,24 @@ pub struct Track {
     /// Áudio: monitoração de entrada durante gravação/espera.
     #[serde(default)]
     pub input_monitor: bool,
+    /// Pasta de trilhas (Track Group) recolhível sem eventos próprios.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_folder: bool,
+    /// Pasta recolhida na timeline (oculta visualmente as trilhas filhas).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    /// Trilha pai (pasta de grupo ou composição Pai/Filho em vídeo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_track_id: Option<Id>,
+    /// Modo de máscara da trilha na composição Pai/Filho.
+    #[serde(default)]
+    pub mask_mode: TrackMaskMode,
+    /// Movimento 2D/3D do grupo Pai/Filho (Parent Track Motion, p. 740).
+    #[serde(default)]
+    pub parent_motion: Keyframes<MotionKey>,
+    /// Trilha marcada como multicâmera (angles em takes).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multicam: bool,
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1701,18 +2051,29 @@ impl Track {
             adjustment: false,
             record_armed: false,
             input_monitor: false,
+            is_folder: false,
+            collapsed: false,
+            parent_track_id: None,
+            mask_mode: TrackMaskMode::None,
+            parent_motion: Keyframes::default(),
+            multicam: false,
         }
+    }
+
+    /// Verdadeiro para pasta/grupo de trilhas.
+    pub fn is_folder_track(&self) -> bool {
+        self.is_folder
     }
 
     /// Verdadeiro para trilha de vídeo marcada como trilha de ajuste.
     pub fn is_adjustment(&self) -> bool {
-        self.kind == TrackKind::Video && self.adjustment
+        self.kind == TrackKind::Video && self.adjustment && !self.is_folder
     }
 
     /// Verdadeiro se a trilha pode receber eventos do tipo `kind`. Trilhas de
-    /// ajuste não recebem eventos: o compositor os ignoraria.
+    /// ajuste ou pastas não recebem eventos: o compositor os ignoraria.
     pub fn accepts(&self, kind: TrackKind) -> bool {
-        self.kind == kind && !self.is_adjustment()
+        self.kind == kind && !self.is_adjustment() && !self.is_folder
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
@@ -1905,6 +2266,9 @@ pub struct Event {
     /// ID do evento mestre para *Sync Link* unidirecional (manual VEGAS Pro 21 p. 351).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_link_master: Option<Id>,
+    /// Parâmetros 3D estereoscópicos do evento (disposição L/R, inversão e deslocamento).
+    #[serde(default, skip_serializing_if = "Stereo3dClip::is_default")]
+    pub stereo_3d: Stereo3dClip,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -1949,6 +2313,7 @@ impl Event {
             pitch_semitones: 0.0,
             lock_pitch_to_stretch: false,
             sync_link_master: None,
+            stereo_3d: Stereo3dClip::default(),
         }
     }
 

@@ -1630,5 +1630,6 @@ fn media_source_label(src: &MediaSource) -> String {
         MediaSource::File { path } => path.clone(),
         MediaSource::ImageSequence { paths, .. } => format!("Sequência ({} quadros)", paths.len()),
         MediaSource::Generated(_) => "Gerador interno".into(),
+        MediaSource::NestedProject { path } => format!("Projeto aninhado: {path}"),
     }
 }
