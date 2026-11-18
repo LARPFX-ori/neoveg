@@ -6,6 +6,7 @@ use crate::model::*;
 use eframe::egui;
 use egui::{pos2, vec2, Align2, FontId, Rect, Sense, Stroke, StrokeKind, TextureHandle};
 use neoveg_common::time::format_ticks;
+use neoveg_common::{tr, tr_args, Language};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrimmerStreamMode {
@@ -22,12 +23,17 @@ impl TrimmerStreamMode {
         TrimmerStreamMode::AudioOnly,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
             TrimmerStreamMode::Both => "Áudio + Vídeo",
             TrimmerStreamMode::VideoOnly => "Apenas Vídeo",
             TrimmerStreamMode::AudioOnly => "Apenas Áudio",
-        }
+        };
+        tr(lang, key)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
     }
 }
 
@@ -144,6 +150,7 @@ impl App {
     }
 
     pub(crate) fn trimmer_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         if let Some(id) = self.trimmer.media_id {
             if self.project.media(id).is_none() {
                 self.trimmer.media_id = None;
@@ -163,11 +170,11 @@ impl App {
             .media_id
             .and_then(|id| self.project.media(id))
             .map(|m| m.name.clone())
-            .unwrap_or_else(|| "(Nenhuma mídia carregada)".into());
+            .unwrap_or_else(|| tr(lang, "(Nenhuma mídia carregada)").into());
 
         let mut picked_id: Option<Id> = None;
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Mídia:").strong().small());
+            ui.label(egui::RichText::new(tr(lang, "Mídia:")).strong().small());
             egui::ComboBox::from_id_salt("trimmer_media_combo")
                 .width(180.0)
                 .selected_text(&selected_label)
@@ -189,8 +196,8 @@ impl App {
                 .map(|e| e.media_id)
             {
                 if ui
-                    .small_button("Carregar seleção")
-                    .on_hover_text("Abre a mídia do evento selecionado na timeline")
+                    .small_button(tr(lang, "Carregar seleção"))
+                    .on_hover_text(tr(lang, "Abre a mídia do evento selecionado na timeline"))
                     .clicked()
                 {
                     picked_id = Some(ev_mid);
@@ -198,10 +205,14 @@ impl App {
             }
             egui::ComboBox::from_id_salt("trimmer_stream_mode")
                 .width(120.0)
-                .selected_text(self.trimmer.stream_mode.label())
+                .selected_text(self.trimmer.stream_mode.label_in(lang))
                 .show_ui(ui, |ui| {
                     for mode in TrimmerStreamMode::ALL {
-                        ui.selectable_value(&mut self.trimmer.stream_mode, mode, mode.label());
+                        ui.selectable_value(
+                            &mut self.trimmer.stream_mode,
+                            mode,
+                            mode.label_in(lang),
+                        );
                     }
                 });
         });
@@ -214,9 +225,10 @@ impl App {
         let Some(media_id) = self.trimmer.media_id else {
             ui.separator();
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(tr(
+                    lang,
                     "Importe ou selecione uma mídia para definir pontos In/Out no Trimmer.",
-                )
+                ))
                 .color(self.theme.text_muted),
             );
             return;
@@ -264,10 +276,14 @@ impl App {
                     let w = (h * asp).min(avail.x);
                     left.image(egui::load::SizedTexture::new(tex.id(), vec2(w, h)));
                 } else {
-                    left.label(egui::RichText::new("Mídia offline / sem quadro").small());
+                    left.label(egui::RichText::new(tr(lang, "Mídia offline / sem quadro")).small());
                 }
             } else {
-                left.label(egui::RichText::new("Mídia somente áudio").strong().small());
+                left.label(
+                    egui::RichText::new(tr(lang, "Mídia somente áudio"))
+                        .strong()
+                        .small(),
+                );
             }
             left.label(
                 egui::RichText::new(&item.info)
@@ -278,10 +294,12 @@ impl App {
             // Coluna direita: leitores SMPTE, In/Out e inserção na timeline
             let right = &mut cols[1];
             let sel_len = (self.trimmer.sel_out - self.trimmer.sel_in).max(Ticks::ZERO);
-            let line1 = format!(
-                "Cursor: {}  |  Duração: {}",
-                format_ticks(self.trimmer.cursor, fps, sr, fmt),
-                format_ticks(dur, fps, sr, fmt),
+            let cur_s = format_ticks(self.trimmer.cursor, fps, sr, fmt);
+            let dur_s = format_ticks(dur, fps, sr, fmt);
+            let line1 = tr_args(
+                lang,
+                "Cursor: {cur}  |  Duração: {dur}",
+                &[("cur", &cur_s), ("dur", &dur_s)],
             );
             crate::fonts::tabular_label(
                 right,
@@ -289,40 +307,33 @@ impl App {
                 crate::fonts::visor_font(10.5),
                 self.theme.text_primary,
             );
-            let in_txt = format!("In: {}", format_ticks(self.trimmer.sel_in, fps, sr, fmt));
-            let out_txt = format!("Out: {}", format_ticks(self.trimmer.sel_out, fps, sr, fmt));
-            let trecho_txt = format!("Trecho: {}", format_ticks(sel_len, fps, sr, fmt));
+            let in_s = format_ticks(self.trimmer.sel_in, fps, sr, fmt);
+            let out_s = format_ticks(self.trimmer.sel_out, fps, sr, fmt);
+            let len_s = format_ticks(sel_len, fps, sr, fmt);
+            let line2 = tr_args(
+                lang,
+                "In: {in_t}   Out: {out_t}   Trecho: {len}",
+                &[("in_t", &in_s), ("out_t", &out_s), ("len", &len_s)],
+            );
+            crate::fonts::tabular_label(
+                right,
+                &line2,
+                crate::fonts::visor_font(10.5),
+                self.theme.text_primary,
+            );
             right.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                crate::fonts::tabular_label(
-                    ui,
-                    &in_txt,
-                    crate::fonts::visor_font(10.5),
-                    self.theme.text_primary,
-                );
-                crate::fonts::tabular_label(
-                    ui,
-                    &out_txt,
-                    crate::fonts::visor_font(10.5),
-                    self.theme.text_primary,
-                );
-                crate::fonts::tabular_label(
-                    ui,
-                    &trecho_txt,
-                    crate::fonts::visor_font(10.5),
-                    self.theme.text_primary,
-                );
-            });
-            right.horizontal_wrapped(|ui| {
-                if ui.small_button("◀ 1q").clicked() {
+                if ui.small_button(tr(lang, "◀ 1q")).clicked() {
                     self.trimmer.cursor = (self.trimmer.cursor - frame_dur).max(Ticks::ZERO);
                 }
-                if ui.small_button("1q ▶").clicked() {
+                if ui.small_button(tr(lang, "1q ▶")).clicked() {
                     self.trimmer.cursor = (self.trimmer.cursor + frame_dur).min(dur);
                 }
                 if ui
-                    .small_button("Marcar In (I)")
-                    .on_hover_text("Define o ponto inicial do trecho no cursor do Trimmer")
+                    .small_button(tr(lang, "Marcar In (I)"))
+                    .on_hover_text(tr(
+                        lang,
+                        "Define o ponto inicial do trecho no cursor do Trimmer",
+                    ))
                     .clicked()
                 {
                     self.trimmer.sel_in = self.trimmer.cursor;
@@ -331,8 +342,11 @@ impl App {
                     }
                 }
                 if ui
-                    .small_button("Marcar Out (O)")
-                    .on_hover_text("Define o ponto final do trecho no cursor do Trimmer")
+                    .small_button(tr(lang, "Marcar Out (O)"))
+                    .on_hover_text(tr(
+                        lang,
+                        "Define o ponto final do trecho no cursor do Trimmer",
+                    ))
                     .clicked()
                 {
                     self.trimmer.sel_out = self.trimmer.cursor.max(frame_dur);
@@ -340,15 +354,15 @@ impl App {
                         self.trimmer.sel_in = (self.trimmer.sel_out - frame_dur).max(Ticks::ZERO);
                     }
                 }
-                if ui.small_button("Tudo").clicked() {
+                if ui.small_button(tr(lang, "Tudo")).clicked() {
                     self.trimmer.sel_in = Ticks::ZERO;
                     self.trimmer.sel_out = dur;
                 }
             });
             right.horizontal_wrapped(|ui| {
                 if ui
-                    .button("Adicionar à Timeline no Cursor")
-                    .on_hover_text("Insere o trecho marcado [In..Out] na timeline")
+                    .button(tr(lang, "Adicionar à Timeline no Cursor"))
+                    .on_hover_text(tr(lang, "Insere o trecho marcado [In..Out] na timeline"))
                     .clicked()
                 {
                     let (inc_v, inc_a) = match self.trimmer.stream_mode {
@@ -371,7 +385,10 @@ impl App {
                         self.set_cursor(next);
                     }
                 }
-                ui.checkbox(&mut self.trimmer.advance_timeline_cursor, "Avançar cursor");
+                ui.checkbox(
+                    &mut self.trimmer.advance_timeline_cursor,
+                    tr(lang, "Avançar cursor"),
+                );
             });
         });
 

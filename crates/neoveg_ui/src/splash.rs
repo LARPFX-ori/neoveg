@@ -8,6 +8,7 @@ use egui::{
     pos2, vec2, Align2, Color32, FontId, Key, Margin, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
 };
 use neoveg_common::prefs::LayoutType;
+use neoveg_common::{tr, tr_args, Language};
 use std::time::Instant;
 
 const STARTUP_HOLD_SECS: f64 = 1.35;
@@ -92,44 +93,58 @@ impl SplashState {
     }
 
     pub fn stage_label(&self, snap: &SplashSnapshot<'_>) -> String {
+        let lang = snap.lang;
+        let cmds_s = snap.commands_count.to_string();
         if !self.auto_close {
-            return format!(
-                "Pronto para editar · {} ações na Tabela Única de Comandos",
-                snap.commands_count
+            return tr_args(
+                lang,
+                "Pronto para editar · {cmds} ações na Tabela Única de Comandos",
+                &[("cmds", &cmds_s)],
             );
         }
         if snap.loading > 0 && self.elapsed_secs >= 0.65 {
-            return format!(
-                "Carregando {} arquivo(s) de mídia em segundo plano...",
-                snap.loading
+            let loading_s = snap.loading.to_string();
+            return tr_args(
+                lang,
+                "Carregando {n} arquivo(s) de mídia em segundo plano...",
+                &[("n", &loading_s)],
             );
         }
         if self.elapsed_secs < 0.28 {
-            return format!(
-                "Carregando preferências e tema ({})...",
-                snap.theme_id.label()
+            return tr_args(
+                lang,
+                "Carregando preferências e tema ({theme})...",
+                &[("theme", &snap.theme_id.label_in(lang))],
             );
         }
         if self.elapsed_secs < 0.60 {
-            return format!(
-                "Configurando {} worker(s) e cache ({} MB · {} quadros)...",
-                snap.workers, snap.ram_preview_mb, snap.frame_cache_cap
+            let workers_s = snap.workers.to_string();
+            let ram_s = snap.ram_preview_mb.to_string();
+            let cap_s = snap.frame_cache_cap.to_string();
+            return tr_args(
+                lang,
+                "Configurando {workers} worker(s) e cache ({mb} MB · {frames} quadros)...",
+                &[("workers", &workers_s), ("mb", &ram_s), ("frames", &cap_s)],
             );
         }
         if self.elapsed_secs < 0.95 {
-            return format!(
-                "Inicializando motor de áudio ({} · {} Hz)...",
-                snap.audio_device, snap.audio_sr
+            let sr_s = snap.audio_sr.to_string();
+            return tr_args(
+                lang,
+                "Inicializando motor de áudio ({dev} · {sr} Hz)...",
+                &[("dev", &snap.audio_device), ("sr", &sr_s)],
             );
         }
-        format!(
-            "Tabela Única de Comandos ({} ações) · Pronto",
-            snap.commands_count
+        tr_args(
+            lang,
+            "Tabela Única de Comandos ({cmds} ações) · Pronto",
+            &[("cmds", &cmds_s)],
         )
     }
 }
 
 pub struct SplashSnapshot<'a> {
+    pub lang: Language,
     pub theme_id: ThemeId,
     pub theme: &'a ThemeColors,
     pub layout_type: LayoutType,
@@ -439,6 +454,7 @@ fn draw_splash_hero(painter: &egui::Painter, banner: Rect, snap: &SplashSnapshot
     draw_neoveg_mark(painter, mark_rect, theme);
 
     let tx = mark_rect.right() + 20.0;
+    let lang = snap.lang;
     painter.text(
         pos2(tx, banner.top() + 34.0),
         Align2::LEFT_CENTER,
@@ -449,28 +465,36 @@ fn draw_splash_hero(painter: &egui::Painter, banner: Rect, snap: &SplashSnapshot
     painter.text(
         pos2(tx, banner.top() + 62.0),
         Align2::LEFT_CENTER,
-        "Editor de Vídeo Não-Linear • Rust Puro",
+        tr(lang, "Editor de Vídeo Não-Linear • Rust Puro"),
         FontId::proportional(13.5),
         theme.accent,
     );
     painter.text(
         pos2(tx, banner.top() + 86.0),
         Align2::LEFT_CENTER,
-        format!(
-            "Versão {}  |  Semântica VEGAS Pro  |  MIT OR Apache-2.0",
-            env!("CARGO_PKG_VERSION")
+        tr_args(
+            lang,
+            "Versão {ver}  |  Semântica VEGAS Pro  |  MIT OR Apache-2.0",
+            &[("ver", &env!("CARGO_PKG_VERSION"))],
         ),
         FontId::proportional(11.5),
         theme.text_muted,
     );
 
     let badge_text = if theme.high_contrast {
-        format!("{} · Alto Contraste AAA", snap.layout_type.label())
+        tr_args(
+            lang,
+            "{label} · Alto Contraste AAA",
+            &[("label", &snap.layout_type.label_in(lang))],
+        )
     } else {
-        format!(
-            "Layout {} · {}",
-            snap.layout_type.label(),
-            snap.theme_id.label()
+        tr_args(
+            lang,
+            "Layout {name} · {era}",
+            &[
+                ("name", &snap.layout_type.label_in(lang)),
+                ("era", &snap.theme_id.label_in(lang)),
+            ],
         )
     };
     painter.text(
@@ -603,33 +627,46 @@ pub fn show_splash_screen(
             egui::Frame::NONE
                 .inner_margin(Margin::symmetric(20, 14))
                 .show(ui, |ui| {
+                    let lang = snap.lang;
                     ui.spacing_mut().item_spacing.y = 6.0;
                     egui::Grid::new("splash_specs")
                         .num_columns(2)
                         .spacing([14.0, 5.0])
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Áudio:").strong());
+                            ui.label(egui::RichText::new(tr(lang, "Áudio:")).strong());
                             ui.label(format!("{} ({} Hz)", snap.audio_device, snap.audio_sr));
                             ui.end_row();
 
-                            ui.label(egui::RichText::new("Processamento:").strong());
-                            ui.label(format!(
-                                "{} worker(s) · Cache {} MB ({} quadros/mídia)",
-                                snap.workers, snap.ram_preview_mb, snap.frame_cache_cap
+                            let workers_s = snap.workers.to_string();
+                            let ram_s = snap.ram_preview_mb.to_string();
+                            let cap_s = snap.frame_cache_cap.to_string();
+                            ui.label(egui::RichText::new(tr(lang, "Processamento:")).strong());
+                            ui.label(tr_args(
+                                lang,
+                                "{workers} worker(s) · Cache {mb} MB ({frames} quadros/mídia)",
+                                &[("workers", &workers_s), ("mb", &ram_s), ("frames", &cap_s)],
                             ));
                             ui.end_row();
 
-                            ui.label(egui::RichText::new("Codecs Rust puro:").strong());
-                            ui.label("WAV/AIFF (próprio), FLAC, OGG, MP3, AVI, Y4M, GIF");
+                            ui.label(egui::RichText::new(tr(lang, "Codecs Rust puro:")).strong());
+                            ui.label(tr(
+                                lang,
+                                "WAV/AIFF (próprio), FLAC, OGG, MP3, AVI, Y4M, GIF",
+                            ));
                             ui.end_row();
 
-                            ui.label(egui::RichText::new("Contêineres / UI:").strong());
+                            ui.label(egui::RichText::new(tr(lang, "Contêineres / UI:")).strong());
                             let os_codecs = if cfg!(windows) {
-                                "Media Foundation (MP4/MOV/MKV/M4A/AAC/WMV)"
+                                tr(lang, "Media Foundation (MP4/MOV/MKV/M4A/AAC/WMV)")
                             } else {
-                                "Formatos em Rust puro (APIs Linux/macOS previstas)"
+                                tr(lang, "Formatos em Rust puro (APIs Linux/macOS previstas)")
                             };
-                            ui.label(format!("{os_codecs} · {} comandos", snap.commands_count));
+                            let cmds_s = snap.commands_count.to_string();
+                            ui.label(tr_args(
+                                lang,
+                                "{codecs} · {cmds} comandos",
+                                &[("codecs", &os_codecs), ("cmds", &cmds_s)],
+                            ));
                             ui.end_row();
                         });
 
@@ -665,16 +702,19 @@ pub fn show_splash_screen(
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .checkbox(show_on_startup, "Mostrar tela de abertura ao iniciar")
+                            .checkbox(
+                                show_on_startup,
+                                tr(lang, "Mostrar tela de abertura ao iniciar"),
+                            )
                             .changed()
                         {
                             out.pref_changed = true;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let btn_label = if state.auto_close {
-                                "Continuar"
+                                tr(lang, "Continuar")
                             } else {
-                                "Fechar"
+                                tr(lang, "Fechar")
                             };
                             if ui.button(btn_label).clicked() {
                                 close_clicked = true;
@@ -698,6 +738,7 @@ mod tests {
 
     fn sample_snap(theme: &ThemeColors, loading: usize) -> SplashSnapshot<'_> {
         SplashSnapshot {
+            lang: Language::PtBr,
             theme_id: ThemeId::VegasEscuro,
             theme,
             layout_type: LayoutType::Magix,

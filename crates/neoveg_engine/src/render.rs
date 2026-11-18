@@ -140,9 +140,8 @@ impl RenderFormat {
         RenderFormat::Wma,
         RenderFormat::Mp3,
     ];
-
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::Mp4H264 => "MP4 H.264 / AVC (+ AAC)",
             Self::Mp4Hevc => "MP4 H.265 / HEVC (+ AAC)",
             Self::Mp4Av1 => "MP4 AV1 (+ AAC)",
@@ -195,7 +194,12 @@ impl RenderFormat {
             Self::AacAdts => "Áudio AAC ADTS (.aac)",
             Self::Wma => "Windows Media Audio (.wma)",
             Self::Mp3 => "Áudio MP3 (.mp3)",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     pub fn ext(self) -> &'static str {

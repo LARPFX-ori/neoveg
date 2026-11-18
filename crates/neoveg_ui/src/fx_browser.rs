@@ -6,6 +6,7 @@
 
 use crate::app::{App, DndPayload};
 use eframe::egui;
+use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::engine::fx_preview::{render_preview, render_preview_at, THUMB_H, THUMB_W};
 use neoveg_engine::model::{FrameRate, FxCategory, FxInstance, FxKind, Ticks};
 use std::collections::HashMap;
@@ -25,13 +26,14 @@ pub(crate) enum BrowserCat<C> {
 /// Linha de categorias no alto da janela.
 pub(crate) fn category_row<C: Copy + PartialEq>(
     ui: &mut egui::Ui,
+    lang: Language,
     cat: &mut BrowserCat<C>,
     cats: &[(C, &str)],
 ) {
     ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(cat, BrowserCat::All, "Todos");
-        ui.selectable_value(cat, BrowserCat::ThirdParty, "Terceiros");
-        ui.selectable_value(cat, BrowserCat::Favorites, "Favoritos");
+        ui.selectable_value(cat, BrowserCat::All, tr(lang, "Todos"));
+        ui.selectable_value(cat, BrowserCat::ThirdParty, tr(lang, "Terceiros"));
+        ui.selectable_value(cat, BrowserCat::Favorites, tr(lang, "Favoritos"));
         ui.separator();
         for (c, name) in cats {
             ui.selectable_value(cat, BrowserCat::Cat(*c), *name);
@@ -138,7 +140,7 @@ impl FxBrowser {
         }
     }
 
-    fn matches(&self, k: FxKind, favs: &[String], q: &str) -> bool {
+    fn matches(&self, k: FxKind, favs: &[String], q: &str, lang: Language) -> bool {
         let in_cat = match self.cat {
             BrowserCat::All => true,
             BrowserCat::ThirdParty => false,
@@ -148,23 +150,29 @@ impl FxBrowser {
         // a busca olha o nome e o grupo (manual, p. 55)
         in_cat
             && (q.is_empty()
+                || k.name_in(lang).to_lowercase().contains(q)
                 || k.name().to_lowercase().contains(q)
-                || k.category()
-                    .is_some_and(|c| c.name().to_lowercase().contains(q)))
+                || k.category().is_some_and(|c| {
+                    c.name_in(lang).to_lowercase().contains(q)
+                        || c.name().to_lowercase().contains(q)
+                }))
     }
 }
 
 impl App {
     pub(crate) fn video_fx_browser(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         self.fx_browser.start_thumbs();
         self.fx_browser.poll(ui.ctx());
 
-        let cats: Vec<(FxCategory, &str)> =
-            FxCategory::ALL.iter().map(|c| (*c, c.name())).collect();
-        category_row(ui, &mut self.fx_browser.cat, &cats);
+        let cats: Vec<(FxCategory, &str)> = FxCategory::ALL
+            .iter()
+            .map(|c| (*c, c.name_in(lang)))
+            .collect();
+        category_row(ui, lang, &mut self.fx_browser.cat, &cats);
         ui.add(
             egui::TextEdit::singleline(&mut self.fx_browser.search)
-                .hint_text("Buscar plug-ins")
+                .hint_text(tr(lang, "Buscar plug-ins"))
                 .desired_width(220.0),
         );
         ui.separator();
@@ -177,7 +185,10 @@ impl App {
         let q = self.fx_browser.search.trim().to_lowercase();
         let list: Vec<FxKind> = FxKind::VIDEO
             .into_iter()
-            .filter(|k| self.fx_browser.matches(*k, &self.prefs.fx_favorites, &q))
+            .filter(|k| {
+                self.fx_browser
+                    .matches(*k, &self.prefs.fx_favorites, &q, lang)
+            })
             .collect();
         if !self.fx_browser.selected.is_some_and(|k| list.contains(&k)) {
             self.fx_browser.selected = list.first().copied();
@@ -185,9 +196,12 @@ impl App {
         if list.is_empty() {
             ui.label(
                 egui::RichText::new(if self.fx_browser.cat == BrowserCat::Favorites {
-                    "Nenhum favorito. Clique na estrela de um efeito para marcá-lo."
+                    tr(
+                        lang,
+                        "Nenhum favorito. Clique na estrela de um efeito para marcá-lo.",
+                    )
                 } else {
-                    "Nenhum efeito encontrado."
+                    tr(lang, "Nenhum efeito encontrado.")
                 })
                 .small()
                 .weak(),
@@ -217,9 +231,9 @@ impl App {
                                 if ui
                                     .selectable_label(fav, if fav { "★" } else { "☆" })
                                     .on_hover_text(if fav {
-                                        "Tirar dos favoritos"
+                                        tr(lang, "Tirar dos favoritos")
                                     } else {
-                                        "Marcar como favorito"
+                                        tr(lang, "Marcar como favorito")
                                     })
                                     .clicked()
                                 {
@@ -229,7 +243,7 @@ impl App {
                                 let r = ui.dnd_drag_source(
                                     egui::Id::new(("fxb_item", *k as u32)),
                                     DndPayload::Fx(*k),
-                                    |ui| ui.selectable_label(sel, k.name()),
+                                    |ui| ui.selectable_label(sel, k.name_in(lang)),
                                 );
                                 if r.inner.clicked() {
                                     select = Some(*k);
@@ -255,7 +269,11 @@ impl App {
                 let mut pick_preset: Option<usize> = None;
                 let mut del_user_preset: Option<String> = None;
                 let mut any_hovered = false;
-                ui.strong(format!("Presets: {}", k.name()));
+                ui.strong(tr_args(
+                    lang,
+                    "Presets: {name}",
+                    &[("name", &k.name_in(lang))],
+                ));
                 ui.horizontal_wrapped(|ui| {
                     for (i, (name, fx, is_user)) in all_presets.iter().enumerate() {
                         let cache_key = (k.id().to_string(), name.clone());
@@ -364,7 +382,7 @@ impl App {
                                             if ui
                                                 .selectable_label(
                                                     chosen,
-                                                    egui::RichText::new(name).small(),
+                                                    egui::RichText::new(tr(lang, name)).small(),
                                                 )
                                                 .clicked()
                                             {
@@ -373,7 +391,7 @@ impl App {
                                             if *is_user
                                                 && ui
                                                     .small_button("×")
-                                                    .on_hover_text("Excluir preset salvo")
+                                                    .on_hover_text(tr(lang, "Excluir preset salvo"))
                                                     .clicked()
                                             {
                                                 del_user_preset = Some(name.clone());
@@ -383,7 +401,7 @@ impl App {
                                 },
                             )
                             .response
-                            .on_hover_text("Arraste para um evento ou trilha de vídeo");
+                            .on_hover_text(tr(lang, "Arraste para um evento ou trilha de vídeo"));
                         let _ = r;
                     }
                 });
@@ -405,7 +423,7 @@ impl App {
                     let _ = self.prefs.save();
                 }
                 ui.separator();
-                ui.label(egui::RichText::new("Aplicar a:").small().weak());
+                ui.label(egui::RichText::new(tr(lang, "Aplicar a:")).small().weak());
                 let active_fx = all_presets
                     .get(chosen_idx)
                     .map(|(_, fx, _)| fx.clone())
@@ -431,6 +449,7 @@ impl App {
     /// Categoria Terceiros: os plug-ins OFX já consultados no Plug-In
     /// Manager. A consulta roda num processo isolado e não é refeita aqui.
     fn third_party_fx(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let q = self.fx_browser.search.trim().to_lowercase();
         let list: Vec<_> = crate::plugin_manager::probed_ofx_plugins(ui.ctx())
             .into_iter()
@@ -438,14 +457,15 @@ impl App {
             .collect();
         if list.is_empty() {
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(tr(
+                    lang,
                     "Nenhum plug-in OFX consultado. Os plug-ins instalados aparecem no \
                      Plug-In Manager; consulte-os lá para usá-los aqui.",
-                )
+                ))
                 .small()
                 .weak(),
             );
-            if ui.button("Abrir o Plug-In Manager").clicked() {
+            if ui.button(tr(lang, "Abrir o Plug-In Manager")).clicked() {
                 let ctx = ui.ctx().clone();
                 self.exec_cmd(Some(&ctx), "view.tab.plugin_manager");
             }
@@ -459,8 +479,11 @@ impl App {
                 for (bin, info) in &list {
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(can_apply, egui::Button::new("Aplicar").small())
-                            .on_disabled_hover_text("Selecione eventos de vídeo na timeline")
+                            .add_enabled(can_apply, egui::Button::new(tr(lang, "Aplicar")).small())
+                            .on_disabled_hover_text(tr(
+                                lang,
+                                "Selecione eventos de vídeo na timeline",
+                            ))
                             .clicked()
                         {
                             self.apply_ofx_to_selection(bin, &info.identifier);

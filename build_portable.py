@@ -2,13 +2,16 @@
 """Empacotador portátil do Neoveg (AGENTS.md §3.4 / §3.6).
 
 Compila o binário principal `neoveg` em modo `--release` (sem `-C target-cpu=native`
-para preservar compatibilidade com CPUs x86-64 sem AVX2) e gera uma pasta
-portátil autocontida em `<target-dir>/portable/neoveg-portable/`, onde `<target-dir>`
-é a pasta de build do cargo (respeita `CARGO_TARGET_DIR` e `.cargo/config.toml`).
+para preservar compatibilidade com CPUs x86-64 sem AVX2), copia o executável e os
+arquivos de que ele precisa para `dist/` na raiz do repositório e, depois de
+confirmar que a cópia deu certo, apaga a pasta de build do cargo (`<target-dir>`,
+que respeita `CARGO_TARGET_DIR` e `.cargo/config.toml`). Se a compilação ou a cópia
+falhar, a pasta de build é mantida e o erro é informado (AGENTS.md §3.4, item 5).
 
 Uso:   
     python build_portable.py
     python build_portable.py --no-build
+    python build_portable.py --keep-target
     python build_portable.py --out ../pacotes/neoveg-portable
 """
 
@@ -78,7 +81,7 @@ def ensure_no_forbidden_files(package_dir: Path) -> None:
                 raise SystemExit(f"ERRO (§1.3 / §1.5): asset/mídia/fonte não permitida: {p}")
 
 
-def build_and_package(repo_root: Path, out_dir: Path, skip_build: bool) -> None:
+def build_and_package(repo_root: Path, out_dir: Path, skip_build: bool) -> Path:
     env = sanitized_env()
     if not skip_build:
         print("Compilando `neoveg` em --release (portável, sem target-cpu=native)...")
@@ -107,14 +110,62 @@ def build_and_package(repo_root: Path, out_dir: Path, skip_build: bool) -> None:
         if src.is_file():
             shutil.copy2(src, out_dir / doc)
 
+    # Catálogos de idiomas em `.json` (pt-BR, en, es, fr, de, ja).
+    i18n_src = repo_root / "i18n"
+    if i18n_src.is_dir():
+        i18n_dst = out_dir / "i18n"
+        i18n_dst.mkdir(exist_ok=True)
+        for lang_file in sorted(i18n_src.glob("*.json")):
+            shutil.copy2(lang_file, i18n_dst / lang_file.name)
+
     # Pastas criadas em tempo de execução ao lado do executável portátil.
     for runtime_dir in ("logs", "autosave", "layouts"):
         (out_dir / runtime_dir).mkdir(exist_ok=True)
 
     ensure_no_forbidden_files(out_dir)
+    verify_copy(bin_path, out_dir / exe_name)
     size_mb = (out_dir / exe_name).stat().st_size / (1024 * 1024)
     print(f"Pacote portátil gerado em: {out_dir}")
     print(f"Executável: {exe_name} ({size_mb:.2f} MiB)")
+    return target_dir
+
+
+def verify_copy(src: Path, dst: Path) -> None:
+    """Confere que o executável copiado existe e tem o mesmo tamanho do original."""
+    if not dst.is_file():
+        raise SystemExit(f"ERRO: o executável não foi copiado para {dst}.")
+    if dst.stat().st_size != src.stat().st_size:
+        raise SystemExit(f"ERRO: a cópia de {src.name} em {dst} está incompleta.")
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def remove_target_dir(target_dir: Path, repo_root: Path, out_dir: Path) -> None:
+    """Apaga a pasta de build do cargo depois do pacote pronto (§3.4, item 5).
+
+    Recusa apagar quando a pasta não parece uma pasta de build do cargo (sem o
+    `CACHEDIR.TAG` que o cargo grava nela), quando é a própria raiz do repositório
+    ou uma pasta acima dela, ou quando o pacote foi gravado dentro dela.
+    """
+    if not target_dir.is_dir():
+        return
+    if not (target_dir / "CACHEDIR.TAG").is_file():
+        print(f"Aviso: {target_dir} não parece uma pasta de build do cargo; mantida.")
+        return
+    if _is_within(repo_root, target_dir):
+        print(f"Aviso: {target_dir} contém o repositório; mantida.")
+        return
+    if _is_within(out_dir, target_dir):
+        print(f"Aviso: o pacote está dentro de {target_dir}; a pasta de build foi mantida.")
+        return
+    print(f"Apagando a pasta de build {target_dir}...")
+    shutil.rmtree(target_dir)
 
 
 def main() -> int:
@@ -126,25 +177,34 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
-        default=None,
+        default="dist",
         help=(
-            "Pasta de saída do pacote portátil (padrão: <target-dir>/portable/neoveg-portable; "
+            "Pasta de saída do pacote portátil (padrão: dist/ na raiz do repositório; "
             "caminhos relativos partem da raiz do repositório)"
         ),
+    )
+    parser.add_argument(
+        "--keep-target",
+        action="store_true",
+        help="Não apaga a pasta de build do cargo depois de gerar o pacote",
     )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
-    if args.out is None:
-        # Segue o target-dir do cargo para que o pacote fique fora de pastas
-        # sincronizadas (ex.: Google Drive) quando CARGO_TARGET_DIR apontar para fora.
-        out_path = cargo_target_dir(repo_root) / "portable" / "neoveg-portable"
-    else:
-        out_path = Path(args.out)
-        if not out_path.is_absolute():
-            out_path = repo_root / out_path
+    out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = repo_root / out_path
 
-    build_and_package(repo_root, out_path, args.no_build)
+    try:
+        target_dir = build_and_package(repo_root, out_path, args.no_build)
+    except subprocess.CalledProcessError as e:
+        print(f"ERRO: a compilação falhou ({e}); a pasta de build foi mantida.", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"ERRO: a cópia do pacote falhou ({e}); a pasta de build foi mantida.", file=sys.stderr)
+        return 1
+    if not args.keep_target:
+        remove_target_dir(target_dir, repo_root, out_path)
     return 0
 
 

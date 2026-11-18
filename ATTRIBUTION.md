@@ -12,11 +12,11 @@ tipográficas `OFL-1.1` embutidas na interface via `include_bytes!`) e
   programaticamente via `egui::Painter` ou utilizam as fontes abertas de
   `assets/fonts/` com fallback das fontes padrão embutidas pelo `egui`
   (`Hack`, `Ubuntu-Light`, `NotoEmoji-Regular`, `emoji-icon-font`);
-- o gerador de títulos/legendas em quadros de vídeo
-  (`neoveg_engine::media::generate`) carrega fontes do sistema operacional em
-  tempo de execução (`Segoe UI`/`Tahoma`/`Arial` no Windows,
-  `Liberation Sans`/`Noto Sans`/`DejaVu Sans` no Linux), sem copiá-las para o
-  repositório (`AGENTS.md` §1.5);
+- os títulos, legendas em vídeo (`neoveg_engine::media::generate`) e glifos
+  CJK (japonês) carregam fontes do sistema operacional em tempo de execução
+  (`Segoe UI`/`Tahoma`/`Arial` e `YuGothic`/`Meiryo`/`MS Gothic` no Windows;
+  `Hiragino`/`Osaka` no macOS; `Liberation Sans`/`Noto Sans`/`DejaVu Sans` e
+  `Noto Sans CJK` no Linux), sem copiá-las para o repositório (`AGENTS.md` §1.5);
 - a mídia de teste é gerada pelos próprios testes ou fica fora do controle de
   versão.
 

@@ -30,12 +30,17 @@ pub enum SourceRangeMode {
 impl SourceRangeMode {
     pub const ALL: [Self; 3] = [Self::EntireClip, Self::InOut, Self::Custom];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::EntireClip => "Clipe / Sequência inteira",
             Self::InOut => "Intervalo Entrada / Saída",
             Self::Custom => "Personalizado",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -56,13 +61,18 @@ impl AlphaInterpret {
         Self::Ignore,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::Auto => "Detectar automaticamente",
             Self::Straight => "Alfa direto (não pré-multiplicado)",
             Self::Premultiplied => "Alfa pré-multiplicado",
             Self::Ignore => "Ignorar canal alfa",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -97,8 +107,8 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::Ready => "Pronto",
             Self::Encoding => "Codificando",
             Self::Done => "Concluído",
@@ -106,7 +116,12 @@ impl JobStatus {
             Self::Stopped => "Parado",
             Self::Failed => "Falha",
             Self::Skipped => "Ignorar",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     pub fn is_terminal(self) -> bool {

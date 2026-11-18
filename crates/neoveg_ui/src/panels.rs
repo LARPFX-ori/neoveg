@@ -7,6 +7,7 @@ use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind};
+use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::engine::loudness::{
     analyze_project_loudness, format_db, format_lufs, LoudnessSnapshot, LoudnessTarget,
 };
@@ -21,6 +22,7 @@ struct FloatingViewportSpec<'a> {
     min_size: [f32; 2],
     icon: std::sync::Arc<egui::IconData>,
     theme: &'a crate::theme::ThemeColors,
+    lang: Language,
 }
 
 struct FloatingOutcome {
@@ -59,7 +61,7 @@ fn show_floating_viewport(
                         if icons::small_icon_button(
                             ui,
                             Icon::DockIn,
-                            Some("Acoplar na área de janelas"),
+                            Some(tr(spec.lang, "Acoplar na área de janelas")),
                             false,
                             spec.theme,
                         )
@@ -80,7 +82,7 @@ fn show_floating_viewport(
                     if icons::small_icon_button(
                         ui,
                         Icon::DockIn,
-                        Some("Acoplar na área de janelas"),
+                        Some(tr(spec.lang, "Acoplar na área de janelas")),
                         false,
                         spec.theme,
                     )
@@ -89,9 +91,10 @@ fn show_floating_viewport(
                         out.reattach = true;
                     }
                     ui.label(
-                        egui::RichText::new(
+                        egui::RichText::new(tr(
+                            spec.lang,
                             "Janela independente (arraste pela barra de título para mover entre monitores)",
-                        )
+                        ))
                         .small()
                         .weak(),
                     );
@@ -122,16 +125,18 @@ impl App {
     }
 
     pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
+        let lang = self.lang();
         let icon = self.window_icon.clone();
         let theme = self.theme.clone();
 
         if self.preview_detached {
             let spec = FloatingViewportSpec {
-                title: "Prévia de Vídeo",
+                title: tr(lang, "Prévia de Vídeo"),
                 inner_size: [560.0, 380.0],
                 min_size: [280.0, 200.0],
                 icon: icon.clone(),
                 theme: &theme,
+                lang,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -153,11 +158,12 @@ impl App {
 
         if self.master_bus_detached {
             let spec = FloatingViewportSpec {
-                title: "Master Bus",
+                title: tr(lang, "Master Bus"),
                 inner_size: [220.0, 420.0],
                 min_size: [140.0, 260.0],
                 icon: icon.clone(),
                 theme: &theme,
+                lang,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -188,11 +194,12 @@ impl App {
                 _ => ([520.0, 360.0], [260.0, 180.0]),
             };
             let spec = FloatingViewportSpec {
-                title: tab.name(),
+                title: tab.name_in(lang),
                 inner_size,
                 min_size,
                 icon: icon.clone(),
                 theme: &theme,
+                lang,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -292,7 +299,8 @@ impl App {
             DockTab::EditDetails => self.edit_details_tab(ui),
             DockTab::Scopes => self.scopes_tab(ui),
             DockTab::Notes => {
-                ui.label("Notas do projeto:");
+                let lang = self.lang();
+                ui.label(tr(lang, "Notas do projeto:"));
                 if ui
                     .add(
                         egui::TextEdit::multiline(&mut self.project.notes)
@@ -309,13 +317,14 @@ impl App {
     }
 
     pub(crate) fn preview_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+        let lang = self.lang();
         ui.horizontal_wrapped(|ui| {
             self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
             egui::ComboBox::from_id_salt(("pq", is_floating))
-                .selected_text(self.opts.preview_quality.name())
+                .selected_text(self.opts.preview_quality.name_in(lang))
                 .show_ui(ui, |ui| {
                     for q in PreviewQuality::ALL {
-                        ui.selectable_value(&mut self.opts.preview_quality, q, q.name());
+                        ui.selectable_value(&mut self.opts.preview_quality, q, q.name_in(lang));
                     }
                 });
             let split_active =
@@ -411,7 +420,7 @@ impl App {
                 true,
                 &self.theme,
             )
-            .on_hover_text("Áreas de segurança")
+            .on_hover_text(tr(lang, "Áreas de segurança"))
             .clicked()
             {
                 self.opts.safe_areas = !self.opts.safe_areas;
@@ -427,7 +436,7 @@ impl App {
                 self.copy_preview_frame_to_clipboard(Some(ui.ctx()));
             }
             if icons::icon_button(ui, Icon::CameraSnap, None, false, true, &self.theme)
-                .on_hover_text("Salvar quadro em PNG")
+                .on_hover_text(tr(lang, "Salvar quadro em PNG"))
                 .clicked()
             {
                 self.snapshot_dialog();
@@ -476,7 +485,7 @@ impl App {
             }
             if ui
                 .button("fx")
-                .on_hover_text("Efeitos de saída de vídeo")
+                .on_hover_text(tr(lang, "Efeitos de saída de vídeo"))
                 .clicked()
             {
                 self.dlg.fx_target = Some(FxTarget::MasterVideo);
@@ -484,11 +493,11 @@ impl App {
             if icons::small_icon_button(
                 ui,
                 Icon::ColorWheels,
-                Some("Cor"),
+                Some(tr(lang, "Cor")),
                 self.is_panel_open(DockTab::ColorGrading),
                 &self.theme,
             )
-            .on_hover_text("Abrir painel Color Grading")
+            .on_hover_text(tr(lang, "Abrir painel Color Grading"))
             .clicked()
             {
                 self.exec_cmd(Some(ui.ctx()), "view.tab.color_grading");
@@ -553,7 +562,10 @@ impl App {
             }
             if !is_floating
                 && icons::small_icon_button(ui, Icon::PopOut, None, false, &self.theme)
-                    .on_hover_text("Destacar Prévia de Vídeo em janela normal do Windows")
+                    .on_hover_text(tr(
+                        lang,
+                        "Destacar Prévia de Vídeo em janela normal do Windows",
+                    ))
                     .clicked()
             {
                 self.preview_detached = true;
@@ -684,34 +696,50 @@ impl App {
             ui.allocate_exact_size(vec2(avail.width().max(80.0), info_h), Sense::hover());
         let ip = ui.painter_at(info_rect);
         let fg = self.theme.text_muted;
+        let w_s = s.width.to_string();
+        let h_s = s.height.to_string();
+        let pw_s = pw.to_string();
+        let ph_s = ph.to_string();
+        let dw_s = dw.to_string();
+        let dh_s = dh.to_string();
+        let frame_s = frame_no.to_string();
+        let fps_s = s.fps.label_in(lang);
         if two_line_info {
             let y1 = info_rect.top() + 1.0;
             let y2 = y1 + line_h + 2.0;
             ip.text(
                 pos2(info_rect.left() + 2.0, y1),
                 egui::Align2::LEFT_TOP,
-                format!("Projeto: {}x{}; {}p", s.width, s.height, s.fps.label()),
+                tr_args(
+                    lang,
+                    "Projeto: {w}x{h}; {fps}p",
+                    &[("w", &w_s), ("h", &h_s), ("fps", &fps_s)],
+                ),
                 font.clone(),
                 fg,
             );
             ip.text(
                 pos2(info_rect.left() + 2.0, y2),
                 egui::Align2::LEFT_TOP,
-                format!("Prévia: {pw}x{ph}; {}p", s.fps.label()),
+                tr_args(
+                    lang,
+                    "Prévia: {w}x{h}; {fps}p",
+                    &[("w", &pw_s), ("h", &ph_s), ("fps", &fps_s)],
+                ),
                 font.clone(),
                 fg,
             );
             ip.text(
                 pos2(info_rect.right() - 2.0, y1),
                 egui::Align2::RIGHT_TOP,
-                format!("Quadro: {frame_no}"),
+                tr_args(lang, "Quadro: {n}", &[("n", &frame_s)]),
                 font.clone(),
                 fg,
             );
             ip.text(
                 pos2(info_rect.right() - 2.0, y2),
                 egui::Align2::RIGHT_TOP,
-                format!("Exibição: {dw}x{dh}"),
+                tr_args(lang, "Exibição: {w}x{h}", &[("w", &dw_s), ("h", &dh_s)]),
                 font,
                 fg,
             );
@@ -719,9 +747,16 @@ impl App {
             ip.text(
                 pos2(info_rect.left() + 2.0, info_rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                format!(
-                    "Projeto: {}x{}  Prévia: {pw}x{ph}  Quadro: {frame_no}",
-                    s.width, s.height
+                tr_args(
+                    lang,
+                    "Projeto: {pw}x{ph}  Prévia: {vw}x{vh}  Quadro: {n}",
+                    &[
+                        ("pw", &w_s),
+                        ("ph", &h_s),
+                        ("vw", &pw_s),
+                        ("vh", &ph_s),
+                        ("n", &frame_s),
+                    ],
                 ),
                 font,
                 fg,
@@ -1155,20 +1190,21 @@ impl App {
     }
 
     fn master_bus_controls(&mut self, ui: &mut egui::Ui, tall_dock: bool) {
+        let lang = self.lang();
         let mut changed = false;
         let mut monitor_changed = false;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             if ui
                 .small_button("fx")
-                .on_hover_text("Efeitos do Master Bus (áudio)")
+                .on_hover_text(tr(lang, "Efeitos do Master Bus (áudio)"))
                 .clicked()
             {
                 self.dlg.fx_target = Some(FxTarget::MasterAudio);
             }
             if ui
                 .selectable_label(self.master_mono, "Mono")
-                .on_hover_text("Downmix Stereo -> Mono na monitoração")
+                .on_hover_text(tr(lang, "Downmix Stereo -> Mono na monitoração"))
                 .clicked()
             {
                 self.master_mono = !self.master_mono;
@@ -1176,7 +1212,10 @@ impl App {
             }
             if ui
                 .selectable_label(self.master_dim, "Dim")
-                .on_hover_text("Atenuar saída de monitoração em -20 dB (Dim Output)")
+                .on_hover_text(tr(
+                    lang,
+                    "Atenuar saída de monitoração em -20 dB (Dim Output)",
+                ))
                 .clicked()
             {
                 self.master_dim = !self.master_dim;
@@ -1184,7 +1223,7 @@ impl App {
             }
             if ui
                 .selectable_label(self.project.master.mute, "M")
-                .on_hover_text("Silenciar Master Bus (Mute)")
+                .on_hover_text(tr(lang, "Silenciar Master Bus (Mute)"))
                 .clicked()
             {
                 self.checkpoint();
@@ -1202,7 +1241,7 @@ impl App {
             format!("{pk:+.1}")
         };
         ui.label(
-            egui::RichText::new(format!("pico: {peak_str} dB"))
+            egui::RichText::new(tr_args(lang, "pico: {val} dB", &[("val", &peak_str)]))
                 .monospace()
                 .small()
                 .color(if pk > -0.1 {
@@ -1233,7 +1272,7 @@ impl App {
                 changed = true;
             }
             changed |= slider
-                .on_hover_text("Volume do Master Bus (duplo clique para 0,0 dB)")
+                .on_hover_text(tr(lang, "Volume do Master Bus (duplo clique para 0,0 dB)"))
                 .changed();
             let (mr, _) = ui.allocate_exact_size(vec2(18.0, meter_h), Sense::hover());
             draw_meter(ui.painter(), mr, self.master_hold);
@@ -1265,9 +1304,10 @@ impl App {
     }
 
     pub(crate) fn master_bus_panel(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+        let lang = self.lang();
         ui.vertical(|ui| {
             if !is_floating {
-                ui.label(egui::RichText::new("Master").strong().small());
+                ui.label(egui::RichText::new(tr(lang, "Master")).strong().small());
             }
             self.master_bus_controls(ui, true);
         });
@@ -1286,9 +1326,10 @@ impl App {
     // -----------------------------------------------------------------
 
     fn explorer_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         ui.horizontal(|ui| {
             if icons::icon_button(ui, Icon::FolderUp, None, false, true, &self.theme)
-                .on_hover_text("Pasta acima")
+                .on_hover_text(tr(lang, "Pasta acima"))
                 .clicked()
             {
                 if let Some(p) = self.explorer_dir.parent() {
@@ -1305,7 +1346,7 @@ impl App {
                     self.explorer_dir = p;
                 }
             }
-            ui.label("Filtro:");
+            ui.label(tr(lang, "Filtro:"));
             ui.add(egui::TextEdit::singleline(&mut self.explorer_filter).desired_width(90.0));
         });
         #[cfg(windows)]
@@ -1372,7 +1413,7 @@ impl App {
                 }
             }
             if !is_dir {
-                r.on_hover_text("Duplo clique: importar e adicionar no cursor");
+                r.on_hover_text(tr(lang, "Duplo clique: importar e adicionar no cursor"));
             }
         }
         if let Some(p) = go {
@@ -1389,7 +1430,15 @@ impl App {
     // -----------------------------------------------------------------
 
     fn transitions_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Arraste uma transição até um evento de vídeo (ela é usada no crossfade/fade de entrada), ou selecione o evento e clique em Aplicar.").small().weak());
+        let lang = self.lang();
+        ui.label(
+            egui::RichText::new(tr(
+                lang,
+                "Arraste uma transição até um evento de vídeo (ela é usada no crossfade/fade de entrada), ou selecione o evento e clique em Aplicar.",
+            ))
+            .small()
+            .weak(),
+        );
         ui.separator();
         let sel: Vec<Id> = self.sel_events.iter().cloned().collect();
         egui::Grid::new("tr_grid")
@@ -1399,10 +1448,16 @@ impl App {
                 for k in TransitionKind::ALL {
                     let id = egui::Id::new(("tr", k as u32));
                     ui.dnd_drag_source(id, DndPayload::Transition(k), |ui| {
-                        icons::icon_label(ui, Icon::TransitionSplit, 14.0, k.name(), &self.theme);
+                        icons::icon_label(
+                            ui,
+                            Icon::TransitionSplit,
+                            14.0,
+                            k.name_in(lang),
+                            &self.theme,
+                        );
                     });
                     if ui
-                        .add_enabled(!sel.is_empty(), egui::Button::new("Aplicar"))
+                        .add_enabled(!sel.is_empty(), egui::Button::new(tr(lang, "Aplicar")))
                         .clicked()
                     {
                         for e in &sel {
@@ -1415,10 +1470,14 @@ impl App {
     }
 
     fn fx_tab(&mut self, ui: &mut egui::Ui, audio: bool) {
+        let lang = self.lang();
         ui.label(
-            egui::RichText::new("Arraste um efeito até um evento ou trilha, ou use os botões para aplicar à seleção / trilha selecionada / master.")
-                .small()
-                .weak(),
+            egui::RichText::new(tr(
+                lang,
+                "Arraste um efeito até um evento ou trilha, ou use os botões para aplicar à seleção / trilha selecionada / master.",
+            ))
+            .small()
+            .weak(),
         );
         ui.separator();
         let list: Vec<FxKind> = if audio {
@@ -1441,7 +1500,7 @@ impl App {
                                 Icon::FxSparkle
                             },
                             14.0,
-                            k.name(),
+                            k.name_in(lang),
                             &self.theme,
                         );
                     });
@@ -1464,6 +1523,7 @@ impl App {
         fx: FxInstance,
         audio: bool,
     ) {
+        let lang = self.lang();
         let want_kind = if audio {
             TrackKind::Audio
         } else {
@@ -1481,7 +1541,7 @@ impl App {
             .cloned()
             .collect();
         if ui
-            .add_enabled(!sel_ev.is_empty(), egui::Button::new("Eventos"))
+            .add_enabled(!sel_ev.is_empty(), egui::Button::new(tr(lang, "Eventos")))
             .clicked()
         {
             self.checkpoint();
@@ -1497,20 +1557,20 @@ impl App {
             self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
             self.changed();
         }
-        let tr = self
+        let sel_tr = self
             .sel_track
             .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(want_kind));
         if let (true, Some(t)) = (
-            ui.add_enabled(tr.is_some(), egui::Button::new("Trilha"))
+            ui.add_enabled(sel_tr.is_some(), egui::Button::new(tr(lang, "Trilha")))
                 .clicked(),
-            tr,
+            sel_tr,
         ) {
             self.checkpoint();
             self.project.tracks[t].fx.push(fx.clone());
             self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
             self.changed();
         }
-        if ui.button("Master").clicked() {
+        if ui.button(tr(lang, "Master")).clicked() {
             self.checkpoint();
             if audio {
                 self.project.master.fx.push(fx);
@@ -1528,21 +1588,24 @@ impl App {
     // -----------------------------------------------------------------
 
     fn mixer_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         ui.horizontal(|ui| {
             let can_add = self.project.audio_buses.len() < crate::model::MAX_AUDIO_BUSES;
             if ui
-                .add_enabled(can_add, egui::Button::new("＋ Barramento"))
-                .on_hover_text("Inserir barramento auxiliar de áudio (até 26)")
+                .add_enabled(can_add, egui::Button::new(tr(lang, "＋ Barramento")))
+                .on_hover_text(tr(lang, "Inserir barramento auxiliar de áudio (até 26)"))
                 .clicked()
             {
                 let ctx = ui.ctx().clone();
                 self.exec_cmd(Some(&ctx), "insert.audio_bus");
             }
+            let n_s = self.project.audio_buses.len().to_string();
+            let max_s = crate::model::MAX_AUDIO_BUSES.to_string();
             ui.label(
-                egui::RichText::new(format!(
-                    "{}/{} barramentos",
-                    self.project.audio_buses.len(),
-                    crate::model::MAX_AUDIO_BUSES
+                egui::RichText::new(tr_args(
+                    lang,
+                    "{count}/{max} barramentos",
+                    &[("count", &n_s), ("max", &max_s)],
                 ))
                 .small()
                 .color(self.theme.text_muted),
@@ -1616,7 +1679,7 @@ impl App {
                                                 .find(|(id, _)| *id == bid)
                                                 .map(|(_, nm)| nm.as_str())
                                         })
-                                        .unwrap_or("Master");
+                                        .unwrap_or_else(|| tr(lang, "Master"));
                                     let before = pending_output;
                                     egui::ComboBox::from_id_salt(("mix_trk_bus", tid))
                                         .width(98.0)
@@ -1625,7 +1688,7 @@ impl App {
                                             ui.selectable_value(
                                                 &mut pending_output,
                                                 None,
-                                                "Master",
+                                                tr(lang, "Master"),
                                             );
                                             for (bid, bname) in &bus_choices {
                                                 ui.selectable_value(
@@ -1680,9 +1743,10 @@ impl App {
                                 ui.label(egui::RichText::new(EnvKind::Pan.format(pan)).small());
                                 if !bus_choices.is_empty() {
                                     let send_lbl = if send_count > 0 {
-                                        format!("Send ({send_count})")
+                                        let sc_s = send_count.to_string();
+                                        tr_args(lang, "Send ({n})", &[("n", &sc_s)])
                                     } else {
-                                        "Send".into()
+                                        tr(lang, "Send").into()
                                     };
                                     ui.menu_button(send_lbl, |ui| {
                                         for (bid, bname) in &bus_choices {
@@ -1703,14 +1767,17 @@ impl App {
                                                 .iter()
                                                 .find(|(id, _)| *id == bid)
                                                 .map(|(_, nm)| nm.as_str())
-                                                .unwrap_or("Bus");
+                                                .unwrap_or_else(|| tr(lang, "Bus"));
                                             let mut pre =
                                                 self.session.project.tracks[ti].sends[si].pre_fader;
                                             let mut sdb =
                                                 self.session.project.tracks[ti].sends[si].level_db;
                                             ui.horizontal(|ui| {
                                                 ui.label(egui::RichText::new(bn).small());
-                                                if ui.toggle_value(&mut pre, "Pré").changed() {
+                                                if ui
+                                                    .toggle_value(&mut pre, tr(lang, "Pré"))
+                                                    .changed()
+                                                {
                                                     self.checkpoint();
                                                     self.session.project.tracks[ti].sends[si]
                                                         .pre_fader = pre;
@@ -1840,7 +1907,7 @@ impl App {
                                     }
                                     if ui
                                         .small_button("×")
-                                        .on_hover_text("Remover barramento")
+                                        .on_hover_text(tr(lang, "Remover barramento"))
                                         .clicked()
                                     {
                                         remove_bus = Some(bid);
@@ -1868,13 +1935,17 @@ impl App {
                                             .find(|(id, _)| *id == out_id)
                                             .map(|(_, nm)| nm.as_str())
                                     })
-                                    .unwrap_or("Master");
+                                    .unwrap_or_else(|| tr(lang, "Master"));
                                 let before = pending_out;
                                 egui::ComboBox::from_id_salt(("mix_bus_out", bid))
                                     .width(98.0)
                                     .selected_text(sel_lbl)
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut pending_out, None, "Master");
+                                        ui.selectable_value(
+                                            &mut pending_out,
+                                            None,
+                                            tr(lang, "Master"),
+                                        );
                                         for (cand, cname) in &valid_targets {
                                             ui.selectable_value(
                                                 &mut pending_out,
@@ -1992,6 +2063,7 @@ impl App {
         if self.loudness_job.is_some() {
             return;
         }
+        let lang = self.lang();
         let proj = self.project.clone();
         let media = self.media.clone();
         let sr = self.audio.sr.max(8_000);
@@ -2008,7 +2080,8 @@ impl App {
             done,
             total,
         });
-        self.set_status("Analisando loudness EBU R128 do projeto...");
+        self.set_status(tr(lang, "Analisando loudness EBU R128 do projeto..."));
+        let err_msg = tr(lang, "falha interna isolada ao analisar loudness").to_string();
         if let Err(e) = util::spawn("loudness-scan", move || {
             let res = crate::util::catch_isolated(|| {
                 analyze_project_loudness(
@@ -2022,7 +2095,7 @@ impl App {
             });
             let msg = match res {
                 Ok(r) => r,
-                Err(_) => Err("falha interna isolada ao analisar loudness".into()),
+                Err(_) => Err(err_msg),
             };
             let _ = tx.send(LoadMsg::LoudnessAnalyzed(msg));
         }) {
@@ -2033,22 +2106,27 @@ impl App {
     }
 
     fn loudness_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let target = self.loudness_target;
         let target_lufs = target.target_lufs();
         let max_tp = target.max_true_peak_dbtp();
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Padrão:").strong().small());
+            ui.label(egui::RichText::new(tr(lang, "Padrão:")).strong().small());
             egui::ComboBox::from_id_salt("loudness_target_preset")
-                .selected_text(self.loudness_target.name())
+                .selected_text(self.loudness_target.name_in(lang))
                 .show_ui(ui, |ui| {
                     for preset in LoudnessTarget::ALL {
-                        ui.selectable_value(&mut self.loudness_target, preset, preset.name());
+                        ui.selectable_value(
+                            &mut self.loudness_target,
+                            preset,
+                            preset.name_in(lang),
+                        );
                     }
                 });
             if ui
-                .button("Zerar")
-                .on_hover_text("Zera a integração EBU R128 e os picos acumulados")
+                .button(tr(lang, "Zerar"))
+                .on_hover_text(tr(lang, "Zera a integração EBU R128 e os picos acumulados"))
                 .clicked()
             {
                 self.audio.reset_loudness();
@@ -2063,13 +2141,13 @@ impl App {
                         .desired_width(120.0)
                         .show_percentage(),
                 );
-                if ui.button("Cancelar").clicked() {
+                if ui.button(tr(lang, "Cancelar")).clicked() {
                     job.cancel.store(true, Ordering::Relaxed);
                 }
             } else {
                 if ui
-                    .button("Analisar projeto")
-                    .on_hover_text("Varredura offline EBU R128 de todo o projeto")
+                    .button(tr(lang, "Analisar projeto"))
+                    .on_hover_text(tr(lang, "Varredura offline EBU R128 de todo o projeto"))
                     .clicked()
                 {
                     self.start_loudness_scan(None);
@@ -2077,8 +2155,8 @@ impl App {
                 if let Some(sel) = self.time_sel {
                     if sel.1 > sel.0
                         && ui
-                            .button("Analisar seleção")
-                            .on_hover_text("Varredura offline apenas na seleção de tempo")
+                            .button(tr(lang, "Analisar seleção"))
+                            .on_hover_text(tr(lang, "Varredura offline apenas na seleção de tempo"))
                             .clicked()
                     {
                         self.start_loudness_scan(Some(sel));
@@ -2150,24 +2228,28 @@ impl App {
                     draw_vert_bar(ui, "TP R", snap.true_peak_dbtp[1], -50.0, 3.0, max_tp);
                     ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Tempo real (Master)").strong().small());
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Tempo real (Master)"))
+                                .strong()
+                                .small(),
+                        );
                         egui::Grid::new("loudness_live_grid")
                             .num_columns(2)
                             .spacing([12.0, 4.0])
                             .show(ui, |ui| {
-                                ui.label("Momentâneo (M):");
+                                ui.label(tr(lang, "Momentâneo (M):"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(snap.momentary_lufs))
                                         .monospace(),
                                 );
                                 ui.end_row();
-                                ui.label("Curto prazo (S):");
+                                ui.label(tr(lang, "Curto prazo (S):"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(snap.short_term_lufs))
                                         .monospace(),
                                 );
                                 ui.end_row();
-                                ui.label("Integrado (I):");
+                                ui.label(tr(lang, "Integrado (I):"));
                                 let int_col = meter_col(snap.integrated_lufs, target_lufs);
                                 ui.label(
                                     egui::RichText::new(format_lufs(snap.integrated_lufs))
@@ -2176,7 +2258,7 @@ impl App {
                                         .color(int_col),
                                 );
                                 ui.end_row();
-                                ui.label("LRA:");
+                                ui.label(tr(lang, "LRA:"));
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "{:.1} LU",
@@ -2185,7 +2267,7 @@ impl App {
                                     .monospace(),
                                 );
                                 ui.end_row();
-                                ui.label("True Peak (L / R):");
+                                ui.label(tr(lang, "True Peak (L / R):"));
                                 let tp_max = snap.true_peak_dbtp[0].max(snap.true_peak_dbtp[1]);
                                 ui.label(
                                     egui::RichText::new(format!(
@@ -2197,7 +2279,7 @@ impl App {
                                     .color(meter_col(tp_max, max_tp)),
                                 );
                                 ui.end_row();
-                                ui.label("RMS (L / R):");
+                                ui.label(tr(lang, "RMS (L / R):"));
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "{} / {}",
@@ -2209,7 +2291,7 @@ impl App {
                                 ui.end_row();
                                 if snap.integrated_lufs.is_finite() {
                                     let delta = snap.integrated_lufs - target_lufs;
-                                    ui.label("Desvio do alvo:");
+                                    ui.label(tr(lang, "Desvio do alvo:"));
                                     ui.label(
                                         egui::RichText::new(format!("{delta:+.1} LU"))
                                             .monospace()
@@ -2225,11 +2307,13 @@ impl App {
                     ui.separator();
                     ui.group(|ui| {
                         ui.horizontal_wrapped(|ui| {
+                            let a_s = self.fmt_time(rep.start);
+                            let b_s = self.fmt_time(rep.end);
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "Varredura offline ({} – {})",
-                                    self.fmt_time(rep.start),
-                                    self.fmt_time(rep.end)
+                                egui::RichText::new(tr_args(
+                                    lang,
+                                    "Varredura offline ({start} – {end})",
+                                    &[("start", &a_s), ("end", &b_s)],
                                 ))
                                 .strong()
                                 .small(),
@@ -2240,11 +2324,11 @@ impl App {
                                 rep.snapshot.true_peak_dbtp[0].max(rep.snapshot.true_peak_dbtp[1]);
                             let over_tp = tp_max.is_finite() && tp_max > max_tp;
                             let (badge, col) = if over_i || over_tp {
-                                ("Acima do limite", self.theme.offline_fg)
+                                (tr(lang, "Acima do limite"), self.theme.offline_fg)
                             } else if rep.snapshot.integrated_lufs.is_finite() {
-                                ("Em conformidade", self.theme.accent)
+                                (tr(lang, "Em conformidade"), self.theme.accent)
                             } else {
-                                ("Silêncio", self.theme.text_muted)
+                                (tr(lang, "Silêncio"), self.theme.text_muted)
                             };
                             ui.label(egui::RichText::new(badge).strong().small().color(col));
                         });
@@ -2252,12 +2336,12 @@ impl App {
                             .num_columns(4)
                             .spacing([12.0, 4.0])
                             .show(ui, |ui| {
-                                ui.label("Integrado:");
+                                ui.label(tr(lang, "Integrado:"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(rep.snapshot.integrated_lufs))
                                         .monospace(),
                                 );
-                                ui.label("LRA:");
+                                ui.label(tr(lang, "LRA:"));
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "{:.1} LU",
@@ -2266,18 +2350,18 @@ impl App {
                                     .monospace(),
                                 );
                                 ui.end_row();
-                                ui.label("Máx. S:");
+                                ui.label(tr(lang, "Máx. S:"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(rep.max_short_term_lufs))
                                         .monospace(),
                                 );
-                                ui.label("Máx. M:");
+                                ui.label(tr(lang, "Máx. M:"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(rep.max_momentary_lufs))
                                         .monospace(),
                                 );
                                 ui.end_row();
-                                ui.label("True Peak L:");
+                                ui.label(tr(lang, "True Peak L:"));
                                 ui.label(
                                     egui::RichText::new(format_db(
                                         rep.snapshot.true_peak_dbtp[0],
@@ -2285,7 +2369,7 @@ impl App {
                                     ))
                                     .monospace(),
                                 );
-                                ui.label("True Peak R:");
+                                ui.label(tr(lang, "True Peak R:"));
                                 ui.label(
                                     egui::RichText::new(format_db(
                                         rep.snapshot.true_peak_dbtp[1],
@@ -2305,15 +2389,19 @@ impl App {
     // -----------------------------------------------------------------
 
     fn scopes_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let Some(t) = &self.scopes_tex else {
-            ui.label("Os escopos são calculados a partir do quadro da prévia...");
+            ui.label(tr(
+                lang,
+                "Os escopos são calculados a partir do quadro da prévia...",
+            ));
             return;
         };
         let names = [
-            "Histograma (RGB + luma)",
-            "Forma de onda (luma)",
-            "Vectorscope",
-            "RGB Parade",
+            tr(lang, "Histograma (RGB + luma)"),
+            tr(lang, "Forma de onda (luma)"),
+            tr(lang, "Vectorscope"),
+            tr(lang, "RGB Parade"),
         ];
         let avail = ui.available_width();
         let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
