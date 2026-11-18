@@ -555,6 +555,9 @@ pub struct Preferences {
     /// Percentual da borda de área segura de títulos (`50..=95`, <= `action_safe_pct`).
     #[serde(default = "default_title_safe_pct")]
     pub title_safe_pct: u8,
+    /// Guias extras da prévia, desenhadas junto das áreas seguras.
+    #[serde(default)]
+    pub safe_guides: SafeGuidesPrefs,
     /// Integração com aplicativos ArtCraft (PhotoCraft, VectorCraft, FilmCraft, EffectCraft, AniCraft, SoundCraft) e Blender.
     #[serde(default)]
     pub external_apps: ExternalAppsPrefs,
@@ -582,6 +585,31 @@ pub struct Preferences {
     /// Preferências de entrada e saída de arquivos, hardware e sequências de imagem (p. 1105).
     #[serde(default)]
     pub file_io: FileIoPrefs,
+}
+
+/// Guias extras das áreas seguras da Prévia de Vídeo: cruz central, grade dos
+/// terços e recortes centrais em outras proporções (para conferir o
+/// enquadramento de uma versão 4:3, vertical 9:16 ou quadrada 1:1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafeGuidesPrefs {
+    pub center_cross: bool,
+    pub thirds: bool,
+    pub cut_4x3: bool,
+    pub cut_9x16: bool,
+    pub cut_1x1: bool,
+}
+
+impl Default for SafeGuidesPrefs {
+    fn default() -> Self {
+        Self {
+            center_cross: true,
+            thirds: false,
+            cut_4x3: false,
+            cut_9x16: false,
+            cut_1x1: false,
+        }
+    }
 }
 
 pub const MAX_TOOLBAR_BUTTONS: usize = 64;
@@ -1042,6 +1070,7 @@ impl Default for Preferences {
             default_sample_rate: default_sample_rate(),
             action_safe_pct: default_action_safe_pct(),
             title_safe_pct: default_title_safe_pct(),
+            safe_guides: SafeGuidesPrefs::default(),
             external_apps: ExternalAppsPrefs::default(),
             default_track: DefaultTrackPrefs::default(),
             user_fx_presets: Vec::new(),
