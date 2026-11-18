@@ -582,9 +582,17 @@ pub struct Preferences {
     /// Preferências de entrada e saída de arquivos, hardware e sequências de imagem (p. 1105).
     #[serde(default)]
     pub file_io: FileIoPrefs,
+    /// Pastas extras de plug-ins VST3/OFX mapeadas pelo usuário (ex.: uma pasta
+    /// do Google Drive). Cada pasta é varrida nos dois formatos, além das
+    /// pastas padrão do sistema.
+    #[serde(default)]
+    pub plugin_folders: Vec<String>,
 }
 
 pub const MAX_TOOLBAR_BUTTONS: usize = 64;
+/// Máximo de pastas de plug-ins mapeadas e tamanho máximo de cada caminho.
+pub const MAX_PLUGIN_FOLDERS: usize = 32;
+pub const MAX_PLUGIN_FOLDER_LEN: usize = 1024;
 
 pub fn default_toolbar_buttons() -> Vec<String> {
     [
@@ -1051,6 +1059,7 @@ impl Default for Preferences {
             audio_device: AudioDevicePrefs::default(),
             midi_sync: MidiSyncPrefs::default(),
             file_io: FileIoPrefs::default(),
+            plugin_folders: Vec::new(),
         }
     }
 }
@@ -1157,6 +1166,51 @@ impl Preferences {
         self.audio_device.sanitize();
         self.midi_sync.sanitize();
         self.file_io.sanitize();
+        sanitize_string_list(
+            &mut self.plugin_folders,
+            MAX_PLUGIN_FOLDERS,
+            MAX_PLUGIN_FOLDER_LEN,
+            cfg!(windows),
+        );
+    }
+
+    /// Mapeia uma pasta de plug-ins. Devolve `false` se o caminho é inválido,
+    /// já está na lista ou a lista está cheia.
+    pub fn add_plugin_folder(&mut self, path: &std::path::Path) -> bool {
+        let raw = path.to_string_lossy();
+        let s = raw.trim();
+        if s.is_empty()
+            || s.len() > MAX_PLUGIN_FOLDER_LEN
+            || s.contains('\0')
+            || self.plugin_folders.len() >= MAX_PLUGIN_FOLDERS
+            || self
+                .plugin_folders
+                .iter()
+                .any(|f| f == s || (cfg!(windows) && f.eq_ignore_ascii_case(s)))
+        {
+            return false;
+        }
+        self.plugin_folders.push(s.to_string());
+        true
+    }
+
+    /// Troca o caminho de uma pasta mapeada (pasta movida ou unidade nova).
+    pub fn replace_plugin_folder(&mut self, index: usize, path: &std::path::Path) -> bool {
+        let Some(old) = self.plugin_folders.get(index).cloned() else {
+            return false;
+        };
+        self.plugin_folders.remove(index);
+        if self.add_plugin_folder(path) {
+            let last = self.plugin_folders.len().saturating_sub(1);
+            let moved = self.plugin_folders.remove(last);
+            self.plugin_folders
+                .insert(index.min(self.plugin_folders.len()), moved);
+            true
+        } else {
+            self.plugin_folders
+                .insert(index.min(self.plugin_folders.len()), old);
+            false
+        }
     }
 
     pub fn load_or_default() -> Self {
@@ -1225,9 +1279,28 @@ mod tests {
                 ..Default::default()
             },
             file_io: hostile_io,
+            plugin_folders: {
+                let mut v = vec![String::new(), "   ".into(), "x\0y".into(), "a".repeat(5000)];
+                v.extend((0..5000).map(|i| format!("G:\\Meu Drive\\plugins{}", i % 40)));
+                v.push("G:\\MEU DRIVE\\PLUGINS0".into());
+                v
+            },
             ..Default::default()
         };
         p2.sanitize();
+        assert!(p2.plugin_folders.len() <= MAX_PLUGIN_FOLDERS);
+        assert!(p2.plugin_folders.iter().all(|f| !f.trim().is_empty()
+            && f.len() <= MAX_PLUGIN_FOLDER_LEN
+            && !f.contains('\0')));
+        let mut seen = std::collections::HashSet::new();
+        assert!(p2
+            .plugin_folders
+            .iter()
+            .all(|f| seen.insert(if cfg!(windows) {
+                f.to_ascii_lowercase()
+            } else {
+                f.clone()
+            })));
         assert_eq!(p2.preview_device.device_mode, "secondary_monitor");
         assert_eq!(p2.preview_device.bg_gray, 48);
         assert_eq!(p2.audio_device.driver_mode, "os_default");
