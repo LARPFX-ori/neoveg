@@ -1402,9 +1402,24 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
         .apply_video_fx_to_output(crate::model::FxKind::Invert));
     assert_eq!(harness.state().project.master.video_fx.len(), 1);
 
-    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo.
+    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo
+    // sem deslocar os botões estáticos da barra quando "Limpar RAM" aparece.
+    let ext_rect_before = harness.get_by_label("Monitor externo").raw_bounds();
     harness.get_by_label("Prévia em RAM").click();
     harness.run_steps(4);
+    if harness.state().ram_preview.frames.is_empty() {
+        let _ = harness
+            .state_mut()
+            .ram_preview
+            .insert_frame(0, image::RgbaImage::new(16, 16));
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Limpar RAM").is_some());
+    assert_eq!(
+        harness.get_by_label("Monitor externo").raw_bounds(),
+        ext_rect_before,
+        "botão Monitor externo não pode deslocar quando Limpar RAM aparece"
+    );
     harness.get_by_label("Monitor externo").click();
     harness.run_steps(2);
     assert!(harness.state().external_monitor);
@@ -1602,9 +1617,41 @@ fn kittest_efeitos_cadeias_lut_curvas_legendas_e_bypass_audio() {
 
 #[test]
 fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
+    struct PrefsBackup {
+        path: std::path::PathBuf,
+        prev: Option<Vec<u8>>,
+    }
+    impl Drop for PrefsBackup {
+        fn drop(&mut self) {
+            let _w = crate::tests::PREFS_LOCK
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &self.prev {
+                Some(bytes) => {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+    let prefs_path = Preferences::file_path();
+    let prev_prefs = {
+        let _r = crate::tests::PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::read(&prefs_path).ok()
+    };
+    let _prefs_backup = PrefsBackup {
+        path: prefs_path,
+        prev: prev_prefs,
+    };
+
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1480.0, 900.0))
         .build_eframe(build_ready_app);
+    harness.state_mut().prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
     harness.run_steps(2);
     let ctx = harness.ctx.clone();
 
