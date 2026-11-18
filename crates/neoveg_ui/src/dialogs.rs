@@ -6154,6 +6154,15 @@ fn prefs_video_preview(
                     ui.checkbox(&mut g.cut_4x3, tr(lang, "Recorte central 4:3"));
                     ui.checkbox(&mut g.cut_9x16, tr(lang, "Recorte central 9:16 (vertical)"));
                     ui.checkbox(&mut g.cut_1x1, tr(lang, "Recorte central 1:1 (quadrado)"));
+                    ui.checkbox(&mut g.action_title, tr(lang, "Áreas de ação e de título"));
+                    ui.checkbox(&mut g.rulers, tr(lang, "Réguas (pixels do projeto)"));
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut g.grid, tr(lang, "Grade"));
+                        ui.label(tr(lang, "Divisões horizontais:"));
+                        ui.add(egui::DragValue::new(&mut g.grid_h).range(2..=64));
+                        ui.label(tr(lang, "Verticais:"));
+                        ui.add(egui::DragValue::new(&mut g.grid_v).range(2..=64));
+                    });
                 });
             });
         },

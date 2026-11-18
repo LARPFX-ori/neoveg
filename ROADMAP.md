@@ -80,7 +80,9 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 - **Prévia em tela dividida** (`PreviewSplitMode::FxBypass` e `Clipboard`, linha divisória arrastável horizontal/vertical, p. 203).
 - **Prévia dinâmica em RAM** (`Shift+B`, `RamPreviewCache` limitado ao orçamento de memória das Preferências, p. 207).
-- **Zoom e deslocamento dentro da prévia** (roda do mouse, menu de níveis `Ajustar`–`400%` e arraste de enquadramento, p. 208).
+- **Zoom e deslocamento dentro da prévia** (roda do mouse em passos de 10% e `Ctrl`+roda em 1%, menu de níveis `Ajustar`–`400%`, `+5%`/`-5%` e *Ignorar zoom* — `preview.zoom_step_in`/`zoom_step_out`/`zoom_bypass` —, arraste de enquadramento, pp. 208–209).
+- **Sobreposições** (botão + seta ▾, pp. 197–198): áreas de ação e de título, **grade** com divisões horizontais e verticais nas Preferências, guias (cruz, terços, recortes 4:3/9:16/1:1), **réguas** em pixels do projeto e **isolamento de canal** (vermelho, verde, azul, alfa em cinza, opção em escala de cinza; os escopos continuam com a imagem real) (`crates/neoveg_ui/src/preview_overlays.rs`).
+- **Barra de transporte da prévia** completa (loop, tocar do início, tocar/pausar, parar, início, fim, quadro anterior/seguinte, pp. 201–202; em largura estreita só o essencial) e **fps exibido** na linha *Exibição* durante a reprodução (p. 197).
 - **Copiar o quadro atual para a área de transferência** (`preview.copy_frame`, imagem RGBA para SO e comparação dividida, p. 200), além de salvar em PNG (`file.snapshot`).
 - **Silenciar todo o áudio ou todo o vídeo** da prévia (`preview.mute_audio` / `preview.mute_video`, p. 200).
 - **Monitor externo** em janela secundária destacada (`Alt+Shift+4`, tela cheia opcional, p. 210).
