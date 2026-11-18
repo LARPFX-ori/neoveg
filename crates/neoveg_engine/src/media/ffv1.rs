@@ -451,7 +451,8 @@ mod tests {
                     String::from_utf8_lossy(&out.stderr)
                 );
                 assert_eq!(
-                    out.stdout, rgba,
+                    out.stdout,
+                    rgba,
                     "FFV1 {tag} não foi 100% lossless (pkt_len={})",
                     pkt.len()
                 );
