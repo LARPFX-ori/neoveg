@@ -4973,6 +4973,9 @@ impl App {
 
         let next_lang = draft.lang();
         self.apply_language(Some(ctx), next_lang, false);
+        if draft.system_ui_font != prev.system_ui_font {
+            crate::fonts::configure_fonts(ctx, draft.system_ui_font && !cfg!(test));
+        }
 
         let mut next = draft.clone();
         next.recent_projects = prev.recent_projects;
@@ -5788,6 +5791,17 @@ fn prefs_general(
             &mut draft.show_splash,
             tr(lang, "Exibir tela de abertura (Splash) ao iniciar"),
         );
+        ui.checkbox(
+            &mut draft.system_ui_font,
+            tr(
+                lang,
+                "Usar as fontes do sistema na interface (Segoe UI no Windows)",
+            ),
+        )
+        .on_hover_text(tr(
+            lang,
+            "Desligado, a interface usa as fontes embutidas do programa",
+        ));
         ui.checkbox(
             &mut draft.show_welcome,
             tr(

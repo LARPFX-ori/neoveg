@@ -381,7 +381,9 @@ impl App {
         }
         let lang = prefs.lang();
         neoveg_common::set_active_language(lang);
-        crate::fonts::configure_fonts(egui_ctx);
+        // nos testes fica a fonte embutida, para as medidas de layout serem
+        // as mesmas em qualquer máquina
+        crate::fonts::configure_fonts(egui_ctx, prefs.system_ui_font && !cfg!(test));
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
         let loaded_layout = prefs
