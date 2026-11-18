@@ -1737,7 +1737,7 @@ namespace ScriptPortal.Vegas
 
 fn media_snap(m: &MediaItem) -> ScriptMediaSnap {
     let (path, generated) = match &m.source {
-        MediaSource::File { path } => (path.clone(), false),
+        MediaSource::File { path } | MediaSource::NestedProject { path } => (path.clone(), false),
         MediaSource::ImageSequence { paths, .. } => {
             (paths.first().cloned().unwrap_or_default(), false)
         }

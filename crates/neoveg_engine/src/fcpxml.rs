@@ -1189,7 +1189,9 @@ pub fn export_fcpxml_string(project: &Project, name_override: Option<&str>) -> S
             .unwrap_or_else(|| Ticks::from_millis_i64(DEFAULT_FCPXML_MS))
             .max(frame_dur);
         let src = match &m.source {
-            MediaSource::File { path } => encode_target_url(path),
+            MediaSource::File { path } | MediaSource::NestedProject { path } => {
+                encode_target_url(path)
+            }
             MediaSource::ImageSequence { paths, .. } => paths
                 .first()
                 .map(|p| encode_target_url(p))

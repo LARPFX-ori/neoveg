@@ -236,6 +236,155 @@ pub struct VideoRenderOpts {
     pub bypass_fx: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StereoEye {
+    Center,
+    Left,
+    Right,
+}
+
+fn extract_stereo_eye(src: &RgbaImage, s3d: &Stereo3dClip, eye: StereoEye) -> Option<RgbaImage> {
+    if eye == StereoEye::Center || s3d.layout == Stereo3dSourceLayout::Mono2D {
+        return None;
+    }
+    let use_right = matches!(
+        (eye, s3d.swap_lr),
+        (StereoEye::Right, false) | (StereoEye::Left, true)
+    );
+    let (sw, sh) = (src.width(), src.height());
+    match s3d.layout {
+        Stereo3dSourceLayout::Mono2D => None,
+        Stereo3dSourceLayout::SideBySideHalf | Stereo3dSourceLayout::SideBySideFull => {
+            let half_w = (sw / 2).max(1);
+            let x0 = if use_right {
+                half_w.min(sw.saturating_sub(1))
+            } else {
+                0
+            };
+            let cw = if use_right {
+                sw.saturating_sub(x0).max(1)
+            } else {
+                half_w
+            };
+            let mut out = RgbaImage::new(cw, sh.max(1));
+            for y in 0..sh {
+                for x in 0..cw {
+                    let px = *src.get_pixel((x0 + x).min(sw - 1), y);
+                    out.put_pixel(x, y, px);
+                }
+            }
+            Some(out)
+        }
+        Stereo3dSourceLayout::TopBottomHalf => {
+            let half_h = (sh / 2).max(1);
+            let y0 = if use_right {
+                half_h.min(sh.saturating_sub(1))
+            } else {
+                0
+            };
+            let ch = if use_right {
+                sh.saturating_sub(y0).max(1)
+            } else {
+                half_h
+            };
+            let mut out = RgbaImage::new(sw.max(1), ch);
+            for y in 0..ch {
+                for x in 0..sw {
+                    let px = *src.get_pixel(x, (y0 + y).min(sh - 1));
+                    out.put_pixel(x, y, px);
+                }
+            }
+            Some(out)
+        }
+    }
+}
+
+fn shift_frame_horizontal(src: &Frame, dx_px: f32) -> Frame {
+    if dx_px.abs() < 0.25 {
+        return src.clone();
+    }
+    let (w, h) = (src.w, src.h);
+    let mut out = Frame::new(w, h);
+    out.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, p) in row.iter_mut().enumerate() {
+            *p = src.sample(x as f32 + 0.5 - dx_px, y as f32 + 0.5);
+        }
+    });
+    out
+}
+
+fn apply_track_mask(dst: &mut Frame, mask: &Frame, mode: TrackMaskMode) {
+    dst.px
+        .par_iter_mut()
+        .zip(mask.px.par_iter())
+        .for_each(|(d, m)| {
+            let luma = (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]).clamp(0.0, 1.0);
+            let alpha = m[3].clamp(0.0, 1.0);
+            let k = match mode {
+                TrackMaskMode::None => 1.0,
+                TrackMaskMode::MultiplyMask => luma,
+                TrackMaskMode::InvertedMultiplyMask => (1.0 - luma).clamp(0.0, 1.0),
+                TrackMaskMode::AlphaMask => alpha,
+                TrackMaskMode::InvertedAlphaMask => (1.0 - alpha).clamp(0.0, 1.0),
+            };
+            for c in d.iter_mut() {
+                *c *= k;
+            }
+        });
+}
+
+fn compose_stereo_3d(left: &Frame, right: &Frame, mode: Stereo3dMode) -> Frame {
+    let (w, h) = (left.w.max(1), left.h.max(1));
+    let mut out = Frame::new(w, h);
+    match mode {
+        Stereo3dMode::Off | Stereo3dMode::LeftOnly => return left.clone(),
+        Stereo3dMode::RightOnly => return right.clone(),
+        Stereo3dMode::AnaglyphRedCyan => {
+            out.px
+                .par_iter_mut()
+                .zip(left.px.par_iter().zip(right.px.par_iter()))
+                .for_each(|(o, (l, r))| {
+                    *o = [l[0], r[1], r[2], l[3].max(r[3])];
+                });
+        }
+        Stereo3dMode::SideBySideHalf | Stereo3dMode::SideBySideFull => {
+            let half_w = (w / 2).max(1);
+            let wf = w as f32;
+            out.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let sy = y as f32 + 0.5;
+                for (x, p) in row.iter_mut().enumerate() {
+                    if x < half_w {
+                        let sx = ((x as f32 + 0.5) / half_w as f32) * wf;
+                        *p = left.sample(sx, sy);
+                    } else {
+                        let rx = (x - half_w) as f32 + 0.5;
+                        let rw = (w - half_w).max(1) as f32;
+                        let sx = (rx / rw) * wf;
+                        *p = right.sample(sx, sy);
+                    }
+                }
+            });
+        }
+        Stereo3dMode::TopBottomHalf => {
+            let half_h = (h / 2).max(1);
+            let hf = h as f32;
+            out.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let (src, sy) = if y < half_h {
+                    (left, ((y as f32 + 0.5) / half_h as f32) * hf)
+                } else {
+                    let ry = (y - half_h) as f32 + 0.5;
+                    let rh = (h - half_h).max(1) as f32;
+                    (right, (ry / rh) * hf)
+                };
+                for (x, p) in row.iter_mut().enumerate() {
+                    *p = src.sample(x as f32 + 0.5, sy);
+                }
+            });
+        }
+    }
+    out
+}
+
 fn event_layer_opts(
     p: &Project,
     media: &MediaCache,
@@ -245,15 +394,35 @@ fn event_layer_opts(
     h: usize,
     opts: VideoRenderOpts,
 ) -> Option<Frame> {
+    event_layer_eye(p, media, e, t, w, h, opts, StereoEye::Center)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn event_layer_eye(
+    p: &Project,
+    media: &MediaCache,
+    e: &Event,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    opts: VideoRenderOpts,
+    eye: StereoEye,
+) -> Option<Frame> {
     let m = p.media(e.media_id)?;
     if !m.has_video {
         return None;
     }
     let mt = e.media_time(t, m.duration)?;
     let src = media.video_frame_for_quality(m, mt, w as u32, h as u32, opts.prefer_proxy)?;
+    let eye_img = extract_stereo_eye(&src, &e.stereo_3d, eye);
+    let src_ref: &RgbaImage = eye_img.as_ref().unwrap_or(&src);
     let local = t - e.start;
     let key = e.pan_crop.eval(local);
-    let mut f = draw_source(&src, w, h, &key, e.maintain_aspect);
+    let mut f = draw_source(src_ref, w, h, &key, e.maintain_aspect);
+    if eye != StereoEye::Center && e.stereo_3d.horizontal_offset.abs() > 1e-6 {
+        let sign = if eye == StereoEye::Left { -0.5 } else { 0.5 };
+        f = shift_frame_horizontal(&f, e.stereo_3d.horizontal_offset * (w as f32) * sign);
+    }
     if opts.bypass_fx {
         return Some(f);
     }
@@ -331,7 +500,36 @@ pub fn render_event_still(
         .unwrap_or_else(|| Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]))
 }
 
-fn render_track(
+/// Renderiza o quadro de um take específico de evento (usado na grade multicâmera).
+#[allow(clippy::too_many_arguments)]
+pub fn render_event_take_still(
+    p: &Project,
+    media: &MediaCache,
+    ev_id: Id,
+    take_idx: usize,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    prefer_proxy: bool,
+) -> Frame {
+    let w = w.max(1);
+    let h = h.max(1);
+    let Some((ti, ei)) = p.find_event(ev_id) else {
+        return Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]);
+    };
+    let mut ev = p.tracks[ti].events[ei].clone();
+    let _ = crate::takes::set_active(&mut ev, take_idx);
+    let clamped_t = t.clamp_safe(ev.start, (ev.end() - Ticks::from_raw(1)).max(ev.start));
+    let opts = VideoRenderOpts {
+        prefer_proxy,
+        bypass_fx: false,
+    };
+    event_layer_opts(p, media, &ev, clamped_t, w, h, opts)
+        .unwrap_or_else(|| Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_track_eye(
     p: &Project,
     media: &MediaCache,
     track: &Track,
@@ -339,6 +537,7 @@ fn render_track(
     w: usize,
     h: usize,
     opts: VideoRenderOpts,
+    eye: StereoEye,
 ) -> Option<Frame> {
     let mut active: Vec<&Event> = track
         .events
@@ -353,7 +552,7 @@ fn render_track(
     // camadas mais antigas por baixo (sem transição)
     let mut base: Option<Frame> = None;
     for e in active.iter().take(n.saturating_sub(2)) {
-        if let Some(mut f) = event_layer_opts(p, media, e, t, w, h, opts) {
+        if let Some(mut f) = event_layer_eye(p, media, e, t, w, h, opts, eye) {
             f.scale_alpha(event_alpha(e, t, false, false));
             match &mut base {
                 Some(b) => b.over(&f),
@@ -366,11 +565,11 @@ fn render_track(
         let b = active[n - 1];
         let overlap = (a.end() - b.start).max(Ticks::from_raw(1));
         let prog = t.fraction_in(b.start, overlap);
-        let fa = event_layer_opts(p, media, a, t, w, h, opts).map(|mut f| {
+        let fa = event_layer_eye(p, media, a, t, w, h, opts, eye).map(|mut f| {
             f.scale_alpha(event_alpha(a, t, false, true));
             f
         });
-        let fb = event_layer_opts(p, media, b, t, w, h, opts).map(|mut f| {
+        let fb = event_layer_eye(p, media, b, t, w, h, opts, eye).map(|mut f| {
             f.scale_alpha(event_alpha(b, t, true, false));
             f
         });
@@ -391,7 +590,7 @@ fn render_track(
             e.fade_in.len > Ticks::ZERO && local < e.fade_in.len,
         ) {
             // transição sem evento anterior: entra a partir do transparente
-            (Some(tr), true) => event_layer_opts(p, media, e, t, w, h, opts).map(|mut f| {
+            (Some(tr), true) => event_layer_eye(p, media, e, t, w, h, opts, eye).map(|mut f| {
                 f.scale_alpha(event_alpha(e, t, true, false));
                 let prog = e
                     .fade_in
@@ -399,7 +598,7 @@ fn render_track(
                     .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
                 transition::apply(tr.kind, tr.softness, &Frame::new(w, h), &f, prog)
             }),
-            _ => event_layer_opts(p, media, e, t, w, h, opts).map(|mut f| {
+            _ => event_layer_eye(p, media, e, t, w, h, opts, eye).map(|mut f| {
                 f.scale_alpha(event_alpha(e, t, false, false));
                 f
             }),
@@ -468,52 +667,176 @@ pub fn render_frame_preview(
     )
 }
 
-/// Renderiza o quadro do projeto com controle explícito de proxies e bypass de efeitos.
-pub fn render_frame_with_opts(
+#[allow(clippy::too_many_arguments)]
+fn render_track_processed(
+    p: &Project,
+    media: &MediaCache,
+    track: &Track,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    opts: VideoRenderOpts,
+    eye: StereoEye,
+) -> Option<Frame> {
+    let mut layer = render_track_eye(p, media, track, t, w, h, opts, eye)?;
+    if !opts.bypass_fx {
+        for fx in &track.fx {
+            vfx::apply(fx, &mut layer, t, p.settings.fps);
+        }
+    }
+    let ftc = track.env_value(EnvKind::FadeToColor, t);
+    if ftc.abs() > 1e-4 {
+        let target = if ftc > 0.0 { 1.0 } else { 0.0 };
+        let k = ftc.abs().min(1.0);
+        layer.px.par_iter_mut().for_each(|px| {
+            for c in 0..3 {
+                px[c] += (target * px[3] - px[c]) * k;
+            }
+        });
+    }
+    let mk = track.motion.eval(t);
+    if mk != MotionKey::default() {
+        layer = apply_motion(&layer, &mk);
+    }
+    Some(layer)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compose_subtree(
+    p: &Project,
+    media: &MediaCache,
+    track: &Track,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    opts: VideoRenderOpts,
+    eye: StereoEye,
+    any_solo: bool,
+    out: &mut Frame,
+    depth: usize,
+) {
+    if depth > MAX_TRACK_DEPTH {
+        return;
+    }
+    if p.is_track_effectively_muted(track.id) {
+        return;
+    }
+    let video_children: Vec<&Track> = p
+        .tracks
+        .iter()
+        .filter(|c| {
+            c.parent_track_id == Some(track.id)
+                && (c.kind == TrackKind::Video || (track.is_folder && c.is_folder))
+        })
+        .collect();
+    if track.is_folder {
+        for child in video_children.into_iter().rev() {
+            compose_subtree(
+                p,
+                media,
+                child,
+                t,
+                w,
+                h,
+                opts,
+                eye,
+                any_solo,
+                out,
+                depth + 1,
+            );
+        }
+        return;
+    }
+    if track.kind != TrackKind::Video {
+        return;
+    }
+    let track_active = !any_solo || track.solo;
+    if track.is_adjustment() {
+        if track_active && !opts.bypass_fx {
+            apply_adjustment(track, out, t, p.settings.fps);
+        }
+        return;
+    }
+    if video_children.is_empty() {
+        if !track_active {
+            return;
+        }
+        let Some(layer) = render_track_processed(p, media, track, t, w, h, opts, eye) else {
+            return;
+        };
+        if track.mask_mode != TrackMaskMode::None {
+            apply_track_mask(out, &layer, track.mask_mode);
+        } else {
+            let op = track.opacity * track.env_value(EnvKind::Opacity, t);
+            blend(out, &layer, track.blend, op);
+        }
+        return;
+    }
+
+    // Subárvore Pai/Filho (composição em grupo com máscara e movimento pai, VEGAS Pro p. 740).
+    let mut group = Frame::new(w, h);
+    for child in video_children.into_iter().rev() {
+        if !p.is_track_effectively_muted(child.id) && child.mask_mode != TrackMaskMode::None {
+            if !any_solo || child.solo {
+                if let Some(mask) = render_track_processed(p, media, child, t, w, h, opts, eye) {
+                    apply_track_mask(&mut group, &mask, child.mask_mode);
+                }
+            }
+        } else {
+            compose_subtree(
+                p,
+                media,
+                child,
+                t,
+                w,
+                h,
+                opts,
+                eye,
+                any_solo,
+                &mut group,
+                depth + 1,
+            );
+        }
+    }
+    if track_active {
+        if let Some(layer) = render_track_processed(p, media, track, t, w, h, opts, eye) {
+            if track.mask_mode != TrackMaskMode::None {
+                apply_track_mask(&mut group, &layer, track.mask_mode);
+            } else {
+                blend(&mut group, &layer, track.blend, 1.0);
+            }
+        }
+    }
+    let pmk = track.parent_motion.eval(t);
+    if pmk != MotionKey::default() {
+        group = apply_motion(&group, &pmk);
+    }
+    let op = track.opacity * track.env_value(EnvKind::Opacity, t);
+    blend(out, &group, BlendMode::SourceAlpha, op);
+}
+
+fn render_frame_eye(
     p: &Project,
     media: &MediaCache,
     t: Ticks,
     w: usize,
     h: usize,
     opts: VideoRenderOpts,
+    eye: StereoEye,
 ) -> Frame {
     let bg = p.settings.background;
     let mut out = Frame::filled(w, h, [bg[0], bg[1], bg[2], 1.0]);
     let any_solo = p.any_solo(TrackKind::Video);
+    let track_ids: std::collections::HashSet<Id> = p.tracks.iter().map(|t| t.id).collect();
     for track in p.tracks.iter().rev() {
-        if track.kind != TrackKind::Video || !track.is_audible(any_solo) {
+        // Trilhas com pai válido são compostas dentro de `compose_subtree` do ancestral.
+        let has_valid_parent = track
+            .parent_track_id
+            .is_some_and(|pid| pid != track.id && track_ids.contains(&pid));
+        if has_valid_parent {
             continue;
         }
-        if track.is_adjustment() {
-            if !opts.bypass_fx {
-                apply_adjustment(track, &mut out, t, p.settings.fps);
-            }
-            continue;
-        }
-        let Some(mut layer) = render_track(p, media, track, t, w, h, opts) else {
-            continue;
-        };
-        if !opts.bypass_fx {
-            for fx in &track.fx {
-                vfx::apply(fx, &mut layer, t, p.settings.fps);
-            }
-        }
-        let ftc = track.env_value(EnvKind::FadeToColor, t);
-        if ftc.abs() > 1e-4 {
-            let target = if ftc > 0.0 { 1.0 } else { 0.0 };
-            let k = ftc.abs().min(1.0);
-            layer.px.par_iter_mut().for_each(|px| {
-                for c in 0..3 {
-                    px[c] += (target * px[3] - px[c]) * k;
-                }
-            });
-        }
-        let mk = track.motion.eval(t);
-        if mk != MotionKey::default() {
-            layer = apply_motion(&layer, &mk);
-        }
-        let op = track.opacity * track.env_value(EnvKind::Opacity, t);
-        blend(&mut out, &layer, track.blend, op);
+        compose_subtree(p, media, track, t, w, h, opts, eye, any_solo, &mut out, 0);
     }
     if !opts.bypass_fx {
         for fx in &p.master.video_fx {
@@ -531,6 +854,31 @@ pub fn render_frame_with_opts(
         }
     });
     out
+}
+
+/// Renderiza o quadro do projeto com controle explícito de proxies e bypass de efeitos.
+pub fn render_frame_with_opts(
+    p: &Project,
+    media: &MediaCache,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    opts: VideoRenderOpts,
+) -> Frame {
+    let mode = p.settings.stereo_3d;
+    match mode {
+        Stereo3dMode::Off => render_frame_eye(p, media, t, w, h, opts, StereoEye::Center),
+        Stereo3dMode::LeftOnly => render_frame_eye(p, media, t, w, h, opts, StereoEye::Left),
+        Stereo3dMode::RightOnly => render_frame_eye(p, media, t, w, h, opts, StereoEye::Right),
+        Stereo3dMode::AnaglyphRedCyan
+        | Stereo3dMode::SideBySideHalf
+        | Stereo3dMode::SideBySideFull
+        | Stereo3dMode::TopBottomHalf => {
+            let left = render_frame_eye(p, media, t, w, h, opts, StereoEye::Left);
+            let right = render_frame_eye(p, media, t, w, h, opts, StereoEye::Right);
+            compose_stereo_3d(&left, &right, mode)
+        }
+    }
 }
 
 /// Reamostra o retângulo `(sx, sy, sw, sh)` de `src` para o retângulo
@@ -728,5 +1076,105 @@ mod adjustment_tests {
         );
         assert!((normal.px[0][0] - 1.0).abs() < 1e-4);
         assert!(bypassed.px[0][0].abs() < 1e-4);
+    }
+
+    #[test]
+    fn pai_filho_mascara_e_estereoscopico_3d() {
+        let mut p = Project::default();
+        p.settings.background = [0.0, 0.0, 0.0];
+        let mut parent = Track::new(TrackKind::Video, "Pai");
+        let mut child = Track::new(TrackKind::Video, "Filho");
+        let mut mask_tr = Track::new(TrackKind::Video, "Máscara");
+
+        let green_m = MediaItem {
+            id: new_id(),
+            name: "Verde".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [0.0, 1.0, 0.0, 1.0],
+            }),
+            duration: None,
+            width: 32,
+            height: 32,
+            fps: None,
+            has_video: true,
+            has_audio: false,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let half_black = MediaItem {
+            id: new_id(),
+            name: "Escuro".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [0.5, 0.5, 0.5, 1.0],
+            }),
+            duration: None,
+            width: 32,
+            height: 32,
+            fps: None,
+            has_video: true,
+            has_audio: false,
+            info: String::new(),
+            proxy_path: None,
+        };
+        p.media = vec![green_m.clone(), half_black.clone()];
+        let ev_c = Event::new(&green_m, Ticks::ZERO, Ticks::from_secs_i64(2));
+        child.events.push(ev_c);
+        child.parent_track_id = Some(parent.id);
+
+        let ev_m = Event::new(&half_black, Ticks::ZERO, Ticks::from_secs_i64(2));
+        mask_tr.events.push(ev_m);
+        mask_tr.parent_track_id = Some(parent.id);
+        mask_tr.mask_mode = TrackMaskMode::MultiplyMask;
+
+        // Movimento no Pai desloca o grupo para fora da borda esquerda em parte do quadro
+        parent.parent_motion.keys[0].value.x = 0.5;
+        p.tracks = vec![parent, mask_tr, child];
+
+        let cache = MediaCache::default();
+        let f = render_frame(&p, &cache, Ticks::ZERO, 20, 20);
+        // Lado esquerdo fica preto pelo deslocamento Pai/Filho, lado direito mascarado em ~0.5
+        assert!(f.px[10 * 20 + 2][1] < 0.05);
+        assert!((f.px[10 * 20 + 18][1] - 0.5).abs() < 0.08);
+
+        // Estereoscópico 3D: Anáglifo vermelho/ciano + lado a lado com offset horizontal
+        let mut p3d = Project::default();
+        p3d.settings.background = [0.0, 0.0, 0.0];
+        p3d.settings.stereo_3d = Stereo3dMode::AnaglyphRedCyan;
+        let white_m = MediaItem {
+            id: new_id(),
+            name: "Branco".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [1.0, 1.0, 1.0, 1.0],
+            }),
+            duration: None,
+            width: 20,
+            height: 20,
+            fps: None,
+            has_video: true,
+            has_audio: false,
+            info: String::new(),
+            proxy_path: None,
+        };
+        p3d.media = vec![white_m.clone()];
+        let mut tr3d = Track::new(TrackKind::Video, "3D");
+        tr3d.motion.keys[0].value.scale_x = 0.4;
+        let mut ev3d = Event::new(&white_m, Ticks::ZERO, Ticks::from_secs_i64(2));
+        ev3d.stereo_3d = Stereo3dClip {
+            layout: Stereo3dSourceLayout::Mono2D,
+            swap_lr: false,
+            horizontal_offset: 0.2,
+        };
+        tr3d.events.push(ev3d);
+        p3d.tracks = vec![tr3d];
+        let ana = render_frame(&p3d, &cache, Ticks::ZERO, 40, 20);
+        // Faixa escalada 0.4× ao redor de x=20: esquerda cobre ~12..26,4 e direita ~13,6..28
+        let left_px = ana.px[10 * 40 + 12];
+        let right_px = ana.px[10 * 40 + 27];
+        assert!(left_px[0] > 0.5 && left_px[1] < 0.2 && left_px[2] < 0.2);
+        assert!(right_px[0] < 0.2 && right_px[1] > 0.5 && right_px[2] > 0.5);
+
+        p3d.settings.stereo_3d = Stereo3dMode::SideBySideHalf;
+        let sbs = render_frame(&p3d, &cache, Ticks::ZERO, 40, 20);
+        assert_eq!((sbs.w, sbs.h), (40, 20));
     }
 }

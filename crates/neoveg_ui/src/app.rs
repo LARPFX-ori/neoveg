@@ -68,6 +68,11 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
     ],
     &[
         "insert.empty_event",
+        "insert.track_folder",
+        "track.toggle_folder",
+        "track.make_child",
+        "tools.multicam_mode",
+        "view.stereo_3d",
         "track.record_arm",
         "transport.record",
         "media.select_events",
@@ -256,6 +261,7 @@ pub struct App {
     pub external_monitor: bool,
     pub(crate) external_monitor_fullscreen: bool,
     pub(crate) expanded_ab_tex: Option<(TextureHandle, TextureHandle)>,
+    pub(crate) multicam_thumbs: HashMap<(Id, usize, i64), TextureHandle>,
     pub(crate) preview_inflight: bool,
     pub(crate) preview_inflight_since: Instant,
     pub(crate) last_req: PreviewReqKey,
@@ -415,6 +421,7 @@ impl App {
             external_monitor: false,
             external_monitor_fullscreen: false,
             expanded_ab_tex: None,
+            multicam_thumbs: HashMap::new(),
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
             last_req: PreviewReqKey {
@@ -1944,6 +1951,12 @@ impl App {
         for spec in pending_generated {
             self.insert_generated(spec);
         }
+        if res.is_ok() && matches!(id, "insert.track_video" | "insert.track_audio") {
+            if let Some(ti) = self.session.sel_track {
+                self.session
+                    .apply_default_track_props(ti, &self.prefs.default_track);
+            }
+        }
         self.sync_after_session();
         match res {
             Ok(_) => {
@@ -2199,6 +2212,56 @@ impl App {
                     "Monitor externo fechado."
                 });
             }
+            UiAction::InsertNestedTimelineDialog => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Projetos Neoveg", &["neoveg", "nvp"])
+                    .pick_file()
+                {
+                    match media::import_nested_project(&p) {
+                        Ok(imp) => {
+                            if let Some(w) = &imp.warning {
+                                self.set_status(w.clone());
+                            }
+                            self.session
+                                .insert_nested_project_event(imp, &self.media, self.cursor);
+                            self.sync_after_session();
+                        }
+                        Err(e) => self.set_status(format!("Projeto aninhado: {e:#}")),
+                    }
+                }
+            }
+            UiAction::RenderToNewTrack => {
+                let dir = std::env::temp_dir().join("neoveg_track_renders");
+                match self.session.render_to_new_track(&self.media, None, &dir) {
+                    Ok(_) => self.sync_after_session(),
+                    Err(e) => self.set_status(format!("Renderizar para nova trilha: {e}")),
+                }
+            }
+            UiAction::SetTrackDefaultProps => {
+                if let Some(ti) = self.session.sel_track {
+                    if let Some(defs) = self
+                        .session
+                        .capture_default_track_props(ti, &self.prefs.default_track)
+                    {
+                        self.prefs.default_track = defs;
+                        let _ = self.prefs.save();
+                        self.set_status("Propriedades padrão da trilha salvas nas Preferências.");
+                    }
+                }
+            }
+            UiAction::CycleStereo3dMode => {
+                let modes = Stereo3dMode::ALL;
+                let cur = self.project.settings.stereo_3d;
+                let next_i = modes
+                    .iter()
+                    .position(|m| *m == cur)
+                    .map(|p| (p + 1) % modes.len())
+                    .unwrap_or(0);
+                self.checkpoint();
+                self.project.settings.stereo_3d = modes[next_i];
+                self.changed();
+                self.set_status(format!("Modo 3D: {}", modes[next_i].label()));
+            }
         }
     }
 
@@ -2294,8 +2357,8 @@ impl App {
             return;
         }
 
-        // Teclas numéricas 0-9: ir para o marcador correspondente
-        if !ctrl && !alt {
+        // Teclas numéricas 0-9: ângulo multicâmera (1..9 quando ativo) ou marcador
+        if !ctrl && !alt && !shift {
             let nums = [
                 Key::Num0,
                 Key::Num1,
@@ -2310,6 +2373,13 @@ impl App {
             ];
             for (i, k) in nums.iter().enumerate() {
                 if pressed(*k) {
+                    if self.opts.multicam_mode
+                        && i > 0
+                        && self.session.switch_multicam_angle(self.cursor, i - 1)
+                    {
+                        self.sync_after_session();
+                        return;
+                    }
                     let idx = if i == 0 { 9 } else { i - 1 };
                     if let Some(t) = self.session.jump_to_marker_index(idx) {
                         self.set_cursor(t);
@@ -2696,7 +2766,10 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
                 self.cmd_menu_btn(ui, "insert.track_adjustment");
+                self.cmd_menu_btn(ui, "insert.track_folder");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
+                ui.separator();
+                self.cmd_menu_btn(ui, "insert.nested_timeline");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
                 self.cmd_menu_btn(ui, "insert.region");
@@ -2731,6 +2804,23 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                self.cmd_menu_btn(ui, "track.render_to_new_track");
+                self.cmd_menu_btn(ui, "track.set_defaults");
+                ui.menu_button("Multicâmera", |ui| {
+                    self.cmd_menu_btn(ui, "tools.multicam_create");
+                    self.cmd_menu_chk(ui, self.opts.multicam_mode, "tools.multicam_mode");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_1");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_2");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_3");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_4");
+                });
+                ui.menu_button("Composição de trilhas (Pai/Filho)", |ui| {
+                    self.cmd_menu_btn(ui, "track.toggle_folder");
+                    self.cmd_menu_btn(ui, "track.make_child");
+                    self.cmd_menu_btn(ui, "track.unmake_child");
+                    self.cmd_menu_btn(ui, "track.mask_cycle");
+                });
                 self.cmd_menu_btn(ui, "preview.ram_build");
                 self.cmd_menu_btn(ui, "preview.ram_clear");
                 ui.menu_button("Neoveg Encoder", |ui| {

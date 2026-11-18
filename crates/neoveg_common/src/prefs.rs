@@ -527,6 +527,52 @@ pub struct Preferences {
     /// Integração com aplicativos ArtCraft (PhotoCraft, VectorCraft, FilmCraft, EffectCraft, AniCraft, SoundCraft) e Blender.
     #[serde(default)]
     pub external_apps: ExternalAppsPrefs,
+    /// Propriedades padrão de novas trilhas (`Definir propriedades padrão da trilha`, p. 414).
+    #[serde(default)]
+    pub default_track: DefaultTrackPrefs,
+}
+
+/// Propriedades padrão herdadas por novas trilhas de vídeo ou áudio.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefaultTrackPrefs {
+    pub video_height: f32,
+    pub video_opacity: f32,
+    pub video_blend: String,
+    pub audio_height: f32,
+    pub audio_volume_db: f32,
+    pub audio_pan: f32,
+    pub mute: bool,
+    pub solo: bool,
+}
+
+impl Default for DefaultTrackPrefs {
+    fn default() -> Self {
+        Self {
+            video_height: 72.0,
+            video_opacity: 1.0,
+            video_blend: "SourceAlpha".to_string(),
+            audio_height: 72.0,
+            audio_volume_db: 0.0,
+            audio_pan: 0.0,
+            mute: false,
+            solo: false,
+        }
+    }
+}
+
+impl DefaultTrackPrefs {
+    pub fn sanitize(&mut self) {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        self.video_height = fin(self.video_height, 72.0).clamp(28.0, 400.0);
+        self.audio_height = fin(self.audio_height, 72.0).clamp(28.0, 400.0);
+        self.video_opacity = fin(self.video_opacity, 1.0).clamp(0.0, 1.0);
+        self.audio_volume_db = fin(self.audio_volume_db, 0.0).clamp(-120.0, 24.0);
+        self.audio_pan = fin(self.audio_pan, 0.0).clamp(-1.0, 1.0);
+        if self.video_blend.trim().is_empty() || self.video_blend.len() > 32 {
+            self.video_blend = "SourceAlpha".to_string();
+        }
+    }
 }
 
 const MAX_RECENT_PROJECTS: usize = 20;
@@ -668,6 +714,7 @@ impl Default for Preferences {
             action_safe_pct: default_action_safe_pct(),
             title_safe_pct: default_title_safe_pct(),
             external_apps: ExternalAppsPrefs::default(),
+            default_track: DefaultTrackPrefs::default(),
         }
     }
 }
@@ -751,6 +798,7 @@ impl Preferences {
         sanitize_string_list(&mut self.fx_favorites, MAX_RENDER_FAVORITES, 80, false);
         sanitize_string_list(&mut self.gen_favorites, MAX_RENDER_FAVORITES, 80, false);
         self.external_apps.sanitize();
+        self.default_track.sanitize();
     }
 
     pub fn load_or_default() -> Self {

@@ -1409,3 +1409,82 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     harness.run_steps(2);
     assert!(harness.state().external_monitor);
 }
+
+#[test]
+fn kittest_trilhas_pastas_comp_pai_filho_multicam_e_3d() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Pasta recolhível de trilhas e composição Pai/Filho via Tabela Única.
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.track_folder");
+    harness.run_steps(2);
+    assert!(harness.state().project.tracks[0].is_folder);
+    let child_id = harness.state().project.tracks[1].id;
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.toggle_folder");
+    harness.run_steps(2);
+    assert!(harness.state().project.is_track_hidden_by_folder(child_id));
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.toggle_folder");
+    harness.run_steps(2);
+    assert!(!harness.state().project.is_track_hidden_by_folder(child_id));
+
+    // 2. Grade Multicâmera e troca de ângulo na Prévia de Vídeo.
+    harness.state_mut().session.sel_track = Some(1);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.track_video");
+    harness.run_steps(1);
+    let imp1 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+        color: [1.0, 0.0, 0.0, 1.0],
+    });
+    let imp2 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+        color: [0.0, 1.0, 0.0, 1.0],
+    });
+    {
+        let st = harness.state_mut();
+        st.media.insert(imp1.item.id, imp1.entry);
+        st.media.insert(imp2.item.id, imp2.entry);
+        let ev1 = crate::model::Event::new(
+            &imp1.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(4),
+        );
+        let ev2 = crate::model::Event::new(
+            &imp2.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(4),
+        );
+        st.project.media.extend([imp1.item, imp2.item]);
+        st.project.tracks[1].events.push(ev1);
+        st.project.tracks[2].events.push(ev2);
+        st.session.sel_events.clear();
+        let _ = st.session.create_multicam_track();
+    }
+    harness.run_steps(2);
+    assert!(harness.state().opts.multicam_mode);
+    harness.get_by_label("Câmera 2").click();
+    harness.run_steps(2);
+    let (_, _, _, active, _) = harness
+        .state()
+        .session
+        .active_multicam_event_at(crate::model::Ticks::ZERO)
+        .expect("multicamera ativa");
+    assert_eq!(active, 1);
+
+    // 3. Alternar modo 3D Estereoscópico pelo botão da Prévia.
+    harness.get_by_label("Modo 3D Estereoscópico").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.settings.stereo_3d,
+        crate::model::Stereo3dMode::AnaglyphRedCyan
+    );
+}

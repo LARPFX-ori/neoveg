@@ -452,6 +452,10 @@ pub enum UiAction {
     PreviewRamClear,
     PreviewZoom(f32),
     PreviewToggleExternalMonitor,
+    InsertNestedTimelineDialog,
+    RenderToNewTrack,
+    SetTrackDefaultProps,
+    CycleStereo3dMode,
 }
 
 /// Resultado de execução de um comando.
@@ -2209,6 +2213,32 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "insert.track_folder",
+        label: "Pasta de trilhas (Grupo)",
+        menu_path: "Inserir/Pasta de trilhas (Grupo)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            let kind = s
+                .sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .map(|t| t.kind)
+                .unwrap_or(TrackKind::Video);
+            s.insert_track_folder(kind);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.nested_timeline",
+        label: "Linha do tempo aninhada (.neoveg)...",
+        menu_path: "Inserir/Linha do tempo aninhada (.neoveg)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::InsertNestedTimelineDialog, h),
+    },
+    CommandDef {
         id: "insert.audio_bus",
         label: "Barramento de áudio",
         menu_path: "Inserir/Barramento de áudio",
@@ -2640,6 +2670,209 @@ pub static COMMANDS: &[CommandDef] = &[
             h.on_media_removed(&removed);
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "track.toggle_folder",
+        label: "Recolher / expandir pasta da trilha",
+        menu_path: "Editar/Trilha/Recolher ou expandir pasta",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .is_some_and(|t| {
+                    t.is_folder
+                        || t.parent_track_id.is_some_and(|pid| {
+                            s.project.tracks.iter().any(|p| p.id == pid && p.is_folder)
+                        })
+                })
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.toggle_track_folder(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.make_child",
+        label: "Tornar filho de composição",
+        menu_path: "Editar/Trilha/Tornar filho de composição",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .is_some_and(|i| i > 0 && i < s.project.tracks.len())
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.make_compositing_child(ti).map_err(|e| e.to_string())?;
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.unmake_child",
+        label: "Promover filho para trilha raiz",
+        menu_path: "Editar/Trilha/Promover filho para trilha raiz",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .is_some_and(|t| t.parent_track_id.is_some())
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.unmake_compositing_child(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.mask_cycle",
+        label: "Alternar modo de máscara da trilha",
+        menu_path: "Editar/Trilha/Alternar modo de máscara",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .is_some_and(|t| t.kind == TrackKind::Video && !t.is_folder)
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                let modes = crate::model::TrackMaskMode::ALL;
+                let cur = s.project.tracks[ti].mask_mode;
+                let next_i = modes
+                    .iter()
+                    .position(|m| *m == cur)
+                    .map(|p| (p + 1) % modes.len())
+                    .unwrap_or(0);
+                s.set_track_mask_mode(ti, modes[next_i]);
+                s.set_status(format!("Máscara da trilha: {}", modes[next_i].label()));
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.set_defaults",
+        label: "Definir propriedades padrão da trilha",
+        menu_path: "Ferramentas/Definir propriedades padrão da trilha",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: |s, h| h.supports_ui() && s.sel_track.is_some(),
+        run: |_s, h| ui_action(UiAction::SetTrackDefaultProps, h),
+    },
+    CommandDef {
+        id: "track.render_to_new_track",
+        label: "Renderizar para nova trilha...",
+        menu_path: "Ferramentas/Renderizar para nova trilha...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: |s, h| {
+            h.supports_ui()
+                && (s.time_sel.is_some_and(|(a, b)| b > a) || s.project.duration() > Ticks::ZERO)
+        },
+        run: |_s, h| ui_action(UiAction::RenderToNewTrack, h),
+    },
+    CommandDef {
+        id: "tools.multicam_create",
+        label: "Multicâmera: Criar trilha multicâmera",
+        menu_path: "Ferramentas/Multicâmera/Criar trilha multicâmera",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.project
+                .tracks
+                .iter()
+                .filter(|t| {
+                    t.kind == TrackKind::Video
+                        && !t.is_folder
+                        && !t.is_adjustment()
+                        && !t.events.is_empty()
+                })
+                .count()
+                >= 2
+        },
+        run: |s, h| {
+            s.create_multicam_track().map_err(|e| e.to_string())?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_mode",
+        label: "Multicâmera: Ativar edição multicâmera",
+        menu_path: "Ferramentas/Multicâmera/Ativar edição multicâmera",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.multicam_mode = !s.opts.multicam_mode;
+            s.set_status(if s.opts.multicam_mode {
+                "Edição Multicâmera ativada (clique no ângulo ou pressione 1..9)."
+            } else {
+                "Edição Multicâmera desativada."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_1",
+        label: "Multicâmera: Cortar para Câmera 1",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 1",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_2",
+        label: "Multicâmera: Cortar para Câmera 2",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 2",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 1);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_3",
+        label: "Multicâmera: Cortar para Câmera 3",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 3",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 2);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_4",
+        label: "Multicâmera: Cortar para Câmera 4",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 4",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 3);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.stereo_3d",
+        label: "Prévia: Alternar modo 3D Estereoscópico",
+        menu_path: "Exibir/Prévia/Alternar modo 3D Estereoscópico",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::CycleStereo3dMode, h),
     },
     CommandDef {
         id: "media.view.thumbnails",

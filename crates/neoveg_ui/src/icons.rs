@@ -107,11 +107,18 @@ pub enum Icon {
     MuteAudio,
     MuteVideo,
     ExternalMonitor,
+    TrackFolder,
+    ParentChild,
+    TrackMask,
+    NestedTimeline,
+    Multicam,
+    Stereo3d,
+    RenderTrack,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 99] = [
+    pub const ALL: [Icon; 106] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -211,6 +218,13 @@ impl Icon {
         Icon::MuteAudio,
         Icon::MuteVideo,
         Icon::ExternalMonitor,
+        Icon::TrackFolder,
+        Icon::ParentChild,
+        Icon::TrackMask,
+        Icon::NestedTimeline,
+        Icon::Multicam,
+        Icon::Stereo3d,
+        Icon::RenderTrack,
     ];
 }
 
@@ -1464,6 +1478,76 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             );
             c.line(0.50, 0.68, 0.50, 0.84, pal.ink, 0.08);
             c.line(0.30, 0.84, 0.70, 0.84, pal.ink, 0.08);
+        }
+        Icon::TrackFolder => {
+            c.p.rect_filled(c.rect(0.12, 0.22, 0.44, 0.34), c.u(0.04), pal.amber);
+            c.p.rect_filled(
+                c.rect(0.12, 0.32, 0.88, 0.82),
+                c.u(0.06),
+                pal.amber.gamma_multiply(0.85),
+            );
+            c.line(0.24, 0.52, 0.76, 0.52, pal.ink, 0.07);
+            c.line(0.24, 0.68, 0.64, 0.68, pal.ink, 0.07);
+        }
+        Icon::ParentChild => {
+            c.p.rect_filled(c.rect(0.14, 0.18, 0.54, 0.38), c.u(0.04), pal.blue);
+            c.polyline(&[(0.28, 0.38), (0.28, 0.68), (0.48, 0.68)], pal.ink, 0.08);
+            c.p.rect_filled(c.rect(0.48, 0.56, 0.88, 0.78), c.u(0.04), pal.cyan);
+        }
+        Icon::TrackMask => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.20, 0.86, 0.80),
+                c.u(0.06),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.p.circle_filled(c.pt(0.50, 0.50), c.u(0.18), pal.paper);
+        }
+        Icon::NestedTimeline => {
+            c.p.rect_filled(
+                c.rect(0.12, 0.20, 0.88, 0.80),
+                c.u(0.06),
+                pal.blue.gamma_multiply(0.45),
+            );
+            c.p.rect_stroke(
+                c.rect(0.12, 0.20, 0.88, 0.80),
+                c.u(0.06),
+                c.stroke(0.06, pal.cyan),
+                StrokeKind::Inside,
+            );
+            c.line(0.22, 0.42, 0.78, 0.42, pal.green, 0.09);
+            c.line(0.30, 0.60, 0.70, 0.60, pal.amber, 0.09);
+        }
+        Icon::Multicam => {
+            for (x0, y0, x1, y1, col) in [
+                (0.14, 0.16, 0.46, 0.46, pal.blue),
+                (0.54, 0.16, 0.86, 0.46, pal.cyan),
+                (0.14, 0.54, 0.46, 0.84, pal.green),
+                (0.54, 0.54, 0.86, 0.84, pal.amber),
+            ] {
+                c.p.rect_filled(c.rect(x0, y0, x1, y1), c.u(0.04), col);
+            }
+        }
+        Icon::Stereo3d => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.28, 0.48, 0.72),
+                c.u(0.05),
+                c.stroke(0.08, pal.red),
+                StrokeKind::Inside,
+            );
+            c.p.rect_stroke(
+                c.rect(0.52, 0.28, 0.88, 0.72),
+                c.u(0.05),
+                c.stroke(0.08, pal.cyan),
+                StrokeKind::Inside,
+            );
+            c.line(0.48, 0.46, 0.52, 0.46, pal.ink, 0.08);
+        }
+        Icon::RenderTrack => {
+            c.p.rect_filled(c.rect(0.14, 0.22, 0.86, 0.42), c.u(0.04), pal.muted);
+            c.polyline(&[(0.50, 0.44), (0.50, 0.64)], pal.green, 0.09);
+            c.poly(&[(0.38, 0.56), (0.62, 0.56), (0.50, 0.70)], pal.green, None);
+            c.p.rect_filled(c.rect(0.14, 0.74, 0.86, 0.90), c.u(0.04), pal.blue);
         }
     }
 }

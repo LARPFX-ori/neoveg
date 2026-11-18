@@ -1071,7 +1071,9 @@ fn export_slot_rate(fps: FrameRate) -> FrameRate {
 
 fn export_media_path(m: &MediaItem) -> Option<String> {
     match &m.source {
-        MediaSource::File { path } => (!path.is_empty()).then(|| path.clone()),
+        MediaSource::File { path } | MediaSource::NestedProject { path } => {
+            (!path.is_empty()).then(|| path.clone())
+        }
         MediaSource::ImageSequence { paths, .. } => {
             paths.first().filter(|p| !p.is_empty()).cloned()
         }
