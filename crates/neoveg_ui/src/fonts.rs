@@ -1,7 +1,8 @@
 //! Configuração tipográfica do Neoveg com fontes abertas (`OFL-1.1`) embutidas
-//! em `assets/fonts/`, carregamento seguro de fallback CJK do sistema em tempo
-//! de execução e utilitários para renderização tabular sem oscilação horizontal
-//! em timecodes (`Visor de tempo`, `Régua`, barra de transporte e `Trimmer`).
+//! em `assets/fonts/` (Selawik, Inter, Noto Sans), carregamento seguro opcional das
+//! fontes do sistema operacional em tempo de execução (Segoe UI, Tahoma, Consolas,
+//! Cascadia Mono, fontes CJK japonesas) e utilitários para renderização tabular sem
+//! oscilação horizontal em timecodes (`Visor de tempo`, `Régua`, barra de transporte e `Trimmer`).
 
 use ab_glyph::{Font as _, FontVec};
 use eframe::egui;
@@ -68,151 +69,6 @@ fn push_unique_chain(target: &mut Vec<String>, items: &[&str], tail: &[String]) 
             target.push(item.clone());
         }
     }
-}
-
-/// Constrói a tabela completa de fontes (`OFL-1.1` embutidas + fallback CJK do SO).
-pub fn build_font_definitions() -> egui::FontDefinitions {
-    let mut fonts = egui::FontDefinitions::default();
-    let default_prop = fonts
-        .families
-        .get(&egui::FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-    let default_mono = fonts
-        .families
-        .get(&egui::FontFamily::Monospace)
-        .cloned()
-        .unwrap_or_default();
-
-    fonts.font_data.insert(
-        KEY_SELAWIK_REGULAR.to_owned(),
-        Arc::new(egui::FontData::from_static(SELAWIK_REGULAR_BYTES)),
-    );
-    fonts.font_data.insert(
-        KEY_SELAWIK_SEMIBOLD.to_owned(),
-        Arc::new(egui::FontData::from_static(SELAWIK_SEMIBOLD_BYTES)),
-    );
-    fonts.font_data.insert(
-        KEY_INTER_REGULAR.to_owned(),
-        Arc::new(egui::FontData::from_static(INTER_REGULAR_BYTES)),
-    );
-    fonts.font_data.insert(
-        KEY_NOTO_SANS_REGULAR.to_owned(),
-        Arc::new(egui::FontData::from_static(NOTO_SANS_REGULAR_BYTES)),
-    );
-    fonts.font_data.insert(
-        KEY_NOTO_SANS_MATH.to_owned(),
-        Arc::new(egui::FontData::from_static(NOTO_SANS_MATH_REGULAR_BYTES)),
-    );
-
-    let mut cjk_tail: &[String] = &[];
-    let cjk_owned: Vec<String>;
-    if let Some(sys_font) = cached_japanese_fallback() {
-        let mut fd = egui::FontData::from_owned(sys_font.data.clone());
-        fd.index = sys_font.index;
-        fonts
-            .font_data
-            .insert(CJK_FONT_KEY.to_owned(), Arc::new(fd));
-        cjk_owned = vec![CJK_FONT_KEY.to_owned()];
-        cjk_tail = &cjk_owned;
-    }
-
-    let mut prop_tail = default_prop.clone();
-    prop_tail.extend_from_slice(cjk_tail);
-    let mut prop_chain = Vec::new();
-    push_unique_chain(
-        &mut prop_chain,
-        &[
-            KEY_SELAWIK_REGULAR,
-            KEY_NOTO_SANS_REGULAR,
-            KEY_INTER_REGULAR,
-            KEY_NOTO_SANS_MATH,
-            KEY_HACK_BUILTIN,
-        ],
-        &prop_tail,
-    );
-    fonts
-        .families
-        .insert(egui::FontFamily::Proportional, prop_chain);
-
-    let mut semibold_chain = Vec::new();
-    push_unique_chain(
-        &mut semibold_chain,
-        &[
-            KEY_SELAWIK_SEMIBOLD,
-            KEY_SELAWIK_REGULAR,
-            KEY_NOTO_SANS_REGULAR,
-            KEY_INTER_REGULAR,
-            KEY_NOTO_SANS_MATH,
-            KEY_HACK_BUILTIN,
-        ],
-        &prop_tail,
-    );
-    fonts.families.insert(
-        egui::FontFamily::Name(FAMILY_SEMIBOLD.into()),
-        semibold_chain,
-    );
-
-    let mut visor_chain = Vec::new();
-    push_unique_chain(
-        &mut visor_chain,
-        &[
-            KEY_INTER_REGULAR,
-            KEY_NOTO_SANS_REGULAR,
-            KEY_NOTO_SANS_MATH,
-            KEY_HACK_BUILTIN,
-        ],
-        &prop_tail,
-    );
-    fonts
-        .families
-        .insert(egui::FontFamily::Name(FAMILY_VISOR.into()), visor_chain);
-
-    let mut ruler_chain = Vec::new();
-    push_unique_chain(
-        &mut ruler_chain,
-        &[
-            KEY_INTER_REGULAR,
-            KEY_NOTO_SANS_REGULAR,
-            KEY_NOTO_SANS_MATH,
-            KEY_HACK_BUILTIN,
-        ],
-        &prop_tail,
-    );
-    fonts
-        .families
-        .insert(egui::FontFamily::Name(FAMILY_RULER.into()), ruler_chain);
-
-    let mut mono_chain = Vec::new();
-    let mut mono_tail = Vec::with_capacity(
-        default_mono
-            .len()
-            .saturating_add(4)
-            .saturating_add(prop_tail.len()),
-    );
-    mono_tail.extend(default_mono);
-    for extra in [KEY_NOTO_SANS_REGULAR, KEY_INTER_REGULAR, KEY_NOTO_SANS_MATH] {
-        mono_tail.push(extra.to_owned());
-    }
-    mono_tail.extend(prop_tail);
-    push_unique_chain(&mut mono_chain, &[], &mono_tail);
-    fonts
-        .families
-        .insert(egui::FontFamily::Monospace, mono_chain);
-
-    fonts
-}
-
-/// Registra as fontes `OFL-1.1` do Neoveg, fallback japonês e ajusta o estilo tipográfico base do `egui::Context`.
-///
-/// É idempotente e segura contra falhas (zero `unwrap`/`expect`/`panic`).
-pub fn configure_fonts(ctx: &egui::Context) {
-    ctx.set_fonts(build_font_definitions());
-    ctx.style_mut(|style| {
-        style
-            .text_styles
-            .insert(egui::TextStyle::Heading, semibold_font(18.0));
-    });
 }
 
 /// Limite superior seguro de tamanho de fonte (em pontos) para evitar estourar o atlas do `epaint`.
@@ -489,6 +345,12 @@ pub fn tabular_label(
 
 const MAX_SYSTEM_FONT_BYTES: u64 = 64 * 1024 * 1024;
 const CJK_FONT_KEY: &str = "neoveg_sys_jp";
+const UI_FONT_KEY: &str = "neoveg_sys_ui";
+const MONO_FONT_KEY: &str = "neoveg_sys_mono";
+const TIME_FONT_KEY: &str = "neoveg_sys_time";
+/// Família do Visor de tempo: números grandes em negrito, como no VEGAS Pro.
+/// Sempre existe na cadeia (cai na monoespaçada sem a fonte do sistema).
+pub const TIME_FAMILY: &str = "neoveg_time";
 
 #[derive(Clone)]
 struct LoadedSystemFont {
@@ -497,6 +359,169 @@ struct LoadedSystemFont {
 }
 
 static CJK_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
+static UI_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
+static MONO_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
+static TIME_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
+
+/// Pasta de fontes do Windows (`%WINDIR%\Fonts`, ou `C:\Windows\Fonts`).
+fn windows_font_dir() -> PathBuf {
+    std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts")
+}
+
+/// Fonte da interface, em ordem de preferência. No Windows é a fonte de
+/// sistema que o VEGAS Pro usa (Segoe UI), com Tahoma como alternativa.
+fn candidate_ui_font_paths() -> Vec<PathBuf> {
+    let win = windows_font_dir();
+    let mut out = vec![win.join("segoeui.ttf"), win.join("tahoma.ttf")];
+    for p in [
+        // macOS
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        // Linux
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ] {
+        out.push(PathBuf::from(p));
+    }
+    out
+}
+
+/// Fonte monoespaçada (códigos de tempo, campos numéricos).
+fn candidate_mono_font_paths() -> Vec<PathBuf> {
+    let win = windows_font_dir();
+    let mut out = vec![win.join("consola.ttf"), win.join("CascadiaMono.ttf")];
+    for p in [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    ] {
+        out.push(PathBuf::from(p));
+    }
+    out
+}
+
+/// Fonte do Visor de tempo: a sem serifa do sistema em negrito (Segoe UI Bold
+/// no Windows), com números de largura fixa.
+fn candidate_time_font_paths() -> Vec<PathBuf> {
+    let win = windows_font_dir();
+    let mut out = vec![win.join("segoeuib.ttf"), win.join("tahomabd.ttf")];
+    for p in [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ] {
+        out.push(PathBuf::from(p));
+    }
+    out
+}
+
+/// Para o Visor de tempo: precisa dos números e dos separadores dos formatos
+/// de tempo, com todos os dígitos da mesma largura (o visor não "dança").
+fn validate_time_font(bytes: &[u8]) -> Option<u32> {
+    use ab_glyph::ScaleFont as _;
+    for idx in 0..4u32 {
+        let Ok(font) = FontVec::try_from_vec_and_index(bytes.to_vec(), idx) else {
+            continue;
+        };
+        let valid_units = font
+            .units_per_em()
+            .is_some_and(|u| (16.0..=16384.0).contains(&u));
+        if !valid_units || !"0123456789:;.,-".chars().all(|c| font.glyph_id(c).0 != 0) {
+            continue;
+        }
+        let scaled = font.as_scaled(100.0);
+        let w0 = scaled.h_advance(font.glyph_id('0'));
+        let tabular = w0.is_finite()
+            && w0 > 0.0
+            && "123456789"
+                .chars()
+                .all(|c| (scaled.h_advance(font.glyph_id(c)) - w0).abs() < 0.5);
+        if tabular {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn cached_time_font() -> Option<&'static LoadedSystemFont> {
+    TIME_FONT_CACHE
+        .get_or_init(|| first_valid_font(candidate_time_font_paths(), validate_time_font))
+        .as_ref()
+}
+
+/// Fonte do Visor de tempo no tamanho pedido. Se a família não estiver
+/// registrada no contexto (fontes trocadas por fora), usa a monoespaçada em
+/// vez de travar o egui.
+pub fn time_font(ctx: &egui::Context, size: f32) -> egui::FontId {
+    let fam = egui::FontFamily::Name(TIME_FAMILY.into());
+    if ctx.fonts(|f| f.families().contains(&fam)) {
+        egui::FontId::new(size, fam)
+    } else {
+        egui::FontId::monospace(size)
+    }
+}
+
+/// Aceita a fonte só se ela abrir e cobrir os idiomas latinos do programa
+/// (pt-BR, en, es, fr, de); devolve o índice dentro de um `.ttc`.
+fn validate_latin_font(bytes: &[u8]) -> Option<u32> {
+    for idx in 0..4u32 {
+        let Ok(font) = FontVec::try_from_vec_and_index(bytes.to_vec(), idx) else {
+            continue;
+        };
+        let valid_units = font
+            .units_per_em()
+            .is_some_and(|u| (16.0..=16384.0).contains(&u));
+        if !valid_units {
+            continue;
+        }
+        let covers = "Aaçãõéêíóúñ¿¡œàèëîïùûüäößÄÖÜ0123456789%:;.,()[]+-"
+            .chars()
+            .all(|c| font.glyph_id(c).0 != 0);
+        if covers {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn first_valid_font(
+    paths: Vec<PathBuf>,
+    validate: fn(&[u8]) -> Option<u32>,
+) -> Option<LoadedSystemFont> {
+    paths.iter().find_map(|p| read_bounded_font(p, validate))
+}
+
+fn cached_ui_font() -> Option<&'static LoadedSystemFont> {
+    UI_FONT_CACHE
+        .get_or_init(|| first_valid_font(candidate_ui_font_paths(), validate_latin_font))
+        .as_ref()
+}
+
+fn cached_mono_font() -> Option<&'static LoadedSystemFont> {
+    MONO_FONT_CACHE
+        .get_or_init(|| first_valid_font(candidate_mono_font_paths(), validate_latin_font))
+        .as_ref()
+}
 
 fn candidate_japanese_font_paths() -> Vec<PathBuf> {
     let mut out = vec![
@@ -564,7 +589,7 @@ fn validate_japanese_font(bytes: &[u8]) -> Option<u32> {
     None
 }
 
-fn read_bounded_font(path: &Path) -> Option<LoadedSystemFont> {
+fn read_bounded_font(path: &Path, validate: fn(&[u8]) -> Option<u32>) -> Option<LoadedSystemFont> {
     let file = std::fs::File::open(path).ok()?;
     let meta_len = file.metadata().ok().map_or(0, |m| m.len());
     if meta_len == 0 || meta_len > MAX_SYSTEM_FONT_BYTES {
@@ -577,30 +602,200 @@ fn read_bounded_font(path: &Path) -> Option<LoadedSystemFont> {
     if buf.len() as u64 > MAX_SYSTEM_FONT_BYTES {
         return None;
     }
-    let index = validate_japanese_font(&buf)?;
+    let index = validate(&buf)?;
     Some(LoadedSystemFont { data: buf, index })
 }
 
 fn cached_japanese_fallback() -> Option<&'static LoadedSystemFont> {
     CJK_FONT_CACHE
-        .get_or_init(|| {
-            for p in candidate_japanese_font_paths() {
-                if let Some(loaded) = read_bounded_font(&p) {
-                    return Some(loaded);
-                }
-            }
-            None
-        })
+        .get_or_init(|| first_valid_font(candidate_japanese_font_paths(), validate_japanese_font))
         .as_ref()
 }
 
+fn font_data(f: &LoadedSystemFont) -> Arc<egui::FontData> {
+    let mut fd = egui::FontData::from_owned(f.data.clone());
+    fd.index = f.index;
+    Arc::new(fd)
+}
+
+/// Monta as definições de fontes da aplicação.
+///
+/// Sempre registra as fontes abertas OFL-1.1 do Neoveg (`assets/fonts/`: Selawik, Inter, Noto Sans).
+/// Quando `system_ui` é verdadeiro, as fontes do sistema operacional (Segoe UI, Tahoma, Consolas,
+/// Cascadia Mono) são inseridas no início da cadeia para paridade clássica de SO.
+pub fn font_definitions(system_ui: bool) -> egui::FontDefinitions {
+    let mut defs = egui::FontDefinitions::default();
+    let default_prop = defs
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let default_mono = defs
+        .families
+        .get(&egui::FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+
+    // 1. Fontes abertas OFL-1.1 do Neoveg embutidas
+    defs.font_data.insert(
+        KEY_SELAWIK_REGULAR.to_owned(),
+        Arc::new(egui::FontData::from_static(SELAWIK_REGULAR_BYTES)),
+    );
+    defs.font_data.insert(
+        KEY_SELAWIK_SEMIBOLD.to_owned(),
+        Arc::new(egui::FontData::from_static(SELAWIK_SEMIBOLD_BYTES)),
+    );
+    defs.font_data.insert(
+        KEY_INTER_REGULAR.to_owned(),
+        Arc::new(egui::FontData::from_static(INTER_REGULAR_BYTES)),
+    );
+    defs.font_data.insert(
+        KEY_NOTO_SANS_REGULAR.to_owned(),
+        Arc::new(egui::FontData::from_static(NOTO_SANS_REGULAR_BYTES)),
+    );
+    defs.font_data.insert(
+        KEY_NOTO_SANS_MATH.to_owned(),
+        Arc::new(egui::FontData::from_static(NOTO_SANS_MATH_REGULAR_BYTES)),
+    );
+
+    // 2. Fallback japonês do sistema
+    let mut cjk_tail: &[String] = &[];
+    let cjk_owned: Vec<String>;
+    if let Some(sys_font) = cached_japanese_fallback() {
+        defs.font_data
+            .insert(CJK_FONT_KEY.to_owned(), font_data(sys_font));
+        cjk_owned = vec![CJK_FONT_KEY.to_owned()];
+        cjk_tail = &cjk_owned;
+    }
+
+    // 3. Cadeia Proporcional base
+    let mut prop_tail = default_prop;
+    prop_tail.extend_from_slice(cjk_tail);
+    let mut prop_chain = Vec::new();
+    push_unique_chain(
+        &mut prop_chain,
+        &[
+            KEY_SELAWIK_REGULAR,
+            KEY_NOTO_SANS_REGULAR,
+            KEY_INTER_REGULAR,
+            KEY_NOTO_SANS_MATH,
+            KEY_HACK_BUILTIN,
+        ],
+        &prop_tail,
+    );
+
+    // 4. Cadeia Semibold
+    let mut semibold_chain = Vec::new();
+    push_unique_chain(
+        &mut semibold_chain,
+        &[
+            KEY_SELAWIK_SEMIBOLD,
+            KEY_SELAWIK_REGULAR,
+            KEY_NOTO_SANS_REGULAR,
+            KEY_INTER_REGULAR,
+            KEY_NOTO_SANS_MATH,
+            KEY_HACK_BUILTIN,
+        ],
+        &prop_tail,
+    );
+    defs.families.insert(
+        egui::FontFamily::Name(FAMILY_SEMIBOLD.into()),
+        semibold_chain,
+    );
+
+    // 5. Cadeia Visor e Régua
+    let mut visor_chain = Vec::new();
+    push_unique_chain(
+        &mut visor_chain,
+        &[
+            KEY_INTER_REGULAR,
+            KEY_NOTO_SANS_REGULAR,
+            KEY_NOTO_SANS_MATH,
+            KEY_HACK_BUILTIN,
+        ],
+        &prop_tail,
+    );
+    defs.families
+        .insert(egui::FontFamily::Name(FAMILY_VISOR.into()), visor_chain.clone());
+
+    let mut ruler_chain = Vec::new();
+    push_unique_chain(
+        &mut ruler_chain,
+        &[
+            KEY_INTER_REGULAR,
+            KEY_NOTO_SANS_REGULAR,
+            KEY_NOTO_SANS_MATH,
+            KEY_HACK_BUILTIN,
+        ],
+        &prop_tail,
+    );
+    defs.families
+        .insert(egui::FontFamily::Name(FAMILY_RULER.into()), ruler_chain);
+
+    // 6. Cadeia Monospace base
+    let mut mono_chain = Vec::new();
+    let mut mono_tail = Vec::with_capacity(
+        default_mono
+            .len()
+            .saturating_add(4)
+            .saturating_add(prop_tail.len()),
+    );
+    mono_tail.extend(default_mono.clone());
+    for extra in [KEY_NOTO_SANS_REGULAR, KEY_INTER_REGULAR, KEY_NOTO_SANS_MATH] {
+        mono_tail.push(extra.to_owned());
+    }
+    mono_tail.extend(prop_tail);
+    push_unique_chain(&mut mono_chain, &[], &mono_tail);
+
+    // 7. TIME_FAMILY base (Visor de tempo)
+    let mut time_chain = default_mono;
+    time_chain.insert(0, KEY_INTER_REGULAR.to_owned());
+
+    // 8. Se system_ui estiver ativo, insere fontes do SO na frente das cadeias
+    if system_ui {
+        if let Some(font) = cached_ui_font() {
+            defs.font_data.insert(UI_FONT_KEY.to_owned(), font_data(font));
+            prop_chain.insert(0, UI_FONT_KEY.to_owned());
+        }
+        if let Some(font) = cached_mono_font() {
+            defs.font_data.insert(MONO_FONT_KEY.to_owned(), font_data(font));
+            mono_chain.insert(0, MONO_FONT_KEY.to_owned());
+        }
+        if let Some(font) = cached_time_font() {
+            defs.font_data.insert(TIME_FONT_KEY.to_owned(), font_data(font));
+            time_chain.insert(0, TIME_FONT_KEY.to_owned());
+        }
+    }
+
+    defs.families.insert(egui::FontFamily::Proportional, prop_chain);
+    defs.families.insert(egui::FontFamily::Monospace, mono_chain);
+    defs.families
+        .insert(egui::FontFamily::Name(TIME_FAMILY.into()), time_chain);
+
+    defs
+}
+
+/// Constrói a tabela padrão de fontes com as fontes abertas OFL-1.1 embutidas.
+pub fn build_font_definitions() -> egui::FontDefinitions {
+    font_definitions(false)
+}
+
+/// Configura as fontes do contexto egui e aplica os estilos tipográficos base.
+pub fn configure_fonts(ctx: &egui::Context, system_ui: bool) {
+    ctx.set_fonts(font_definitions(system_ui));
+    ctx.style_mut(|style| {
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, semibold_font(18.0));
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn configured_ctx_with_ppp(ppp: f32) -> egui::Context {
         let ctx = egui::Context::default();
-        configure_fonts(&ctx);
+        configure_fonts(&ctx, false);
         ctx.set_pixels_per_point(ppp);
         let _ = ctx.run(
             egui::RawInput {
@@ -623,7 +818,7 @@ mod tests {
     fn configure_fonts_registra_familias_e_preserva_text_styles() {
         let ctx = configured_ctx();
         // Idempotência: chamar duas vezes não altera nem falha.
-        configure_fonts(&ctx);
+        configure_fonts(&ctx, false);
 
         ctx.fonts(|f| {
             let prop_w = f.glyph_width(&egui::FontId::proportional(12.5), 'A');
@@ -859,6 +1054,108 @@ mod tests {
         assert_eq!(validate_japanese_font(&[]), None);
         assert_eq!(validate_japanese_font(b"not a valid font"), None);
         assert_eq!(validate_japanese_font(&vec![0xFF; 4096]), None);
+        assert_eq!(validate_time_font(&[]), None);
+        assert_eq!(validate_time_font(&vec![0xFF; 4096]), None);
+        assert_eq!(validate_latin_font(&[]), None);
+        assert_eq!(validate_latin_font(b"not a valid font"), None);
+        assert_eq!(validate_latin_font(&vec![0xFF; 4096]), None);
+        // arquivo inexistente ou pasta: sem fonte, sem pânico
+        assert!(read_bounded_font(Path::new("nao/existe.ttf"), validate_latin_font).is_none());
+        assert!(read_bounded_font(Path::new("."), validate_latin_font).is_none());
+    }
+
+    #[test]
+    fn familia_do_visor_de_tempo_sempre_existe_e_cai_na_monoespacada() {
+        let fam = egui::FontFamily::Name(TIME_FAMILY.into());
+        for system_ui in [false, true] {
+            let defs = font_definitions(system_ui);
+            let chain = defs.families.get(&fam).expect("família do visor");
+            let mono = defs
+                .families
+                .get(&egui::FontFamily::Monospace)
+                .expect("monoespaçada");
+            // a reserva é a cadeia monoespaçada inteira
+            assert!(chain.ends_with(mono), "{chain:?} / {mono:?}");
+            if !system_ui {
+                assert_eq!(chain, mono);
+            }
+        }
+        // contexto sem as fontes do programa: cai na monoespaçada
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(time_font(&ctx, 20.0), egui::FontId::monospace(20.0));
+        ctx.set_fonts(font_definitions(false));
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(time_font(&ctx, 20.0).family, fam);
+    }
+
+    #[test]
+    fn fontes_do_sistema_vao_para_o_inicio_e_as_embutidas_ficam_de_reserva() {
+        let embutida = font_definitions(false);
+        assert!(!embutida.font_data.contains_key(UI_FONT_KEY));
+        assert!(!embutida.font_data.contains_key(MONO_FONT_KEY));
+
+        let sistema = font_definitions(true);
+        for (key, fam) in [
+            (UI_FONT_KEY, egui::FontFamily::Proportional),
+            (MONO_FONT_KEY, egui::FontFamily::Monospace),
+        ] {
+            let chain = sistema.families.get(&fam).expect("família");
+            let base = embutida.families.get(&fam).expect("família");
+            if sistema.font_data.contains_key(key) {
+                assert_eq!(chain.first().map(String::as_str), Some(key));
+                assert_eq!(chain.len(), base.len() + 1);
+            } else {
+                // máquina sem a fonte: a cadeia é a embutida
+                assert_eq!(chain, base);
+            }
+            for name in base {
+                assert!(chain.contains(name), "a reserva {name} saiu da cadeia");
+            }
+        }
+    }
+
+    #[test]
+    fn fonte_da_interface_do_sistema_cobre_os_textos_latinos() {
+        let Some(sys) = cached_ui_font() else {
+            // máquina sem Segoe UI, Tahoma, Noto, Liberation ou DejaVu
+            return;
+        };
+        let fv = FontVec::try_from_vec_and_index(sys.data.clone(), sys.index)
+            .expect("fonte validada deve abrir no ab_glyph");
+        let defs = egui::FontDefinitions::default();
+        let mut chain = vec![fv];
+        if let Some(names) = defs.families.get(&egui::FontFamily::Proportional) {
+            for name in names {
+                if let Some(fd) = defs.font_data.get(name) {
+                    if let Ok(f) = FontVec::try_from_vec_and_index(fd.font.to_vec(), fd.index) {
+                        chain.push(f);
+                    }
+                }
+            }
+        }
+        for lang in [
+            Language::PtBr,
+            Language::En,
+            Language::Es,
+            Language::Fr,
+            Language::De,
+        ] {
+            for cmd in COMMANDS {
+                for ch in cmd.label_in(lang).chars() {
+                    if ch.is_control() || ch.is_whitespace() {
+                        continue;
+                    }
+                    assert!(
+                        chain.iter().any(|f| f.glyph_id(ch).0 != 0),
+                        "glifo ausente para {:?} (U+{:04X}) em {:?}",
+                        ch,
+                        ch as u32,
+                        cmd.label_in(lang)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

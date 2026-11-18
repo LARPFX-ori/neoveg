@@ -272,6 +272,8 @@ pub struct App {
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
+    /// Painéis fechados (fora da área de janelas); voltam pelo menu Exibir.
+    pub closed_tabs: HashSet<DockTab>,
     pub preview_detached: bool,
     pub preview_visible: bool,
     pub master_bus_visible: bool,
@@ -325,6 +327,8 @@ pub struct App {
     /// Sessões anteriores que não fecharam normalmente (janela de relatório).
     pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
+    /// A janela ainda está no modo tela de abertura (sem bordas, tamanho da abertura).
+    pub(crate) startup_window: bool,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
@@ -381,7 +385,12 @@ impl App {
         }
         let lang = prefs.lang();
         neoveg_common::set_active_language(lang);
-        crate::fonts::configure_fonts(egui_ctx);
+        // Ctrl+= / Ctrl+- / Ctrl+0 são atalhos do VEGAS (tom em oitavas);
+        // o zoom da interface do egui não pode tomar essas teclas.
+        egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        // nos testes fica a fonte embutida, para as medidas de layout serem
+        // as mesmas em qualquer máquina
+        crate::fonts::configure_fonts(egui_ctx, prefs.system_ui_font && !cfg!(test));
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
         let loaded_layout = prefs
@@ -449,6 +458,7 @@ impl App {
                 ..Default::default()
             },
             detached_tabs: initial_layout.detached_panels(),
+            closed_tabs: initial_layout.closed_panels(),
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
             master_bus_visible,
@@ -507,6 +517,7 @@ impl App {
             recovery_offer,
             crash_reports: Vec::new(),
             splash,
+            startup_window: false,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
@@ -921,6 +932,35 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ticks::from_samples(s.pos.max(0), self.audio.sr)
+    }
+
+    /// Destino do cursor para uma seta (`dir` < 0: esquerda). Anda um pixel
+    /// da régua; com Quantizar para quadros ligado, para na grade de quadros e
+    /// anda pelo menos um quadro, para que a agulha nunca fique parada no
+    /// mesmo quadro com o zoom aberto.
+    pub(crate) fn arrow_step_target(&self, dir: i64) -> Ticks {
+        let px = Ticks::from_secs_f64_clamped(
+            1.0 / f64::from(
+                self.tl
+                    .px_per_sec
+                    .max(crate::timeline::TimelineState::MIN_PX_PER_SEC),
+            ),
+        )
+        .max(Ticks::from_raw(1));
+        let cur = self.cursor;
+        let raw = if dir < 0 { cur - px } else { cur + px };
+        if !self.opts.quantize {
+            return raw.max(Ticks::ZERO);
+        }
+        let fps = self.project.settings.fps;
+        let cur_f = fps.ticks_to_frame_round(cur);
+        let raw_f = fps.ticks_to_frame_round(raw);
+        let f = if dir < 0 {
+            raw_f.min(cur_f.saturating_sub(1))
+        } else {
+            raw_f.max(cur_f.saturating_add(1))
+        };
+        fps.frame_to_ticks(f.max(0)).max(Ticks::ZERO)
     }
 
     pub fn set_cursor(&mut self, t: Ticks) {
@@ -2416,8 +2456,12 @@ impl App {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+            UiAction::SelectDock(panel) if crate::layout::window_only(panel) => {
+                self.open_window_panel(ctx, panel);
+            }
             UiAction::SelectDock(panel) => {
                 self.dock_visible = true;
+                self.closed_tabs.remove(&panel);
                 self.detached_tabs.remove(&panel);
                 self.dock_tab = panel;
                 self.pending_dock_focus = Some(panel);
@@ -2560,6 +2604,20 @@ impl App {
             UiAction::PreviewZoom(z) => {
                 self.apply_preview_zoom(z);
             }
+            UiAction::UiScale(steps) => {
+                let pct = self.prefs.step_ui_scale(steps).to_string();
+                // aplicada no próximo quadro (`frame_ui`)
+                if let Err(e) = self.prefs.save() {
+                    self.set_status(e);
+                } else {
+                    let lang = self.lang();
+                    self.set_status(tr_args(
+                        lang,
+                        "Escala da interface: {pct}%",
+                        &[("pct", &pct)],
+                    ));
+                }
+            }
             UiAction::PreviewToggleExternalMonitor => {
                 self.external_monitor = !self.external_monitor;
                 self.set_status(if self.external_monitor {
@@ -2625,7 +2683,7 @@ impl App {
     // Atalhos de teclado (despachados via Tabela Única de Comandos)
     // -----------------------------------------------------------------
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // com um script rodando, a sessão é dele até o fim
         if self.splash.active
             || self.welcome_open
@@ -2664,32 +2722,17 @@ impl App {
             return;
         }
 
-        // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
+        // Esquerda/Direita sem modificadores (lista de atalhos do VEGAS Pro):
+        // um pixel da régua; com Quantizar para quadros, no mínimo um quadro
         if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                let dt = Ticks::from_secs_f64_clamped(
-                    1.0 / self
-                        .tl
-                        .px_per_sec
-                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
-                        as f64,
-                )
-                .max(Ticks::from_raw(1));
-                let c = self.cursor;
-                self.set_cursor(c - dt);
+                let t = self.arrow_step_target(-1);
+                self.set_cursor(t);
                 return;
             }
             if pressed(Key::ArrowRight) {
-                let dt = Ticks::from_secs_f64_clamped(
-                    1.0 / self
-                        .tl
-                        .px_per_sec
-                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
-                        as f64,
-                )
-                .max(Ticks::from_raw(1));
-                let c = self.cursor;
-                self.set_cursor(c + dt);
+                let t = self.arrow_step_target(1);
+                self.set_cursor(t);
                 return;
             }
         }
@@ -4307,7 +4350,47 @@ impl eframe::App for App {
 
 impl App {
     /// Um quadro completo da interface (separado de `eframe::App` para testes).
+    /// A janela abriu do tamanho da tela de abertura (ver `native_options`):
+    /// enquanto a abertura estiver ativa, só ela é desenhada. Vale mesmo com a
+    /// abertura inativa (ex.: oferta de recuperação): aí o primeiro quadro já
+    /// devolve as bordas e o tamanho normal, e a janela nunca fica presa pequena.
+    pub fn set_startup_splash_window(&mut self, on: bool) {
+        self.startup_window = on;
+    }
+
+    /// Fim da tela de abertura na inicialização: a janela ganha bordas e o
+    /// tamanho normal, centralizada no monitor.
+    fn leave_startup_window(&mut self, ctx: &egui::Context) {
+        self.startup_window = false;
+        let [w, h] = crate::MAIN_WINDOW_SIZE;
+        let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
+        let monitor = ctx
+            .input(|i| i.viewport().monitor_size)
+            .filter(|m| m.x.is_finite() && m.y.is_finite() && m.x > 0.0 && m.y > 0.0);
+        let size = match monitor {
+            Some(m) => egui::vec2(w.min(m.x - 40.0).max(min_w), h.min(m.y - 80.0).max(min_h)),
+            None => egui::vec2(w, h),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            min_w, min_h,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if let Some(m) = monitor {
+            let x = ((m.x - size.x) * 0.5).max(0.0);
+            let y = ((m.y - size.y) * 0.5).max(0.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
+        // escala da interface (Exibir > Escala da interface, Preferências)
+        let want_zoom = self.prefs.ui_scale_factor();
+        if (ctx.zoom_factor() - want_zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(want_zoom);
+        }
         let want_delay = if self.prefs.show_tooltips {
             0.5
         } else {
@@ -4326,6 +4409,14 @@ impl App {
         let lang = self.lang();
         if let Some(msg) = self.encoder.tick(ctx, dt, &self.media, lang) {
             self.set_status(msg);
+        }
+        if self.startup_window {
+            // tela de abertura na própria janela: a interface só aparece depois
+            self.show_splash_overlay(ctx);
+            if self.splash.active {
+                return;
+            }
+            self.leave_startup_window(ctx);
         }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
@@ -4471,6 +4562,7 @@ impl App {
             loading: self.loading,
             commands_count: COMMANDS.len(),
             fallback_notice: notice,
+            own_window: self.startup_window,
         };
         let out = crate::splash::show_splash_screen(
             ctx,
@@ -4603,7 +4695,10 @@ impl App {
     }
 
     pub fn is_panel_open(&self, tab: DockTab) -> bool {
-        (self.dock_visible && self.dock_tab == tab && !self.detached_tabs.contains(&tab))
+        (self.dock_visible
+            && self.dock_tab == tab
+            && !self.detached_tabs.contains(&tab)
+            && !self.closed_tabs.contains(&tab))
             || self.detached_tabs.contains(&tab)
     }
 
@@ -4614,6 +4709,12 @@ impl App {
             .map(|t| layout::panel_key(*t).to_string())
             .collect();
         detached.sort();
+        let mut closed: Vec<String> = self
+            .closed_tabs
+            .iter()
+            .map(|t| layout::panel_key(*t).to_string())
+            .collect();
+        closed.sort();
         let mut l = WindowLayout {
             name: name.to_string(),
             dock_height: self.dock_height,
@@ -4628,6 +4729,7 @@ impl App {
             px_per_sec: Some(self.tl.px_per_sec),
             edit_layout: Some(self.prefs.edit_layout.clone()),
             tile_tree: Some(self.dock_tree.clone()),
+            closed_tabs: Some(closed),
         };
         l.sanitize();
         l
@@ -4642,6 +4744,7 @@ impl App {
         self.dock_visible = l.dock_visible;
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
+        self.closed_tabs = l.closed_panels();
         self.preview_detached = l.preview_detached;
         self.preview_visible = l.preview_visible;
         self.master_bus_visible = l.master_bus_visible;

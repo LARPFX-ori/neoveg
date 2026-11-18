@@ -483,6 +483,14 @@ pub struct Preferences {
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
+    /// Usa as fontes do sistema na interface (Segoe UI no Windows, como o
+    /// VEGAS Pro); desligado, usa as fontes embutidas.
+    #[serde(default = "default_system_ui_font")]
+    pub system_ui_font: bool,
+    /// Escala da interface em porcentagem (tamanho de textos, botões e
+    /// painéis), de `UI_SCALE_MIN` a `UI_SCALE_MAX`.
+    #[serde(default = "default_ui_scale_pct")]
+    pub ui_scale_pct: u16,
     /// Exibe a tela de boas-vindas com ações rápidas e projetos recentes ao iniciar.
     #[serde(default = "default_show_welcome")]
     pub show_welcome: bool,
@@ -555,6 +563,9 @@ pub struct Preferences {
     /// Percentual da borda de área segura de títulos (`50..=95`, <= `action_safe_pct`).
     #[serde(default = "default_title_safe_pct")]
     pub title_safe_pct: u8,
+    /// Guias extras da prévia, desenhadas junto das áreas seguras.
+    #[serde(default)]
+    pub safe_guides: SafeGuidesPrefs,
     /// Integração com aplicativos ArtCraft (PhotoCraft, VectorCraft, FilmCraft, EffectCraft, AniCraft, SoundCraft) e Blender.
     #[serde(default)]
     pub external_apps: ExternalAppsPrefs,
@@ -582,9 +593,42 @@ pub struct Preferences {
     /// Preferências de entrada e saída de arquivos, hardware e sequências de imagem (p. 1105).
     #[serde(default)]
     pub file_io: FileIoPrefs,
+    /// Pastas extras de plug-ins VST3/OFX mapeadas pelo usuário (ex.: uma pasta
+    /// do Google Drive). Cada pasta é varrida nos dois formatos, além das
+    /// pastas padrão do sistema.
+    #[serde(default)]
+    pub plugin_folders: Vec<String>,
+}
+
+/// Guias extras das áreas seguras da Prévia de Vídeo: cruz central, grade dos
+/// terços e recortes centrais em outras proporções (para conferir o
+/// enquadramento de uma versão 4:3, vertical 9:16 ou quadrada 1:1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafeGuidesPrefs {
+    pub center_cross: bool,
+    pub thirds: bool,
+    pub cut_4x3: bool,
+    pub cut_9x16: bool,
+    pub cut_1x1: bool,
+}
+
+impl Default for SafeGuidesPrefs {
+    fn default() -> Self {
+        Self {
+            center_cross: true,
+            thirds: false,
+            cut_4x3: false,
+            cut_9x16: false,
+            cut_1x1: false,
+        }
+    }
 }
 
 pub const MAX_TOOLBAR_BUTTONS: usize = 64;
+/// Máximo de pastas de plug-ins mapeadas e tamanho máximo de cada caminho.
+pub const MAX_PLUGIN_FOLDERS: usize = 32;
+pub const MAX_PLUGIN_FOLDER_LEN: usize = 1024;
 
 pub fn default_toolbar_buttons() -> Vec<String> {
     [
@@ -927,6 +971,39 @@ fn default_show_splash() -> bool {
     true
 }
 
+fn default_system_ui_font() -> bool {
+    true
+}
+
+fn default_ui_scale_pct() -> u16 {
+    100
+}
+
+/// Limites e passo da escala da interface (%).
+pub const UI_SCALE_MIN: u16 = 50;
+pub const UI_SCALE_MAX: u16 = 300;
+pub const UI_SCALE_STEP: u16 = 10;
+
+impl Preferences {
+    /// Escala da interface já limitada, como fator (1.0 = 100%).
+    pub fn ui_scale_factor(&self) -> f32 {
+        f32::from(self.ui_scale_pct.clamp(UI_SCALE_MIN, UI_SCALE_MAX)) / 100.0
+    }
+
+    /// Muda a escala em `steps` passos de `UI_SCALE_STEP` (negativo diminui);
+    /// `None` volta a 100%. Devolve a escala nova, sempre dentro dos limites.
+    pub fn step_ui_scale(&mut self, steps: Option<i32>) -> u16 {
+        let cur = i32::from(self.ui_scale_pct.clamp(UI_SCALE_MIN, UI_SCALE_MAX));
+        let next = match steps {
+            None => 100,
+            Some(n) => cur.saturating_add(n.saturating_mul(i32::from(UI_SCALE_STEP))),
+        };
+        let next = next.clamp(i32::from(UI_SCALE_MIN), i32::from(UI_SCALE_MAX));
+        self.ui_scale_pct = u16::try_from(next).unwrap_or(100);
+        self.ui_scale_pct
+    }
+}
+
 fn default_show_welcome() -> bool {
     true
 }
@@ -1018,6 +1095,8 @@ impl Default for Preferences {
             edit_layout: EditLayoutPrefs::default(),
             track_header: TrackHeaderPrefs::default(),
             show_splash: default_show_splash(),
+            system_ui_font: default_system_ui_font(),
+            ui_scale_pct: default_ui_scale_pct(),
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
@@ -1042,6 +1121,7 @@ impl Default for Preferences {
             default_sample_rate: default_sample_rate(),
             action_safe_pct: default_action_safe_pct(),
             title_safe_pct: default_title_safe_pct(),
+            safe_guides: SafeGuidesPrefs::default(),
             external_apps: ExternalAppsPrefs::default(),
             default_track: DefaultTrackPrefs::default(),
             user_fx_presets: Vec::new(),
@@ -1051,6 +1131,7 @@ impl Default for Preferences {
             audio_device: AudioDevicePrefs::default(),
             midi_sync: MidiSyncPrefs::default(),
             file_io: FileIoPrefs::default(),
+            plugin_folders: Vec::new(),
         }
     }
 }
@@ -1109,6 +1190,7 @@ impl Preferences {
             self.theme = default_theme();
         }
         self.ram_preview_mb = self.ram_preview_mb.clamp(32, 8192);
+        self.ui_scale_pct = self.ui_scale_pct.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
         self.frame_cache_cap = self.frame_cache_cap.clamp(4, 512);
         self.worker_threads = self.worker_threads.min(16);
         self.max_recent_projects = self.max_recent_projects.clamp(1, MAX_RECENT_PROJECTS);
@@ -1157,6 +1239,51 @@ impl Preferences {
         self.audio_device.sanitize();
         self.midi_sync.sanitize();
         self.file_io.sanitize();
+        sanitize_string_list(
+            &mut self.plugin_folders,
+            MAX_PLUGIN_FOLDERS,
+            MAX_PLUGIN_FOLDER_LEN,
+            cfg!(windows),
+        );
+    }
+
+    /// Mapeia uma pasta de plug-ins. Devolve `false` se o caminho é inválido,
+    /// já está na lista ou a lista está cheia.
+    pub fn add_plugin_folder(&mut self, path: &std::path::Path) -> bool {
+        let raw = path.to_string_lossy();
+        let s = raw.trim();
+        if s.is_empty()
+            || s.len() > MAX_PLUGIN_FOLDER_LEN
+            || s.contains('\0')
+            || self.plugin_folders.len() >= MAX_PLUGIN_FOLDERS
+            || self
+                .plugin_folders
+                .iter()
+                .any(|f| f == s || (cfg!(windows) && f.eq_ignore_ascii_case(s)))
+        {
+            return false;
+        }
+        self.plugin_folders.push(s.to_string());
+        true
+    }
+
+    /// Troca o caminho de uma pasta mapeada (pasta movida ou unidade nova).
+    pub fn replace_plugin_folder(&mut self, index: usize, path: &std::path::Path) -> bool {
+        let Some(old) = self.plugin_folders.get(index).cloned() else {
+            return false;
+        };
+        self.plugin_folders.remove(index);
+        if self.add_plugin_folder(path) {
+            let last = self.plugin_folders.len().saturating_sub(1);
+            let moved = self.plugin_folders.remove(last);
+            self.plugin_folders
+                .insert(index.min(self.plugin_folders.len()), moved);
+            true
+        } else {
+            self.plugin_folders
+                .insert(index.min(self.plugin_folders.len()), old);
+            false
+        }
     }
 
     pub fn load_or_default() -> Self {
@@ -1225,9 +1352,28 @@ mod tests {
                 ..Default::default()
             },
             file_io: hostile_io,
+            plugin_folders: {
+                let mut v = vec![String::new(), "   ".into(), "x\0y".into(), "a".repeat(5000)];
+                v.extend((0..5000).map(|i| format!("G:\\Meu Drive\\plugins{}", i % 40)));
+                v.push("G:\\MEU DRIVE\\PLUGINS0".into());
+                v
+            },
             ..Default::default()
         };
         p2.sanitize();
+        assert!(p2.plugin_folders.len() <= MAX_PLUGIN_FOLDERS);
+        assert!(p2.plugin_folders.iter().all(|f| !f.trim().is_empty()
+            && f.len() <= MAX_PLUGIN_FOLDER_LEN
+            && !f.contains('\0')));
+        let mut seen = std::collections::HashSet::new();
+        assert!(p2
+            .plugin_folders
+            .iter()
+            .all(|f| seen.insert(if cfg!(windows) {
+                f.to_ascii_lowercase()
+            } else {
+                f.clone()
+            })));
         assert_eq!(p2.preview_device.device_mode, "secondary_monitor");
         assert_eq!(p2.preview_device.bg_gray, 48);
         assert_eq!(p2.audio_device.driver_mode, "os_default");
@@ -1240,6 +1386,9 @@ mod tests {
         let p_no_splash: Preferences =
             serde_json::from_str(r#"{"show_splash":false,"show_welcome":false}"#).unwrap();
         assert!(!p_no_splash.show_splash);
+        // preferências antigas, sem o campo: fontes do sistema ligadas
+        assert!(p_no_splash.system_ui_font);
+        assert_eq!(p_no_splash.ui_scale_pct, 100);
         assert!(!p_no_splash.show_welcome);
 
         let mut p_rec = Preferences {
@@ -1385,5 +1534,26 @@ mod tests {
         assert_eq!(p.external_apps.path_for("blender"), "");
         assert_eq!(p.external_apps.rpc_timeout_secs, 300);
         assert!(p.external_apps.watch_edited_copies);
+    }
+
+    #[test]
+    fn escala_da_interface_fica_nos_limites_com_entrada_hostil() {
+        let mut p = Preferences::default();
+        assert_eq!(p.ui_scale_factor(), 1.0);
+        assert_eq!(p.step_ui_scale(Some(1)), 110);
+        assert_eq!(p.step_ui_scale(Some(-2)), 90);
+        assert_eq!(p.step_ui_scale(None), 100);
+        assert_eq!(p.step_ui_scale(Some(i32::MAX)), UI_SCALE_MAX);
+        assert_eq!(p.step_ui_scale(Some(i32::MIN)), UI_SCALE_MIN);
+        // arquivo de preferências com valor fora da faixa
+        let mut h: Preferences = serde_json::from_str(r#"{"ui_scale_pct":0}"#).unwrap();
+        assert_eq!(h.ui_scale_factor(), f32::from(UI_SCALE_MIN) / 100.0);
+        h.sanitize();
+        assert_eq!(h.ui_scale_pct, UI_SCALE_MIN);
+        let mut h: Preferences = serde_json::from_str(r#"{"ui_scale_pct":65535}"#).unwrap();
+        assert_eq!(h.step_ui_scale(Some(1)), UI_SCALE_MAX);
+        h.sanitize();
+        assert_eq!(h.ui_scale_pct, UI_SCALE_MAX);
+        assert!(serde_json::from_str::<Preferences>(r#"{"ui_scale_pct":-5}"#).is_err());
     }
 }

@@ -1299,7 +1299,7 @@ impl App {
             pos2(box_r.right() - 8.0, box_r.bottom() - 3.0),
             Align2::RIGHT_BOTTOM,
             &self.fmt_time(self.view_time()),
-            crate::fonts::visor_font(20.0),
+            crate::fonts::time_font(ui.ctx(), 20.0),
             self.theme.timecode_fg,
         );
 
@@ -1555,6 +1555,20 @@ impl App {
                 self.theme.tl_loop_inactive
             };
             painter.rect_filled(lr, 2.0, col);
+            // setas amarelas nas pontas da região de loop (manual do VEGAS Pro 21, p. 207)
+            let h = (loop_r.height() - 2.0).clamp(4.0, 8.0);
+            let top = loop_r.top() + 1.0;
+            let arrow = Color32::from_rgb(240, 210, 40);
+            let outline = Stroke::new(1.0_f32, Color32::from_black_alpha(160));
+            for (x, dir) in [(lr.left(), 1.0_f32), (lr.right(), -1.0_f32)] {
+                if x.is_finite() && x >= r.left() - h && x <= r.right() + h {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![pos2(x, top), pos2(x + dir * h, top), pos2(x, top + h)],
+                        arrow,
+                        outline,
+                    ));
+                }
+            }
         }
         // barra de status de pré-renderização no topo da timeline (VEGAS Pro 21, p. 215)
         for &(pa, pb) in &self.session.prerendered_ranges {

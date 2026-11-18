@@ -23,6 +23,8 @@ struct FloatingViewportSpec<'a> {
     icon: std::sync::Arc<egui::IconData>,
     theme: &'a crate::theme::ThemeColors,
     lang: Language,
+    /// Mostra o botão Acoplar (falso nos painéis só de janela).
+    can_dock: bool,
 }
 
 struct FloatingOutcome {
@@ -57,6 +59,30 @@ fn show_floating_viewport(
                 .default_size([spec.inner_size[0] - 40.0, spec.inner_size[1] - 40.0])
                 .min_size([spec.min_size[0] - 20.0, spec.min_size[1] - 20.0])
                 .show(v_ctx, |ui| {
+                    if spec.can_dock {
+                        ui.horizontal(|ui| {
+                            if icons::small_icon_button(
+                                ui,
+                                Icon::DockIn,
+                                Some(tr(spec.lang, "Acoplar na área de janelas")),
+                                false,
+                                spec.theme,
+                            )
+                            .clicked()
+                            {
+                                out.reattach = true;
+                            }
+                        });
+                        ui.separator();
+                    }
+                    body(ui);
+                });
+        } else {
+            if v_ctx.input(|i| i.viewport().close_requested()) {
+                out.open = false;
+            }
+            egui::CentralPanel::default().show(v_ctx, |ui| {
+                if spec.can_dock {
                     ui.horizontal(|ui| {
                         if icons::small_icon_button(
                             ui,
@@ -69,37 +95,17 @@ fn show_floating_viewport(
                         {
                             out.reattach = true;
                         }
+                        ui.label(
+                            egui::RichText::new(tr(
+                                spec.lang,
+                                "Janela independente (arraste pela barra de título para mover entre monitores)",
+                            ))
+                            .small()
+                            .weak(),
+                        );
                     });
                     ui.separator();
-                    body(ui);
-                });
-        } else {
-            if v_ctx.input(|i| i.viewport().close_requested()) {
-                out.open = false;
-            }
-            egui::CentralPanel::default().show(v_ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if icons::small_icon_button(
-                        ui,
-                        Icon::DockIn,
-                        Some(tr(spec.lang, "Acoplar na área de janelas")),
-                        false,
-                        spec.theme,
-                    )
-                    .clicked()
-                    {
-                        out.reattach = true;
-                    }
-                    ui.label(
-                        egui::RichText::new(tr(
-                            spec.lang,
-                            "Janela independente (arraste pela barra de título para mover entre monitores)",
-                        ))
-                        .small()
-                        .weak(),
-                    );
-                });
-                ui.separator();
+                }
                 body(ui);
             });
         }
@@ -108,12 +114,81 @@ fn show_floating_viewport(
 }
 
 impl App {
+    /// Abre um painel só de janela (ver `layout::window_only`) na janela
+    /// própria e a traz para a frente.
+    pub fn open_window_panel(&mut self, ctx: Option<&egui::Context>, tab: DockTab) {
+        self.closed_tabs.remove(&tab);
+        self.detached_tabs.insert(tab);
+        if let Some(ctx) = ctx {
+            let key = crate::layout::panel_key(tab);
+            let vid = egui::ViewportId::from_hash_of(("neoveg_floating_dock_viewport", key));
+            ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Focus);
+        }
+    }
+
     pub fn detach_dock_tab(&mut self, tab: DockTab) {
         self.detached_tabs.insert(tab);
         if self.dock_tab == tab {
             if let Some(next) = DockTab::ALL
                 .into_iter()
                 .find(|t| !self.detached_tabs.contains(t))
+            {
+                self.dock_tab = next;
+            }
+        }
+    }
+
+    /// Menu de botão direito do botão Áreas de segurança: guias extras,
+    /// salvas nas Preferências.
+    fn safe_guides_menu(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
+        let mut changed = false;
+        changed |= ui
+            .checkbox(
+                &mut self.opts.safe_areas,
+                tr(lang, "Áreas de ação e de título"),
+            )
+            .changed();
+        ui.separator();
+        let g = &mut self.prefs.safe_guides;
+        changed |= ui
+            .checkbox(&mut g.center_cross, tr(lang, "Cruz central"))
+            .changed();
+        changed |= ui
+            .checkbox(&mut g.thirds, tr(lang, "Grade dos terços"))
+            .changed();
+        changed |= ui
+            .checkbox(&mut g.cut_4x3, tr(lang, "Recorte central 4:3"))
+            .changed();
+        changed |= ui
+            .checkbox(&mut g.cut_9x16, tr(lang, "Recorte central 9:16 (vertical)"))
+            .changed();
+        changed |= ui
+            .checkbox(&mut g.cut_1x1, tr(lang, "Recorte central 1:1 (quadrado)"))
+            .changed();
+        if changed {
+            // ligar uma guia mostra as guias
+            if g.center_cross || g.thirds || g.cut_4x3 || g.cut_9x16 || g.cut_1x1 {
+                self.opts.safe_areas = true;
+            }
+            if let Err(e) = self.prefs.save() {
+                self.set_status(e);
+            }
+        }
+    }
+
+    /// Fecha um painel: sai da área de janelas (e da janela própria, se
+    /// estava destacado) e volta pelo menu Exibir.
+    pub fn close_dock_tab(&mut self, tab: DockTab) {
+        self.detached_tabs.remove(&tab);
+        self.closed_tabs.insert(tab);
+        if self.dock_maximized == Some(crate::dock::DockPane::Tab(tab)) {
+            self.dock_maximized = None;
+        }
+        if self.dock_tab == tab {
+            if let Some(next) = DockTab::ALL
+                .into_iter()
+                .find(|t| !self.detached_tabs.contains(t) && !self.closed_tabs.contains(t))
             {
                 self.dock_tab = next;
             }
@@ -137,6 +212,7 @@ impl App {
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
+                can_dock: true,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -164,6 +240,7 @@ impl App {
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
+                can_dock: true,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -200,6 +277,7 @@ impl App {
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
+                can_dock: !crate::layout::window_only(tab),
             };
             let out = show_floating_viewport(
                 ctx,
@@ -213,13 +291,14 @@ impl App {
                         .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
                 },
             );
-            if !out.open || out.reattach {
+            if out.reattach {
                 self.detached_tabs.remove(&tab);
-                if out.reattach {
-                    self.dock_visible = true;
-                    self.dock_tab = tab;
-                    self.pending_dock_focus = Some(tab);
-                }
+                self.dock_visible = true;
+                self.dock_tab = tab;
+                self.pending_dock_focus = Some(tab);
+            } else if !out.open {
+                // fechar a janela fecha o painel (volta pelo menu Exibir)
+                self.close_dock_tab(tab);
             }
         }
 
@@ -412,7 +491,7 @@ impl App {
             {
                 self.start_ram_preview();
             }
-            if icons::icon_button(
+            let safe_resp = icons::icon_button(
                 ui,
                 Icon::SafeAreas,
                 None,
@@ -420,11 +499,11 @@ impl App {
                 true,
                 &self.theme,
             )
-            .on_hover_text(tr(lang, "Áreas de segurança"))
-            .clicked()
-            {
+            .on_hover_text(tr(lang, "Áreas de segurança (botão direito: guias extras)"));
+            if safe_resp.clicked() {
                 self.opts.safe_areas = !self.opts.safe_areas;
             }
+            safe_resp.context_menu(|ui| self.safe_guides_menu(ui));
             let copy_resp = icons::icon_button(ui, Icon::CopyFrame, None, false, true, &self.theme);
             copy_resp.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copiar quadro")
@@ -1000,15 +1079,37 @@ impl App {
                     StrokeKind::Inside,
                 );
             }
-            let c = img_rect.center();
-            painter.line_segment(
-                [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
-            );
-            painter.line_segment(
-                [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
-            );
+            let g = &self.prefs.safe_guides;
+            if g.center_cross {
+                let c = img_rect.center();
+                painter.line_segment(
+                    [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+                );
+                painter.line_segment(
+                    [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+                );
+            }
+            if g.thirds {
+                let st = Stroke::new(1.0_f32, Color32::from_white_alpha(70));
+                for k in [1.0 / 3.0, 2.0 / 3.0] {
+                    let x = img_rect.left() + img_rect.width() * k;
+                    let y = img_rect.top() + img_rect.height() * k;
+                    painter.line_segment([pos2(x, img_rect.top()), pos2(x, img_rect.bottom())], st);
+                    painter.line_segment([pos2(img_rect.left(), y), pos2(img_rect.right(), y)], st);
+                }
+            }
+            let cut = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 200, 60, 150));
+            for (on, aspect) in [
+                (g.cut_4x3, 4.0 / 3.0),
+                (g.cut_9x16, 9.0 / 16.0),
+                (g.cut_1x1, 1.0),
+            ] {
+                if let Some(r) = on.then(|| centered_aspect_rect(img_rect, aspect)).flatten() {
+                    painter.rect_stroke(r, 0.0, cut, StrokeKind::Inside);
+                }
+            }
         }
 
         if self.opts.preview_mute_video {
@@ -2419,5 +2520,43 @@ impl App {
                 }
             }
         });
+    }
+}
+
+/// Maior retângulo de proporção `aspect` (largura/altura) centrado em `r`.
+/// `None` para proporção ou retângulo inválidos (§0.4).
+fn centered_aspect_rect(r: Rect, aspect: f32) -> Option<Rect> {
+    if !aspect.is_finite() || aspect <= 0.0 || !r.is_finite() || r.width() < 1.0 || r.height() < 1.0
+    {
+        return None;
+    }
+    let (w, h) = if r.width() / r.height() > aspect {
+        (r.height() * aspect, r.height())
+    } else {
+        (r.width(), r.width() / aspect)
+    };
+    Some(Rect::from_center_size(r.center(), vec2(w, h)))
+}
+
+#[cfg(test)]
+mod safe_guide_tests {
+    use super::*;
+
+    #[test]
+    fn recorte_central_cabe_no_quadro_e_recusa_entrada_invalida() {
+        let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(1920.0, 1080.0));
+        let c = centered_aspect_rect(r, 9.0 / 16.0).expect("9:16");
+        assert!((c.height() - 1080.0).abs() < 0.01);
+        assert!((c.width() - 607.5).abs() < 0.01);
+        assert!((c.center().x - 960.0).abs() < 0.01);
+        let q = centered_aspect_rect(r, 1.0).expect("1:1");
+        assert!((q.width() - 1080.0).abs() < 0.01);
+        // quadro vertical: o 4:3 é limitado pela largura
+        let v = Rect::from_min_size(pos2(0.0, 0.0), vec2(1080.0, 1920.0));
+        let w = centered_aspect_rect(v, 4.0 / 3.0).expect("4:3");
+        assert!((w.width() - 1080.0).abs() < 0.01 && w.height() < 1920.0);
+        assert!(centered_aspect_rect(r, f32::NAN).is_none());
+        assert!(centered_aspect_rect(r, 0.0).is_none());
+        assert!(centered_aspect_rect(Rect::NOTHING, 1.0).is_none());
     }
 }

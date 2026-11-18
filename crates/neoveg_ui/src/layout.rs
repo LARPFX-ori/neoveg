@@ -63,6 +63,36 @@ pub struct WindowLayout {
     pub edit_layout: Option<EditLayoutPrefs>,
     #[serde(default)]
     pub tile_tree: Option<egui_tiles::Tree<crate::dock::DockPane>>,
+    /// Painéis fechados (fora da área de janelas e sem janela própria); voltam
+    /// pelo menu Exibir. `None` (layout antigo ou preset): usa
+    /// [`DEFAULT_CLOSED_TABS`].
+    #[serde(default)]
+    pub closed_tabs: Option<Vec<String>>,
+}
+
+/// Painéis do grupo à esquerda da Prévia num layout novo. O Trimmer fica no
+/// grupo da Prévia de Vídeo; os outros painéis começam fechados e abrem pelo
+/// menu Exibir.
+pub const DEFAULT_DOCK_TABS: [DockTab; 5] = [
+    DockTab::ProjectMedia,
+    DockTab::Transitions,
+    DockTab::VideoFx,
+    DockTab::Generators,
+    DockTab::PluginManager,
+];
+
+/// Painéis que começam fechados num layout novo.
+/// Painéis que só abrem em janela própria, fora da área de janelas: o
+/// Neoveg Encoder é uma ferramenta à parte, como um programa separado.
+pub fn window_only(tab: DockTab) -> bool {
+    matches!(tab, DockTab::Encoder)
+}
+
+pub fn default_closed_tabs() -> HashSet<DockTab> {
+    DockTab::ALL
+        .into_iter()
+        .filter(|t| !DEFAULT_DOCK_TABS.contains(t) && *t != DockTab::Trimmer)
+        .collect()
 }
 
 fn default_dock_height() -> f32 {
@@ -97,6 +127,7 @@ impl Default for WindowLayout {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
         }
     }
 }
@@ -134,6 +165,15 @@ impl WindowLayout {
                 *k = panel_key(tab).to_string();
             }
         }
+        if let Some(list) = self.closed_tabs.as_mut() {
+            let mut seen = HashSet::new();
+            list.retain(|k| panel_from_key(k).is_some_and(|tab| seen.insert(panel_key(tab))));
+            for k in list.iter_mut() {
+                if let Some(tab) = panel_from_key(k) {
+                    *k = panel_key(tab).to_string();
+                }
+            }
+        }
         self.px_per_sec = self
             .px_per_sec
             .filter(|v| v.is_finite() && *v > 0.0)
@@ -150,7 +190,10 @@ impl WindowLayout {
     }
 
     pub fn active_panel(&self) -> DockTab {
-        panel_from_key(&self.active_tab).unwrap_or(DockTab::ProjectMedia)
+        // painel só de janela (Encoder) nunca é a aba ativa do dock
+        panel_from_key(&self.active_tab)
+            .filter(|t| !window_only(*t))
+            .unwrap_or(DockTab::ProjectMedia)
     }
 
     pub fn detached_panels(&self) -> HashSet<DockTab> {
@@ -158,6 +201,20 @@ impl WindowLayout {
             .iter()
             .filter_map(|k| panel_from_key(k))
             .collect()
+    }
+
+    /// Painéis fechados. O painel ativo e os destacados nunca contam como
+    /// fechados (um preset que abre nos Escopos mostra os Escopos).
+    pub fn closed_panels(&self) -> HashSet<DockTab> {
+        let mut closed = match &self.closed_tabs {
+            Some(list) => list.iter().filter_map(|k| panel_from_key(k)).collect(),
+            None => default_closed_tabs(),
+        };
+        closed.remove(&self.active_panel());
+        for t in self.detached_panels() {
+            closed.remove(&t);
+        }
+        closed
     }
 }
 
@@ -178,6 +235,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
         },
         WindowLayout {
             name: "Mixagem de Áudio".into(),
@@ -193,6 +251,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
         },
         WindowLayout {
             name: "Timeline Ampla".into(),
@@ -208,6 +267,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
         },
     ]
 }
@@ -314,6 +374,7 @@ mod tests {
             px_per_sec: Some(-10.0),
             edit_layout: Some(EditLayoutPrefs::for_type(neoveg_common::LayoutType::Sony)),
             tile_tree: None,
+            closed_tabs: None,
         };
         bad.sanitize();
         assert_eq!(bad.dock_height, 320.0);

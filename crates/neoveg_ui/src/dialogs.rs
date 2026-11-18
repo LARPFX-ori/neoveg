@@ -5259,6 +5259,9 @@ impl App {
 
         let next_lang = draft.lang();
         self.apply_language(Some(ctx), next_lang, false);
+        if draft.system_ui_font != prev.system_ui_font {
+            crate::fonts::configure_fonts(ctx, draft.system_ui_font && !cfg!(test));
+        }
 
         let mut next = draft.clone();
         next.recent_projects = prev.recent_projects;
@@ -6074,6 +6077,33 @@ fn prefs_general(
             &mut draft.show_splash,
             tr(lang, "Exibir tela de abertura (Splash) ao iniciar"),
         );
+        ui.horizontal(|ui| {
+            ui.label(tr(lang, "Escala da interface:"));
+            ui.add(
+                egui::DragValue::new(&mut draft.ui_scale_pct)
+                    .range(neoveg_common::prefs::UI_SCALE_MIN..=neoveg_common::prefs::UI_SCALE_MAX)
+                    .speed(1.0)
+                    .suffix(" %"),
+            )
+            .on_hover_text(tr(
+                lang,
+                "Aumenta ou diminui textos, botões e painéis (também em Exibir > Escala da interface)",
+            ));
+            if ui.small_button("100%").clicked() {
+                draft.ui_scale_pct = 100;
+            }
+        });
+        ui.checkbox(
+            &mut draft.system_ui_font,
+            tr(
+                lang,
+                "Usar as fontes do sistema na interface (Segoe UI no Windows)",
+            ),
+        )
+        .on_hover_text(tr(
+            lang,
+            "Desligado, a interface usa as fontes embutidas do programa",
+        ));
         ui.checkbox(
             &mut draft.show_welcome,
             tr(
@@ -6417,6 +6447,16 @@ fn prefs_video_preview(
                     )
                     .wrap(),
                 );
+            });
+            prefs_row(ui, inner_lw, tr(lang, "Guias extras:"), |ui| {
+                ui.vertical(|ui| {
+                    let g = &mut draft.safe_guides;
+                    ui.checkbox(&mut g.center_cross, tr(lang, "Cruz central"));
+                    ui.checkbox(&mut g.thirds, tr(lang, "Grade dos terços"));
+                    ui.checkbox(&mut g.cut_4x3, tr(lang, "Recorte central 4:3"));
+                    ui.checkbox(&mut g.cut_9x16, tr(lang, "Recorte central 9:16 (vertical)"));
+                    ui.checkbox(&mut g.cut_1x1, tr(lang, "Recorte central 1:1 (quadrado)"));
+                });
             });
         },
     );

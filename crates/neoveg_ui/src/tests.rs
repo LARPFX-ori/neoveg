@@ -100,8 +100,10 @@ fn ui_smoke() {
     };
 
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     let mut app = App::with_context(&ctx, None);
+    // o teste de fumaça percorre todas as abas do dock
+    app.closed_tabs.clear();
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>, mods: Modifiers| {
         t += 1.0 / 60.0;
@@ -455,7 +457,7 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     app.loading = 1;
 
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     let narrow_raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(840.0, 800.0))),
         time: Some(2.5),
@@ -521,7 +523,8 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     }
 
     let mut row_tops = Vec::new();
-    for tab_label in ["Mídia do Projeto", "Explorer", "Destacar"] {
+    // as duas primeiras abas da ordem padrão (o rodapé rola na horizontal)
+    for tab_label in ["Mídia do Projeto", "Transições", "Destacar"] {
         let tab = texts
             .iter()
             .find(|(txt, _, _, _)| txt == tab_label)
@@ -568,7 +571,7 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     let prev_prerendered = app.session.prerendered_ranges.clone();
 
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     app.apply_window_layout(crate::layout::WindowLayout::default());
     app.exec_cmd(Some(&ctx), "edit.properties.layout.magix");
     let small_raw = |t: f64| egui::RawInput {
@@ -812,7 +815,7 @@ fn assert_welcome_ui_layout(app: &mut App) {
     let prev_open = app.is_welcome_open();
     let prev_welcome = app.welcome.clone();
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     app.open_welcome();
     app.welcome.section = crate::welcome::WelcomeSection::NewProject;
 
@@ -890,7 +893,7 @@ fn assert_welcome_ui_layout(app: &mut App) {
 #[test]
 fn ferramentas_de_edicao_na_timeline() {
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>| {
@@ -998,7 +1001,7 @@ fn ferramentas_de_edicao_na_timeline() {
 #[test]
 fn modos_shuffle_slide_stretch_split_trim_na_timeline() {
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>| {
@@ -1104,7 +1107,7 @@ fn ui_sync_links_arraste_unidirecional_e_eixos_selecao() {
     use neoveg_engine::session::BoxAxisMode;
 
     let ctx = egui::Context::default();
-    crate::fonts::configure_fonts(&ctx);
+    crate::fonts::configure_fonts(&ctx, false);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0f64;
     let mut frame = |app: &mut App, ev: Vec<Event>| {
@@ -1283,4 +1286,270 @@ fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
         app.dock_maximized, None,
         "destacado, deixa de estar maximizado"
     );
+}
+
+/// Layout novo: à esquerda da Prévia só Mídia do Projeto, Transições, Efeitos
+/// de Vídeo, Geradores de Mídia e Plug-In Manager; o Trimmer no grupo da
+/// Prévia; os outros painéis fechados até o menu Exibir abrir. "Fechar
+/// painel" fecha de verdade e o layout salvo lembra. O zoom de teclado do
+/// egui fica desligado (Ctrl+= / Ctrl+- são do tom em oitavas).
+#[test]
+fn dock_padrao_cinco_paineis_trimmer_na_previa_e_fechar_painel() {
+    use crate::dock::{build_dock_tree, find_pane_tile, DockPane};
+    use crate::layout::{builtin_presets, WindowLayout, DEFAULT_DOCK_TABS};
+
+    let novo = WindowLayout::default();
+    let fechados = novo.closed_panels();
+    for t in DEFAULT_DOCK_TABS {
+        assert!(!fechados.contains(&t), "{t:?} deve abrir no dock");
+    }
+    assert!(!fechados.contains(&DockTab::Trimmer));
+    for t in [
+        DockTab::Explorer,
+        DockTab::Mixer,
+        DockTab::Notes,
+        DockTab::Encoder,
+    ] {
+        assert!(fechados.contains(&t), "{t:?} deve começar fechado");
+    }
+    // preset que abre nos Escopos mostra os Escopos
+    let cor = builtin_presets()
+        .into_iter()
+        .find(|l| l.active_panel() == DockTab::Scopes)
+        .expect("preset de cor");
+    assert!(!cor.closed_panels().contains(&DockTab::Scopes));
+
+    let tree = build_dock_tree(0.40, DockTab::ProjectMedia, false);
+    let grupo = |p: DockPane| find_pane_tile(&tree, p).and_then(|id| tree.tiles.parent_of(id));
+    assert_eq!(
+        grupo(DockPane::Tab(DockTab::Trimmer)),
+        grupo(DockPane::Preview)
+    );
+    assert_ne!(
+        grupo(DockPane::Tab(DockTab::ProjectMedia)),
+        grupo(DockPane::Preview)
+    );
+
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    assert!(!ctx.options(|o| o.zoom_with_keyboard));
+    app.apply_window_layout(WindowLayout::default());
+    assert!(app.closed_tabs.contains(&DockTab::Mixer));
+    assert!(!app.is_panel_open(DockTab::Mixer));
+
+    app.exec_cmd(Some(&ctx), "view.tab.mixer");
+    assert!(!app.closed_tabs.contains(&DockTab::Mixer));
+    assert_eq!(app.dock_tab, DockTab::Mixer);
+
+    app.close_dock_tab(DockTab::Mixer);
+    assert!(app.closed_tabs.contains(&DockTab::Mixer));
+    assert_ne!(app.dock_tab, DockTab::Mixer);
+    let salvo = app.current_window_layout("teste");
+    assert!(salvo.closed_panels().contains(&DockTab::Mixer));
+    assert!(!salvo.closed_panels().contains(&DockTab::ProjectMedia));
+
+    // destacado e depois fechado: some da janela própria também
+    app.detach_dock_tab(DockTab::Transitions);
+    app.close_dock_tab(DockTab::Transitions);
+    assert!(!app.detached_tabs.contains(&DockTab::Transitions));
+    assert!(app.closed_tabs.contains(&DockTab::Transitions));
+}
+
+/// Tela de abertura na própria janela (inicialização, como no VEGAS Pro):
+/// enquanto ela está ativa só ela é desenhada; quando termina, a janela sai
+/// do modo abertura. Sem abertura ativa o modo nem liga.
+#[test]
+fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let small = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            Pos2::ZERO,
+            vec2(
+                crate::splash::SPLASH_WINDOW_SIZE[0],
+                crate::splash::SPLASH_WINDOW_SIZE[1],
+            ),
+        )),
+        time: Some(t),
+        ..Default::default()
+    };
+    // janela nasceu pequena, mas a abertura não está ativa (ex.: oferta de
+    // recuperação): o primeiro quadro já devolve bordas e tamanho
+    app.splash = crate::splash::SplashState::startup(false);
+    app.set_startup_splash_window(true);
+    let out = ctx.run(small(0.0), |c| app.frame_ui(c));
+    assert!(
+        !app.startup_window,
+        "sem abertura ativa a janela não pode ficar presa no tamanho da abertura"
+    );
+    assert!(out.viewport_output.values().any(|v| v
+        .commands
+        .contains(&egui::ViewportCommand::Decorations(true))));
+
+    app.splash = crate::splash::SplashState::startup(true);
+    app.set_startup_splash_window(true);
+    assert!(app.startup_window);
+    let out = ctx.run(small(0.05), |c| app.frame_ui(c));
+    assert!(app.startup_window);
+    assert!(!out.viewport_output.values().any(|v| v
+        .commands
+        .contains(&egui::ViewportCommand::Decorations(true))));
+
+    app.splash.advance_for_test(30.0, 0);
+    let out = ctx.run(small(0.1), |c| app.frame_ui(c));
+    assert!(
+        !app.startup_window,
+        "a abertura terminou: a janela sai do modo abertura"
+    );
+    let cmds: Vec<_> = out
+        .viewport_output
+        .values()
+        .flat_map(|v| v.commands.iter().cloned())
+        .collect();
+    assert!(cmds.contains(&egui::ViewportCommand::Decorations(true)));
+    assert!(cmds.contains(&egui::ViewportCommand::Resizable(true)));
+}
+
+/// Exibir > Escala da interface: o comando muda a preferência e o quadro
+/// seguinte aplica o fator no egui; os limites seguram cliques repetidos.
+#[test]
+fn escala_da_interface_pelo_menu_aplica_no_proximo_quadro() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.prefs.ui_scale_pct = 100;
+    let raw = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        time: Some(t),
+        ..Default::default()
+    };
+    app.exec_cmd(Some(&ctx), "view.ui_scale_up");
+    assert_eq!(app.prefs.ui_scale_pct, 110);
+    // o egui aplica o zoom novo no começo do quadro seguinte
+    let _ = ctx.run(raw(0.0), |c| app.frame_ui(c));
+    let _ = ctx.run(raw(0.05), |c| app.frame_ui(c));
+    assert!((ctx.zoom_factor() - 1.1).abs() < 0.001);
+
+    for _ in 0..40 {
+        app.exec_cmd(Some(&ctx), "view.ui_scale_down");
+    }
+    assert_eq!(app.prefs.ui_scale_pct, neoveg_common::prefs::UI_SCALE_MIN);
+    app.exec_cmd(Some(&ctx), "view.ui_scale_reset");
+    assert_eq!(app.prefs.ui_scale_pct, 100);
+    let _ = ctx.run(raw(0.1), |c| app.frame_ui(c));
+    let _ = ctx.run(raw(0.15), |c| app.frame_ui(c));
+    assert!((ctx.zoom_factor() - 1.0).abs() < 0.001);
+}
+
+/// Setas Esquerda/Direita (lista de atalhos do VEGAS Pro): com Quantizar
+/// para quadros, cada toque anda pelo menos um quadro na grade, mesmo com o
+/// zoom aberto (um pixel menor que um quadro); sem quantizar, um pixel.
+#[test]
+fn setas_andam_um_quadro_na_agulha_com_quantizar() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let fps = app.project.settings.fps;
+    let fd = app.project.settings.frame_dur();
+    app.opts.quantize = true;
+    // zoom aberto: 1 px bem menor que um quadro
+    app.tl.px_per_sec = 4000.0;
+    app.cursor = Ticks::ZERO;
+    let t = app.arrow_step_target(1);
+    assert_eq!(t, fps.frame_to_ticks(1));
+    app.cursor = t;
+    assert_eq!(app.arrow_step_target(1), fps.frame_to_ticks(2));
+    assert_eq!(app.arrow_step_target(-1), Ticks::ZERO);
+    // no início não passa de zero
+    app.cursor = Ticks::ZERO;
+    assert_eq!(app.arrow_step_target(-1), Ticks::ZERO);
+    // cursor fora da grade volta para a grade
+    app.cursor = fd + Ticks::from_raw(7);
+    assert_eq!(app.arrow_step_target(1), fps.frame_to_ticks(2));
+    // zoom fechado: um pixel vale vários quadros
+    app.tl.px_per_sec = 2.0;
+    app.cursor = Ticks::ZERO;
+    assert!(app.arrow_step_target(1) > fps.frame_to_ticks(1));
+    // sem quantizar: um pixel
+    app.opts.quantize = false;
+    app.tl.px_per_sec = 4000.0;
+    app.cursor = Ticks::ZERO;
+    let t = app.arrow_step_target(1);
+    assert!(t > Ticks::ZERO && t < fd);
+
+    // pelo teclado, sem foco em campo de texto
+    app.opts.quantize = true;
+    app.cursor = Ticks::ZERO;
+    app.welcome_open = false;
+    app.splash = crate::splash::SplashState::startup(false);
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![egui::Event::Key {
+            key: egui::Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+        ..Default::default()
+    };
+    let _ = ctx.run(raw, |c| app.handle_shortcuts(c));
+    assert_eq!(app.cursor, fps.frame_to_ticks(1));
+}
+
+/// O Neoveg Encoder abre em janela própria, fora da área de janelas: não
+/// entra na árvore do dock, o menu Exibir abre a janela, um layout salvo com
+/// ele como aba ativa cai na Mídia do Projeto e fechar a janela fecha o painel.
+#[test]
+fn encoder_abre_em_janela_propria_fora_do_dock() {
+    use crate::dock::{build_dock_tree, find_pane_tile, DockPane};
+    use crate::layout::WindowLayout;
+
+    let tree = build_dock_tree(0.40, DockTab::Encoder, false);
+    assert!(find_pane_tile(&tree, DockPane::Tab(DockTab::Encoder)).is_none());
+
+    let l = WindowLayout {
+        active_tab: crate::layout::panel_key(DockTab::Encoder).to_string(),
+        ..WindowLayout::default()
+    };
+    assert_eq!(l.active_panel(), DockTab::ProjectMedia);
+
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let antes = app.dock_tab;
+    app.exec_cmd(Some(&ctx), "view.tab.encoder");
+    assert!(app.detached_tabs.contains(&DockTab::Encoder));
+    assert!(!app.closed_tabs.contains(&DockTab::Encoder));
+    assert_eq!(app.dock_tab, antes, "a aba ativa do dock não muda");
+    app.close_dock_tab(DockTab::Encoder);
+    assert!(!app.detached_tabs.contains(&DockTab::Encoder));
+    assert!(app.closed_tabs.contains(&DockTab::Encoder));
 }
