@@ -1240,10 +1240,18 @@ fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
     frame(&mut app, key(Key::F11, Modifiers::SHIFT), Modifiers::SHIFT);
     assert!(!app.tl.header_collapsed());
 
-    frame(&mut app, key(Key::F11, Modifiers::CTRL), Modifiers::CTRL);
+    frame(
+        &mut app,
+        key(Key::F11, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
     assert!(!app.dock_visible && app.tl.header_collapsed());
     frame(&mut app, vec![], Modifiers::NONE);
-    frame(&mut app, key(Key::F11, Modifiers::CTRL), Modifiers::CTRL);
+    frame(
+        &mut app,
+        key(Key::F11, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
     assert!(app.dock_visible && !app.tl.header_collapsed());
 
     // Com a timeline maximizada, F11 também restaura tudo.
