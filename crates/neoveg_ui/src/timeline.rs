@@ -109,6 +109,9 @@ enum Drag {
         origin_track: usize,
         orig: Vec<(Id, Ticks, usize)>,
         sync_followers: Vec<(Id, Ticks)>,
+        /// Travar envelopes nos eventos: foto da automação de cada trilha de
+        /// origem (id da trilha) no começo do arraste.
+        env_lock: Vec<(Id, neoveg_engine::env_lock::AutomationSnapshot)>,
     },
     Trim {
         left: bool,
@@ -3619,6 +3622,8 @@ impl App {
                             origin_track: ti,
                             orig,
                             sync_followers: Vec::new(),
+                            // cópia: a automação fica com os originais
+                            env_lock: Vec::new(),
                         };
                         return;
                     }
@@ -3632,6 +3637,11 @@ impl App {
                         .collect();
                     let sync_followers = self.session.sync_followers_for(&ids);
                     let anchor_start = self.project.tracks[ti].events[ei].start;
+                    let env_lock = if self.opts.lock_envelopes {
+                        self.capture_env_lock(&ids)
+                    } else {
+                        Vec::new()
+                    };
                     self.tl.drag = Drag::Move {
                         anchor_id: anchor,
                         anchor_start,
@@ -3639,6 +3649,7 @@ impl App {
                         origin_track: ti,
                         orig,
                         sync_followers,
+                        env_lock,
                     };
                 }
             }
@@ -3874,6 +3885,7 @@ impl App {
                 origin_track,
                 orig,
                 sync_followers,
+                env_lock,
             } => {
                 let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
                 let raw = anchor_start + (t - origin_t);
@@ -3940,6 +3952,14 @@ impl App {
                 for &(fid, f_orig) in &sync_followers {
                     if let Some(fe) = self.project.event_mut(fid) {
                         fe.start = (f_orig + dt).max(Ticks::ZERO);
+                    }
+                }
+                // a automação só acompanha quando os eventos ficam na mesma
+                // trilha; trocando de trilha, ela volta ao lugar
+                let env_dt = if dtrack == 0 { dt } else { Ticks::ZERO };
+                for (track_id, snap) in &env_lock {
+                    if let Some(tr) = self.project.tracks.iter_mut().find(|t| t.id == *track_id) {
+                        snap.apply(tr, env_dt);
                     }
                 }
                 self.changed();
@@ -4065,6 +4085,37 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Foto da automação das trilhas de origem dos eventos `ids`, com o
+    /// trecho de cada evento (Travar envelopes nos eventos).
+    pub(crate) fn capture_env_lock<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a Id>,
+    ) -> Vec<(Id, neoveg_engine::env_lock::AutomationSnapshot)> {
+        let mut by_track: Vec<(usize, Vec<(Ticks, Ticks)>)> = Vec::new();
+        for id in ids {
+            let Some((ti, ei)) = self.project.find_event(*id) else {
+                continue;
+            };
+            let Some(e) = self.project.tracks.get(ti).and_then(|t| t.events.get(ei)) else {
+                continue;
+            };
+            match by_track.iter_mut().find(|(t, _)| *t == ti) {
+                Some((_, spans)) => spans.push((e.start, e.length)),
+                None => by_track.push((ti, vec![(e.start, e.length)])),
+            }
+        }
+        by_track
+            .into_iter()
+            .filter_map(|(ti, spans)| {
+                let tr = self.project.tracks.get(ti)?;
+                Some((
+                    tr.id,
+                    neoveg_engine::env_lock::AutomationSnapshot::capture(tr, &spans),
+                ))
+            })
+            .collect()
     }
 
     fn capture_track_snapshot(&self, track_idx: usize) -> Vec<TrackEventSnapshot> {
