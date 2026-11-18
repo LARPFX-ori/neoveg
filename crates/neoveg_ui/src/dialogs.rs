@@ -6172,8 +6172,9 @@ fn prefs_video_preview(
                     ui.checkbox(&mut g.cut_1x1, tr(lang, "Recorte central 1:1 (quadrado)"));
                     ui.checkbox(&mut g.action_title, tr(lang, "Áreas de ação e de título"));
                     ui.checkbox(&mut g.rulers, tr(lang, "Réguas (pixels do projeto)"));
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut g.grid, tr(lang, "Grade"));
+                    ui.checkbox(&mut g.grid, tr(lang, "Grade"));
+                    // quebra a linha em janela estreita (Preferências em 760x520)
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(tr(lang, "Divisões horizontais:"));
                         ui.add(egui::DragValue::new(&mut g.grid_h).range(2..=64));
                         ui.label(tr(lang, "Verticais:"));
