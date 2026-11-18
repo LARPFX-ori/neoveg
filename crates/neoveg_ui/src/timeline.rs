@@ -10,7 +10,7 @@ use egui::{
     pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
 };
 use neoveg_common::{tr, tr_args};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 mod keyframes;
 use keyframes::KfArea;
@@ -241,6 +241,8 @@ pub struct TimelineState {
     pub header_prev_w: f32,
     /// Valor fixado em automação *Latch* enquanto a reprodução continua.
     latch_hold: Option<(usize, EnvKind, f32)>,
+    /// Altura de cada trilha antes de Minimizar/Maximizar (p. 388).
+    pub(crate) height_restore: HashMap<Id, f32>,
 }
 
 impl Default for TimelineState {
@@ -262,6 +264,7 @@ impl Default for TimelineState {
             header_w: HEADER_W,
             header_prev_w: HEADER_W,
             latch_hold: None,
+            height_restore: HashMap::new(),
         }
     }
 }
@@ -438,6 +441,11 @@ fn effective_grid_step(
 }
 
 const BUS_TRACK_H: f32 = 58.0;
+/// Altura mínima de uma trilha (Minimizar, p. 388).
+pub(crate) const TRACK_MIN_H: f32 = 28.0;
+/// Teto de Maximizar: a área das faixas, limitada para não gerar camadas
+/// gigantes em monitores muito altos.
+const TRACK_MAX_FILL_H: f32 = 2000.0;
 
 impl App {
     fn timeline_rows(&self, lanes_top: f32) -> TimelineRows {
@@ -981,6 +989,40 @@ impl App {
             tr.height = h;
         }
         self.tl.scroll_y = 0.0;
+    }
+
+    /// Minimizar (`maximize = false`) ou Maximizar a altura da trilha `ti`
+    /// (manual do VEGAS Pro 21, p. 388). Clicar de novo no mesmo botão volta
+    /// à altura de antes. Maximizar ocupa a área das faixas do último quadro.
+    pub(crate) fn toggle_track_height(&mut self, ti: usize, maximize: bool) {
+        let Some((id, cur)) = self.project.tracks.get(ti).map(|t| (t.id, t.height)) else {
+            return;
+        };
+        let lanes_h = self.tl.last_lanes.height();
+        let target = if maximize {
+            if lanes_h.is_finite() && lanes_h > TRACK_MIN_H {
+                lanes_h.min(TRACK_MAX_FILL_H)
+            } else {
+                400.0
+            }
+        } else {
+            TRACK_MIN_H
+        };
+        let next = match self.tl.height_restore.get(&id).copied() {
+            Some(prev) if (cur - target).abs() < 0.5 => {
+                self.tl.height_restore.remove(&id);
+                prev.clamp(TRACK_MIN_H, TRACK_MAX_FILL_H)
+            }
+            _ => {
+                // guarda a altura "normal" só na primeira vez (minimizar e
+                // depois maximizar ainda volta para a altura original)
+                self.tl.height_restore.entry(id).or_insert(cur);
+                target
+            }
+        };
+        if let Some(t) = self.project.tracks.get_mut(ti) {
+            t.height = next;
+        }
     }
 
     fn adjust_all_track_heights(&mut self, delta: f32) {
@@ -2199,9 +2241,9 @@ impl App {
                 // todos os botões do cabeçalho, inclusive os ocultos. O manual
                 // o põe acima do número; aqui fica ao lado, para não aumentar
                 // a altura do cabeçalho.
-                let (cur_mute, cur_solo, cur_auto) = {
+                let (cur_mute, cur_solo, cur_auto, cur_armed) = {
                     let t = &self.project.tracks[ti];
-                    (t.mute, t.solo, t.automation_mode)
+                    (t.mute, t.solo, t.automation_mode, t.record_armed)
                 };
                 let adj = self.project.tracks[ti].is_adjustment();
                 ui.menu_button(egui::RichText::new("…").small(), |ui| {
@@ -2230,6 +2272,44 @@ impl App {
                             .clicked()
                     {
                         more = Some(HeaderAction::TrackMotion);
+                        ui.close_menu();
+                    }
+                    if !is_folder {
+                        if ui
+                            .button(tr(lang, "Minimizar a altura da trilha"))
+                            .clicked()
+                        {
+                            more = Some(HeaderAction::Minimize);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button(tr(lang, "Maximizar a altura da trilha"))
+                            .clicked()
+                        {
+                            more = Some(HeaderAction::Maximize);
+                            ui.close_menu();
+                        }
+                    }
+                    if is_video
+                        && !is_folder
+                        && !adj
+                        && ui
+                            .selectable_label(
+                                has_parent,
+                                tr(lang, "Tornar filho de composição (Pai/Filho)"),
+                            )
+                            .clicked()
+                    {
+                        more = Some(HeaderAction::ToggleCompositingChild);
+                        ui.close_menu();
+                    }
+                    if !is_video
+                        && !is_folder
+                        && ui
+                            .selectable_label(cur_armed, tr(lang, "Armar para gravação"))
+                            .clicked()
+                    {
+                        more = Some(HeaderAction::RecordArm);
                         ui.close_menu();
                     }
                     if !is_folder {
@@ -2427,7 +2507,7 @@ impl App {
                 {
                     self.dlg.track_motion = Some(tid);
                 }
-                if show_btns && kind == TrackKind::Audio && !is_folder {
+                if show_btns && kind == TrackKind::Audio && !is_folder && btns.record_arm {
                     let (rec_armed, rec_locked) = {
                         let tk = &self.project.tracks[ti];
                         (tk.record_armed, tk.locked)
@@ -2445,8 +2525,45 @@ impl App {
                         .on_hover_text("Armar faixa para gravação (Ctrl+Shift+R)")
                         .clicked()
                     {
-                        self.session.toggle_record_arm(ti);
-                        self.sync_status_from_session();
+                        more = Some(HeaderAction::RecordArm);
+                    }
+                }
+                if show_btns
+                    && is_video
+                    && btns.compositing_child
+                    && !is_folder
+                    && !is_adjustment
+                    && icons::small_icon_button(
+                        ui,
+                        Icon::ParentChild,
+                        None,
+                        has_parent,
+                        &self.theme,
+                    )
+                    .on_hover_text(if has_parent {
+                        tr(lang, "Promover filho para trilha raiz")
+                    } else {
+                        tr(lang, "Tornar filho de composição (Pai/Filho)")
+                    })
+                    .clicked()
+                {
+                    more = Some(HeaderAction::ToggleCompositingChild);
+                }
+                if show_btns && btns.height && !is_folder {
+                    // ⏶ / ⏷ estão na fonte de ícones embutida (sempre presente)
+                    if ui
+                        .small_button("⏶")
+                        .on_hover_text(tr(lang, "Minimizar a altura da trilha"))
+                        .clicked()
+                    {
+                        more = Some(HeaderAction::Minimize);
+                    }
+                    if ui
+                        .small_button("⏷")
+                        .on_hover_text(tr(lang, "Maximizar a altura da trilha"))
+                        .clicked()
+                    {
+                        more = Some(HeaderAction::Maximize);
                     }
                 }
                 if kf_has
@@ -2485,6 +2602,22 @@ impl App {
                 }
                 Some(HeaderAction::Fx) => self.dlg.fx_target = Some(FxTarget::Track(tid)),
                 Some(HeaderAction::TrackMotion) => self.dlg.track_motion = Some(tid),
+                Some(HeaderAction::Minimize) => self.toggle_track_height(ti, false),
+                Some(HeaderAction::Maximize) => self.toggle_track_height(ti, true),
+                Some(HeaderAction::ToggleCompositingChild) => {
+                    if has_parent {
+                        self.session.unmake_compositing_child(ti);
+                        self.sync_after_session();
+                    } else if let Err(e) = self.session.make_compositing_child(ti) {
+                        self.set_status(format!("{e}"));
+                    } else {
+                        self.sync_after_session();
+                    }
+                }
+                Some(HeaderAction::RecordArm) => {
+                    self.session.toggle_record_arm(ti);
+                    self.sync_status_from_session();
+                }
                 Some(HeaderAction::SetAutomation(mode)) => {
                     self.session.set_track_automation_mode(ti, mode);
                     self.sync_status_from_session();
@@ -5598,6 +5731,10 @@ enum HeaderAction {
     Solo,
     Fx,
     TrackMotion,
+    Minimize,
+    Maximize,
+    ToggleCompositingChild,
+    RecordArm,
     SetAutomation(AutomationMode),
     CycleAutomation,
     EditButtons,
