@@ -3,9 +3,10 @@
 
 use crate::engine::audio::{Meters, Mixer, TransportVarispeed};
 use crate::engine::loudness::{LoudnessAnalyzer, LoudnessSnapshot};
-use crate::engine::video::{render_event_still, render_frame_preview};
+use crate::engine::video::{render_event_still, render_frame_with_opts, VideoRenderOpts};
+use crate::engine::Frame;
 use crate::media::{AudioData, MediaCache};
-use crate::model::{Id, Project, Ticks};
+use crate::model::{FrameRate, Id, Project, Ticks};
 use crate::render::{WavBits, WavWriter};
 use crate::scopes;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -31,6 +32,8 @@ pub struct Shared {
     pub frac: f64,
     pub dim: bool,
     pub mono_downmix: bool,
+    /// Silencia apenas a monitoração de áudio da prévia sem afetar as trilhas/render.
+    pub preview_muted: bool,
     /// Erro ocorrido na thread de áudio, exibido pela interface.
     pub error: Option<String>,
 }
@@ -112,6 +115,7 @@ impl AudioOut {
             frac: 0.0,
             dim: false,
             mono_downmix: false,
+            preview_muted: false,
             error: None,
         }));
         let mut stream = None;
@@ -292,6 +296,10 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
             if s.dim {
                 buf.iter_mut().take(frames * 2).for_each(|v| *v *= 0.1);
             }
+            if s.preview_muted {
+                buf.iter_mut().take(frames * 2).for_each(|v| *v = 0.0);
+                s.meters.master = [0.0, 0.0];
+            }
         } else {
             s.meters.master = [0.0, 0.0];
             for v in s.meters.tracks.values_mut() {
@@ -308,6 +316,122 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
 // Prévia de vídeo
 // ---------------------------------------------------------------------------
 
+/// Modo de comparação da Prévia de Vídeo em tela dividida (manual do VEGAS Pro 21, p. 203).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PreviewSplitMode {
+    #[default]
+    Off,
+    FxBypass,
+    Clipboard,
+}
+
+impl PreviewSplitMode {
+    pub const ALL: [PreviewSplitMode; 3] = [
+        PreviewSplitMode::Off,
+        PreviewSplitMode::FxBypass,
+        PreviewSplitMode::Clipboard,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PreviewSplitMode::Off => "Normal",
+            PreviewSplitMode::FxBypass => "Tela dividida: FX ignorados",
+            PreviewSplitMode::Clipboard => "Tela dividida: Área de transferência",
+        }
+    }
+}
+
+/// Cache de quadros pré-renderizados em memória para Prévia Dinâmica em RAM (`Shift+B`, p. 207).
+#[derive(Clone, Debug)]
+pub struct RamPreviewCache {
+    pub generation: u64,
+    pub width: usize,
+    pub height: usize,
+    pub start: Ticks,
+    pub end: Ticks,
+    pub fps: FrameRate,
+    pub frames: HashMap<i64, image::RgbaImage>,
+    pub bytes_used: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for RamPreviewCache {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+impl RamPreviewCache {
+    pub fn new(max_mb: usize) -> Self {
+        let cap_mb = max_mb.clamp(32, 4096);
+        Self {
+            generation: 0,
+            width: 0,
+            height: 0,
+            start: Ticks::ZERO,
+            end: Ticks::ZERO,
+            fps: FrameRate::FPS_29_97,
+            frames: HashMap::new(),
+            bytes_used: 0,
+            max_bytes: cap_mb.saturating_mul(1024 * 1024),
+        }
+    }
+
+    pub fn reset(
+        &mut self,
+        generation: u64,
+        (width, height): (usize, usize),
+        (start, end): (Ticks, Ticks),
+        fps: FrameRate,
+        max_mb: usize,
+    ) {
+        self.generation = generation;
+        self.width = width;
+        self.height = height;
+        self.start = start;
+        self.end = end;
+        self.fps = fps;
+        self.frames.clear();
+        self.bytes_used = 0;
+        self.max_bytes = max_mb.clamp(32, 4096).saturating_mul(1024 * 1024);
+    }
+
+    pub fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes_used = 0;
+        self.generation = 0;
+    }
+
+    pub fn insert_frame(&mut self, frame_idx: i64, img: image::RgbaImage) -> bool {
+        let sz = img.as_raw().len();
+        if self.bytes_used.saturating_add(sz) > self.max_bytes {
+            return false;
+        }
+        if let Some(old) = self.frames.insert(frame_idx, img) {
+            self.bytes_used = self.bytes_used.saturating_sub(old.as_raw().len());
+        }
+        self.bytes_used = self.bytes_used.saturating_add(sz);
+        true
+    }
+
+    pub fn get(
+        &self,
+        generation: u64,
+        frame_idx: i64,
+        w: usize,
+        h: usize,
+    ) -> Option<&image::RgbaImage> {
+        if self.generation != generation || self.width != w || self.height != h {
+            return None;
+        }
+        self.frames.get(&frame_idx)
+    }
+
+    pub fn mb_used(&self) -> f32 {
+        self.bytes_used as f32 / (1024.0 * 1024.0)
+    }
+}
+
 pub struct PreviewRequest {
     pub project: Arc<Project>,
     pub t: Ticks,
@@ -315,12 +439,15 @@ pub struct PreviewRequest {
     pub h: usize,
     pub scopes: bool,
     pub prefer_proxy: bool,
+    pub split_mode: PreviewSplitMode,
+    pub mute_video: bool,
     /// Modo de edição expandido (prévia dupla A/B lado a lado): `(esq_id, esq_t, dir_id, dir_t)`.
     pub expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
 }
 
 pub struct PreviewResult {
     pub image: image::RgbaImage,
+    pub split_alt: Option<image::RgbaImage>,
     pub scopes: Option<scopes::ScopeImages>,
     pub render_ms: f64,
     pub error: Option<String>,
@@ -356,14 +483,45 @@ impl Preview {
                     // §0.6: uma falha ao renderizar um quadro vira um quadro de erro,
                     // e o worker continua vivo para os próximos pedidos.
                     let rendered = crate::util::guard("prévia de vídeo", || {
-                        let f = render_frame_preview(
-                            &req.project,
-                            &media,
-                            req.t,
-                            req.w,
-                            req.h,
-                            req.prefer_proxy,
-                        );
+                        let f = if req.mute_video {
+                            Frame::filled(req.w, req.h, [0.04, 0.04, 0.05, 1.0])
+                        } else {
+                            render_frame_with_opts(
+                                &req.project,
+                                &media,
+                                req.t,
+                                req.w,
+                                req.h,
+                                VideoRenderOpts {
+                                    prefer_proxy: req.prefer_proxy,
+                                    bypass_fx: false,
+                                },
+                            )
+                        };
+                        let split_alt =
+                            if !req.mute_video && req.split_mode == PreviewSplitMode::FxBypass {
+                                let raw_f = render_frame_with_opts(
+                                    &req.project,
+                                    &media,
+                                    req.t,
+                                    req.w,
+                                    req.h,
+                                    VideoRenderOpts {
+                                        prefer_proxy: req.prefer_proxy,
+                                        bypass_fx: true,
+                                    },
+                                );
+                                Some(
+                                    image::RgbaImage::from_raw(
+                                        req.w as u32,
+                                        req.h as u32,
+                                        raw_f.to_rgba8(),
+                                    )
+                                    .unwrap_or_else(|| error_image(req.w, req.h)),
+                                )
+                            } else {
+                                None
+                            };
                         let sc = if req.scopes {
                             Some(scopes::compute(&f))
                         } else {
@@ -398,15 +556,16 @@ impl Preview {
                         let rgba = f.to_rgba8();
                         let img = image::RgbaImage::from_raw(req.w as u32, req.h as u32, rgba)
                             .unwrap_or_else(|| error_image(req.w, req.h));
-                        (img, sc, ab)
+                        (img, split_alt, sc, ab)
                     });
-                    let (image, sc, ab, error) = match rendered {
-                        Ok((img, sc, ab)) => (img, sc, ab, None),
-                        Err(e) => (error_image(req.w, req.h), None, None, Some(e)),
+                    let (image, split_alt, sc, ab, error) = match rendered {
+                        Ok((img, split_alt, sc, ab)) => (img, split_alt, sc, ab, None),
+                        Err(e) => (error_image(req.w, req.h), None, None, None, Some(e)),
                     };
                     if tx_res
                         .send(PreviewResult {
                             image,
+                            split_alt,
                             scopes: sc,
                             render_ms: t0.elapsed().as_secs_f64() * 1000.0,
                             error,
@@ -738,5 +897,26 @@ mod tests {
         assert_eq!(decoded.samples.len() / 2, clip.frames_written as usize);
         assert!(decoded.samples.iter().all(|s| s.is_finite()));
         let _ = std::fs::remove_file(&clip.path);
+    }
+
+    #[test]
+    fn ram_preview_cache_respeita_orcamento_e_geracao() {
+        let mut cache = RamPreviewCache::new(32);
+        cache.reset(
+            7,
+            (64, 64),
+            (Ticks::ZERO, Ticks::from_secs_i64(2)),
+            FrameRate::FPS_30,
+            32,
+        );
+        cache.max_bytes = 32 * 1024; // 32 KiB para teste determinístico (§0.4)
+        let f = image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255]));
+        // 64*64*4 = 16 KiB: cabem 2 quadros e o 3º é recusado sem pânico
+        assert!(cache.insert_frame(0, f.clone()));
+        assert!(cache.insert_frame(1, f.clone()));
+        assert!(!cache.insert_frame(2, f));
+        assert!(cache.get(7, 0, 64, 64).is_some());
+        assert!(cache.get(8, 0, 64, 64).is_none());
+        assert!(cache.get(7, 0, 32, 32).is_none());
     }
 }

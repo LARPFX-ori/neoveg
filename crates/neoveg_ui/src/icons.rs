@@ -101,11 +101,17 @@ pub enum Icon {
     StoryboardGrid,
     SmartFolder,
     ReplaceMedia,
+    SplitPreview,
+    RamCache,
+    CopyFrame,
+    MuteAudio,
+    MuteVideo,
+    ExternalMonitor,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 93] = [
+    pub const ALL: [Icon; 99] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -199,6 +205,12 @@ impl Icon {
         Icon::StoryboardGrid,
         Icon::SmartFolder,
         Icon::ReplaceMedia,
+        Icon::SplitPreview,
+        Icon::RamCache,
+        Icon::CopyFrame,
+        Icon::MuteAudio,
+        Icon::MuteVideo,
+        Icon::ExternalMonitor,
     ];
 }
 
@@ -1386,6 +1398,72 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.62, 0.22, 0.78, 0.34, pal.blue, 0.08);
             c.line(0.80, 0.66, 0.24, 0.66, pal.green, 0.08);
             c.line(0.38, 0.78, 0.22, 0.66, pal.green, 0.08);
+        }
+        Icon::SplitPreview => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.20, 0.86, 0.80),
+                c.u(0.04),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.p.rect_filled(c.rect(0.50, 0.24, 0.82, 0.76), c.u(0.02), pal.blue);
+            c.line(0.50, 0.14, 0.50, 0.86, pal.amber, 0.09);
+        }
+        Icon::RamCache => {
+            c.p.rect_stroke(
+                c.rect(0.16, 0.26, 0.84, 0.74),
+                c.u(0.05),
+                c.stroke(0.07, pal.green),
+                StrokeKind::Inside,
+            );
+            for rx in [0.28, 0.46, 0.64] {
+                c.p.rect_filled(c.rect(rx, 0.36, rx + 0.10, 0.64), c.u(0.02), pal.ink);
+            }
+            for rx in [0.24, 0.42, 0.60, 0.74] {
+                c.line(rx, 0.14, rx, 0.26, pal.amber, 0.07);
+                c.line(rx, 0.74, rx, 0.86, pal.amber, 0.07);
+            }
+        }
+        Icon::CopyFrame => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.16, 0.66, 0.68),
+                c.u(0.04),
+                c.stroke(0.07, pal.muted),
+                StrokeKind::Inside,
+            );
+            c.p.rect_filled(c.rect(0.34, 0.32, 0.86, 0.84), c.u(0.04), pal.paper);
+            c.p.rect_stroke(
+                c.rect(0.34, 0.32, 0.86, 0.84),
+                c.u(0.04),
+                c.stroke(0.07, pal.blue),
+                StrokeKind::Inside,
+            );
+        }
+        Icon::MuteAudio => {
+            c.line(0.18, 0.42, 0.34, 0.42, pal.ink, 0.09);
+            c.line(0.34, 0.42, 0.54, 0.24, pal.ink, 0.08);
+            c.line(0.54, 0.24, 0.54, 0.76, pal.ink, 0.08);
+            c.line(0.54, 0.76, 0.34, 0.58, pal.ink, 0.08);
+            c.line(0.18, 0.82, 0.84, 0.18, pal.red, 0.09);
+        }
+        Icon::MuteVideo => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.24, 0.86, 0.76),
+                c.u(0.05),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.16, 0.82, 0.84, 0.18, pal.red, 0.09);
+        }
+        Icon::ExternalMonitor => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.18, 0.88, 0.68),
+                c.u(0.05),
+                c.stroke(0.07, pal.blue),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.68, 0.50, 0.84, pal.ink, 0.08);
+            c.line(0.30, 0.84, 0.70, 0.84, pal.ink, 0.08);
         }
     }
 }

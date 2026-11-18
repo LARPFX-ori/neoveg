@@ -1359,3 +1359,53 @@ fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
     assert_eq!(harness.state().project.tracks[0].events.len(), before + 1);
     assert_eq!(harness.state().session.active_storyboard_id, Some(sb_id));
 }
+
+#[test]
+fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Botão de tela dividida alterna Bypass FX.
+    harness.get_by_label("Tela dividida").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().opts.preview_split_mode,
+        neoveg_engine::playback::PreviewSplitMode::FxBypass
+    );
+
+    // 2. Copiar quadro armazena buffer da área de transferência interna.
+    harness.get_by_label("Copiar quadro").click();
+    harness.run_steps(2);
+    assert!(harness.state().preview_clipboard.is_some());
+
+    // 3. Zoom dentro da prévia ajusta e restaura para Fit (1.0).
+    harness.state_mut().exec_cmd(Some(&ctx), "preview.zoom_in");
+    harness.run_steps(1);
+    assert!(harness.state().preview_zoom > 1.1);
+    harness.state_mut().exec_cmd(Some(&ctx), "preview.zoom_fit");
+    assert!((harness.state().preview_zoom - 1.0).abs() < 1e-4);
+
+    // 4. Silenciar áudio e vídeo da prévia via barra de ferramentas.
+    harness.get_by_label("Silenciar áudio da prévia").click();
+    harness.get_by_label("Silenciar vídeo da prévia").click();
+    harness.run_steps(2);
+    assert!(harness.state().opts.preview_mute_audio);
+    assert!(harness.state().opts.preview_mute_video);
+
+    // 5. Soltar efeito de vídeo na prévia aplica em Master Video Output FX.
+    assert!(harness
+        .state_mut()
+        .session
+        .apply_video_fx_to_output(crate::model::FxKind::Invert));
+    assert_eq!(harness.state().project.master.video_fx.len(), 1);
+
+    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo.
+    harness.get_by_label("Prévia em RAM").click();
+    harness.run_steps(4);
+    harness.get_by_label("Monitor externo").click();
+    harness.run_steps(2);
+    assert!(harness.state().external_monitor);
+}
