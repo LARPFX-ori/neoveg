@@ -20,6 +20,8 @@ pub mod aaf;
 #[forbid(unsafe_code)]
 mod aaf_metadict;
 #[forbid(unsafe_code)]
+pub mod color;
+#[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;

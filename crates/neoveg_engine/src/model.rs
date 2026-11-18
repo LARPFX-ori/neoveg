@@ -36,6 +36,18 @@ pub struct ProjectSettings {
     /// Tempo musical em batidas por minuto para régua e grade de compassos (p. 232).
     #[serde(default = "default_bpm")]
     pub bpm: f64,
+    /// Formato de pixel do projeto (8-bit ou 32-bit ponto flutuante).
+    #[serde(default)]
+    pub pixel_format: crate::color::PixelFormat,
+    /// Gama de composição (2,222 vídeo ou 1,000 linear).
+    #[serde(default)]
+    pub compositing_gamma: crate::color::CompositingGamma,
+    /// Espaço de cor do projeto / ACES.
+    #[serde(default)]
+    pub color_space: crate::color::ProjectColorSpace,
+    /// Transformação de visualização na prévia (View Transform).
+    #[serde(default)]
+    pub view_transform: crate::color::ViewTransform,
 }
 
 fn default_bpm() -> f64 {
@@ -246,6 +258,10 @@ impl Default for ProjectSettings {
             channel_layout: ChannelLayout::Stereo,
             stereo_3d: Stereo3dMode::Off,
             bpm: default_bpm(),
+            pixel_format: crate::color::PixelFormat::Bits8,
+            compositing_gamma: crate::color::CompositingGamma::Gamma2_222,
+            color_space: crate::color::ProjectColorSpace::DefaultSrgb,
+            view_transform: crate::color::ViewTransform::Off,
         }
     }
 }
