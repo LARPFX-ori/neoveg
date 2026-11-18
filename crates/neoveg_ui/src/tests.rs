@@ -444,7 +444,6 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     let prev_tab = app.dock_tab;
     let prev_dock_vis = app.dock_visible;
     let prev_loading = app.loading;
-    let prev_closed = app.closed_tabs.clone();
     let prev_name = app.project.media.get(media_idx).map(|m| m.name.clone());
     if let Some(item) = app.project.media.get_mut(media_idx) {
         item.name = "BigBuckBunny_320x180.mp4".to_owned();
@@ -454,8 +453,6 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     app.dock_tab = DockTab::ProjectMedia;
     app.dock_visible = true;
     app.detached_tabs.clear();
-    // todas as abas no rodapé (o padrão fecha o Explorer e outras)
-    app.closed_tabs.clear();
     app.loading = 1;
 
     let ctx = egui::Context::default();
@@ -524,7 +521,8 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     }
 
     let mut row_tops = Vec::new();
-    for tab_label in ["Mídia do Projeto", "Explorer", "Destacar"] {
+    // as duas primeiras abas da ordem padrão (o rodapé rola na horizontal)
+    for tab_label in ["Mídia do Projeto", "Transições", "Destacar"] {
         let tab = texts
             .iter()
             .find(|(txt, _, _, _)| txt == tab_label)
@@ -559,7 +557,6 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     app.prefs.edit_layout.master_bus_docked = prev_master_docked;
     app.dock_tab = prev_tab;
     app.dock_visible = prev_dock_vis;
-    app.closed_tabs = prev_closed;
     app.loading = prev_loading;
 }
 
