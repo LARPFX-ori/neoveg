@@ -225,7 +225,15 @@ pub fn event_layer(
     w: usize,
     h: usize,
 ) -> Option<Frame> {
-    event_layer_opts(p, media, e, t, w, h, false)
+    event_layer_opts(p, media, e, t, w, h, VideoRenderOpts::default())
+}
+
+/// Opções de renderização de prévia para um quadro composto.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VideoRenderOpts {
+    pub prefer_proxy: bool,
+    /// Ignora todos os efeitos de evento, trilha, ajuste e saída mestre (tela dividida "Antes").
+    pub bypass_fx: bool,
 }
 
 fn event_layer_opts(
@@ -235,17 +243,20 @@ fn event_layer_opts(
     t: Ticks,
     w: usize,
     h: usize,
-    prefer_proxy: bool,
+    opts: VideoRenderOpts,
 ) -> Option<Frame> {
     let m = p.media(e.media_id)?;
     if !m.has_video {
         return None;
     }
     let mt = e.media_time(t, m.duration)?;
-    let src = media.video_frame_for_quality(m, mt, w as u32, h as u32, prefer_proxy)?;
+    let src = media.video_frame_for_quality(m, mt, w as u32, h as u32, opts.prefer_proxy)?;
     let local = t - e.start;
     let key = e.pan_crop.eval(local);
     let mut f = draw_source(&src, w, h, &key, e.maintain_aspect);
+    if opts.bypass_fx {
+        return Some(f);
+    }
     for fx in &e.fx {
         if fx.enabled && fx.kind == FxKind::Stabilization {
             let vals = fx.values(local);
@@ -312,7 +323,11 @@ pub fn render_event_still(
     };
     let e = &p.tracks[ti].events[ei];
     let clamped_t = t.clamp_safe(e.start, (e.end() - Ticks::from_raw(1)).max(e.start));
-    event_layer_opts(p, media, e, clamped_t, w, h, prefer_proxy)
+    let opts = VideoRenderOpts {
+        prefer_proxy,
+        bypass_fx: false,
+    };
+    event_layer_opts(p, media, e, clamped_t, w, h, opts)
         .unwrap_or_else(|| Frame::filled(w, h, [0.0, 0.0, 0.0, 1.0]))
 }
 
@@ -323,7 +338,7 @@ fn render_track(
     t: Ticks,
     w: usize,
     h: usize,
-    prefer_proxy: bool,
+    opts: VideoRenderOpts,
 ) -> Option<Frame> {
     let mut active: Vec<&Event> = track
         .events
@@ -338,7 +353,7 @@ fn render_track(
     // camadas mais antigas por baixo (sem transição)
     let mut base: Option<Frame> = None;
     for e in active.iter().take(n.saturating_sub(2)) {
-        if let Some(mut f) = event_layer_opts(p, media, e, t, w, h, prefer_proxy) {
+        if let Some(mut f) = event_layer_opts(p, media, e, t, w, h, opts) {
             f.scale_alpha(event_alpha(e, t, false, false));
             match &mut base {
                 Some(b) => b.over(&f),
@@ -351,11 +366,11 @@ fn render_track(
         let b = active[n - 1];
         let overlap = (a.end() - b.start).max(Ticks::from_raw(1));
         let prog = t.fraction_in(b.start, overlap);
-        let fa = event_layer_opts(p, media, a, t, w, h, prefer_proxy).map(|mut f| {
+        let fa = event_layer_opts(p, media, a, t, w, h, opts).map(|mut f| {
             f.scale_alpha(event_alpha(a, t, false, true));
             f
         });
-        let fb = event_layer_opts(p, media, b, t, w, h, prefer_proxy).map(|mut f| {
+        let fb = event_layer_opts(p, media, b, t, w, h, opts).map(|mut f| {
             f.scale_alpha(event_alpha(b, t, true, false));
             f
         });
@@ -376,17 +391,15 @@ fn render_track(
             e.fade_in.len > Ticks::ZERO && local < e.fade_in.len,
         ) {
             // transição sem evento anterior: entra a partir do transparente
-            (Some(tr), true) => {
-                event_layer_opts(p, media, e, t, w, h, prefer_proxy).map(|mut f| {
-                    f.scale_alpha(event_alpha(e, t, true, false));
-                    let prog = e
-                        .fade_in
-                        .curve
-                        .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
-                    transition::apply(tr.kind, tr.softness, &Frame::new(w, h), &f, prog)
-                })
-            }
-            _ => event_layer_opts(p, media, e, t, w, h, prefer_proxy).map(|mut f| {
+            (Some(tr), true) => event_layer_opts(p, media, e, t, w, h, opts).map(|mut f| {
+                f.scale_alpha(event_alpha(e, t, true, false));
+                let prog = e
+                    .fade_in
+                    .curve
+                    .shape(local.fraction_in(Ticks::ZERO, e.fade_in.len));
+                transition::apply(tr.kind, tr.softness, &Frame::new(w, h), &f, prog)
+            }),
+            _ => event_layer_opts(p, media, e, t, w, h, opts).map(|mut f| {
                 f.scale_alpha(event_alpha(e, t, false, false));
                 f
             }),
@@ -442,6 +455,28 @@ pub fn render_frame_preview(
     h: usize,
     prefer_proxy: bool,
 ) -> Frame {
+    render_frame_with_opts(
+        p,
+        media,
+        t,
+        w,
+        h,
+        VideoRenderOpts {
+            prefer_proxy,
+            bypass_fx: false,
+        },
+    )
+}
+
+/// Renderiza o quadro do projeto com controle explícito de proxies e bypass de efeitos.
+pub fn render_frame_with_opts(
+    p: &Project,
+    media: &MediaCache,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    opts: VideoRenderOpts,
+) -> Frame {
     let bg = p.settings.background;
     let mut out = Frame::filled(w, h, [bg[0], bg[1], bg[2], 1.0]);
     let any_solo = p.any_solo(TrackKind::Video);
@@ -450,14 +485,18 @@ pub fn render_frame_preview(
             continue;
         }
         if track.is_adjustment() {
-            apply_adjustment(track, &mut out, t, p.settings.fps);
+            if !opts.bypass_fx {
+                apply_adjustment(track, &mut out, t, p.settings.fps);
+            }
             continue;
         }
-        let Some(mut layer) = render_track(p, media, track, t, w, h, prefer_proxy) else {
+        let Some(mut layer) = render_track(p, media, track, t, w, h, opts) else {
             continue;
         };
-        for fx in &track.fx {
-            vfx::apply(fx, &mut layer, t, p.settings.fps);
+        if !opts.bypass_fx {
+            for fx in &track.fx {
+                vfx::apply(fx, &mut layer, t, p.settings.fps);
+            }
         }
         let ftc = track.env_value(EnvKind::FadeToColor, t);
         if ftc.abs() > 1e-4 {
@@ -476,8 +515,10 @@ pub fn render_frame_preview(
         let op = track.opacity * track.env_value(EnvKind::Opacity, t);
         blend(&mut out, &layer, track.blend, op);
     }
-    for fx in &p.master.video_fx {
-        vfx::apply(fx, &mut out, t, p.settings.fps);
+    if !opts.bypass_fx {
+        for fx in &p.master.video_fx {
+            vfx::apply(fx, &mut out, t, p.settings.fps);
+        }
     }
     // garante saída opaca
     out.px.par_iter_mut().for_each(|px| {
@@ -655,5 +696,37 @@ mod adjustment_tests {
         t.adjustment = true;
         assert!(!t.accepts(TrackKind::Video));
         assert!(!t.accepts(TrackKind::Audio));
+    }
+
+    #[test]
+    fn bypass_fx_ignora_efeitos_de_evento_trilha_e_master() {
+        let mut p = Project::default();
+        p.settings.background = [0.0, 0.0, 0.0];
+        p.master.video_fx.push(FxInstance::new(FxKind::Invert));
+        let cache = MediaCache::default();
+        let normal = render_frame_with_opts(
+            &p,
+            &cache,
+            Ticks::ZERO,
+            4,
+            4,
+            VideoRenderOpts {
+                prefer_proxy: false,
+                bypass_fx: false,
+            },
+        );
+        let bypassed = render_frame_with_opts(
+            &p,
+            &cache,
+            Ticks::ZERO,
+            4,
+            4,
+            VideoRenderOpts {
+                prefer_proxy: false,
+                bypass_fx: true,
+            },
+        );
+        assert!((normal.px[0][0] - 1.0).abs() < 1e-4);
+        assert!(bypassed.px[0][0].abs() < 1e-4);
     }
 }

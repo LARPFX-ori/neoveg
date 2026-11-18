@@ -26,7 +26,7 @@ use neoveg_engine::util;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -71,6 +71,9 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
         "track.record_arm",
         "transport.record",
         "media.select_events",
+        "preview.copy_frame",
+        "preview.ram_build",
+        "preview.external_monitor",
         "insert.marker",
         "insert.region",
         "transport.jump_prev_marker",
@@ -130,6 +133,14 @@ pub enum LoadMsg {
     Reloaded(Id, Result<media::Imported, String>),
     Replaced(Id, Result<media::Imported, String>),
     ProxyBuilt(Id, Result<PathBuf, String>),
+    RamPreviewFrame {
+        gen: u64,
+        frame_idx: i64,
+        image: image::RgbaImage,
+    },
+    RamPreviewDone {
+        gen: u64,
+    },
     PrerenderDone {
         start: Ticks,
         end: Ticks,
@@ -209,6 +220,13 @@ impl ScriptJob {
     }
 }
 
+pub struct RamPreviewJob {
+    pub cancel: Arc<AtomicBool>,
+    pub done: Arc<AtomicU64>,
+    pub total: Arc<AtomicU64>,
+    pub gen: u64,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct PreviewReqKey {
     t: Ticks,
@@ -217,6 +235,8 @@ pub(crate) struct PreviewReqKey {
     h: usize,
     scopes: bool,
     prefer_proxy: bool,
+    split_mode: neoveg_engine::playback::PreviewSplitMode,
+    mute_video: bool,
     expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
 }
 
@@ -227,6 +247,14 @@ pub struct App {
     pub audio: AudioOut,
     pub(crate) preview: Preview,
     pub(crate) preview_tex: Option<TextureHandle>,
+    pub(crate) preview_split_tex: Option<TextureHandle>,
+    pub(crate) preview_clipboard: Option<(TextureHandle, image::RgbaImage)>,
+    pub(crate) ram_preview: neoveg_engine::playback::RamPreviewCache,
+    pub(crate) ram_preview_job: Option<RamPreviewJob>,
+    pub(crate) preview_zoom: f32,
+    pub(crate) preview_pan: egui::Vec2,
+    pub external_monitor: bool,
+    pub(crate) external_monitor_fullscreen: bool,
     pub(crate) expanded_ab_tex: Option<(TextureHandle, TextureHandle)>,
     pub(crate) preview_inflight: bool,
     pub(crate) preview_inflight_since: Instant,
@@ -378,6 +406,14 @@ impl App {
             audio,
             preview,
             preview_tex: None,
+            preview_split_tex: None,
+            preview_clipboard: None,
+            ram_preview: neoveg_engine::playback::RamPreviewCache::default(),
+            ram_preview_job: None,
+            preview_zoom: 1.0,
+            preview_pan: egui::Vec2::ZERO,
+            external_monitor: false,
+            external_monitor_fullscreen: false,
             expanded_ab_tex: None,
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
@@ -452,6 +488,8 @@ impl App {
             recording_peaks: HashMap::new(),
             project_media: crate::project_media::ProjectMediaState::default(),
         };
+        app.ram_preview =
+            neoveg_engine::playback::RamPreviewCache::new(app.prefs.ram_preview_mb as usize);
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
         }
@@ -502,6 +540,7 @@ impl App {
 
     pub fn sync_after_session(&mut self) {
         self.sync_status_from_session();
+        self.sync_master_monitor_audio();
         let removed = std::mem::take(&mut self.session.removed_media_ids);
         for id in removed {
             self.thumbs.remove(&id);
@@ -1350,6 +1389,27 @@ impl App {
                     }
                     Err(e) => self.set_status(format!("Erro ao gerar proxy: {e}")),
                 },
+                LoadMsg::RamPreviewFrame {
+                    gen,
+                    frame_idx,
+                    image,
+                } => {
+                    if gen == self.generation {
+                        let _ = self.ram_preview.insert_frame(frame_idx, image);
+                    }
+                }
+                LoadMsg::RamPreviewDone { gen } => {
+                    if self.ram_preview_job.as_ref().is_some_and(|j| j.gen == gen) {
+                        self.ram_preview_job = None;
+                        if gen == self.generation {
+                            let n = self.ram_preview.frames.len();
+                            let mb = self.ram_preview.mb_used();
+                            self.set_status(format!(
+                                "Prévia em RAM pronta: {n} quadros ({mb:.1} MB)."
+                            ));
+                        }
+                    }
+                }
                 LoadMsg::PrerenderDone { start, end, result } => {
                     self.prerender_job = None;
                     match result {
@@ -1482,6 +1542,23 @@ impl App {
                         Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR))
                 }
             }
+            if let Some(alt_img) = res.split_alt {
+                let alt_ci = rgba_to_color_image(&alt_img);
+                match &mut self.preview_split_tex {
+                    Some(t) => t.set(alt_ci, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.preview_split_tex = Some(ctx.load_texture(
+                            "preview_split_alt",
+                            alt_ci,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            } else if self.opts.preview_split_mode
+                != neoveg_engine::playback::PreviewSplitMode::FxBypass
+            {
+                self.preview_split_tex = None;
+            }
             if let Some((la, rb)) = res.expanded_ab {
                 let ia = rgba_to_color_image(&la);
                 let ib = rgba_to_color_image(&rb);
@@ -1537,6 +1614,17 @@ impl App {
         let scopes =
             self.is_panel_open(DockTab::Scopes) || self.is_panel_open(DockTab::ColorGrading);
         let prefer_proxy = self.opts.preview_quality.prefer_proxy();
+        let split_mode = self.opts.preview_split_mode;
+        let mute_video = self.opts.preview_mute_video;
+        if let Some(job) = &self.ram_preview_job {
+            if job.gen != self.generation {
+                job.cancel.store(true, Ordering::Relaxed);
+                self.ram_preview_job = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        self.sync_master_monitor_audio();
         let expanded_ab = self.session.expanded_edit.as_ref().map(|exp| {
             let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
             let (lid, lt) = match exp.left_event_id.and_then(|id| {
@@ -1563,9 +1651,31 @@ impl App {
             h,
             scopes,
             prefer_proxy,
+            split_mode,
+            mute_video,
             expanded_ab,
         };
         if key != self.last_req {
+            if !scopes
+                && !mute_video
+                && split_mode == neoveg_engine::playback::PreviewSplitMode::Off
+                && expanded_ab.is_none()
+            {
+                let frame_idx = self.project.settings.fps.ticks_to_frame_round(t);
+                if let Some(cached) = self.ram_preview.get(self.generation, frame_idx, w, h) {
+                    let ci = rgba_to_color_image(cached);
+                    match &mut self.preview_tex {
+                        Some(tex) => tex.set(ci, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.preview_tex =
+                                Some(ctx.load_texture("preview", ci, egui::TextureOptions::LINEAR));
+                        }
+                    }
+                    self.last_req = key;
+                    self.preview_inflight = false;
+                    return;
+                }
+            }
             self.sync_snapshot();
             self.preview.request(PreviewRequest {
                 project: self.snapshot.clone(),
@@ -1574,11 +1684,148 @@ impl App {
                 h,
                 scopes,
                 prefer_proxy,
+                split_mode,
+                mute_video,
                 expanded_ab,
             });
             self.last_req = key;
             self.preview_inflight = true;
             self.preview_inflight_since = Instant::now();
+        }
+    }
+
+    pub fn copy_preview_frame_to_clipboard(&mut self, ctx: Option<&egui::Context>) {
+        let t = self.project.settings.quantize(self.view_time());
+        let w = (self.project.settings.width as usize).clamp(16, 4096);
+        let h = (self.project.settings.height as usize).clamp(16, 4096);
+        let frame = neoveg_engine::engine::video::render_frame_preview(
+            &self.project,
+            &self.media,
+            t,
+            w,
+            h,
+            self.opts.preview_quality.prefer_proxy(),
+        );
+        let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, frame.to_rgba8()) else {
+            return;
+        };
+        let ci = rgba_to_color_image(&rgba);
+        if let Some(c) = ctx {
+            c.copy_image(ci.clone());
+            let tex = c.load_texture("preview_clipboard", ci, egui::TextureOptions::LINEAR);
+            self.preview_clipboard = Some((tex, rgba));
+        } else if let Some((tex, buf)) = &mut self.preview_clipboard {
+            tex.set(ci, egui::TextureOptions::LINEAR);
+            *buf = rgba;
+        }
+        self.set_status(format!(
+            "Quadro ({w}x{h}) copiado para a área de transferência."
+        ));
+    }
+
+    pub fn start_ram_preview(&mut self) {
+        if let Some(prev) = self.ram_preview_job.take() {
+            prev.cancel.store(true, Ordering::Relaxed);
+        }
+        let fps = self.project.settings.fps;
+        let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+        let (start, end) = match self.time_sel.filter(|(a, b)| b > a) {
+            Some((a, b)) => (a, b),
+            None => {
+                let a = self.cursor.max(Ticks::ZERO);
+                let proj_end = self.project.duration().max(a + Ticks::from_secs_i64(3));
+                let b = (a + Ticks::from_secs_i64(4)).min(proj_end);
+                (a, b)
+            }
+        };
+        let s = self.opts.preview_quality.scale();
+        let w = ((self.project.settings.width as f32 * s) as usize).max(16);
+        let h = ((self.project.settings.height as f32 * s) as usize).max(16);
+        let max_mb = self.prefs.ram_preview_mb as usize;
+        let gen = self.generation;
+        self.ram_preview
+            .reset(gen, (w, h), (start, end), fps, max_mb);
+
+        let bytes_per_frame = w.saturating_mul(h).saturating_mul(4).max(1);
+        let budget_frames = (self.ram_preview.max_bytes / bytes_per_frame).max(1) as i64;
+        let start_idx = fps.ticks_to_frame_round(start);
+        let raw_end_idx = fps.ticks_to_frame_round(end).max(start_idx);
+        let end_idx = raw_end_idx.min(start_idx.saturating_add(budget_frames - 1));
+        let total = (end_idx - start_idx + 1).max(1) as u64;
+
+        self.sync_snapshot();
+        let project = self.snapshot.clone();
+        let media = self.media.clone();
+        let prefer_proxy = self.opts.preview_quality.prefer_proxy();
+        let tx = self.loader_tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicU64::new(0));
+        let job = RamPreviewJob {
+            cancel: cancel.clone(),
+            done: done.clone(),
+            total: Arc::new(AtomicU64::new(total)),
+            gen,
+        };
+        self.ram_preview_job = Some(job);
+        let spawned = util::spawn("ram-preview", move || {
+            for idx in start_idx..=end_idx {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let ft = Ticks::from_raw(fd.0.saturating_mul(idx));
+                let fr = neoveg_engine::engine::video::render_frame_preview(
+                    &project,
+                    &media,
+                    ft,
+                    w,
+                    h,
+                    prefer_proxy,
+                );
+                if let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, fr.to_rgba8()) {
+                    if tx
+                        .send(LoadMsg::RamPreviewFrame {
+                            gen,
+                            frame_idx: idx,
+                            image: rgba,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                done.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = tx.send(LoadMsg::RamPreviewDone { gen });
+        });
+        if let Err(e) = spawned {
+            self.ram_preview_job = None;
+            self.set_status(e);
+        } else {
+            self.set_status(format!(
+                "Gerando prévia dinâmica em RAM ({total} quadros)..."
+            ));
+        }
+    }
+
+    pub fn clear_ram_preview(&mut self) {
+        if let Some(job) = self.ram_preview_job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.ram_preview.clear();
+        self.set_status("Cache da prévia dinâmica em RAM limpo.");
+    }
+
+    pub fn apply_preview_zoom(&mut self, val: f32) {
+        if val == 0.0 {
+            self.preview_zoom = 1.0;
+            self.preview_pan = egui::Vec2::ZERO;
+        } else if val < 0.0 {
+            self.preview_zoom = (self.preview_zoom * (-val)).clamp(0.25, 8.0);
+        } else {
+            self.preview_zoom = val.clamp(0.25, 8.0);
+        }
+        if (self.preview_zoom - 1.0).abs() < 0.01 {
+            self.preview_pan = egui::Vec2::ZERO;
         }
     }
 
@@ -1921,6 +2168,37 @@ impl App {
                     self.sync_after_session();
                 }
             }
+            UiAction::PreviewToggleSplit => {
+                self.opts.preview_split_mode = match self.opts.preview_split_mode {
+                    neoveg_engine::playback::PreviewSplitMode::Off => {
+                        neoveg_engine::playback::PreviewSplitMode::FxBypass
+                    }
+                    _ => neoveg_engine::playback::PreviewSplitMode::Off,
+                };
+            }
+            UiAction::PreviewSplitMode(mode) => {
+                self.opts.preview_split_mode = mode;
+            }
+            UiAction::PreviewCopyFrame => {
+                self.copy_preview_frame_to_clipboard(ctx);
+            }
+            UiAction::PreviewRamBuild => {
+                self.start_ram_preview();
+            }
+            UiAction::PreviewRamClear => {
+                self.clear_ram_preview();
+            }
+            UiAction::PreviewZoom(z) => {
+                self.apply_preview_zoom(z);
+            }
+            UiAction::PreviewToggleExternalMonitor => {
+                self.external_monitor = !self.external_monitor;
+                self.set_status(if self.external_monitor {
+                    "Monitor externo ativado."
+                } else {
+                    "Monitor externo fechado."
+                });
+            }
         }
     }
 
@@ -2136,6 +2414,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.cut");
                 self.cmd_menu_btn(ui, "edit.copy");
+                self.cmd_menu_btn(ui, "preview.copy_frame");
                 self.cmd_menu_btn(ui, "edit.paste");
                 self.cmd_menu_btn(ui, "edit.paste_insert");
                 self.cmd_menu_btn(ui, "edit.paste_attributes");
@@ -2395,6 +2674,18 @@ impl App {
                     self.cmd_menu_btn(ui, "media.view.details");
                     self.cmd_menu_btn(ui, "media.view.storyboard");
                 });
+                ui.menu_button("Prévia de Vídeo", |ui| {
+                    self.cmd_menu_btn(ui, "preview.split_toggle");
+                    self.cmd_menu_btn(ui, "preview.split_bypass");
+                    self.cmd_menu_btn(ui, "preview.split_clipboard");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "preview.zoom_fit");
+                    self.cmd_menu_btn(ui, "preview.zoom_100");
+                    self.cmd_menu_btn(ui, "preview.zoom_in");
+                    self.cmd_menu_btn(ui, "preview.zoom_out");
+                    ui.separator();
+                    self.cmd_menu_chk(ui, self.external_monitor, "preview.external_monitor");
+                });
                 ui.separator();
                 ui.label("Formato de tempo:");
                 for fmt in TimeFormat::ALL {
@@ -2440,6 +2731,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                self.cmd_menu_btn(ui, "preview.ram_build");
+                self.cmd_menu_btn(ui, "preview.ram_clear");
                 ui.menu_button("Neoveg Encoder", |ui| {
                     self.cmd_menu_btn(ui, "view.tab.encoder");
                     self.cmd_menu_btn(ui, "file.send_to_encoder");
@@ -2473,6 +2766,8 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
                 self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
+                self.cmd_menu_chk(ui, self.opts.preview_mute_audio, "preview.mute_audio");
+                self.cmd_menu_chk(ui, self.opts.preview_mute_video, "preview.mute_video");
                 ui.separator();
                 ui.label(format!(
                     "Dispositivo de áudio: {} ({} Hz)",

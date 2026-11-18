@@ -232,6 +232,10 @@ impl Shortcut {
         Self::new(false, false, true, key)
     }
 
+    pub const fn alt_shift(key: ShortcutKey) -> Self {
+        Self::new(false, true, true, key)
+    }
+
     pub fn format(self) -> String {
         let mut parts = Vec::with_capacity(4);
         if self.ctrl {
@@ -441,6 +445,13 @@ pub enum UiAction {
     ProjectMediaNewStoryboard,
     ProjectMediaReplaceDialog,
     ProjectMediaInsertStoryboard,
+    PreviewToggleSplit,
+    PreviewSplitMode(crate::playback::PreviewSplitMode),
+    PreviewCopyFrame,
+    PreviewRamBuild,
+    PreviewRamClear,
+    PreviewZoom(f32),
+    PreviewToggleExternalMonitor,
 }
 
 /// Resultado de execução de um comando.
@@ -2014,6 +2025,149 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::ToggleMasterBus, h),
     },
+    CommandDef {
+        id: "preview.split_toggle",
+        label: "Prévia: Tela dividida (Antes/Depois)",
+        menu_path: "Exibir/Prévia/Tela dividida",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewToggleSplit, h),
+    },
+    CommandDef {
+        id: "preview.split_bypass",
+        label: "Prévia: Comparar sem efeitos (Bypass FX)",
+        menu_path: "Exibir/Prévia/Tela dividida: FX ignorados",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::PreviewSplitMode(crate::playback::PreviewSplitMode::FxBypass),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "preview.split_clipboard",
+        label: "Prévia: Comparar com área de transferência",
+        menu_path: "Exibir/Prévia/Tela dividida: Área de transferência",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::PreviewSplitMode(crate::playback::PreviewSplitMode::Clipboard),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "preview.ram_build",
+        label: "Prévia dinâmica em RAM (seleção de tempo)",
+        menu_path: "Ferramentas/Prévia dinâmica em RAM",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::B)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewRamBuild, h),
+    },
+    CommandDef {
+        id: "preview.ram_clear",
+        label: "Limpar cache da prévia em RAM",
+        menu_path: "Ferramentas/Limpar prévia em RAM",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewRamClear, h),
+    },
+    CommandDef {
+        id: "preview.zoom_fit",
+        label: "Zoom da prévia: Ajustar à janela",
+        menu_path: "Exibir/Prévia/Ajustar zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(0.0), h),
+    },
+    CommandDef {
+        id: "preview.zoom_100",
+        label: "Zoom da prévia: 100%",
+        menu_path: "Exibir/Prévia/Zoom 100%",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(1.0), h),
+    },
+    CommandDef {
+        id: "preview.zoom_in",
+        label: "Ampliar imagem da prévia",
+        menu_path: "Exibir/Prévia/Ampliar zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(-1.25), h),
+    },
+    CommandDef {
+        id: "preview.zoom_out",
+        label: "Reduzir imagem da prévia",
+        menu_path: "Exibir/Prévia/Reduzir zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(-0.8), h),
+    },
+    CommandDef {
+        id: "preview.copy_frame",
+        label: "Copiar quadro atual para a área de transferência",
+        menu_path: "Editar/Copiar quadro da prévia",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewCopyFrame, h),
+    },
+    CommandDef {
+        id: "preview.mute_audio",
+        label: "Silenciar todo o áudio na prévia",
+        menu_path: "Opções/Silenciar áudio da prévia",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.preview_mute_audio = !s.opts.preview_mute_audio;
+            s.set_status(if s.opts.preview_mute_audio {
+                "Áudio da prévia silenciado."
+            } else {
+                "Áudio da prévia ativado."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "preview.mute_video",
+        label: "Silenciar todo o vídeo na prévia",
+        menu_path: "Opções/Silenciar vídeo da prévia",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.preview_mute_video = !s.opts.preview_mute_video;
+            s.set_status(if s.opts.preview_mute_video {
+                "Vídeo da prévia silenciado."
+            } else {
+                "Vídeo da prévia ativado."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "preview.external_monitor",
+        label: "Monitor externo (janela de prévia secundária)",
+        menu_path: "Exibir/Monitor externo (Prévia)",
+        default_shortcut: Some(Shortcut::alt_shift(ShortcutKey::Num4)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewToggleExternalMonitor, h),
+    },
     // --- Inserir ---
     CommandDef {
         id: "insert.track_video",
@@ -3279,5 +3433,13 @@ mod tests {
         s.add_media_to_storyboard(sb, ma.id);
         run_command("media.insert_storyboard", &mut s, &mut h).unwrap();
         assert_eq!(s.project.tracks[1].events.len(), 3);
+
+        assert!(s.apply_video_fx_to_output(crate::model::FxKind::Invert));
+        assert_eq!(s.project.master.video_fx.len(), 1);
+        assert!(!s.apply_video_fx_to_output(crate::model::FxKind::Gain));
+        run_command("preview.mute_audio", &mut s, &mut h).unwrap();
+        assert!(s.opts.preview_mute_audio);
+        run_command("preview.mute_video", &mut s, &mut h).unwrap();
+        assert!(s.opts.preview_mute_video);
     }
 }

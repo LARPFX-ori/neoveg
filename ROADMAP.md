@@ -79,13 +79,13 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Prévia de Vídeo
 
-- **Prévia em tela dividida** (antes e depois do efeito, p. 203).
-- **Prévia dinâmica em RAM** (p. 207).
-- **Zoom e deslocamento dentro da prévia** (p. 208).
-- **Copiar o quadro atual para a área de transferência** (p. 200). Salvar o quadro em PNG já existe (`file.snapshot`).
-- **Silenciar todo o áudio ou todo o vídeo** da prévia (p. 200).
-- **Monitor externo** (p. 210).
-- **Soltar efeitos na prévia** para aplicá-los ao vídeo de saída (p. 55).
+- **Prévia em tela dividida** (`PreviewSplitMode::FxBypass` e `Clipboard`, linha divisória arrastável horizontal/vertical, p. 203).
+- **Prévia dinâmica em RAM** (`Shift+B`, `RamPreviewCache` limitado ao orçamento de memória das Preferências, p. 207).
+- **Zoom e deslocamento dentro da prévia** (roda do mouse, menu de níveis `Ajustar`–`400%` e arraste de enquadramento, p. 208).
+- **Copiar o quadro atual para a área de transferência** (`preview.copy_frame`, imagem RGBA para SO e comparação dividida, p. 200), além de salvar em PNG (`file.snapshot`).
+- **Silenciar todo o áudio ou todo o vídeo** da prévia (`preview.mute_audio` / `preview.mute_video`, p. 200).
+- **Monitor externo** em janela secundária destacada (`Alt+Shift+4`, tela cheia opcional, p. 210).
+- **Soltar efeitos na prévia** aplicando-os à saída mestre de vídeo (`MasterVideo` Video Output FX, p. 55).
 
 ### Edição na linha do tempo
 

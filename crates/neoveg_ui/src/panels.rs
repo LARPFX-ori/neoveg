@@ -215,6 +215,63 @@ impl App {
                 }
             }
         }
+
+        if self.external_monitor {
+            let vid = egui::ViewportId::from_hash_of("neoveg_external_monitor_viewport");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Monitor Externo (Prévia) - Neoveg")
+                .with_inner_size([960.0, 560.0])
+                .with_min_inner_size([320.0, 200.0])
+                .with_resizable(true)
+                .with_icon(icon);
+            let mut close_ext = false;
+            ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
+                let draw_body = |ui: &mut egui::Ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Monitor Externo").strong().small());
+                        if ui
+                            .selectable_label(self.external_monitor_fullscreen, "Tela cheia")
+                            .clicked()
+                        {
+                            self.external_monitor_fullscreen = !self.external_monitor_fullscreen;
+                            v_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                                self.external_monitor_fullscreen,
+                            ));
+                        }
+                        if ui.small_button("Fechar").clicked() {
+                            close_ext = true;
+                        }
+                    });
+                    let avail_ext = ui.available_rect_before_wrap();
+                    let ext_sz = vec2(
+                        avail_ext.width().clamp(64.0, 4096.0),
+                        avail_ext.height().clamp(48.0, 2160.0),
+                    );
+                    let (rect, _) = ui.allocate_exact_size(ext_sz, Sense::hover());
+                    let _ = self.draw_preview_canvas(ui, rect, false);
+                };
+                if class == egui::ViewportClass::Embedded {
+                    let mut open_win = true;
+                    egui::Window::new("Monitor Externo")
+                        .id(egui::Id::new("external_monitor_embedded_window"))
+                        .open(&mut open_win)
+                        .default_size([640.0, 380.0])
+                        .show(v_ctx, draw_body);
+                    if !open_win {
+                        close_ext = true;
+                    }
+                } else {
+                    egui::CentralPanel::default().show(v_ctx, draw_body);
+                    if v_ctx.input(|i| i.viewport().close_requested()) {
+                        close_ext = true;
+                    }
+                }
+            });
+            if close_ext {
+                self.external_monitor = false;
+                self.external_monitor_fullscreen = false;
+            }
+        }
     }
 
     pub(crate) fn show_dock_tab_contents(&mut self, ui: &mut egui::Ui, tab: DockTab) {
@@ -261,6 +318,94 @@ impl App {
                         ui.selectable_value(&mut self.opts.preview_quality, q, q.name());
                     }
                 });
+            let split_active =
+                self.opts.preview_split_mode != neoveg_engine::playback::PreviewSplitMode::Off;
+            let split_resp = icons::icon_button(
+                ui,
+                Icon::SplitPreview,
+                None,
+                split_active,
+                true,
+                &self.theme,
+            );
+            split_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Tela dividida")
+            });
+            if split_resp
+                .on_hover_text("Alternar Prévia em tela dividida (Antes/Depois)")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.split_toggle");
+            }
+            ui.menu_button("Divisão", |ui| {
+                for m in neoveg_engine::playback::PreviewSplitMode::ALL {
+                    if ui
+                        .selectable_label(self.opts.preview_split_mode == m, m.label())
+                        .clicked()
+                    {
+                        self.opts.preview_split_mode = m;
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                ui.checkbox(
+                    &mut self.opts.preview_split_horizontal,
+                    "Divisão horizontal",
+                );
+            });
+            let zoom_txt = if (self.preview_zoom - 1.0).abs() < 0.01 {
+                "Ajustar".to_string()
+            } else {
+                format!("{:.0}%", self.preview_zoom * 100.0)
+            };
+            ui.menu_button(zoom_txt, |ui| {
+                for (lbl, v) in [
+                    ("Ajustar (Fit)", 0.0_f32),
+                    ("50%", 0.5),
+                    ("100%", 1.0),
+                    ("150%", 1.5),
+                    ("200%", 2.0),
+                    ("400%", 4.0),
+                ] {
+                    if ui.button(lbl).clicked() {
+                        if v == 1.0 {
+                            let (pw, ph) = (
+                                self.project.settings.width as f32,
+                                self.project.settings.height as f32,
+                            );
+                            let cw = ui.available_width().max(64.0);
+                            self.preview_zoom = (pw / cw).clamp(1.0, 8.0);
+                            if ph > 0.0 && (self.preview_zoom - 1.0).abs() < 0.01 {
+                                self.preview_zoom = 1.01;
+                            }
+                        } else {
+                            self.apply_preview_zoom(v);
+                        }
+                        ui.close_menu();
+                    }
+                }
+            });
+            let ram_busy = self.ram_preview_job.is_some();
+            let ram_resp = icons::icon_button(
+                ui,
+                Icon::RamCache,
+                None,
+                ram_busy || !self.ram_preview.frames.is_empty(),
+                true,
+                &self.theme,
+            );
+            ram_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Prévia em RAM")
+            });
+            if ram_resp
+                .on_hover_text("Prévia dinâmica em RAM na seleção de tempo (Shift+B)")
+                .clicked()
+            {
+                self.start_ram_preview();
+            }
+            if !self.ram_preview.frames.is_empty() && ui.small_button("Limpar RAM").clicked() {
+                self.clear_ram_preview();
+            }
             if icons::icon_button(
                 ui,
                 Icon::SafeAreas,
@@ -274,11 +419,63 @@ impl App {
             {
                 self.opts.safe_areas = !self.opts.safe_areas;
             }
+            let copy_resp = icons::icon_button(ui, Icon::CopyFrame, None, false, true, &self.theme);
+            copy_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copiar quadro")
+            });
+            if copy_resp
+                .on_hover_text("Copiar quadro atual para a área de transferência")
+                .clicked()
+            {
+                self.copy_preview_frame_to_clipboard(Some(ui.ctx()));
+            }
             if icons::icon_button(ui, Icon::CameraSnap, None, false, true, &self.theme)
                 .on_hover_text("Salvar quadro em PNG")
                 .clicked()
             {
                 self.snapshot_dialog();
+            }
+            let mute_a_resp = icons::icon_button(
+                ui,
+                Icon::MuteAudio,
+                None,
+                self.opts.preview_mute_audio,
+                true,
+                &self.theme,
+            );
+            mute_a_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Silenciar áudio da prévia",
+                )
+            });
+            if mute_a_resp
+                .on_hover_text("Silenciar todo o áudio na monitoração da prévia")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.mute_audio");
+            }
+            let mute_v_resp = icons::icon_button(
+                ui,
+                Icon::MuteVideo,
+                None,
+                self.opts.preview_mute_video,
+                true,
+                &self.theme,
+            );
+            mute_v_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Silenciar vídeo da prévia",
+                )
+            });
+            if mute_v_resp
+                .on_hover_text("Silenciar todo o vídeo na prévia")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.mute_video");
             }
             if ui
                 .button("fx")
@@ -298,6 +495,22 @@ impl App {
             .clicked()
             {
                 self.exec_cmd(Some(ui.ctx()), "view.tab.color_grading");
+            }
+            let ext_resp = icons::small_icon_button(
+                ui,
+                Icon::ExternalMonitor,
+                None,
+                self.external_monitor,
+                &self.theme,
+            );
+            ext_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Monitor externo")
+            });
+            if ext_resp
+                .on_hover_text("Abrir ou fechar Monitor Externo (Alt+Shift+4)")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.external_monitor");
             }
             if !is_floating
                 && icons::small_icon_button(ui, Icon::PopOut, None, false, &self.theme)
@@ -359,80 +572,21 @@ impl App {
                 0.0
             };
         let canvas_h = (avail.height() - reserved_h).max(24.0);
-        let (rect, _resp) = ui.allocate_exact_size(vec2(avail.width(), canvas_h), Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
-        let (proj_w, proj_h) = (self.project.settings.width, self.project.settings.height);
-        let aspect = proj_w as f32 / proj_h.max(1) as f32;
-        let (mut w, mut h) = (rect.width(), rect.width() / aspect);
-        if h > rect.height() {
-            h = rect.height();
-            w = h * aspect;
-        }
-        let img_rect = Rect::from_center_size(rect.center(), vec2(w, h));
-        if self.session.expanded_edit.is_some() {
-            if let Some((lt_tex, rt_tex)) = &self.expanded_ab_tex {
-                let mid_x = img_rect.center().x;
-                let left_r = Rect::from_min_max(
-                    img_rect.left_top(),
-                    pos2((mid_x - 1.0).max(img_rect.left()), img_rect.bottom()),
-                );
-                let right_r = Rect::from_min_max(
-                    pos2((mid_x + 1.0).min(img_rect.right()), img_rect.top()),
-                    img_rect.right_bottom(),
-                );
-                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                painter.image(lt_tex.id(), left_r, uv, Color32::WHITE);
-                painter.image(rt_tex.id(), right_r, uv, Color32::WHITE);
-                painter.line_segment(
-                    [pos2(mid_x, img_rect.top()), pos2(mid_x, img_rect.bottom())],
-                    Stroke::new(2.0_f32, self.theme.accent),
-                );
-                painter.text(
-                    left_r.left_top() + vec2(4.0, 3.0),
-                    egui::Align2::LEFT_TOP,
-                    "A: Saída",
-                    egui::FontId::proportional(10.0),
-                    Color32::WHITE,
-                );
-                painter.text(
-                    right_r.left_top() + vec2(4.0, 3.0),
-                    egui::Align2::LEFT_TOP,
-                    "B: Entrada",
-                    egui::FontId::proportional(10.0),
-                    Color32::WHITE,
-                );
+        let drop_out = ui.dnd_drop_zone::<DndPayload, Rect>(egui::Frame::NONE, |ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(avail.width(), canvas_h), Sense::hover());
+            self.draw_preview_canvas(ui, rect, true)
+        });
+        if let Some(payload) = drop_out.1 {
+            if let DndPayload::Fx(kind) = *payload {
+                if self.session.apply_video_fx_to_output(kind) {
+                    self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                    self.sync_after_session();
+                } else {
+                    self.sync_status_from_session();
+                }
             }
-        } else if let Some(tex) = &self.preview_tex {
-            painter.image(
-                tex.id(),
-                img_rect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
         }
-        if self.opts.safe_areas {
-            let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
-            let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
-            for k in [action_k, title_k] {
-                let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
-                painter.rect_stroke(
-                    r,
-                    0.0,
-                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
-                    StrokeKind::Inside,
-                );
-            }
-            let c = img_rect.center();
-            painter.line_segment(
-                [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
-            );
-            painter.line_segment(
-                [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
-            );
-        }
+        let img_rect = drop_out.0.inner;
 
         if show_transport {
             let playing = self.is_playing();
@@ -515,10 +669,270 @@ impl App {
         }
     }
 
-    fn sync_master_monitor_audio(&self) {
+    pub(crate) fn sync_master_monitor_audio(&self) {
         let mut s = crate::util::lock(&self.audio.shared);
         s.dim = self.master_dim;
         s.mono_downmix = self.master_mono;
+        s.preview_muted = self.opts.preview_mute_audio;
+    }
+
+    fn draw_preview_canvas(&mut self, ui: &mut egui::Ui, rect: Rect, interactive: bool) -> Rect {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
+        let (proj_w, proj_h) = (self.project.settings.width, self.project.settings.height);
+        let aspect = proj_w as f32 / proj_h.max(1) as f32;
+        let (mut fw, mut fh) = (rect.width(), rect.width() / aspect);
+        if fh > rect.height() {
+            fh = rect.height();
+            fw = fh * aspect;
+        }
+        let zoom = self.preview_zoom.clamp(0.25, 8.0);
+        let w = (fw * zoom).max(8.0);
+        let h = (fh * zoom).max(8.0);
+        let max_px = ((w - rect.width()) * 0.5).max(0.0);
+        let max_py = ((h - rect.height()) * 0.5).max(0.0);
+        self.preview_pan.x = self.preview_pan.x.clamp(-max_px, max_px);
+        self.preview_pan.y = self.preview_pan.y.clamp(-max_py, max_py);
+        let img_rect = Rect::from_center_size(rect.center() + self.preview_pan, vec2(w, h));
+
+        let split_mode = self.opts.preview_split_mode;
+        if self.session.expanded_edit.is_some() {
+            if let Some((lt_tex, rt_tex)) = &self.expanded_ab_tex {
+                let mid_x = img_rect.center().x;
+                let left_r = Rect::from_min_max(
+                    img_rect.left_top(),
+                    pos2((mid_x - 1.0).max(img_rect.left()), img_rect.bottom()),
+                );
+                let right_r = Rect::from_min_max(
+                    pos2((mid_x + 1.0).min(img_rect.right()), img_rect.top()),
+                    img_rect.right_bottom(),
+                );
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(lt_tex.id(), left_r, uv, Color32::WHITE);
+                painter.image(rt_tex.id(), right_r, uv, Color32::WHITE);
+                painter.line_segment(
+                    [pos2(mid_x, img_rect.top()), pos2(mid_x, img_rect.bottom())],
+                    Stroke::new(2.0_f32, self.theme.accent),
+                );
+                painter.text(
+                    left_r.left_top() + vec2(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "A: Saída",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    right_r.left_top() + vec2(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "B: Entrada",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+            }
+        } else if split_mode != neoveg_engine::playback::PreviewSplitMode::Off
+            && !self.opts.preview_mute_video
+        {
+            use neoveg_engine::playback::PreviewSplitMode;
+            let cmp_tex = match split_mode {
+                PreviewSplitMode::FxBypass => {
+                    self.preview_split_tex.as_ref().map(|t| (t.id(), "Sem FX"))
+                }
+                PreviewSplitMode::Clipboard => self
+                    .preview_clipboard
+                    .as_ref()
+                    .map(|(t, _)| (t.id(), "Transferência")),
+                PreviewSplitMode::Off => None,
+            };
+            let k = self.opts.preview_split_pos.clamp(0.08, 0.92);
+            if let (Some((alt_id, alt_lbl)), Some(main_tex)) = (cmp_tex, &self.preview_tex) {
+                if self.opts.preview_split_horizontal {
+                    let div_y = img_rect.top() + img_rect.height() * k;
+                    let top_r =
+                        Rect::from_min_max(img_rect.left_top(), pos2(img_rect.right(), div_y));
+                    let bot_r =
+                        Rect::from_min_max(pos2(img_rect.left(), div_y), img_rect.right_bottom());
+                    painter.image(
+                        alt_id,
+                        top_r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, k)),
+                        Color32::WHITE,
+                    );
+                    painter.image(
+                        main_tex.id(),
+                        bot_r,
+                        Rect::from_min_max(pos2(0.0, k), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.line_segment(
+                        [pos2(img_rect.left(), div_y), pos2(img_rect.right(), div_y)],
+                        Stroke::new(2.0_f32, self.theme.accent),
+                    );
+                } else {
+                    let div_x = img_rect.left() + img_rect.width() * k;
+                    let left_r =
+                        Rect::from_min_max(img_rect.left_top(), pos2(div_x, img_rect.bottom()));
+                    let right_r =
+                        Rect::from_min_max(pos2(div_x, img_rect.top()), img_rect.right_bottom());
+                    painter.image(
+                        alt_id,
+                        left_r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.image(
+                        main_tex.id(),
+                        right_r,
+                        Rect::from_min_max(pos2(k, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.line_segment(
+                        [pos2(div_x, img_rect.top()), pos2(div_x, img_rect.bottom())],
+                        Stroke::new(2.0_f32, self.theme.accent),
+                    );
+                }
+                painter.text(
+                    img_rect.left_top() + vec2(6.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    alt_lbl,
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    img_rect.right_top() + vec2(-6.0, 4.0),
+                    egui::Align2::RIGHT_TOP,
+                    "Ativa",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+            } else if let Some(tex) = &self.preview_tex {
+                painter.image(
+                    tex.id(),
+                    img_rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                if split_mode == PreviewSplitMode::Clipboard {
+                    painter.text(
+                        img_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Copie um quadro antes para comparar",
+                        egui::FontId::proportional(11.0),
+                        Color32::from_white_alpha(200),
+                    );
+                }
+            }
+        } else if let Some(tex) = &self.preview_tex {
+            painter.image(
+                tex.id(),
+                img_rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
+        if interactive {
+            let mut dragging_split = false;
+            if split_mode != neoveg_engine::playback::PreviewSplitMode::Off
+                && self.session.expanded_edit.is_none()
+            {
+                let k = self.opts.preview_split_pos.clamp(0.08, 0.92);
+                let hit_rect = if self.opts.preview_split_horizontal {
+                    let y = img_rect.top() + img_rect.height() * k;
+                    Rect::from_min_max(
+                        pos2(img_rect.left(), y - 6.0),
+                        pos2(img_rect.right(), y + 6.0),
+                    )
+                } else {
+                    let x = img_rect.left() + img_rect.width() * k;
+                    Rect::from_min_max(
+                        pos2(x - 6.0, img_rect.top()),
+                        pos2(x + 6.0, img_rect.bottom()),
+                    )
+                };
+                let div_resp = ui.interact(
+                    hit_rect,
+                    ui.id().with("pv_split_handle"),
+                    Sense::click_and_drag(),
+                );
+                if div_resp.dragged() {
+                    dragging_split = true;
+                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                        let new_k = if self.opts.preview_split_horizontal {
+                            (pos.y - img_rect.top()) / img_rect.height().max(1.0)
+                        } else {
+                            (pos.x - img_rect.left()) / img_rect.width().max(1.0)
+                        };
+                        self.opts.preview_split_pos = new_k.clamp(0.08, 0.92);
+                    }
+                }
+            }
+            let canvas_resp = ui.interact(
+                rect,
+                ui.id().with("pv_zoom_pan_canvas"),
+                Sense::click_and_drag(),
+            );
+            if canvas_resp.hovered() {
+                let sy = ui.input(|i| i.smooth_scroll_delta.y);
+                if sy.abs() > 0.5 {
+                    let factor = if sy > 0.0 { 1.12 } else { 1.0 / 1.12 };
+                    self.preview_zoom = (self.preview_zoom * factor).clamp(0.25, 8.0);
+                    if (self.preview_zoom - 1.0).abs() < 0.02 {
+                        self.apply_preview_zoom(0.0);
+                    }
+                }
+            }
+            if !dragging_split && self.preview_zoom > 1.01 && canvas_resp.dragged() {
+                self.preview_pan += canvas_resp.drag_delta();
+            }
+            if canvas_resp.double_clicked() && (self.preview_zoom - 1.0).abs() > 0.02 {
+                self.apply_preview_zoom(0.0);
+            }
+        }
+
+        if self.opts.safe_areas {
+            let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
+            let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
+            for k in [action_k, title_k] {
+                let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
+                    StrokeKind::Inside,
+                );
+            }
+            let c = img_rect.center();
+            painter.line_segment(
+                [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+            );
+            painter.line_segment(
+                [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+            );
+        }
+
+        if self.opts.preview_mute_video {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "VÍDEO SILENCIADO",
+                egui::FontId::proportional(13.0),
+                self.theme.offline_fg,
+            );
+        } else if let Some(job) = &self.ram_preview_job {
+            let done = job.done.load(Ordering::Relaxed);
+            let total = job.total.load(Ordering::Relaxed).max(1);
+            let pct = (done.saturating_mul(100) / total).min(100);
+            painter.text(
+                rect.left_bottom() + vec2(6.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("RAM Preview: {pct}% ({done}/{total})"),
+                egui::FontId::proportional(10.0),
+                Color32::WHITE,
+            );
+        }
+        img_rect
     }
 
     fn master_bus_controls(&mut self, ui: &mut egui::Ui, tall_dock: bool) {

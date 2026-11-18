@@ -275,6 +275,16 @@ pub struct EditorOptions {
     /// vertically (audio only)"). Passos inteiros: subir e descer volta
     /// exatamente a 1×.
     pub waveform_zoom_steps: u8,
+    /// Prévia em tela dividida (Desligada, FX ignorados ou Área de transferência).
+    pub preview_split_mode: crate::playback::PreviewSplitMode,
+    /// Posição da divisória da prévia dividida (`0.08..=0.92`).
+    pub preview_split_pos: f32,
+    /// Divisão horizontal (cima/baixo) quando `true`, ou vertical (esquerda/direita).
+    pub preview_split_horizontal: bool,
+    /// Silencia todo o áudio apenas na monitoração da prévia (p. 200).
+    pub preview_mute_audio: bool,
+    /// Silencia toda a imagem na monitoração da prévia (p. 200).
+    pub preview_mute_video: bool,
 }
 
 /// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
@@ -305,6 +315,11 @@ impl Default for EditorOptions {
             loop_playback: false,
             slip_all_takes: false,
             waveform_zoom_steps: 0,
+            preview_split_mode: crate::playback::PreviewSplitMode::Off,
+            preview_split_pos: 0.5,
+            preview_split_horizontal: false,
+            preview_mute_audio: false,
+            preview_mute_video: false,
         }
     }
 }
@@ -4208,6 +4223,23 @@ impl EditorSession {
             created.len()
         ));
         created
+    }
+
+    /// Aplica um efeito de vídeo à saída mestre de vídeo (Video Output FX,
+    /// ao soltar um efeito diretamente na janela Prévia de Vídeo, p. 55).
+    pub fn apply_video_fx_to_output(&mut self, kind: FxKind) -> bool {
+        if kind.is_audio() {
+            self.set_status("Efeitos de áudio devem ser aplicados em trilhas ou eventos de áudio.");
+            return false;
+        }
+        self.checkpoint();
+        self.project.master.video_fx.push(FxInstance::new(kind));
+        self.changed();
+        self.set_status(format!(
+            "Efeito \"{}\" aplicado à saída de vídeo (Prévia).",
+            kind.name()
+        ));
+        true
     }
 }
 
