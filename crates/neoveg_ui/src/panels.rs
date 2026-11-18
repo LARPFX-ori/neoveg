@@ -23,6 +23,8 @@ struct FloatingViewportSpec<'a> {
     icon: std::sync::Arc<egui::IconData>,
     theme: &'a crate::theme::ThemeColors,
     lang: Language,
+    /// Mostra o botão Acoplar (falso nos painéis só de janela).
+    can_dock: bool,
 }
 
 struct FloatingOutcome {
@@ -57,6 +59,30 @@ fn show_floating_viewport(
                 .default_size([spec.inner_size[0] - 40.0, spec.inner_size[1] - 40.0])
                 .min_size([spec.min_size[0] - 20.0, spec.min_size[1] - 20.0])
                 .show(v_ctx, |ui| {
+                    if spec.can_dock {
+                        ui.horizontal(|ui| {
+                            if icons::small_icon_button(
+                                ui,
+                                Icon::DockIn,
+                                Some(tr(spec.lang, "Acoplar na área de janelas")),
+                                false,
+                                spec.theme,
+                            )
+                            .clicked()
+                            {
+                                out.reattach = true;
+                            }
+                        });
+                        ui.separator();
+                    }
+                    body(ui);
+                });
+        } else {
+            if v_ctx.input(|i| i.viewport().close_requested()) {
+                out.open = false;
+            }
+            egui::CentralPanel::default().show(v_ctx, |ui| {
+                if spec.can_dock {
                     ui.horizontal(|ui| {
                         if icons::small_icon_button(
                             ui,
@@ -69,37 +95,17 @@ fn show_floating_viewport(
                         {
                             out.reattach = true;
                         }
+                        ui.label(
+                            egui::RichText::new(tr(
+                                spec.lang,
+                                "Janela independente (arraste pela barra de título para mover entre monitores)",
+                            ))
+                            .small()
+                            .weak(),
+                        );
                     });
                     ui.separator();
-                    body(ui);
-                });
-        } else {
-            if v_ctx.input(|i| i.viewport().close_requested()) {
-                out.open = false;
-            }
-            egui::CentralPanel::default().show(v_ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if icons::small_icon_button(
-                        ui,
-                        Icon::DockIn,
-                        Some(tr(spec.lang, "Acoplar na área de janelas")),
-                        false,
-                        spec.theme,
-                    )
-                    .clicked()
-                    {
-                        out.reattach = true;
-                    }
-                    ui.label(
-                        egui::RichText::new(tr(
-                            spec.lang,
-                            "Janela independente (arraste pela barra de título para mover entre monitores)",
-                        ))
-                        .small()
-                        .weak(),
-                    );
-                });
-                ui.separator();
+                }
                 body(ui);
             });
         }
@@ -108,6 +114,18 @@ fn show_floating_viewport(
 }
 
 impl App {
+    /// Abre um painel só de janela (ver `layout::window_only`) na janela
+    /// própria e a traz para a frente.
+    pub fn open_window_panel(&mut self, ctx: Option<&egui::Context>, tab: DockTab) {
+        self.closed_tabs.remove(&tab);
+        self.detached_tabs.insert(tab);
+        if let Some(ctx) = ctx {
+            let key = crate::layout::panel_key(tab);
+            let vid = egui::ViewportId::from_hash_of(("neoveg_floating_dock_viewport", key));
+            ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Focus);
+        }
+    }
+
     pub fn detach_dock_tab(&mut self, tab: DockTab) {
         self.detached_tabs.insert(tab);
         if self.dock_tab == tab {
@@ -233,6 +251,7 @@ impl App {
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
+                can_dock: true,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -260,6 +279,7 @@ impl App {
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
+                can_dock: true,
             };
             let out = show_floating_viewport(
                 ctx,
@@ -296,6 +316,7 @@ impl App {
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
+                can_dock: !crate::layout::window_only(tab),
             };
             let out = show_floating_viewport(
                 ctx,

@@ -809,7 +809,9 @@ fn kittest_neoveg_encoder_fluxo_completo() {
         app.send_timeline_to_encoder();
     }
     harness.run_steps(3);
-    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    // o Encoder abre na janela própria, fora do dock
+    assert!(harness.state().detached_tabs.contains(&DockTab::Encoder));
+    assert_ne!(harness.state().dock_tab, DockTab::Encoder);
     assert_eq!(harness.state().encoder.state.items.len(), 1);
     assert!(harness.query_all_by_label("Neoveg Encoder").count() >= 1);
     assert!(harness.query_all_by_label("Fila de Codificação").count() >= 1);
@@ -1284,7 +1286,8 @@ fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
     // O botão "Encoder" fica visível diretamente na barra superior ao iniciar.
     harness.get_by_label("Encoder").click();
     harness.run_steps(2);
-    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert!(harness.state().detached_tabs.contains(&DockTab::Encoder));
+    assert_ne!(harness.state().dock_tab, DockTab::Encoder);
 
     // Em "Renderizar como", "Enviar para o Encoder" enfileira a timeline e foca o Encoder.
     let ctx = harness.ctx.clone();
@@ -1302,7 +1305,7 @@ fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
     harness.run_steps(3);
 
     assert!(harness.state().dlg.render.is_none());
-    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert!(harness.state().detached_tabs.contains(&DockTab::Encoder));
     assert_eq!(harness.state().encoder.state.items.len(), before + 1);
 }
 
