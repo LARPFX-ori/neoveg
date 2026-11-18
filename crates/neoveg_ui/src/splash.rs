@@ -12,6 +12,8 @@ use neoveg_common::{tr, tr_args, Language};
 use std::time::Instant;
 
 const STARTUP_HOLD_SECS: f64 = 1.35;
+/// Tamanho da janela da tela de abertura na inicialização.
+pub(crate) const SPLASH_WINDOW_SIZE: [f32; 2] = [640.0, 388.0];
 const STARTUP_MAX_WAIT_SECS: f64 = 6.0;
 
 #[derive(Debug, Clone)]
@@ -156,6 +158,9 @@ pub struct SplashSnapshot<'a> {
     pub loading: usize,
     pub commands_count: usize,
     pub fallback_notice: Option<&'a str>,
+    /// A tela de abertura ocupa a própria janela (inicialização): sem fundo
+    /// escurecido e com o cartão do tamanho da janela.
+    pub own_window: bool,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -571,18 +576,20 @@ pub fn show_splash_screen(
         Color32::from_rgba_unmultiplied(18, 22, 30, 115)
     };
 
-    egui::Area::new(egui::Id::new("neoveg_splash_backdrop"))
-        .fixed_pos(sr.min)
-        .order(egui::Order::Foreground)
-        .interactable(true)
-        .show(ctx, |ui| {
-            let resp = ui.allocate_response(sr.size(), Sense::click());
-            ui.painter().rect_filled(sr, 0.0_f32, backdrop_col);
-            if resp.clicked() {
-                state.dismiss();
-                out.dismissed = true;
-            }
-        });
+    if !snap.own_window {
+        egui::Area::new(egui::Id::new("neoveg_splash_backdrop"))
+            .fixed_pos(sr.min)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_response(sr.size(), Sense::click());
+                ui.painter().rect_filled(sr, 0.0_f32, backdrop_col);
+                if resp.clicked() {
+                    state.dismiss();
+                    out.dismissed = true;
+                }
+            });
+    }
 
     if out.dismissed {
         return out;
@@ -598,8 +605,12 @@ pub fn show_splash_screen(
     } else {
         260.0
     };
-    let card_w = safe_w.clamp(320.0, 640.0);
-    let card_h = safe_h.clamp(260.0, 388.0);
+    let (card_w, card_h) = if snap.own_window && sr.width().is_finite() && sr.height().is_finite() {
+        // o cartão é a janela inteira
+        (sr.width().max(320.0), sr.height().max(260.0))
+    } else {
+        (safe_w.clamp(320.0, 640.0), safe_h.clamp(260.0, 388.0))
+    };
     let border_w = if snap.theme.high_contrast {
         2.0_f32
     } else {
@@ -750,6 +761,7 @@ mod tests {
             loading,
             commands_count: 68,
             fallback_notice: None,
+            own_window: false,
         }
     }
 

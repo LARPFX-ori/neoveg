@@ -6146,6 +6146,16 @@ fn prefs_video_preview(
                     .wrap(),
                 );
             });
+            prefs_row(ui, inner_lw, tr(lang, "Guias extras:"), |ui| {
+                ui.vertical(|ui| {
+                    let g = &mut draft.safe_guides;
+                    ui.checkbox(&mut g.center_cross, tr(lang, "Cruz central"));
+                    ui.checkbox(&mut g.thirds, tr(lang, "Grade dos terços"));
+                    ui.checkbox(&mut g.cut_4x3, tr(lang, "Recorte central 4:3"));
+                    ui.checkbox(&mut g.cut_9x16, tr(lang, "Recorte central 9:16 (vertical)"));
+                    ui.checkbox(&mut g.cut_1x1, tr(lang, "Recorte central 1:1 (quadrado)"));
+                });
+            });
         },
     );
 }
