@@ -4089,7 +4089,7 @@ impl App {
                         ui.add(egui::Slider::new(&mut t.line_spacing, 0.6..=3.0));
                         ui.end_row();
                         ui.label(tr(lang, "Espaçamento de caracteres (Tracking)"));
-                        ui.add(egui::Slider::new(&mut t.tracking, -0.2..=1.0).speed(0.01));
+                        ui.add(egui::Slider::new(&mut t.tracking, -0.2..=1.0).step_by(0.01));
                         ui.end_row();
                         ui.label(tr(lang, "Quebra automática de linha"));
                         ui.horizontal(|ui| {

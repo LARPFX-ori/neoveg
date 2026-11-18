@@ -34,6 +34,7 @@ const TRACK_FOOTER_H: f32 = 26.0;
 const STATUS_BAR_H: f32 = 22.0;
 const BOTTOM_BARS_H: f32 = TRACK_FOOTER_H + STATUS_BAR_H;
 const EDGE_PX: f32 = 5.0;
+const SEQ_TAB_H: f32 = 24.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EnvOwner {
@@ -705,35 +706,47 @@ impl App {
     }
 
     pub fn timeline_ui(&mut self, ui: &mut egui::Ui) {
+        self.project.ensure_sequences();
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
+        let show_seq_tabs = full.height() > TOP_H + BOTTOM_BARS_H + SEQ_TAB_H + 40.0;
+        let seq_bar_h = if show_seq_tabs { SEQ_TAB_H } else { 0.0 };
+        if show_seq_tabs {
+            let seq_bar_rect = Rect::from_min_size(full.min, vec2(full.width(), SEQ_TAB_H));
+            self.sequence_tab_bar_ui(ui, seq_bar_rect);
+        }
+        let content_top = full.top() + seq_bar_h;
+
         let max_hdr =
             (full.width() - 96.0).clamp(TimelineState::MIN_HEADER_W, TimelineState::MAX_HEADER_W);
         let hdr_w = self.tl.header_w.clamp(TimelineState::MIN_HEADER_W, max_hdr);
         let left = full.left() + hdr_w;
         let show_h_col = full.width() > hdr_w + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
-        let show_footer = full.height() > TOP_H + BOTTOM_BARS_H + 40.0;
+        let show_footer = full.height() > seq_bar_h + TOP_H + BOTTOM_BARS_H + 40.0;
         let bottom_h = if show_footer { BOTTOM_BARS_H } else { 0.0 };
-        let show_v_col = show_h_col && full.height() > TOP_H + bottom_h + 60.0;
+        let show_v_col = show_h_col && full.height() > seq_bar_h + TOP_H + bottom_h + 60.0;
         let v_col_w = if show_v_col {
             crate::scrollbars::TIMELINE_V_SCROLL_W
         } else {
             0.0
         };
         let lanes_right = (full.right() - v_col_w).max(left + 10.0);
-        let lanes_bottom = (full.bottom() - bottom_h).max(full.top() + TOP_H + 10.0);
+        let lanes_bottom = (full.bottom() - bottom_h).max(content_top + TOP_H + 10.0);
 
-        let corner = Rect::from_min_max(full.min, pos2(left, full.top() + TOP_H));
+        let corner = Rect::from_min_max(
+            pos2(full.left(), content_top),
+            pos2(left, content_top + TOP_H),
+        );
         let top = Rect::from_min_max(
-            pos2(left, full.top()),
-            pos2(lanes_right, full.top() + TOP_H),
+            pos2(left, content_top),
+            pos2(lanes_right, content_top + TOP_H),
         );
         let headers = Rect::from_min_max(
-            pos2(full.left(), full.top() + TOP_H),
+            pos2(full.left(), content_top + TOP_H),
             pos2(left, lanes_bottom),
         );
         let lanes = Rect::from_min_max(
-            pos2(left, full.top() + TOP_H),
+            pos2(left, content_top + TOP_H),
             pos2(lanes_right, lanes_bottom),
         );
         self.tl.width = lanes.width().max(10.0);
@@ -760,7 +773,7 @@ impl App {
         self.top_strip(ui, top);
         if show_v_col {
             let cap = Rect::from_min_max(
-                pos2(lanes_right, full.top()),
+                pos2(lanes_right, content_top),
                 pos2(full.right(), lanes.top()),
             );
             let p = ui.painter();
@@ -784,7 +797,7 @@ impl App {
         // Divisor interativo da largura dos cabeçalhos de trilha (p. 69):
         // arrastar oculta progressivamente botões; duplo clique alterna largura.
         let edge_r = Rect::from_min_max(
-            pos2(left - 3.0, full.top()),
+            pos2(left - 3.0, content_top),
             pos2(left + 3.0, lanes.bottom()),
         );
         let edge_resp = ui.interact(
@@ -802,7 +815,7 @@ impl App {
         if edge_resp.hovered() || edge_resp.dragged() {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             ui.painter().line_segment(
-                [pos2(left, full.top()), pos2(left, lanes.bottom())],
+                [pos2(left, content_top), pos2(left, lanes.bottom())],
                 Stroke::new(2.0_f32, self.theme.accent),
             );
         }
@@ -1299,6 +1312,212 @@ impl App {
             if fit_click {
                 self.fit_project_to_timeline(lanes_w);
             }
+        }
+    }
+
+    /// Barra de abas de sequências na timeline (item 13 do backlog / VEGAS Pro).
+    fn sequence_tab_bar_ui(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let p = ui.painter();
+        p.rect_filled(rect, egui::CornerRadius::ZERO, self.theme.panel_fill);
+        p.line_segment(
+            [
+                pos2(rect.left(), rect.bottom() - 0.5),
+                pos2(rect.right(), rect.bottom() - 0.5),
+            ],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let active_id = self.project.active_sequence_id;
+        let mut cur_x = rect.left() + 4.0;
+        let font_id = FontId::proportional(11.5);
+        let tab_h = rect.height() - 3.0;
+
+        let mut action_switch: Option<Id> = None;
+        let mut action_delete: Option<Id> = None;
+        let mut action_duplicate: Option<Id> = None;
+        let mut action_rename: Option<(Id, String)> = None;
+
+        let seq_count = self.project.sequences.len();
+
+        for seq in &self.project.sequences {
+            let is_active = Some(seq.id) == active_id;
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(seq.name.clone(), font_id.clone(), Color32::WHITE)
+                .size()
+                .x;
+            let close_w = if seq_count > 1 { 16.0 } else { 0.0 };
+            let tab_w = (text_w + 20.0 + close_w).clamp(70.0, 180.0);
+
+            if cur_x + tab_w > rect.right() - 32.0 {
+                break;
+            }
+
+            let tab_rect = Rect::from_min_size(pos2(cur_x, rect.top() + 3.0), vec2(tab_w, tab_h));
+            let tab_resp = ui.interact(tab_rect, ui.id().with(("seq_tab", seq.id)), Sense::click());
+
+            let bg = if is_active {
+                self.theme.tl_header_bg
+            } else if tab_resp.hovered() {
+                self.theme.widget_hover_bg
+            } else {
+                self.theme.panel_fill
+            };
+
+            p.rect_filled(
+                tab_rect,
+                egui::CornerRadius {
+                    nw: 3,
+                    ne: 3,
+                    sw: 0,
+                    se: 0,
+                },
+                bg,
+            );
+            let border_color = if is_active {
+                self.theme.accent
+            } else {
+                self.theme.border
+            };
+            p.rect_stroke(
+                tab_rect,
+                egui::CornerRadius {
+                    nw: 3,
+                    ne: 3,
+                    sw: 0,
+                    se: 0,
+                },
+                Stroke::new(1.0_f32, border_color),
+                StrokeKind::Inside,
+            );
+
+            if is_active {
+                p.line_segment(
+                    [
+                        pos2(tab_rect.left() + 1.0, tab_rect.top() + 1.0),
+                        pos2(tab_rect.right() - 1.0, tab_rect.top() + 1.0),
+                    ],
+                    Stroke::new(2.0_f32, self.theme.accent),
+                );
+            }
+
+            let text_color = if is_active {
+                self.theme.text_primary
+            } else {
+                self.theme.text_muted
+            };
+            let max_text_w = tab_w - 12.0 - close_w;
+            let text_pos = pos2(tab_rect.left() + 8.0, tab_rect.center().y);
+            let label_clipped = if text_w > max_text_w {
+                format!("{}…", &seq.name.chars().take(8).collect::<String>())
+            } else {
+                seq.name.clone()
+            };
+            p.text(
+                text_pos,
+                Align2::LEFT_CENTER,
+                label_clipped,
+                font_id.clone(),
+                text_color,
+            );
+
+            if seq_count > 1 {
+                let close_rect = Rect::from_center_size(
+                    pos2(tab_rect.right() - 10.0, tab_rect.center().y),
+                    vec2(12.0, 12.0),
+                );
+                let close_resp = ui.interact(
+                    close_rect,
+                    ui.id().with(("seq_close", seq.id)),
+                    Sense::click(),
+                );
+                let close_color = if close_resp.hovered() {
+                    self.theme.offline_fg
+                } else {
+                    self.theme.text_muted
+                };
+                p.text(
+                    close_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "×",
+                    FontId::proportional(12.0),
+                    close_color,
+                );
+                if close_resp.clicked() {
+                    action_delete = Some(seq.id);
+                }
+            }
+
+            tab_resp.context_menu(|ui| {
+                if ui.button(tr(self.lang(), "Renomear")).clicked() {
+                    action_rename = Some((seq.id, seq.name.clone()));
+                    ui.close_menu();
+                }
+                if ui.button(tr(self.lang(), "Duplicar sequência")).clicked() {
+                    action_duplicate = Some(seq.id);
+                    ui.close_menu();
+                }
+                if seq_count > 1 {
+                    if ui.button(tr(self.lang(), "Excluir sequência")).clicked() {
+                        action_delete = Some(seq.id);
+                        ui.close_menu();
+                    }
+                }
+            });
+
+            if tab_resp.clicked() && !is_active {
+                action_switch = Some(seq.id);
+            }
+            if tab_resp.double_clicked() {
+                action_rename = Some((seq.id, seq.name.clone()));
+            }
+
+            cur_x += tab_w + 3.0;
+        }
+
+        let add_rect = Rect::from_min_size(pos2(cur_x, rect.top() + 4.0), vec2(20.0, tab_h - 2.0));
+        let add_resp = ui.interact(add_rect, ui.id().with("seq_add_btn"), Sense::click());
+        let add_bg = if add_resp.hovered() {
+            self.theme.widget_hover_bg
+        } else {
+            self.theme.widget_bg
+        };
+        p.rect_filled(add_rect, egui::CornerRadius::same(2), add_bg);
+        p.rect_stroke(
+            add_rect,
+            egui::CornerRadius::same(2),
+            Stroke::new(1.0_f32, self.theme.border),
+            StrokeKind::Inside,
+        );
+        p.text(
+            add_rect.center(),
+            Align2::CENTER_CENTER,
+            "+",
+            font_id,
+            self.theme.text_primary,
+        );
+        if add_resp.clicked() {
+            self.checkpoint();
+            self.create_sequence(None);
+            self.changed();
+        }
+
+        if let Some(target_id) = action_switch {
+            self.switch_sequence(target_id);
+            self.changed();
+        }
+        if let Some(target_id) = action_delete {
+            self.checkpoint();
+            self.delete_sequence(target_id);
+            self.changed();
+        }
+        if let Some(source_id) = action_duplicate {
+            self.checkpoint();
+            self.duplicate_sequence(source_id);
+            self.changed();
+        }
+        if let Some((id, name)) = action_rename {
+            self.tl.rename = Some((id, name));
         }
     }
 
@@ -2123,6 +2342,7 @@ impl App {
             if let Some(e) = self.project.event_mut(id) {
                 e.name = label.clone();
             }
+            self.project.rename_sequence(id, &label);
             self.changed();
             self.tl.rename = None;
         } else if !open {

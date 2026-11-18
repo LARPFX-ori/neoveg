@@ -2532,6 +2532,49 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "sequence.new",
+        label: "Nova sequência",
+        menu_path: "Inserir/Nova sequência",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.checkpoint();
+            s.create_sequence(None);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "sequence.duplicate",
+        label: "Duplicar sequência ativa",
+        menu_path: "Editar/Sequência/Duplicar sequência ativa",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.active_sequence_id.is_some(),
+        run: |s, h| {
+            if let Some(id) = s.project.active_sequence_id {
+                s.checkpoint();
+                s.duplicate_sequence(id);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "sequence.delete",
+        label: "Excluir sequência ativa",
+        menu_path: "Editar/Sequência/Excluir sequência ativa",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.sequences.len() > 1,
+        run: |s, h| {
+            if let Some(id) = s.project.active_sequence_id {
+                s.checkpoint();
+                s.delete_sequence(id);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.env_volume",
         label: "Envelope de Volume / Nível",
         menu_path: "Inserir/Volume / Nível de composição",
@@ -4066,5 +4109,13 @@ mod tests {
         assert!(s.opts.preview_mute_audio);
         run_command("preview.mute_video", &mut s, &mut h).unwrap();
         assert!(s.opts.preview_mute_video);
+
+        // Comandos de sequência
+        run_command("sequence.new", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 2);
+        run_command("sequence.duplicate", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 3);
+        run_command("sequence.delete", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 2);
     }
 }

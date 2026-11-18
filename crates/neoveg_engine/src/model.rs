@@ -310,6 +310,46 @@ pub struct Project {
     /// Sequências de *storyboard* para montagem rápida na timeline.
     #[serde(default)]
     pub storyboards: Vec<Storyboard>,
+    /// Sequências em abas na timeline (item 13 do backlog / VEGAS Pro).
+    #[serde(default)]
+    pub sequences: Vec<Sequence>,
+    /// ID da sequência ativa no momento.
+    #[serde(default)]
+    pub active_sequence_id: Option<Id>,
+}
+
+/// Sequência em aba na timeline (item 13 do backlog / VEGAS Pro).
+///
+/// Cada sequência mantém sua própria coleção de trilhas, eventos, marcadores,
+/// regiões e região de loop, permitindo múltiplos cortes e montagens no mesmo projeto.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Sequence {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+    #[serde(default)]
+    pub regions: Vec<Region>,
+    #[serde(default)]
+    pub loop_region: Option<(Ticks, Ticks)>,
+    #[serde(default)]
+    pub cursor: Ticks,
+}
+
+impl Sequence {
+    pub fn new(id: Id, name: &str) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            tracks: Vec::new(),
+            markers: Vec::new(),
+            regions: Vec::new(),
+            loop_region: None,
+            cursor: Ticks::ZERO,
+        }
+    }
 }
 
 impl Project {
@@ -317,7 +357,132 @@ impl Project {
         let mut p = Project::default();
         p.tracks.push(Track::new(TrackKind::Video, "Vídeo 1"));
         p.tracks.push(Track::new(TrackKind::Audio, "Áudio 1"));
+        p.ensure_sequences();
         p
+    }
+
+    /// Garante que o projeto tenha pelo menos uma sequência configurada e sincronizada.
+    pub fn ensure_sequences(&mut self) {
+        if self.sequences.is_empty() {
+            let seq_id = new_id();
+            let seq = Sequence {
+                id: seq_id,
+                name: "Sequência 1".to_string(),
+                tracks: self.tracks.clone(),
+                markers: self.markers.clone(),
+                regions: self.regions.clone(),
+                loop_region: self.loop_region,
+                cursor: Ticks::ZERO,
+            };
+            self.sequences.push(seq);
+            self.active_sequence_id = Some(seq_id);
+        } else if self.active_sequence_id.is_none() {
+            self.active_sequence_id = self.sequences.first().map(|s| s.id);
+        }
+    }
+
+    /// Sincroniza o estado atual das trilhas/marcadores com a sequência ativa.
+    pub fn sync_to_active_sequence(&mut self) {
+        self.ensure_sequences();
+        if let Some(active_id) = self.active_sequence_id {
+            if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == active_id) {
+                seq.tracks = self.tracks.clone();
+                seq.markers = self.markers.clone();
+                seq.regions = self.regions.clone();
+                seq.loop_region = self.loop_region;
+            }
+        }
+    }
+
+    /// Alterna para uma sequência diferente pelo ID, sincronizando antes a atual.
+    pub fn switch_sequence(&mut self, target_id: Id) -> bool {
+        self.sync_to_active_sequence();
+        if let Some(target) = self.sequences.iter().find(|s| s.id == target_id).cloned() {
+            self.tracks = target.tracks;
+            self.markers = target.markers;
+            self.regions = target.regions;
+            self.loop_region = target.loop_region;
+            self.active_sequence_id = Some(target_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cria uma nova sequência no projeto e a torna ativa.
+    pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
+        self.sync_to_active_sequence();
+        let new_id = new_id();
+        let seq_name = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Sequência {}", self.sequences.len() + 1));
+        let seq = Sequence {
+            id: new_id,
+            name: seq_name,
+            tracks: vec![
+                Track::new(TrackKind::Video, "Vídeo 1"),
+                Track::new(TrackKind::Audio, "Áudio 1"),
+            ],
+            markers: Vec::new(),
+            regions: Vec::new(),
+            loop_region: None,
+            cursor: Ticks::ZERO,
+        };
+        self.tracks = seq.tracks.clone();
+        self.markers.clear();
+        self.regions.clear();
+        self.loop_region = None;
+        self.sequences.push(seq);
+        self.active_sequence_id = Some(new_id);
+        new_id
+    }
+
+    /// Duplica uma sequência existente com todo o seu conteúdo.
+    pub fn duplicate_sequence(&mut self, source_id: Id) -> Option<Id> {
+        self.sync_to_active_sequence();
+        let source = self.sequences.iter().find(|s| s.id == source_id)?.clone();
+        let new_id = new_id();
+        let dup = Sequence {
+            id: new_id,
+            name: format!("{} (Cópia)", source.name),
+            tracks: source.tracks,
+            markers: source.markers,
+            regions: source.regions,
+            loop_region: source.loop_region,
+            cursor: source.cursor,
+        };
+        self.sequences.push(dup);
+        Some(new_id)
+    }
+
+    /// Remove uma sequência se houver mais de uma.
+    pub fn delete_sequence(&mut self, seq_id: Id) -> bool {
+        self.ensure_sequences();
+        if self.sequences.len() <= 1 {
+            return false;
+        }
+        let was_active = self.active_sequence_id == Some(seq_id);
+        self.sequences.retain(|s| s.id != seq_id);
+        if was_active {
+            if let Some(first) = self.sequences.first().cloned() {
+                self.tracks = first.tracks;
+                self.markers = first.markers;
+                self.regions = first.regions;
+                self.loop_region = first.loop_region;
+                self.active_sequence_id = Some(first.id);
+            }
+        }
+        true
+    }
+
+    /// Renomeia uma sequência.
+    pub fn rename_sequence(&mut self, seq_id: Id, new_name: &str) -> bool {
+        if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == seq_id) {
+            seq.name = new_name.to_string();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn duration(&self) -> Ticks {
@@ -4069,5 +4234,49 @@ mod tests {
         assert!(p.save_file_with_backup(hostile, true, 3).is_err());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn sequencias_multiplas_e_gerenciamento() {
+        let mut p = Project::new_default();
+        assert_eq!(p.sequences.len(), 1);
+        assert!(p.active_sequence_id.is_some());
+        let seq1_id = p.active_sequence_id.unwrap();
+        assert_eq!(p.sequences[0].name, "Sequência 1");
+
+        // Cria nova sequência
+        let seq2_id = p.create_sequence(Some("Corte Diretor"));
+        assert_eq!(p.sequences.len(), 2);
+        assert_eq!(p.active_sequence_id, Some(seq2_id));
+        assert_eq!(p.sequences[1].name, "Corte Diretor");
+
+        // Altera nome da sequência 2
+        assert!(p.rename_sequence(seq2_id, "Corte Final"));
+        assert_eq!(p.sequences[1].name, "Corte Final");
+
+        // Duplica sequência 2
+        let seq3_id = p.duplicate_sequence(seq2_id).expect("duplica sequencia");
+        assert_eq!(p.sequences.len(), 3);
+        assert_eq!(p.sequences[2].name, "Corte Final (Cópia)");
+
+        // Alterna de volta para sequência 1
+        assert!(p.switch_sequence(seq1_id));
+        assert_eq!(p.active_sequence_id, Some(seq1_id));
+
+        // Tenta alternar para ID inexistente
+        assert!(!p.switch_sequence(999999));
+
+        // Exclui sequência 3
+        assert!(p.delete_sequence(seq3_id));
+        assert_eq!(p.sequences.len(), 2);
+
+        // Exclui sequência ativa (seq1): ativa deve mudar para a primeira restante
+        assert!(p.delete_sequence(seq1_id));
+        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.active_sequence_id, Some(seq2_id));
+
+        // Tenta excluir última sequência: deve recusar para nunca deixar projeto sem sequência
+        assert!(!p.delete_sequence(seq2_id));
+        assert_eq!(p.sequences.len(), 1);
     }
 }
