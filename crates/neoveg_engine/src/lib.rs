@@ -27,6 +27,7 @@ pub mod edl;
 pub mod encoder;
 #[forbid(unsafe_code)]
 pub mod engine;
+pub mod env_lock;
 #[forbid(unsafe_code)]
 pub mod fcp7xml;
 #[forbid(unsafe_code)]

@@ -3322,6 +3322,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "options.lock_envelopes",
+        label: "Travar envelopes nos eventos",
+        menu_path: "Opções/Travar envelopes nos eventos",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.lock_envelopes = !s.opts.lock_envelopes;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "options.auto_ripple",
         label: "Ripple automático",
         menu_path: "Opções/Ripple automático",
