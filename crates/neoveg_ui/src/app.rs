@@ -327,6 +327,8 @@ pub struct App {
     /// Sessões anteriores que não fecharam normalmente (janela de relatório).
     pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
+    /// A janela ainda está no modo tela de abertura (sem bordas, tamanho da abertura).
+    pub(crate) startup_window: bool,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
@@ -513,6 +515,7 @@ impl App {
             recovery_offer,
             crash_reports: Vec::new(),
             splash,
+            startup_window: false,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
@@ -4308,6 +4311,41 @@ impl eframe::App for App {
 
 impl App {
     /// Um quadro completo da interface (separado de `eframe::App` para testes).
+    /// A janela abriu do tamanho da tela de abertura (ver `native_options`):
+    /// enquanto a abertura estiver ativa, só ela é desenhada. Vale mesmo com a
+    /// abertura inativa (ex.: oferta de recuperação): aí o primeiro quadro já
+    /// devolve as bordas e o tamanho normal, e a janela nunca fica presa pequena.
+    pub fn set_startup_splash_window(&mut self, on: bool) {
+        self.startup_window = on;
+    }
+
+    /// Fim da tela de abertura na inicialização: a janela ganha bordas e o
+    /// tamanho normal, centralizada no monitor.
+    fn leave_startup_window(&mut self, ctx: &egui::Context) {
+        self.startup_window = false;
+        let [w, h] = crate::MAIN_WINDOW_SIZE;
+        let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
+        let monitor = ctx
+            .input(|i| i.viewport().monitor_size)
+            .filter(|m| m.x.is_finite() && m.y.is_finite() && m.x > 0.0 && m.y > 0.0);
+        let size = match monitor {
+            Some(m) => egui::vec2(w.min(m.x - 40.0).max(min_w), h.min(m.y - 80.0).max(min_h)),
+            None => egui::vec2(w, h),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            min_w, min_h,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if let Some(m) = monitor {
+            let x = ((m.x - size.x) * 0.5).max(0.0);
+            let y = ((m.y - size.y) * 0.5).max(0.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
         let want_delay = if self.prefs.show_tooltips {
             0.5
@@ -4327,6 +4365,14 @@ impl App {
         let lang = self.lang();
         if let Some(msg) = self.encoder.tick(ctx, dt, &self.media, lang) {
             self.set_status(msg);
+        }
+        if self.startup_window {
+            // tela de abertura na própria janela: a interface só aparece depois
+            self.show_splash_overlay(ctx);
+            if self.splash.active {
+                return;
+            }
+            self.leave_startup_window(ctx);
         }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
@@ -4472,6 +4518,7 @@ impl App {
             loading: self.loading,
             commands_count: COMMANDS.len(),
             fallback_notice: notice,
+            own_window: self.startup_window,
         };
         let out = crate::splash::show_splash_screen(
             ctx,

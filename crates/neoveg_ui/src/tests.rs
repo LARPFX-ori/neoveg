@@ -1353,3 +1353,64 @@ fn dock_padrao_cinco_paineis_trimmer_na_previa_e_fechar_painel() {
     assert!(!app.detached_tabs.contains(&DockTab::Transitions));
     assert!(app.closed_tabs.contains(&DockTab::Transitions));
 }
+
+/// Tela de abertura na própria janela (inicialização, como no VEGAS Pro):
+/// enquanto ela está ativa só ela é desenhada; quando termina, a janela sai
+/// do modo abertura. Sem abertura ativa o modo nem liga.
+#[test]
+fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let small = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            Pos2::ZERO,
+            vec2(
+                crate::splash::SPLASH_WINDOW_SIZE[0],
+                crate::splash::SPLASH_WINDOW_SIZE[1],
+            ),
+        )),
+        time: Some(t),
+        ..Default::default()
+    };
+    // janela nasceu pequena, mas a abertura não está ativa (ex.: oferta de
+    // recuperação): o primeiro quadro já devolve bordas e tamanho
+    app.splash = crate::splash::SplashState::startup(false);
+    app.set_startup_splash_window(true);
+    let out = ctx.run(small(0.0), |c| app.frame_ui(c));
+    assert!(
+        !app.startup_window,
+        "sem abertura ativa a janela não pode ficar presa no tamanho da abertura"
+    );
+    assert!(out.viewport_output.values().any(|v| v
+        .commands
+        .contains(&egui::ViewportCommand::Decorations(true))));
+
+    app.splash = crate::splash::SplashState::startup(true);
+    app.set_startup_splash_window(true);
+    assert!(app.startup_window);
+    let out = ctx.run(small(0.05), |c| app.frame_ui(c));
+    assert!(app.startup_window);
+    assert!(!out.viewport_output.values().any(|v| v
+        .commands
+        .contains(&egui::ViewportCommand::Decorations(true))));
+
+    app.splash.advance_for_test(30.0, 0);
+    let out = ctx.run(small(0.1), |c| app.frame_ui(c));
+    assert!(
+        !app.startup_window,
+        "a abertura terminou: a janela sai do modo abertura"
+    );
+    let cmds: Vec<_> = out
+        .viewport_output
+        .values()
+        .flat_map(|v| v.commands.iter().cloned())
+        .collect();
+    assert!(cmds.contains(&egui::ViewportCommand::Decorations(true)));
+    assert!(cmds.contains(&egui::ViewportCommand::Resizable(true)));
+}

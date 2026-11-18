@@ -54,14 +54,31 @@ pub use neoveg_engine::{media, model, playback, recovery, render, session, util}
 use eframe::egui;
 use std::path::PathBuf;
 
-fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
+/// Tamanho da janela principal depois da tela de abertura.
+pub(crate) const MAIN_WINDOW_SIZE: [f32; 2] = [1480.0, 900.0];
+pub(crate) const MAIN_WINDOW_MIN: [f32; 2] = [900.0, 600.0];
+
+/// Com `splash_window`, a janela começa do tamanho da tela de abertura, sem
+/// bordas e centralizada: a tela de abertura aparece sozinha e a janela do
+/// programa só surge depois de carregar, como no VEGAS Pro.
+fn native_options(renderer: eframe::Renderer, splash_window: bool) -> eframe::NativeOptions {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Neoveg")
+        .with_icon(std::sync::Arc::new(crate::splash::window_icon_data()));
+    let viewport = if splash_window {
+        viewport
+            .with_inner_size(crate::splash::SPLASH_WINDOW_SIZE)
+            .with_decorations(false)
+            .with_resizable(false)
+    } else {
+        viewport
+            .with_inner_size(MAIN_WINDOW_SIZE)
+            .with_min_inner_size(MAIN_WINDOW_MIN)
+    };
     eframe::NativeOptions {
         renderer,
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1480.0, 900.0])
-            .with_min_inner_size([900.0, 600.0])
-            .with_title("Neoveg")
-            .with_icon(std::sync::Arc::new(crate::splash::window_icon_data())),
+        viewport,
+        centered: true,
         ..Default::default()
     }
 }
@@ -84,12 +101,14 @@ pub fn run_gui_in(
 ) -> eframe::Result<()> {
     let open_wgpu = open.clone();
     let crash_wgpu = crash_reports.clone();
+    let splash_window = Preferences::load_or_default().show_splash;
     match eframe::run_native(
         "Neoveg",
-        native_options(eframe::Renderer::Wgpu),
+        native_options(eframe::Renderer::Wgpu, splash_window),
         Box::new(move |cc| {
             let mut app = App::with_context_in(&cc.egui_ctx, open_wgpu.clone(), initial_lang);
             app.set_crash_reports(crash_wgpu.clone());
+            app.set_startup_splash_window(splash_window);
             Ok(Box::new(app))
         }),
     ) {
@@ -100,10 +119,11 @@ pub fn run_gui_in(
             util::log_warn(&warn);
             eframe::run_native(
                 "Neoveg",
-                native_options(eframe::Renderer::Glow),
+                native_options(eframe::Renderer::Glow, splash_window),
                 Box::new(move |cc| {
                     let mut app = App::with_context_in(&cc.egui_ctx, open.clone(), initial_lang);
                     app.set_crash_reports(crash_reports.clone());
+                    app.set_startup_splash_window(splash_window);
                     let lang = app.lang();
                     app.set_status(neoveg_common::tr(
                         lang,
