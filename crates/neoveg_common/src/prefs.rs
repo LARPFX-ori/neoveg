@@ -487,6 +487,10 @@ pub struct Preferences {
     /// VEGAS Pro); desligado, usa as fontes embutidas.
     #[serde(default = "default_system_ui_font")]
     pub system_ui_font: bool,
+    /// Escala da interface em porcentagem (tamanho de textos, botões e
+    /// painéis), de `UI_SCALE_MIN` a `UI_SCALE_MAX`.
+    #[serde(default = "default_ui_scale_pct")]
+    pub ui_scale_pct: u16,
     /// Exibe a tela de boas-vindas com ações rápidas e projetos recentes ao iniciar.
     #[serde(default = "default_show_welcome")]
     pub show_welcome: bool,
@@ -971,6 +975,35 @@ fn default_system_ui_font() -> bool {
     true
 }
 
+fn default_ui_scale_pct() -> u16 {
+    100
+}
+
+/// Limites e passo da escala da interface (%).
+pub const UI_SCALE_MIN: u16 = 50;
+pub const UI_SCALE_MAX: u16 = 300;
+pub const UI_SCALE_STEP: u16 = 10;
+
+impl Preferences {
+    /// Escala da interface já limitada, como fator (1.0 = 100%).
+    pub fn ui_scale_factor(&self) -> f32 {
+        f32::from(self.ui_scale_pct.clamp(UI_SCALE_MIN, UI_SCALE_MAX)) / 100.0
+    }
+
+    /// Muda a escala em `steps` passos de `UI_SCALE_STEP` (negativo diminui);
+    /// `None` volta a 100%. Devolve a escala nova, sempre dentro dos limites.
+    pub fn step_ui_scale(&mut self, steps: Option<i32>) -> u16 {
+        let cur = i32::from(self.ui_scale_pct.clamp(UI_SCALE_MIN, UI_SCALE_MAX));
+        let next = match steps {
+            None => 100,
+            Some(n) => cur.saturating_add(n.saturating_mul(i32::from(UI_SCALE_STEP))),
+        };
+        let next = next.clamp(i32::from(UI_SCALE_MIN), i32::from(UI_SCALE_MAX));
+        self.ui_scale_pct = u16::try_from(next).unwrap_or(100);
+        self.ui_scale_pct
+    }
+}
+
 fn default_show_welcome() -> bool {
     true
 }
@@ -1063,6 +1096,7 @@ impl Default for Preferences {
             track_header: TrackHeaderPrefs::default(),
             show_splash: default_show_splash(),
             system_ui_font: default_system_ui_font(),
+            ui_scale_pct: default_ui_scale_pct(),
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
@@ -1156,6 +1190,7 @@ impl Preferences {
             self.theme = default_theme();
         }
         self.ram_preview_mb = self.ram_preview_mb.clamp(32, 8192);
+        self.ui_scale_pct = self.ui_scale_pct.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
         self.frame_cache_cap = self.frame_cache_cap.clamp(4, 512);
         self.worker_threads = self.worker_threads.min(16);
         self.max_recent_projects = self.max_recent_projects.clamp(1, MAX_RECENT_PROJECTS);
@@ -1353,6 +1388,7 @@ mod tests {
         assert!(!p_no_splash.show_splash);
         // preferências antigas, sem o campo: fontes do sistema ligadas
         assert!(p_no_splash.system_ui_font);
+        assert_eq!(p_no_splash.ui_scale_pct, 100);
         assert!(!p_no_splash.show_welcome);
 
         let mut p_rec = Preferences {
@@ -1498,5 +1534,26 @@ mod tests {
         assert_eq!(p.external_apps.path_for("blender"), "");
         assert_eq!(p.external_apps.rpc_timeout_secs, 300);
         assert!(p.external_apps.watch_edited_copies);
+    }
+
+    #[test]
+    fn escala_da_interface_fica_nos_limites_com_entrada_hostil() {
+        let mut p = Preferences::default();
+        assert_eq!(p.ui_scale_factor(), 1.0);
+        assert_eq!(p.step_ui_scale(Some(1)), 110);
+        assert_eq!(p.step_ui_scale(Some(-2)), 90);
+        assert_eq!(p.step_ui_scale(None), 100);
+        assert_eq!(p.step_ui_scale(Some(i32::MAX)), UI_SCALE_MAX);
+        assert_eq!(p.step_ui_scale(Some(i32::MIN)), UI_SCALE_MIN);
+        // arquivo de preferências com valor fora da faixa
+        let mut h: Preferences = serde_json::from_str(r#"{"ui_scale_pct":0}"#).unwrap();
+        assert_eq!(h.ui_scale_factor(), f32::from(UI_SCALE_MIN) / 100.0);
+        h.sanitize();
+        assert_eq!(h.ui_scale_pct, UI_SCALE_MIN);
+        let mut h: Preferences = serde_json::from_str(r#"{"ui_scale_pct":65535}"#).unwrap();
+        assert_eq!(h.step_ui_scale(Some(1)), UI_SCALE_MAX);
+        h.sanitize();
+        assert_eq!(h.ui_scale_pct, UI_SCALE_MAX);
+        assert!(serde_json::from_str::<Preferences>(r#"{"ui_scale_pct":-5}"#).is_err());
     }
 }
