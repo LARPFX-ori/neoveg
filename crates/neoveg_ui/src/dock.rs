@@ -138,13 +138,14 @@ pub fn build_dock_tree(
     let mut tiles = Tiles::default();
     // Grupo à esquerda: os painéis padrão primeiro, depois os outros (que
     // começam fechados e aparecem aqui quando abertos pelo menu Exibir).
-    let left_order: Vec<DockTab> =
-        crate::layout::DEFAULT_DOCK_TABS
-            .into_iter()
-            .chain(DockTab::ALL.into_iter().filter(|t| {
-                !crate::layout::DEFAULT_DOCK_TABS.contains(t) && *t != DockTab::Trimmer
-            }))
-            .collect();
+    let left_order: Vec<DockTab> = crate::layout::DEFAULT_DOCK_TABS
+        .into_iter()
+        .chain(DockTab::ALL.into_iter().filter(|t| {
+            !crate::layout::DEFAULT_DOCK_TABS.contains(t)
+                && *t != DockTab::Trimmer
+                && !crate::layout::window_only(*t)
+        }))
+        .collect();
     let mut tab_ids = Vec::with_capacity(left_order.len());
     let mut active_id = None;
     for tab in left_order {

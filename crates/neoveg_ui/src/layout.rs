@@ -82,6 +82,12 @@ pub const DEFAULT_DOCK_TABS: [DockTab; 5] = [
 ];
 
 /// Painéis que começam fechados num layout novo.
+/// Painéis que só abrem em janela própria, fora da área de janelas: o
+/// Neoveg Encoder é uma ferramenta à parte, como um programa separado.
+pub fn window_only(tab: DockTab) -> bool {
+    matches!(tab, DockTab::Encoder)
+}
+
 pub fn default_closed_tabs() -> HashSet<DockTab> {
     DockTab::ALL
         .into_iter()
@@ -184,7 +190,10 @@ impl WindowLayout {
     }
 
     pub fn active_panel(&self) -> DockTab {
-        panel_from_key(&self.active_tab).unwrap_or(DockTab::ProjectMedia)
+        // painel só de janela (Encoder) nunca é a aba ativa do dock
+        panel_from_key(&self.active_tab)
+            .filter(|t| !window_only(*t))
+            .unwrap_or(DockTab::ProjectMedia)
     }
 
     pub fn detached_panels(&self) -> HashSet<DockTab> {
