@@ -1,0 +1,9 @@
+asset:        selawksb.ttf
+title:        Selawik SemiBold (fonte de destaque e cabeçalhos do Neoveg)
+author:       Microsoft Corporation / Aaron Bell
+source:       https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip
+license:      OFL-1.1
+license-file: assets/fonts/Selawik.LICENSE.txt
+added:        2026-11-18 por contribuidores do projeto Neoveg
+notes:        Versão 1.01 extraída de Selawik_Release.zip (SHA-256: 0a9e9d0549a10f24bef9b3a29e06fe6e0b5c21e7a784c503b048a307841a7783).
+              Utilizada na família nomeada "semibold" e em cabeçalhos da interface (TextStyle::Heading).
