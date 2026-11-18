@@ -1435,7 +1435,9 @@ fn escala_da_interface_pelo_menu_aplica_no_proximo_quadro() {
     };
     app.exec_cmd(Some(&ctx), "view.ui_scale_up");
     assert_eq!(app.prefs.ui_scale_pct, 110);
+    // o egui aplica o zoom novo no começo do quadro seguinte
     let _ = ctx.run(raw(0.0), |c| app.frame_ui(c));
+    let _ = ctx.run(raw(0.05), |c| app.frame_ui(c));
     assert!((ctx.zoom_factor() - 1.1).abs() < 0.001);
 
     for _ in 0..40 {
@@ -1445,5 +1447,6 @@ fn escala_da_interface_pelo_menu_aplica_no_proximo_quadro() {
     app.exec_cmd(Some(&ctx), "view.ui_scale_reset");
     assert_eq!(app.prefs.ui_scale_pct, 100);
     let _ = ctx.run(raw(0.1), |c| app.frame_ui(c));
+    let _ = ctx.run(raw(0.15), |c| app.frame_ui(c));
     assert!((ctx.zoom_factor() - 1.0).abs() < 0.001);
 }
