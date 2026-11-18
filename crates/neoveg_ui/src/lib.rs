@@ -21,6 +21,7 @@ mod dock_drop;
 mod edit;
 mod edit_details;
 mod encoder_panel;
+mod float_dock;
 pub mod fonts;
 mod fx_browser;
 mod gen_browser;

@@ -49,6 +49,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 ## Fase 4 — Próximos Marcos *(Em andamento)*
 
 - **Concluído:**
+  - **Acoplar arrastando** uma janela destacada para a área de janelas, com contorno de destino e a preferência *Permitir que janelas flutuantes acoplem* (`Ctrl` inverte, manual do VEGAS Pro 21, pp. 42-43; `float_dock.rs`), e os atalhos alternativos ``Alt+` `` / ``Ctrl+Alt+` `` / ``Shift+Alt+` `` (= `F11` / `Ctrl+F11` / `Shift+F11`, também pela tecla física no ABNT2);
   - **Efeitos e envelopes na API de scripts** (`ScriptPortal.Vegas`, nomes da *VEGAS Pro Scripting API Summary*): `Track.Effects`, `VideoEvent.Effects`/`AudioEvent.Effects`, `Effect` (`Bypass`, `PlugIn`, `Description`, `Index`), `Effects.AddEffect`, árvores `Vegas.VideoFX`/`AudioFX`/`PlugIns` com `PlugInNode.FindChildByName`/`FindChildByUniqueID`, `Track.Envelopes` (`HasEnvelope`, `FindByType`), `Envelope` (`Points`, `Min`/`Max`/`Neutral`, `ValueAt`), `EnvelopePoint` e `CurveType`; validados ao aplicar (protocolo 5 da ponte, `vegas_cs.rs`);
   - **Janelas destacadas lembram posição e tamanho** (Prévia, Master Bus e painéis): a janela reaberta volta ao último lugar na sessão e o `.neoveglayout` salvo leva e traz as posições, saneadas contra valores não finitos e fora de faixa (`layout.rs`, `panels.rs`);
   - **Travar envelopes nos eventos** (*Opções → Travar envelopes nos eventos*, `options.lock_envelopes`, pp. 389, 710 e 1014): arrastar eventos leva junto os pontos de envelope da trilha e os quadros-chave de Track Motion, de movimento do pai e dos efeitos da trilha no trecho de cada evento, recalculados a partir de uma foto do começo do arraste (`env_lock.rs`);
@@ -64,8 +65,8 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - **Backends nativos Linux e macOS:** contrato comum `SystemVideoReader` (`media/system.rs`) e leitor/demuxer de contêineres MP4/MOV/MKV/WEBM em Rust puro (`media/demux/`, ISO/IEC 14496-12, QTFF, RFC 8794, RFC 9559) concluídos; faltam as bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO. Os portões de CI em macOS e Linux estão no PR #12.
   - **Plug-ins externos restantes:** OFX com tiles e múltiplas entradas em contexto *General*; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros em tempo real e instrumentos (MIDI).
   - **API de scripts:** parâmetros e quadros-chave dos efeitos (`Effect.Keyframes`, presets), efeitos OFX/VST3 criados por script e envelopes de evento.
-  - **Quadros-chave de trilha:** curva por quadro-chave nos parâmetros de efeito (manual do VEGAS Pro 21, p. 389); *Travar envelopes nos eventos* ao mover por teclado e ao recortar/colar (o arraste já está feito).
-  - **Área de janelas:** docas flutuantes com várias abas na mesma janela, `Ctrl` + arrastar uma janela flutuante de volta para a área, a preferência *Permitir que janelas flutuantes acoplem* e os atalhos alternativos ``Alt+` ``, ``Shift+Alt+` `` e ``Ctrl+Alt+` `` (a crase é tecla morta no ABNT2).
+  - **Quadros-chave de trilha:** curva por quadro-chave nos parâmetros de efeito (manual do VEGAS Pro 21, p. 389).
+  - **Área de janelas:** docas flutuantes com várias abas na mesma janela (arrastar abas entre janelas nativas não existe no egui).
 
 ## Paridade de UI/UX com o manual do VEGAS Pro 21
 
