@@ -6,7 +6,7 @@ para preservar compatibilidade com CPUs x86-64 sem AVX2) e gera uma pasta
 portátil autocontida em `<target-dir>/portable/neoveg-portable/`, onde `<target-dir>`
 é a pasta de build do cargo (respeita `CARGO_TARGET_DIR` e `.cargo/config.toml`).
 
-Uso:
+Uso:   
     python build_portable.py
     python build_portable.py --no-build
     python build_portable.py --out ../pacotes/neoveg-portable

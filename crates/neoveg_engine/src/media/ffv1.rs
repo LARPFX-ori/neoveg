@@ -220,9 +220,9 @@ impl Ffv1Encoder {
         rc.put_symbol(&mut p_state, (num_v_slices - 1) as i32, false);
         rc.put_symbol(&mut p_state, 1, false); // quant_table_set_count = 1
 
-        // QuantizationTableSet(0): cada uma das 5 tabelas tem um bloco de 128 zeros (len-1 = 127)
-        let mut q_state = [128u8; 32];
+        // QuantizationTableSet(0): cada uma das 5 tabelas tem seu próprio estado inicial [128; 32] (RFC 9043 §4.1).
         for _ in 0..5 {
+            let mut q_state = [128u8; 32];
             rc.put_symbol(&mut q_state, 127, false);
         }
 
@@ -306,9 +306,10 @@ impl Ffv1Encoder {
         rc.put_symbol(&mut sh_state, 0, false); // sar_num
         rc.put_symbol(&mut sh_state, 0, false); // sar_den
 
-        // Estados de contexto para cada plano (context_count[0] == 1 -> índice único por plano)
+        // Estados de contexto por QuantizationTableSetIndex:
+        // Y -> índice 0, Cb e Cr compartilham índice 1, Alfa -> índice 2 (RFC 9043 §3.6).
         let planes = if self.has_alpha { 4usize } else { 3usize };
-        let mut plane_states = [[128u8; 32]; 4];
+        let mut plane_states = [[128u8; 32]; 3];
 
         // Buffers de linhas (com borda: [col -2, col -1, cols 0..sw-1, col sw])
         let row_len = sw + 3;
@@ -344,9 +345,17 @@ impl Ffv1Encoder {
                 row[sw + 2] = row[sw + 1];
             }
 
-            // Codifica linhas por plano (RGB intercala linha a linha: Y, Cb, Cr [, Alpha])
+            // Codifica linhas por plano (RGB intercala linha a linha: Y, Cb, Cr [, Alfa]).
+            // No RCT (colorspace_type == 1), todos os planos codificam diferenças de 9 bits (RFC 9043 §3.8).
             for p in 0..planes {
-                let bits = if p < 3 { 9 } else { 8 };
+                let state_idx = if p == 0 {
+                    0
+                } else if p <= 2 {
+                    1
+                } else {
+                    2
+                };
+                let bits = 9i32;
                 let half = 1i32 << (bits - 1);
                 let mask = (1i32 << bits) - 1;
                 for rx in 0..sw {
@@ -357,7 +366,7 @@ impl Ffv1Encoder {
                     let pred = median3(l, t, l + t - tl);
                     let raw_diff = cur_row[p][c] - pred;
                     let wrapped = ((raw_diff + half) & mask) - half;
-                    rc.put_symbol(&mut plane_states[p], wrapped, true);
+                    rc.put_symbol(&mut plane_states[state_idx], wrapped, true);
                 }
             }
 
@@ -427,7 +436,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            mkv.write_video_packet(0, true, pkt).unwrap();
+            mkv.write_video_packet(0, true, pkt.clone()).unwrap();
             mkv.finish().unwrap();
 
             if let Ok(out) = std::process::Command::new("ffmpeg")
@@ -436,14 +445,22 @@ mod tests {
                 .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
                 .output()
             {
-                if out.status.success() {
-                    assert!(
-                        out.stderr.is_empty(),
-                        "ffmpeg erro FFV1 {tag}: {}",
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    assert_eq!(out.stdout, rgba, "FFV1 {tag} não foi 100% lossless");
-                }
+                assert!(
+                    out.status.success(),
+                    "ffmpeg falhou ao decodificar FFV1 {tag}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert_eq!(
+                    out.stdout, rgba,
+                    "FFV1 {tag} não foi 100% lossless (pkt_len={})",
+                    pkt.len()
+                );
+                assert!(
+                    out.stderr.is_empty(),
+                    "ffmpeg erro FFV1 {tag} (pkt_len={}): {}",
+                    pkt.len(),
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
             let _ = std::fs::remove_file(&mkv_path);
         }

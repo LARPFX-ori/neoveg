@@ -33,7 +33,15 @@ use std::time::Instant;
 pub enum RenderFormat {
     Mp4H264,
     Mp4Hevc,
+    Mp4Av1,
     MovH264,
+    MovHevc,
+    MovAv1,
+    MovMpeg4,
+    MkvH264,
+    MkvHevc,
+    MkvAv1,
+    MkvVp9,
     ThreeGp,
     Wmv,
     AviMjpeg,
@@ -78,10 +86,18 @@ pub enum RenderFormat {
 }
 
 impl RenderFormat {
-    pub const ALL: [RenderFormat; 44] = [
+    pub const ALL: [RenderFormat; 52] = [
         RenderFormat::Mp4H264,
         RenderFormat::Mp4Hevc,
+        RenderFormat::Mp4Av1,
         RenderFormat::MovH264,
+        RenderFormat::MovHevc,
+        RenderFormat::MovAv1,
+        RenderFormat::MovMpeg4,
+        RenderFormat::MkvH264,
+        RenderFormat::MkvHevc,
+        RenderFormat::MkvAv1,
+        RenderFormat::MkvVp9,
         RenderFormat::ThreeGp,
         RenderFormat::Wmv,
         RenderFormat::AviMjpeg,
@@ -129,7 +145,15 @@ impl RenderFormat {
         match self {
             Self::Mp4H264 => "MP4 H.264 / AVC (+ AAC)",
             Self::Mp4Hevc => "MP4 H.265 / HEVC (+ AAC)",
+            Self::Mp4Av1 => "MP4 AV1 (+ AAC)",
             Self::MovH264 => "QuickTime MOV H.264 (+ AAC)",
+            Self::MovHevc => "QuickTime MOV H.265 / HEVC (+ AAC)",
+            Self::MovAv1 => "QuickTime MOV AV1 (+ AAC)",
+            Self::MovMpeg4 => "QuickTime MOV MPEG-4 Part 2 (+ AAC)",
+            Self::MkvH264 => "Matroska MKV H.264 / AVC (+ AAC)",
+            Self::MkvHevc => "Matroska MKV H.265 / HEVC (+ AAC)",
+            Self::MkvAv1 => "Matroska MKV AV1 (+ AAC)",
+            Self::MkvVp9 => "Matroska MKV VP9 (+ AAC)",
             Self::ThreeGp => "3GPP H.264 (+ AAC)",
             Self::Wmv => "Windows Media Video (.wmv)",
             Self::AviMjpeg => "AVI (Motion-JPEG + PCM)",
@@ -176,8 +200,11 @@ impl RenderFormat {
 
     pub fn ext(self) -> &'static str {
         match self {
-            Self::Mp4H264 | Self::Mp4Hevc => "mp4",
+            Self::Mp4H264 | Self::Mp4Hevc | Self::Mp4Av1 => "mp4",
             Self::MovH264
+            | Self::MovHevc
+            | Self::MovAv1
+            | Self::MovMpeg4
             | Self::MovUncompressedRgb
             | Self::MovUncompressedYuv422
             | Self::MovMjpeg
@@ -189,7 +216,13 @@ impl RenderFormat {
             | Self::AviUncompressedBgra
             | Self::AviUncompressedYuv422
             | Self::AviUncompressedRgb10 => "avi",
-            Self::MkvFfv1 | Self::MkvMjpeg | Self::MkvPng => "mkv",
+            Self::MkvFfv1
+            | Self::MkvMjpeg
+            | Self::MkvPng
+            | Self::MkvH264
+            | Self::MkvHevc
+            | Self::MkvAv1
+            | Self::MkvVp9 => "mkv",
             Self::AnimatedGif => "gif",
             Self::Y4m => "y4m",
             Self::PngSequence => "png",
@@ -274,7 +307,15 @@ impl RenderFormat {
                     | Self::MkvPng
                     | Self::Mp4H264
                     | Self::Mp4Hevc
+                    | Self::Mp4Av1
                     | Self::MovH264
+                    | Self::MovHevc
+                    | Self::MovAv1
+                    | Self::MovMpeg4
+                    | Self::MkvH264
+                    | Self::MkvHevc
+                    | Self::MkvAv1
+                    | Self::MkvVp9
                     | Self::ThreeGp
                     | Self::Wmv
             )
@@ -290,7 +331,19 @@ impl RenderFormat {
     pub fn uses_video_bitrate(self) -> bool {
         matches!(
             self,
-            Self::Mp4H264 | Self::Mp4Hevc | Self::MovH264 | Self::ThreeGp | Self::Wmv
+            Self::Mp4H264
+                | Self::Mp4Hevc
+                | Self::Mp4Av1
+                | Self::MovH264
+                | Self::MovHevc
+                | Self::MovAv1
+                | Self::MovMpeg4
+                | Self::MkvH264
+                | Self::MkvHevc
+                | Self::MkvAv1
+                | Self::MkvVp9
+                | Self::ThreeGp
+                | Self::Wmv
         )
     }
 
@@ -602,7 +655,15 @@ fn mf_output_format(fmt: RenderFormat) -> Option<crate::media::mf::encode::MfOut
     match fmt {
         RenderFormat::Mp4H264 => Some(MfOutputFormat::Mp4H264),
         RenderFormat::Mp4Hevc => Some(MfOutputFormat::Mp4Hevc),
+        RenderFormat::Mp4Av1 => Some(MfOutputFormat::Mp4Av1),
         RenderFormat::MovH264 => Some(MfOutputFormat::MovH264),
+        RenderFormat::MovHevc => Some(MfOutputFormat::MovHevc),
+        RenderFormat::MovAv1 => Some(MfOutputFormat::MovAv1),
+        RenderFormat::MovMpeg4 => Some(MfOutputFormat::MovMpeg4),
+        RenderFormat::MkvH264 => Some(MfOutputFormat::MkvH264),
+        RenderFormat::MkvHevc => Some(MfOutputFormat::MkvHevc),
+        RenderFormat::MkvAv1 => Some(MfOutputFormat::MkvAv1),
+        RenderFormat::MkvVp9 => Some(MfOutputFormat::MkvVp9),
         RenderFormat::ThreeGp => Some(MfOutputFormat::ThreeGp),
         RenderFormat::Wmv => Some(MfOutputFormat::Wmv),
         RenderFormat::AacM4a => Some(MfOutputFormat::M4aAac),
@@ -1027,14 +1088,10 @@ pub fn run_with_options(
             render_h as u32,
             fps,
         )?),
-        RenderFormat::Mp4H264
-        | RenderFormat::Mp4Hevc
-        | RenderFormat::MovH264
-        | RenderFormat::ThreeGp
-        | RenderFormat::Wmv => {
+        other if other.uses_windows_mf() => {
             #[cfg(windows)]
             {
-                let Some(fmt) = mf_output_format(s.format) else {
+                let Some(fmt) = mf_output_format(other) else {
                     bail!("formato MF inválido");
                 };
                 let enc = crate::media::mf::encode::MfSinkEncoder::create(
@@ -1053,7 +1110,7 @@ pub fn run_with_options(
             }
             #[cfg(not(windows))]
             {
-                let _ = (w_even, h_even);
+                let _ = (w_even, h_even, other);
                 bail!(
                     "exportação {} via Media Foundation disponível apenas no Windows até os backends nativos VideoToolbox/VA-API",
                     s.format.name()
@@ -1082,30 +1139,42 @@ pub fn run_with_options(
         Sink::Mkv { ffv1, .. } => ffv1.clone(),
         _ => None,
     };
+    let proj_ch = p.settings.channel_layout.channels();
     // WAV separado para formatos sem áudio embutido
     let mut side_wav = if has_audio && !s.format.has_embedded_audio() {
-        Some(WavWriter::create(
+        Some(WavWriter::create_with_channels(
             &s.path.with_extension("wav"),
             sr,
             s.wav_bits,
+            proj_ch as u16,
         )?)
     } else {
         None
     };
+    let audio_ch = if side_wav.is_some() { proj_ch } else { 2 };
 
     let batch = rayon::current_num_threads().clamp(1, 8) as u64;
     if has_audio && pdc > 0 {
         let mut pre = 0_i64;
         let base = sample_at(0);
-        let mut prime_buf = vec![0f32; 8192 * 2];
+        let mut prime_buf = vec![0f32; 8192 * audio_ch];
         while pre < pdc {
             let n = ((pdc - pre) as usize).min(8192);
-            mixer.process(
-                p,
-                &audio_map,
-                base.saturating_add(pre),
-                &mut prime_buf[..n * 2],
-            );
+            if audio_ch == 2 {
+                mixer.process(
+                    p,
+                    &audio_map,
+                    base.saturating_add(pre),
+                    &mut prime_buf[..n * 2],
+                );
+            } else {
+                mixer.process_multichannel(
+                    p,
+                    &audio_map,
+                    base.saturating_add(pre),
+                    &mut prime_buf[..n * audio_ch],
+                );
+            }
             pre += n as i64;
         }
     }
@@ -1193,11 +1262,7 @@ pub fn run_with_options(
                         };
                         enc.encode_frame(&f.to_rgba8())
                     }
-                    RenderFormat::Mp4H264
-                    | RenderFormat::Mp4Hevc
-                    | RenderFormat::MovH264
-                    | RenderFormat::ThreeGp
-                    | RenderFormat::Wmv => {
+                    other if other.uses_windows_mf() => {
                         #[cfg(windows)]
                         {
                             Ok(crate::media::mf::encode::rgba_to_nv12(
@@ -1253,8 +1318,12 @@ pub fn run_with_options(
                 let a0 = sample_at(fi);
                 let a1 = sample_at(fi + 1);
                 let n = (a1 - a0).max(0) as usize;
-                let mut buf = vec![0f32; n * 2];
-                mixer.process(p, &audio_map, a0.saturating_add(pdc), &mut buf);
+                let mut buf = vec![0f32; n * audio_ch];
+                if audio_ch == 2 {
+                    mixer.process(p, &audio_map, a0.saturating_add(pdc), &mut buf);
+                } else {
+                    mixer.process_multichannel(p, &audio_map, a0.saturating_add(pdc), &mut buf);
+                }
                 match (&mut sink, &mut side_wav) {
                     (Sink::Avi(wr), _) => wr.write_audio(&to_i16(&buf))?,
                     (Sink::Mov(wr), _) => wr.write_audio(&to_i16(&buf))?,
