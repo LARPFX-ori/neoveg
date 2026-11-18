@@ -2261,6 +2261,18 @@ pub struct PanCropKey {
     pub size: f32,
     /// Rotação em graus.
     pub rot: f32,
+    /// Altura do enquadramento em relação à que teria com a proporção do
+    /// quadro (1 = mesma proporção do quadro; 2 = o dobro da altura). Permite
+    /// largura e altura independentes com *Travar proporção* desligado
+    /// (manual do VEGAS Pro 21, p. 250).
+    #[serde(default = "one")]
+    pub ratio: f32,
+    /// Espelhamento horizontal/vertical do enquadramento (menu de contexto
+    /// da área de trabalho do Pan/Crop, p. 251).
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
 }
 
 impl Default for PanCropKey {
@@ -2270,17 +2282,40 @@ impl Default for PanCropKey {
             cy: 0.5,
             size: 1.0,
             rot: 0.0,
+            ratio: 1.0,
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+}
+
+impl PanCropKey {
+    /// Proporção usável: finita e dentro de um limite que não zera a altura.
+    pub fn ratio_safe(&self) -> f32 {
+        if self.ratio.is_finite() {
+            self.ratio.clamp(0.01, 100.0)
+        } else {
+            1.0
         }
     }
 }
 
 impl Lerp for PanCropKey {
     fn lerp(&self, o: &Self, t: f32) -> Self {
+        // espelhamento não se interpola: vale o do quadro-chave anterior
+        let (flip_h, flip_v) = if t < 1.0 {
+            (self.flip_h, self.flip_v)
+        } else {
+            (o.flip_h, o.flip_v)
+        };
         PanCropKey {
             cx: self.cx.lerp(&o.cx, t),
             cy: self.cy.lerp(&o.cy, t),
             size: self.size.lerp(&o.size, t),
             rot: self.rot.lerp(&o.rot, t),
+            ratio: self.ratio.lerp(&o.ratio, t),
+            flip_h,
+            flip_v,
         }
     }
 }

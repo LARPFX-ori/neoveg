@@ -262,6 +262,7 @@ pub fn apply_camera_to_event(data: &BlenderCameraExchange, event: &mut Event) ->
                 cy: util::clampf(0.5 + mk.y, -1.0, 2.0),
                 size,
                 rot: mk.rot,
+                ..PanCropKey::default()
             };
             event.pan_crop.set(rel_t, pk, tol);
             count += 1;

@@ -21,7 +21,14 @@ pub fn draw_source(
 ) -> Frame {
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     let (wf, hf) = (w as f32, h as f32);
-    let identity = key.size == 1.0 && key.rot == 0.0 && key.cx == 0.5 && key.cy == 0.5;
+    let ratio = key.ratio_safe();
+    let identity = key.size == 1.0
+        && key.rot == 0.0
+        && key.cx == 0.5
+        && key.cy == 0.5
+        && ratio == 1.0
+        && !key.flip_h
+        && !key.flip_v;
     let mut out = Frame::new(w, h);
     let raw = src.as_raw();
     let srcw = src.width() as usize;
@@ -53,9 +60,11 @@ pub fn draw_source(
     let (sx_scale, sy_scale) = (sw / fw, sh / fh);
     let (sn, cs) = key.rot.to_radians().sin_cos();
     let size = key.size.max(0.001);
+    let size_x = if key.flip_h { -size } else { size };
+    let size_y = size * ratio * if key.flip_v { -1.0 } else { 1.0 };
     let (ccx, ccy) = (key.cx * wf, key.cy * hf);
     // ao reduzir muito a imagem, usa uma amostragem com área (pré-redução)
-    let downscale = (sx_scale * size).max(sy_scale * size);
+    let downscale = (sx_scale * size).max(sy_scale * size * ratio);
     let sample_src = |x: f32, y: f32| -> [f32; 4] {
         // bilinear em u8
         let fx = x - 0.5;
@@ -95,8 +104,8 @@ pub fn draw_source(
                     let ox = (tx as f32 + 0.5) / taps as f32;
                     let oy = (ty as f32 + 0.5) / taps as f32;
                     // ponto no espaço "enquadrado"
-                    let dx = (x as f32 + ox - wf / 2.0) * size;
-                    let dy = (y as f32 + oy - hf / 2.0) * size;
+                    let dx = (x as f32 + ox - wf / 2.0) * size_x;
+                    let dy = (y as f32 + oy - hf / 2.0) * size_y;
                     let qx = dx * cs - dy * sn + ccx;
                     let qy = dx * sn + dy * cs + ccy;
                     let sx = (qx - fx0) * sx_scale;
@@ -1176,5 +1185,82 @@ mod adjustment_tests {
         p3d.settings.stereo_3d = Stereo3dMode::SideBySideHalf;
         let sbs = render_frame(&p3d, &cache, Ticks::ZERO, 40, 20);
         assert_eq!((sbs.w, sbs.h), (40, 20));
+    }
+}
+
+#[cfg(test)]
+mod pan_crop_tests {
+    use super::*;
+
+    /// Imagem 4x4: coluna da esquerda vermelha, linha de cima azul.
+    fn src() -> RgbaImage {
+        let mut img = RgbaImage::new(4, 4);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let r = if x == 0 { 255 } else { 0 };
+            let b = if y == 0 { 255 } else { 0 };
+            *p = image::Rgba([r, 0, b, 255]);
+        }
+        img
+    }
+
+    #[test]
+    fn espelhar_na_horizontal_traz_a_coluna_da_direita_para_a_esquerda() {
+        let key = PanCropKey {
+            flip_h: true,
+            ..PanCropKey::default()
+        };
+        let f = draw_source(&src(), 4, 4, &key, false);
+        // pixel (0,1): sem espelhar seria vermelho; espelhado vem da coluna 3
+        assert!(f.px[4][0] < 0.1, "{:?}", f.px[4]);
+        assert!(f.px[4 + 3][0] > 0.9, "{:?}", f.px[4 + 3]);
+    }
+
+    #[test]
+    fn espelhar_na_vertical_traz_a_linha_de_baixo_para_cima() {
+        let key = PanCropKey {
+            flip_v: true,
+            ..PanCropKey::default()
+        };
+        let f = draw_source(&src(), 4, 4, &key, false);
+        assert!(f.px[1][2] < 0.1, "{:?}", f.px[1]);
+        assert!(f.px[3 * 4 + 1][2] > 0.9, "{:?}", f.px[3 * 4 + 1]);
+    }
+
+    #[test]
+    fn proporcao_maior_mostra_mais_altura_da_origem() {
+        // ratio 2: o enquadramento cobre o dobro da altura do quadro, então
+        // a imagem aparece achatada na vertical e sobra área vazia em cima
+        let key = PanCropKey {
+            ratio: 2.0,
+            ..PanCropKey::default()
+        };
+        let f = draw_source(&src(), 4, 4, &key, false);
+        assert!(
+            f.px[0][3] < 0.1,
+            "linha 0 fica fora da origem: {:?}",
+            f.px[0]
+        );
+        assert!(f.px[4 * 2 + 2][3] > 0.9);
+    }
+
+    #[test]
+    fn proporcao_hostil_nao_trava() {
+        for r in [f32::NAN, f32::INFINITY, -5.0, 0.0, 1e30] {
+            let key = PanCropKey {
+                ratio: r,
+                ..PanCropKey::default()
+            };
+            let f = draw_source(&src(), 4, 4, &key, false);
+            assert_eq!(f.px.len(), 16);
+        }
+    }
+
+    #[test]
+    fn projeto_antigo_sem_os_campos_novos_abre_igual() {
+        let k: PanCropKey =
+            serde_json::from_str(r#"{"cx":0.4,"cy":0.6,"size":0.5,"rot":10.0}"#).unwrap();
+        assert_eq!(k.ratio, 1.0);
+        assert!(!k.flip_h && !k.flip_v);
+        assert_eq!(k.size, 0.5);
     }
 }

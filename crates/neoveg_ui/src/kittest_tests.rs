@@ -2338,3 +2338,54 @@ fn kittest_visor_e_chips_sem_oscilacao_tabular() {
         assert_f32_spread(&format!("Literal Visor sep[{col}]"), &v_col);
     }
 }
+
+/// Janela Pan/Crop no layout do VEGAS Pro (manual do VEGAS Pro 21, pp.
+/// 250–251): grade de propriedades com seções recolhíveis, barra de
+/// ferramentas vertical e linha de quadros-chave na mesma janela.
+#[test]
+fn kittest_pan_crop_grade_de_propriedades_recolhivel() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.4, 0.8, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let eid = app
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .map(|e| e.id)
+            .next()
+            .expect("evento gerado");
+        app.dlg.pan_crop = Some(eid);
+    }
+    harness.run_steps(3);
+    for label in [
+        "Posição",
+        "Rotação",
+        "Área de trabalho",
+        "Largura:",
+        "Zoom (%):",
+    ] {
+        assert!(
+            harness.query_by_label(label).is_some(),
+            "falta '{label}' na janela Pan/Crop"
+        );
+    }
+    // seção recolhida esconde as linhas dela
+    harness.get_by_label("Posição").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Largura:").is_none());
+    harness.get_by_label("Posição").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Largura:").is_some());
+    // fechar a janela limpa o estado
+    harness.state_mut().dlg.pan_crop = None;
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Área de trabalho").is_none());
+}
