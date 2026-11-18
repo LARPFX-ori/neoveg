@@ -298,6 +298,10 @@ pub struct EditorOptions {
     pub ruler_grid: RulerGridSpacing,
     /// Encaixar edições na grade da régua (Snap to Grid, Ctrl+F8).
     pub snap_to_grid: bool,
+    /// Travar envelopes nos eventos (menu Opções, p. 1014): mover um evento
+    /// leva junto os pontos de envelope e os quadros-chave da trilha no
+    /// trecho dele.
+    pub lock_envelopes: bool,
 }
 
 /// Espaçamento configurável da grade vertical da régua da timeline (pp. 86, 232).
@@ -397,6 +401,7 @@ impl Default for EditorOptions {
             bypass_all_audio_fx: false,
             ruler_grid: RulerGridSpacing::Auto,
             snap_to_grid: false,
+            lock_envelopes: false,
         }
     }
 }

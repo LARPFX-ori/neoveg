@@ -3381,6 +3381,7 @@ impl App {
                     }
                 });
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
+                self.cmd_menu_chk(ui, self.opts.lock_envelopes, "options.lock_envelopes");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
                 self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
