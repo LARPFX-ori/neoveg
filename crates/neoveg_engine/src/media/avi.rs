@@ -25,12 +25,16 @@ enum VideoCodec {
     Yuy2,
     Uyvy,
     I420,
+    R210,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AviVideoCodec {
     Mjpeg,
     UncompressedRgb24,
+    UncompressedBgra,
+    UncompressedUyvy,
+    UncompressedR210,
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +208,8 @@ impl AviReader {
                     Some(VideoCodec::Uyvy)
                 } else if up == "I420" || up == "IYUV" {
                     Some(VideoCodec::I420)
+                } else if up == "R210" {
+                    Some(VideoCodec::R210)
                 } else {
                     None
                 };
@@ -366,6 +372,28 @@ impl AviReader {
                         let u = us[(y / 2) * uv_w + (x / 2)];
                         let v = vs[(y / 2) * uv_w + (x / 2)];
                         img.put_pixel(x as u32, y as u32, yuv_to_rgba(yv, u, v));
+                    }
+                }
+                Ok(img)
+            }
+            Some(VideoCodec::R210) => {
+                let (w, h) = (self.width as usize, self.height as usize);
+                let stride = (w * 4).div_ceil(256) * 256;
+                if data.len() < stride.saturating_mul(h) {
+                    bail!("quadro r210 truncado no quadro {i}");
+                }
+                let mut img = RgbaImage::new(w as u32, h as u32);
+                for y in 0..h {
+                    let row = data.get(y * stride..y * stride + w * 4).unwrap_or(&[]);
+                    for x in 0..w {
+                        let Some(b) = row.get(x * 4..x * 4 + 4) else {
+                            break;
+                        };
+                        let word = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                        let r = (((word >> 20) & 0x3FF) >> 2) as u8;
+                        let g = (((word >> 10) & 0x3FF) >> 2) as u8;
+                        let b_c = ((word & 0x3FF) >> 2) as u8;
+                        img.put_pixel(x as u32, y as u32, image::Rgba([r, g, b_c, 255]));
                     }
                 }
                 Ok(img)
@@ -721,13 +749,33 @@ impl AviWriter {
         h.extend_from_slice(b"strl");
         h.extend_from_slice(b"strh");
         w32(&mut h, 56);
-        let (strh_handler, bi_comp, image_bytes): ([u8; 4], [u8; 4], u32) = match codec {
-            AviVideoCodec::Mjpeg => (*b"MJPG", *b"MJPG", width * height * 3),
-            AviVideoCodec::UncompressedRgb24 => {
-                let stride = (width * 3 + 3) & !3;
-                (*b"DIB ", [0, 0, 0, 0], stride.saturating_mul(height))
-            }
-        };
+        let (strh_handler, bi_bits, bi_comp, image_bytes): ([u8; 4], u16, [u8; 4], u32) =
+            match codec {
+                AviVideoCodec::Mjpeg => (
+                    *b"MJPG",
+                    24,
+                    *b"MJPG",
+                    width.saturating_mul(height).saturating_mul(3),
+                ),
+                AviVideoCodec::UncompressedRgb24 => {
+                    let stride = (width.saturating_mul(3).saturating_add(3)) & !3;
+                    (*b"DIB ", 24, [0, 0, 0, 0], stride.saturating_mul(height))
+                }
+                AviVideoCodec::UncompressedBgra => (
+                    *b"DIB ",
+                    32,
+                    [0, 0, 0, 0],
+                    width.saturating_mul(height).saturating_mul(4),
+                ),
+                AviVideoCodec::UncompressedUyvy => {
+                    let stride = (width.saturating_mul(2).saturating_add(3)) & !3;
+                    (*b"UYVY", 16, *b"UYVY", stride.saturating_mul(height))
+                }
+                AviVideoCodec::UncompressedR210 => {
+                    let stride = width.saturating_mul(4).div_ceil(256).saturating_mul(256);
+                    (*b"r210", 30, *b"r210", stride.saturating_mul(height))
+                }
+            };
         h.extend_from_slice(b"vids");
         h.extend_from_slice(&strh_handler);
         w32(&mut h, 0);
@@ -752,7 +800,7 @@ impl AviWriter {
         w32(&mut h, width);
         w32(&mut h, height);
         w16(&mut h, 1);
-        w16(&mut h, 24);
+        w16(&mut h, bi_bits);
         h.extend_from_slice(&bi_comp);
         w32(&mut h, image_bytes);
         w32(&mut h, 0);
@@ -1051,6 +1099,89 @@ impl AviWriter {
                 out[dst_off + x * 3] = b;
                 out[dst_off + x * 3 + 1] = g;
                 out[dst_off + x * 3 + 2] = r;
+            }
+        }
+        out
+    }
+
+    /// Converte RGBA8 (topo para baixo) em BGRA 32-bit BI_RGB (baixo para cima).
+    pub fn rgba_to_dib_bgra32(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut out = vec![0u8; wu * hu * 4];
+        for y in 0..hu {
+            let src_y = hu - 1 - y;
+            let src_off = src_y * wu * 4;
+            let dst_off = y * wu * 4;
+            for x in 0..wu {
+                let s = rgba.get(src_off + x * 4..src_off + x * 4 + 4);
+                let [r, g, b, a] = s.map(|p| [p[0], p[1], p[2], p[3]]).unwrap_or([0; 4]);
+                out[dst_off + x * 4] = b;
+                out[dst_off + x * 4 + 1] = g;
+                out[dst_off + x * 4 + 2] = r;
+                out[dst_off + x * 4 + 3] = a;
+            }
+        }
+        out
+    }
+
+    /// Converte RGBA8 em UYVY 4:2:2 BT.601 faixa limitada (topo para baixo).
+    pub fn rgba_to_uyvy(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+        #[inline]
+        fn rgb_to_yuv(r: i32, g: i32, b: i32) -> (u8, i32, i32) {
+            let y = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(16, 235) as u8;
+            let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+            let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+            (y, u, v)
+        }
+        let (wu, hu) = (w as usize, h as usize);
+        let stride = (wu * 2 + 3) & !3;
+        let mut out = vec![0u8; stride * hu];
+        for y in 0..hu {
+            let src_off = y * wu * 4;
+            let dst_off = y * stride;
+            for x in (0..wu).step_by(2) {
+                let p0 = rgba
+                    .get(src_off + x * 4..src_off + x * 4 + 4)
+                    .unwrap_or(&[0, 0, 0, 255]);
+                let p1 = if x + 1 < wu {
+                    rgba.get(src_off + (x + 1) * 4..src_off + (x + 1) * 4 + 4)
+                        .unwrap_or(p0)
+                } else {
+                    p0
+                };
+                let (y0, u0, v0) = rgb_to_yuv(i32::from(p0[0]), i32::from(p0[1]), i32::from(p0[2]));
+                let (y1, u1, v1) = rgb_to_yuv(i32::from(p1[0]), i32::from(p1[1]), i32::from(p1[2]));
+                let u = ((u0 + u1) / 2).clamp(16, 240) as u8;
+                let v = ((v0 + v1) / 2).clamp(16, 240) as u8;
+                let d = dst_off + x * 2;
+                if d + 3 < dst_off + stride {
+                    out[d] = u;
+                    out[d + 1] = y0;
+                    out[d + 2] = v;
+                    out[d + 3] = y1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Converte RGBA8 em Blackmagic `r210` (10 bits RGB alinhado a 256 bytes/linha, BE).
+    pub fn rgba_to_r210(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let (wu, hu) = (w as usize, h as usize);
+        let stride = (wu * 4).div_ceil(256) * 256;
+        let mut out = vec![0u8; stride * hu];
+        for y in 0..hu {
+            let src_off = y * wu * 4;
+            let dst_off = y * stride;
+            for x in 0..wu {
+                let p = rgba
+                    .get(src_off + x * 4..src_off + x * 4 + 4)
+                    .unwrap_or(&[0, 0, 0, 255]);
+                let r10 = (u32::from(p[0]) << 2) | (u32::from(p[0]) >> 6);
+                let g10 = (u32::from(p[1]) << 2) | (u32::from(p[1]) >> 6);
+                let b10 = (u32::from(p[2]) << 2) | (u32::from(p[2]) >> 6);
+                let word = (r10 << 20) | (g10 << 10) | b10;
+                out[dst_off + x * 4..dst_off + x * 4 + 4].copy_from_slice(&word.to_be_bytes());
             }
         }
         out
@@ -1478,5 +1609,63 @@ mod tests {
         assert_eq!(f2.dimensions(), (4, 2));
         assert!(f2.get_pixel(0, 0)[0] < 20);
         let _ = std::fs::remove_file(&p_yuy2);
+    }
+
+    #[test]
+    fn write_then_read_uncompressed_bgra_uyvy_r210_and_ffmpeg_oracle() {
+        let mut img = RgbaImage::new(32, 24);
+        for y in 0..24u32 {
+            for x in 0..32u32 {
+                img.put_pixel(x, y, image::Rgba([(x * 7) as u8, (y * 10) as u8, 120, 255]));
+            }
+        }
+        let raw = img.as_raw();
+        for (tag, codec, frame_bytes) in [
+            (
+                "bgra",
+                AviVideoCodec::UncompressedBgra,
+                AviWriter::rgba_to_dib_bgra32(raw, 32, 24),
+            ),
+            (
+                "uyvy",
+                AviVideoCodec::UncompressedUyvy,
+                AviWriter::rgba_to_uyvy(raw, 32, 24),
+            ),
+            (
+                "r210",
+                AviVideoCodec::UncompressedR210,
+                AviWriter::rgba_to_r210(raw, 32, 24),
+            ),
+        ] {
+            let p = std::env::temp_dir().join(format!("neoveg_avi_{tag}.avi"));
+            let mut w =
+                AviWriter::create_with_codec(&p, 32, 24, FrameRate::FPS_25, Some(48000), codec)
+                    .unwrap();
+            for _ in 0..3 {
+                w.write_video_jpeg(&frame_bytes).unwrap();
+                w.write_audio(&vec![250i16; 48000 / 25 * 2]).unwrap();
+            }
+            w.finish().unwrap();
+
+            let mut rd = AviReader::open(&p).unwrap();
+            assert_eq!(rd.frame_count(), 3);
+            let dec = rd.decode_frame(1).unwrap();
+            assert_eq!(dec.dimensions(), (32, 24));
+            if let Ok(out) = std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-v", "error", "-i"])
+                .arg(&p)
+                .args(["-f", "null", "-"])
+                .output()
+            {
+                if out.status.success() {
+                    assert!(
+                        out.stderr.is_empty(),
+                        "ffmpeg erro em AVI {tag}: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
+            let _ = std::fs::remove_file(&p);
+        }
     }
 }

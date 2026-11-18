@@ -987,3 +987,94 @@ fn fuzz_demux_mp4_e_mkv() {
         }
     }
 }
+
+#[test]
+fn fuzz_generated_flac_dpx10_cineon_mov_mkv() {
+    use crate::render::WavBits;
+    use crate::time::FrameRate;
+
+    // Seed DPX 10-bit + Cineon
+    let img = image::RgbaImage::from_pixel(16, 12, image::Rgba([40, 120, 220, 255]));
+    let dpx10_seed = media::img_extra::encode_dpx_10bit(&img).unwrap();
+    let cin_seed = media::img_extra::encode_cineon(&img).unwrap();
+    for (i, m) in mutations(&dpx10_seed, 120, 0xD10A).iter().enumerate() {
+        assert_no_panic("dpx10", i, || {
+            let _ = media::img_extra::decode_dpx(m);
+        });
+    }
+    for (i, m) in mutations(&cin_seed, 120, 0xC14E).iter().enumerate() {
+        assert_no_panic("cineon", i, || {
+            let _ = media::img_extra::decode_cineon(m);
+        });
+    }
+
+    // Seed FLAC gerado pelo FlacWriter
+    let flac_p = tmp("seed.flac");
+    {
+        let mut w = media::flac::FlacWriter::create(&flac_p, 48_000, WavBits::Pcm16, 2).unwrap();
+        w.write(&vec![0.15f32; 2048]).unwrap();
+        w.finish().unwrap();
+    }
+    let flac_seed = std::fs::read(&flac_p).unwrap();
+    let _ = std::fs::remove_file(&flac_p);
+    let flac_mut = tmp("mut.flac");
+    for (i, m) in mutations(&flac_seed, 120, 0xF1AC).iter().enumerate() {
+        let _ = std::fs::write(&flac_mut, m);
+        assert_no_panic("flac", i, || {
+            let _ = media::audio::decode_file(&flac_mut);
+        });
+    }
+    let _ = std::fs::remove_file(&flac_mut);
+
+    // Seeds QuickTime MOV e Matroska MKV/FFV1 gerados em Rust puro
+    let rgba = vec![80u8; 16 * 12 * 4];
+    let mov_p = tmp("seed.mov");
+    {
+        let mut w = media::mov::MovWriter::create(
+            &mov_p,
+            16,
+            12,
+            FrameRate::FPS_25,
+            None,
+            media::mov::MovVideoCodec::UncompressedYuv422,
+        )
+        .unwrap();
+        w.write_video_frame(&media::mov::MovWriter::rgba_to_2vuy(&rgba, 16, 12))
+            .unwrap();
+        w.finish().unwrap();
+    }
+    let mov_seed = std::fs::read(&mov_p).unwrap();
+    let _ = std::fs::remove_file(&mov_p);
+    for (i, m) in mutations(&mov_seed, 120, 0x9001).iter().enumerate() {
+        assert_no_panic("mov.qt", i, || {
+            let _ = media::demux::demux_bytes(m);
+        });
+    }
+
+    let mkv_p = tmp("seed.mkv");
+    {
+        let ffv1 = media::ffv1::Ffv1Encoder::new(16, 12, false).unwrap();
+        let pkt = ffv1.encode_frame(&rgba).unwrap();
+        let mut w = media::mkv::MkvWriter::create(
+            &mkv_p,
+            16,
+            12,
+            FrameRate::FPS_25,
+            media::mkv::MkvVideoCodec::Ffv1 {
+                codec_private: ffv1.configuration_record().to_vec(),
+                has_alpha: false,
+            },
+            None,
+        )
+        .unwrap();
+        w.write_video_packet(0, true, pkt).unwrap();
+        w.finish().unwrap();
+    }
+    let mkv_seed = std::fs::read(&mkv_p).unwrap();
+    let _ = std::fs::remove_file(&mkv_p);
+    for (i, m) in mutations(&mkv_seed, 120, 0x9002).iter().enumerate() {
+        assert_no_panic("mkv.ffv1", i, || {
+            let _ = media::demux::demux_bytes(m);
+        });
+    }
+}

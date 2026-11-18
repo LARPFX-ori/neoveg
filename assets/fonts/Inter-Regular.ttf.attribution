@@ -1,0 +1,9 @@
+asset:        Inter-Regular.ttf
+title:        Inter Regular (fonte de Visor de Tempo e Régua da timeline do Neoveg)
+author:       The Inter Project Authors / Rasmus Andersson
+source:       https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+license:      OFL-1.1
+license-file: assets/fonts/Inter.LICENSE.txt
+added:        2026-11-18 por contribuidores do projeto Neoveg
+notes:        Versão v4.1 (4.001;git-9221beed3), caminho interno extras/ttf/Inter-Regular.ttf (SHA-256: 40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82).
+              Utilizada nas famílias "visor" e "ruler" com células tabulares fixas para evitar oscilação horizontal, além de fallback de símbolos geométricos/setas.

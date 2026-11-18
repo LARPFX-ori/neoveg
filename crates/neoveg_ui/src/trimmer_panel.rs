@@ -296,26 +296,30 @@ impl App {
             let sel_len = (self.trimmer.sel_out - self.trimmer.sel_in).max(Ticks::ZERO);
             let cur_s = format_ticks(self.trimmer.cursor, fps, sr, fmt);
             let dur_s = format_ticks(dur, fps, sr, fmt);
-            right.label(
-                egui::RichText::new(tr_args(
-                    lang,
-                    "Cursor: {cur}  |  Duração: {dur}",
-                    &[("cur", &cur_s), ("dur", &dur_s)],
-                ))
-                .monospace()
-                .small(),
+            let line1 = tr_args(
+                lang,
+                "Cursor: {cur}  |  Duração: {dur}",
+                &[("cur", &cur_s), ("dur", &dur_s)],
+            );
+            crate::fonts::tabular_label(
+                right,
+                &line1,
+                crate::fonts::visor_font(10.5),
+                self.theme.text_primary,
             );
             let in_s = format_ticks(self.trimmer.sel_in, fps, sr, fmt);
             let out_s = format_ticks(self.trimmer.sel_out, fps, sr, fmt);
             let len_s = format_ticks(sel_len, fps, sr, fmt);
-            right.label(
-                egui::RichText::new(tr_args(
-                    lang,
-                    "In: {in_t}   Out: {out_t}   Trecho: {len}",
-                    &[("in_t", &in_s), ("out_t", &out_s), ("len", &len_s)],
-                ))
-                .monospace()
-                .small(),
+            let line2 = tr_args(
+                lang,
+                "In: {in_t}   Out: {out_t}   Trecho: {len}",
+                &[("in_t", &in_s), ("out_t", &out_s), ("len", &len_s)],
+            );
+            crate::fonts::tabular_label(
+                right,
+                &line2,
+                crate::fonts::visor_font(10.5),
+                self.theme.text_primary,
             );
             right.horizontal_wrapped(|ui| {
                 if ui.small_button(tr(lang, "◀ 1q")).clicked() {

@@ -3599,19 +3599,25 @@ impl App {
                     let name = egui::RichText::new(label)
                         .small()
                         .color(self.theme.text_muted);
-                    let value = egui::RichText::new(txt)
-                        .monospace()
-                        .small()
-                        .color(self.theme.text_primary);
                     // a barra é desenhada da direita para a esquerda e o
                     // `horizontal` herda isso: aí o valor entra primeiro, para
                     // o nome ficar à esquerda dele na tela
                     if ui.layout().prefer_right_to_left() {
-                        ui.label(value);
+                        crate::fonts::tabular_label(
+                            ui,
+                            &txt,
+                            crate::fonts::visor_font(10.5),
+                            self.theme.text_primary,
+                        );
                         ui.label(name);
                     } else {
                         ui.label(name);
-                        ui.label(value);
+                        crate::fonts::tabular_label(
+                            ui,
+                            &txt,
+                            crate::fonts::visor_font(10.5),
+                            self.theme.text_primary,
+                        );
                     }
                 });
             })
