@@ -1600,3 +1600,47 @@ fn previa_zoom_5_por_cento_ignorar_zoom_e_isolamento_de_canal() {
     let ci = crate::app::isolated_color_image(&img, (ChannelIsolation::Off, false));
     assert_eq!(ci.pixels[0], egui::Color32::from_rgb(200, 100, 50));
 }
+
+/// Cabeçalho de trilha (manual do VEGAS Pro 21, p. 388): Minimizar e
+/// Maximizar voltam à altura de antes quando clicados de novo; minimizar e
+/// depois maximizar ainda volta à altura original; índice inválido não trava.
+#[test]
+fn minimizar_maximizar_altura_da_trilha_e_voltar() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    if app.project.tracks.is_empty() {
+        app.session.insert_track(TrackKind::Video);
+        app.sync_after_session();
+    }
+    app.tl.last_lanes = egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 500.0));
+    app.project.tracks[0].height = 90.0;
+
+    app.toggle_track_height(0, false);
+    assert_eq!(app.project.tracks[0].height, crate::timeline::TRACK_MIN_H);
+    app.toggle_track_height(0, false);
+    assert_eq!(app.project.tracks[0].height, 90.0);
+
+    app.toggle_track_height(0, true);
+    assert_eq!(app.project.tracks[0].height, 500.0);
+    app.toggle_track_height(0, true);
+    assert_eq!(app.project.tracks[0].height, 90.0);
+
+    // minimizar, depois maximizar, depois maximizar de novo: volta aos 90
+    app.toggle_track_height(0, false);
+    app.toggle_track_height(0, true);
+    assert_eq!(app.project.tracks[0].height, 500.0);
+    app.toggle_track_height(0, true);
+    assert_eq!(app.project.tracks[0].height, 90.0);
+
+    // área das faixas inválida: Maximizar usa 400
+    app.tl.last_lanes = egui::Rect::NOTHING;
+    app.toggle_track_height(0, true);
+    assert_eq!(app.project.tracks[0].height, 400.0);
+    app.toggle_track_height(usize::MAX, true);
+}

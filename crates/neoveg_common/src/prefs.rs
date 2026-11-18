@@ -315,6 +315,13 @@ pub struct HeaderButtons {
     pub fx: bool,
     /// Só em faixas de vídeo.
     pub track_motion: bool,
+    /// Minimizar / Maximizar a altura da trilha (manual do VEGAS Pro 21,
+    /// p. 388): clicar de novo volta à altura anterior.
+    pub height: bool,
+    /// Tornar filha de composição / promover (só vídeo, p. 740).
+    pub compositing_child: bool,
+    /// Armar para gravação (só áudio, p. 853).
+    pub record_arm: bool,
 }
 
 impl HeaderButtons {
@@ -325,6 +332,9 @@ impl HeaderButtons {
             solo: on,
             fx: on,
             track_motion: on,
+            height: on,
+            compositing_child: on,
+            record_arm: on,
         }
     }
 }

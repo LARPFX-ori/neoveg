@@ -105,6 +105,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Trilhas
 
+- **Cabeçalho de trilha** com *Minimizar*/*Maximizar* a altura (clicar de novo volta à altura anterior, p. 388), *Tornar filho de composição*/*Promover* nas trilhas de vídeo e *Armar para gravação* nas de áudio, todos no conjunto de botões visíveis e no botão *Mais* (p. 69).
 - **Agrupar trilhas** em pastas recolhíveis (`insert.track_folder` / `track.toggle_folder`, indentação hierárquica e cascata de mudo na timeline e no mixer, p. 382) implementado.
 - **Propriedades padrão de trilha** (`track.set_defaults` persistido nas Preferências, p. 414) e **Renderizar para uma nova trilha** (`track.render_to_new_track`, p. 415) implementados.
 - **Composição pai/filho e máscaras** (`parent_track_id`, `parent_motion` de grupo no *Movimento da trilha* e modos de máscara por luminância/alfa, p. 740) implementados.

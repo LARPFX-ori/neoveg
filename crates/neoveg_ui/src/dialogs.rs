@@ -1117,7 +1117,17 @@ impl App {
                         &mut draft.track_motion,
                         tr(lang, "Movimento da trilha (Track Motion)"),
                     );
+                    ui.checkbox(
+                        &mut draft.compositing_child,
+                        tr(lang, "Tornar filho de composição (Pai/Filho)"),
+                    );
+                } else {
+                    ui.checkbox(&mut draft.record_arm, tr(lang, "Armar para gravação"));
                 }
+                ui.checkbox(
+                    &mut draft.height,
+                    tr(lang, "Minimizar / Maximizar a altura"),
+                );
                 ui.label(
                     egui::RichText::new(tr(lang, "Os botões ocultos continuam no botão Mais (…)."))
                         .small()
