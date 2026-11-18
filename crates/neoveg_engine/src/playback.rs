@@ -444,6 +444,7 @@ pub struct PreviewRequest {
     pub w: usize,
     pub h: usize,
     pub scopes: bool,
+    pub scopes_config: Option<scopes::ScopeConfig>,
     pub prefer_proxy: bool,
     pub split_mode: PreviewSplitMode,
     pub mute_video: bool,
@@ -529,7 +530,11 @@ impl Preview {
                                 None
                             };
                         let sc = if req.scopes {
-                            Some(scopes::compute(&f))
+                            static DEF_CFG: std::sync::OnceLock<scopes::ScopeConfig> =
+                                std::sync::OnceLock::new();
+                            let default_cfg = DEF_CFG.get_or_init(scopes::ScopeConfig::default);
+                            let cfg = req.scopes_config.as_ref().unwrap_or(default_cfg);
+                            Some(scopes::compute_with_config(&f, cfg))
                         } else {
                             None
                         };

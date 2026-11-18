@@ -278,6 +278,7 @@ pub struct App {
     pub(crate) last_req: PreviewReqKey,
     pub(crate) preview_ms: f64,
     pub(crate) scopes_tex: Option<[TextureHandle; 4]>,
+    pub(crate) scopes_config: neoveg_engine::scopes::ScopeConfig,
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
@@ -506,6 +507,7 @@ impl App {
             playback_rate: 1.0,
             preview_ms: 0.0,
             scopes_tex: None,
+            scopes_config: neoveg_engine::scopes::ScopeConfig::default(),
             tl: TimelineState::default(),
             dock_tab: initial_layout.active_panel(),
             dlg: Dialogs::default(),
@@ -2098,6 +2100,11 @@ impl App {
                 w,
                 h,
                 scopes,
+                scopes_config: if scopes {
+                    Some(self.scopes_config)
+                } else {
+                    None
+                },
                 prefer_proxy,
                 split_mode,
                 mute_video,

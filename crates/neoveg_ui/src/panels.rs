@@ -2733,6 +2733,121 @@ impl App {
 
     fn scopes_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
+        let changed = ui
+            .horizontal_wrapped(|ui| {
+                let mut changed = false;
+                ui.label(tr(lang, "Escala:"));
+                egui::ComboBox::from_id_salt("sc_scale")
+                    .selected_text(self.scopes_config.waveform_scale.label())
+                    .show_ui(ui, |ui| {
+                        for s in neoveg_engine::scopes::WaveformScale::ALL {
+                            if ui
+                                .selectable_value(
+                                    &mut self.scopes_config.waveform_scale,
+                                    s,
+                                    s.label(),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+
+                ui.separator();
+                ui.label(tr(lang, "Waveform:"));
+                egui::ComboBox::from_id_salt("sc_mode")
+                    .selected_text(self.scopes_config.waveform_mode.label())
+                    .show_ui(ui, |ui| {
+                        for m in neoveg_engine::scopes::WaveformMode::ALL {
+                            if ui
+                                .selectable_value(
+                                    &mut self.scopes_config.waveform_mode,
+                                    m,
+                                    m.label(),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+
+                ui.separator();
+                ui.label(tr(lang, "Alvos:"));
+                egui::ComboBox::from_id_salt("sc_vec_targets")
+                    .selected_text(self.scopes_config.vectorscope_targets.label())
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(
+                                &mut self.scopes_config.vectorscope_targets,
+                                neoveg_engine::scopes::VectorscopeTarget::Percent75,
+                                "75%",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut self.scopes_config.vectorscope_targets,
+                                neoveg_engine::scopes::VectorscopeTarget::Percent100,
+                                "100%",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+
+                if ui
+                    .checkbox(
+                        &mut self.scopes_config.vectorscope_skin_line,
+                        tr(lang, "Tom de pele (I)"),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label(tr(lang, "Parade:"));
+                egui::ComboBox::from_id_salt("sc_parade")
+                    .selected_text(self.scopes_config.parade_mode.label())
+                    .show_ui(ui, |ui| {
+                        for p in neoveg_engine::scopes::ParadeMode::ALL {
+                            if ui
+                                .selectable_value(&mut self.scopes_config.parade_mode, p, p.label())
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+
+                ui.separator();
+                ui.label(tr(lang, "Matriz:"));
+                egui::ComboBox::from_id_salt("sc_matrix")
+                    .selected_text(self.scopes_config.matrix.label())
+                    .show_ui(ui, |ui| {
+                        for m in neoveg_engine::scopes::ScopeColorMatrix::ALL {
+                            if ui
+                                .selectable_value(&mut self.scopes_config.matrix, m, m.label())
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+                changed
+            })
+            .inner;
+
+        if changed {
+            self.last_req = crate::app::PreviewReqKey::default();
+        }
+        ui.separator();
+
         let Some(t) = &self.scopes_tex else {
             ui.label(tr(
                 lang,
@@ -2742,9 +2857,19 @@ impl App {
         };
         let names = [
             tr(lang, "Histograma (RGB + luma)"),
-            tr(lang, "Forma de onda (luma)"),
+            match self.scopes_config.waveform_mode {
+                neoveg_engine::scopes::WaveformMode::RgbOverlay => {
+                    tr(lang, "Forma de onda (RGB Overlay)")
+                }
+                neoveg_engine::scopes::WaveformMode::YC => tr(lang, "Forma de onda (YC Envelope)"),
+                _ => tr(lang, "Forma de onda (Luma)"),
+            },
             tr(lang, "Vectorscope"),
-            tr(lang, "RGB Parade"),
+            match self.scopes_config.parade_mode {
+                neoveg_engine::scopes::ParadeMode::Yuv => tr(lang, "YUV Parade"),
+                neoveg_engine::scopes::ParadeMode::RgbWhite => tr(lang, "RGB + Branco Parade"),
+                _ => tr(lang, "RGB Parade"),
+            },
         ];
         let avail = ui.available_width();
         let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
