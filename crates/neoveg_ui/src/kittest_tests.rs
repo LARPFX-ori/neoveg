@@ -6,16 +6,19 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
+    let _lock = lock_test_prefs();
     let mut app = {
         let _prefs_read = crate::tests::PREFS_LOCK
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        App::new(cc, None)
+        App::with_context_in(&cc.egui_ctx, None, Some(neoveg_common::Language::PtBr))
     };
     app.splash.active = false;
     app.pending_welcome_after_splash = false;
     app.dismiss_welcome();
     app.select_layout_type(Some(&cc.egui_ctx), LayoutType::Magix, false);
+    // os testes de dock clicam em todas as abas; o padrão novo fica no teste próprio
+    app.closed_tabs.clear();
     app
 }
 
@@ -806,7 +809,9 @@ fn kittest_neoveg_encoder_fluxo_completo() {
         app.send_timeline_to_encoder();
     }
     harness.run_steps(3);
-    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    // o Encoder abre na janela própria, fora do dock
+    assert!(harness.state().detached_tabs.contains(&DockTab::Encoder));
+    assert_ne!(harness.state().dock_tab, DockTab::Encoder);
     assert_eq!(harness.state().encoder.state.items.len(), 1);
     assert!(harness.query_all_by_label("Neoveg Encoder").count() >= 1);
     assert!(harness.query_all_by_label("Fila de Codificação").count() >= 1);
@@ -838,9 +843,10 @@ fn kittest_neoveg_encoder_fluxo_completo() {
 /// vídeo; as de áudio continuam com os seus.
 #[test]
 fn kittest_conjunto_de_botoes_visiveis_do_cabecalho() {
+    let _prefs_guard = I18nPrefsGuard::new();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1500.0, 920.0))
-        .build_eframe(build_ready_app);
+        .build_eframe(|cc| build_ready_app_lang(cc, neoveg_common::Language::PtBr));
     // o OK grava as preferências em arquivo: começa do padrão, sem depender
     // do que uma rodada anterior gravou
     harness.state_mut().prefs.track_header = Default::default();
@@ -1004,6 +1010,272 @@ fn kittest_navegador_de_geradores_de_midia() {
     assert!(radial, "inseriu o preset Gradiente radial");
 }
 
+static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn lock_test_prefs() -> std::sync::MutexGuard<'static, ()> {
+    I18N_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct I18nPrefsGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prefs_path: std::path::PathBuf,
+    prev_prefs: Option<Vec<u8>>,
+    prev_lang: neoveg_common::Language,
+}
+
+impl I18nPrefsGuard {
+    fn new() -> Self {
+        let lock = lock_test_prefs();
+        let prefs_path = crate::Preferences::file_path();
+        Self {
+            _lock: lock,
+            prev_prefs: std::fs::read(&prefs_path).ok(),
+            prefs_path,
+            prev_lang: neoveg_common::active_language(),
+        }
+    }
+}
+
+impl Drop for I18nPrefsGuard {
+    fn drop(&mut self) {
+        neoveg_common::set_active_language(self.prev_lang);
+        match &self.prev_prefs {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.prefs_path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.prefs_path);
+            }
+        }
+    }
+}
+
+fn build_ready_app_lang(cc: &eframe::CreationContext<'_>, lang: neoveg_common::Language) -> App {
+    let mut app = App::with_context_in(&cc.egui_ctx, None, Some(lang));
+    app.splash.active = false;
+    app.pending_welcome_after_splash = false;
+    app.dismiss_welcome();
+    app.select_layout_type(Some(&cc.egui_ctx), LayoutType::Magix, false);
+    // os testes de dock clicam em todas as abas; o padrão novo fica no teste próprio
+    app.closed_tabs.clear();
+    app
+}
+
+#[test]
+fn kittest_i18n_troca_ao_vivo_todos_os_idiomas() {
+    use neoveg_common::{tr, Language};
+
+    let _guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(|cc| build_ready_app_lang(cc, Language::PtBr));
+    harness.run_steps(2);
+
+    let expected_menus: [(Language, &str, &str, &str); 6] = [
+        (
+            Language::PtBr,
+            "Arquivo",
+            "Mídia do Projeto",
+            "Novo Projeto",
+        ),
+        (Language::En, "File", "Project Media", "New Project"),
+        (
+            Language::Es,
+            "Archivo",
+            "Medios del proyecto",
+            "Nuevo proyecto",
+        ),
+        (Language::Fr, "Fichier", "Média de projet", "Nouveau projet"),
+        (Language::De, "Datei", "Projektmedien", "Neues Projekt"),
+        (
+            Language::Ja,
+            "ファイル",
+            "プロジェクト メディア",
+            "新規プロジェクト",
+        ),
+    ];
+
+    for (lang, menu_file, tab_media, welcome_new) in expected_menus {
+        let ctx = harness.ctx.clone();
+        {
+            let app = harness.state_mut();
+            app.dismiss_welcome();
+            app.apply_language(Some(&ctx), lang, false);
+        }
+        harness.run_steps(3);
+        assert_eq!(harness.state().lang(), lang);
+        assert_eq!(tr(lang, "Arquivo"), menu_file);
+        assert!(
+            harness.query_by_label(menu_file).is_some(),
+            "menu '{menu_file}' deve estar visível no idioma {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tr(lang, "Editar")).is_some(),
+            "menu Editar deve atualizar em {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tab_media).is_some(),
+            "aba '{tab_media}' deve estar visível em {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tr(lang, "Transições")).is_some(),
+            "aba Transições deve atualizar em {}",
+            lang.code()
+        );
+
+        harness.state_mut().open_welcome();
+        harness.run_steps(3);
+        assert!(
+            harness.query_by_label(welcome_new).is_some(),
+            "Welcome '{welcome_new}' deve estar visível em {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tr(lang, "Criar Projeto")).is_some(),
+            "botão Criar Projeto na Welcome deve estar visível em {}",
+            lang.code()
+        );
+    }
+}
+
+#[test]
+fn kittest_i18n_preferencias_combo_e_cancelar_reverte() {
+    use neoveg_common::{active_language, Language};
+
+    let _guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(|cc| build_ready_app_lang(cc, Language::PtBr));
+    harness.run_steps(2);
+
+    let ctx = harness.ctx.clone();
+    harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+    harness.run_steps(2);
+    assert!(harness.state().dlg.prefs_open);
+
+    // Abre o seletor de idioma em Preferências > Geral (o ComboBox na linha de "Idioma ativo:")
+    // e escolhe Japonês.
+    let lang_label_rect = harness
+        .get_by_label("Idioma ativo:")
+        .raw_bounds()
+        .expect("rótulo Idioma ativo: deve ter bounds");
+    let lang_cy = (lang_label_rect.y0 + lang_label_rect.y1) * 0.5;
+    harness
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .min_by(|a, b| {
+            let da = a
+                .raw_bounds()
+                .map_or(f64::MAX, |r| ((r.y0 + r.y1) * 0.5 - lang_cy).abs());
+            let db = b
+                .raw_bounds()
+                .map_or(f64::MAX, |r| ((r.y0 + r.y1) * 0.5 - lang_cy).abs());
+            da.total_cmp(&db)
+        })
+        .expect("ComboBox de idioma em Preferências")
+        .click();
+    harness.run_steps(2);
+    let ja_opt = Language::Ja.display_option(Language::PtBr);
+    harness.get_by_label(&ja_opt).click();
+    harness.run_steps(3);
+
+    // Prévia ao vivo aplicada imediatamente antes mesmo de OK/Aplicar.
+    assert_eq!(harness.state().lang(), Language::Ja);
+    assert_eq!(harness.state().prefs.lang(), Language::Ja);
+    assert_eq!(harness.state().session.lang, Language::Ja);
+    assert_eq!(active_language(), Language::Ja);
+    assert!(harness.query_by_label("初期設定に戻す").is_some());
+    assert!(harness.query_by_label("適用").is_some());
+    assert!(harness.query_by_label("キャンセル").is_some());
+
+    // Cancelar deve reverter completamente para o idioma original (pt-BR).
+    harness.get_by_label("キャンセル").click();
+    harness.run_steps(3);
+    assert!(!harness.state().dlg.prefs_open);
+    assert_eq!(harness.state().lang(), Language::PtBr);
+    assert_eq!(harness.state().prefs.lang(), Language::PtBr);
+    assert_eq!(harness.state().session.lang, Language::PtBr);
+    assert_eq!(active_language(), Language::PtBr);
+}
+
+#[test]
+fn kittest_i18n_preferencias_compacto_de_ja_sem_recorte() {
+    use neoveg_common::Language;
+
+    let _guard = I18nPrefsGuard::new();
+    for (lang, buttons) in [
+        (
+            Language::De,
+            ["Standard wiederherstellen", "Abbrechen", "Übernehmen", "OK"],
+        ),
+        (Language::Ja, ["初期設定に戻す", "キャンセル", "適用", "OK"]),
+    ] {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(760.0, 520.0))
+            .build_eframe(move |cc| build_ready_app_lang(cc, lang));
+        harness.run_steps(2);
+
+        let ctx = harness.ctx.clone();
+        harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+        harness.run_steps(3);
+        assert!(harness.state().dlg.prefs_open);
+
+        for btn in buttons {
+            let b = harness
+                .query_by_label(btn)
+                .unwrap_or_else(|| panic!("botão '{btn}' deve existir em {:?}", lang))
+                .raw_bounds()
+                .unwrap_or_else(|| panic!("botão '{btn}' deve ter bounds em {:?}", lang));
+            assert!(
+                b.x0 >= -0.5 && b.y0 >= -0.5 && b.x1 <= 760.0 + 1.5 && b.y1 <= 520.0 + 1.5,
+                "botão '{btn}' recortado em 760x520 ({lang:?}): bounds={b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kittest_i18n_welcome_combo_idioma_e_criar_projeto_ja() {
+    use neoveg_common::Language;
+
+    let _guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 760.0))
+        .build_eframe(|cc| {
+            let mut app = App::with_context_in(&cc.egui_ctx, None, Some(Language::PtBr));
+            app.splash.active = false;
+            app.pending_welcome_after_splash = false;
+            app.open_welcome();
+            app
+        });
+    harness.run_steps(2);
+    assert!(harness.state().is_welcome_open());
+
+    // O seletor de idioma da Welcome Screen é o primeiro ComboBox dentro de `neoveg_welcome_card`.
+    harness
+        .get_by_label("neoveg_welcome_card")
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("ComboBox de idioma na Welcome Screen")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label(Language::Ja.native_name()).click();
+    harness.run_steps(3);
+
+    assert_eq!(harness.state().lang(), Language::Ja);
+    assert!(harness.query_by_label("新規プロジェクト").is_some());
+    assert!(harness.query_by_label("プロジェクト作成").is_some());
+
+    harness.get_by_label("プロジェクト作成").click();
+    harness.run_steps(3);
+    assert!(!harness.state().is_welcome_open());
+    assert_eq!(harness.state().lang(), Language::Ja);
+}
+
 #[test]
 fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
     let mut harness = Harness::builder()
@@ -1014,7 +1286,8 @@ fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
     // O botão "Encoder" fica visível diretamente na barra superior ao iniciar.
     harness.get_by_label("Encoder").click();
     harness.run_steps(2);
-    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert!(harness.state().detached_tabs.contains(&DockTab::Encoder));
+    assert_ne!(harness.state().dock_tab, DockTab::Encoder);
 
     // Em "Renderizar como", "Enviar para o Encoder" enfileira a timeline e foca o Encoder.
     let ctx = harness.ctx.clone();
@@ -1032,7 +1305,7 @@ fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
     harness.run_steps(3);
 
     assert!(harness.state().dlg.render.is_none());
-    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert!(harness.state().detached_tabs.contains(&DockTab::Encoder));
     assert_eq!(harness.state().encoder.state.items.len(), before + 1);
 }
 
@@ -1358,4 +1631,710 @@ fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
     harness.run_steps(2);
     assert_eq!(harness.state().project.tracks[0].events.len(), before + 1);
     assert_eq!(harness.state().session.active_storyboard_id, Some(sb_id));
+}
+
+#[test]
+fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Botão de tela dividida alterna Bypass FX.
+    harness.get_by_label("Tela dividida").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().opts.preview_split_mode,
+        neoveg_engine::playback::PreviewSplitMode::FxBypass
+    );
+
+    // 2. Copiar quadro armazena buffer da área de transferência interna.
+    harness.get_by_label("Copiar quadro").click();
+    harness.run_steps(2);
+    assert!(harness.state().preview_clipboard.is_some());
+
+    // 3. Zoom dentro da prévia ajusta e restaura para Fit (1.0).
+    harness.state_mut().exec_cmd(Some(&ctx), "preview.zoom_in");
+    harness.run_steps(1);
+    assert!(harness.state().preview_zoom > 1.1);
+    harness.state_mut().exec_cmd(Some(&ctx), "preview.zoom_fit");
+    assert!((harness.state().preview_zoom - 1.0).abs() < 1e-4);
+
+    // 4. Silenciar áudio e vídeo da prévia via barra de ferramentas.
+    harness.get_by_label("Silenciar áudio da prévia").click();
+    harness.get_by_label("Silenciar vídeo da prévia").click();
+    harness.run_steps(2);
+    assert!(harness.state().opts.preview_mute_audio);
+    assert!(harness.state().opts.preview_mute_video);
+
+    // 5. Soltar efeito de vídeo na prévia aplica em Master Video Output FX.
+    assert!(harness
+        .state_mut()
+        .session
+        .apply_video_fx_to_output(crate::model::FxKind::Invert));
+    assert_eq!(harness.state().project.master.video_fx.len(), 1);
+
+    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo
+    // sem deslocar os botões estáticos da barra quando "Limpar RAM" aparece.
+    let ext_rect_before = harness.get_by_label("Monitor externo").raw_bounds();
+    harness.get_by_label("Prévia em RAM").click();
+    harness.run_steps(4);
+    if harness.state().ram_preview.frames.is_empty() {
+        let _ = harness
+            .state_mut()
+            .ram_preview
+            .insert_frame(0, image::RgbaImage::new(16, 16));
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Limpar RAM").is_some());
+    assert_eq!(
+        harness.get_by_label("Monitor externo").raw_bounds(),
+        ext_rect_before,
+        "botão Monitor externo não pode deslocar quando Limpar RAM aparece"
+    );
+    harness.get_by_label("Monitor externo").click();
+    harness.run_steps(2);
+    assert!(harness.state().external_monitor);
+}
+
+#[test]
+fn kittest_trilhas_pastas_comp_pai_filho_multicam_e_3d() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Pasta recolhível de trilhas e composição Pai/Filho via Tabela Única.
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.track_folder");
+    harness.run_steps(2);
+    assert!(harness.state().project.tracks[0].is_folder);
+    let child_id = harness.state().project.tracks[1].id;
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.toggle_folder");
+    harness.run_steps(2);
+    assert!(harness.state().project.is_track_hidden_by_folder(child_id));
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.toggle_folder");
+    harness.run_steps(2);
+    assert!(!harness.state().project.is_track_hidden_by_folder(child_id));
+
+    // 2. Grade Multicâmera e troca de ângulo na Prévia de Vídeo.
+    harness.state_mut().session.sel_track = Some(1);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.track_video");
+    harness.run_steps(1);
+    let imp1 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+        color: [1.0, 0.0, 0.0, 1.0],
+    });
+    let imp2 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+        color: [0.0, 1.0, 0.0, 1.0],
+    });
+    {
+        let st = harness.state_mut();
+        st.media.insert(imp1.item.id, imp1.entry);
+        st.media.insert(imp2.item.id, imp2.entry);
+        let ev1 = crate::model::Event::new(
+            &imp1.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(4),
+        );
+        let ev2 = crate::model::Event::new(
+            &imp2.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(4),
+        );
+        st.project.media.extend([imp1.item, imp2.item]);
+        st.project.tracks[1].events.push(ev1);
+        st.project.tracks[2].events.push(ev2);
+        st.session.sel_events.clear();
+        let _ = st.session.create_multicam_track();
+    }
+    harness.run_steps(2);
+    assert!(harness.state().opts.multicam_mode);
+    harness.get_by_label("Câmera 2").click();
+    harness.run_steps(2);
+    let (_, _, _, active, _) = harness
+        .state()
+        .session
+        .active_multicam_event_at(crate::model::Ticks::ZERO)
+        .expect("multicamera ativa");
+    assert_eq!(active, 1);
+
+    // 3. Alternar modo 3D Estereoscópico pelo botão da Prévia.
+    harness.get_by_label("Modo 3D Estereoscópico").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.settings.stereo_3d,
+        crate::model::Stereo3dMode::AnaglyphRedCyan
+    );
+}
+
+#[test]
+fn kittest_efeitos_cadeias_lut_curvas_legendas_e_bypass_audio() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // Prepara mídia gerada animada, evento selecionado e uma região na timeline.
+    let ev_id = {
+        let st = harness.state_mut();
+        let imp = neoveg_engine::media::import_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec {
+                text: "Cena teste".into(),
+                anim: crate::model::TextAnim::CrawlLeft,
+                anim_duration: 2.0,
+                ..crate::model::TextSpec::default()
+            },
+        ));
+        let ev = crate::model::Event::new(
+            &imp.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(2),
+        );
+        let ev_id = ev.id;
+        st.media.insert(imp.item.id, imp.entry);
+        st.project.media.push(imp.item);
+        st.project.tracks[0].events.push(ev);
+        st.project.regions.push(crate::model::Region {
+            id: crate::model::new_id(),
+            start: crate::model::Ticks::ZERO,
+            end: crate::model::Ticks::from_secs_i64(2),
+            label: "Fala inicial".into(),
+        });
+        st.session.sel_events.insert(ev_id);
+        st.changed();
+        ev_id
+    };
+    harness.run_steps(2);
+
+    // 1. Janela de FX do evento: adiciona Sépia, salva cadeia e salva preset próprio.
+    harness.state_mut().exec_cmd(Some(&ctx), "tools.fx_event");
+    harness.run_steps(2);
+    {
+        let st = harness.state_mut();
+        if let Some(ev) = st.project.event_mut(ev_id) {
+            ev.fx
+                .push(crate::model::FxInstance::new(crate::model::FxKind::Sepia));
+            ev.fx.push(crate::model::FxInstance::new(
+                crate::model::FxKind::ColorCorrector,
+            ));
+        }
+        st.changed();
+    }
+    harness.run_steps(2);
+    harness.get_by_label("Salvar cadeia...").click();
+    harness.run_steps(2);
+    harness.get_by_label("Salvar").click();
+    harness.run_steps(2);
+    assert!(!harness.state().prefs.fx_chains.is_empty());
+
+    // 2. Painel Color Grading mostra LUT, Curvas RGB e Curvas HSL.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.color_grading");
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("LUT de Câmera / Look (.cube)")
+        .is_some());
+    assert!(harness.query_by_label("Curvas RGB").is_some());
+    assert!(harness.query_by_label("Curvas HSL (6 setores)").is_some());
+
+    // 3. Legendas a partir das regiões via Tabela Única.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.subtitles_from_regions");
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .tracks
+        .iter()
+        .any(|t| t.name.starts_with("Legendas") && !t.events.is_empty()));
+
+    // 4. Bypass global de FX de áudio no Mixer e Opções.
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.mixer");
+    harness.run_steps(2);
+    harness.get_by_label("Bypass FX").click();
+    harness.run_steps(2);
+    assert!(harness.state().opts.bypass_all_audio_fx);
+
+    // 5. Rastreamento de movimento grava keyframes no Pan/Crop.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "tools.motion_track");
+    harness.run_steps(2);
+    harness.get_by_label("Rastrear e aplicar keyframes").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .project
+            .event(ev_id)
+            .expect("ev")
+            .pan_crop
+            .keys
+            .len()
+            >= 2
+    );
+}
+
+#[test]
+fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
+    struct PrefsBackup {
+        path: std::path::PathBuf,
+        prev: Option<Vec<u8>>,
+    }
+    impl Drop for PrefsBackup {
+        fn drop(&mut self) {
+            let _w = crate::tests::PREFS_LOCK
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &self.prev {
+                Some(bytes) => {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+    let prefs_path = Preferences::file_path();
+    let prev_prefs = {
+        let _r = crate::tests::PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::read(&prefs_path).ok()
+    };
+    let _prefs_backup = PrefsBackup {
+        path: prefs_path,
+        prev: prev_prefs,
+    };
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.state_mut().prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Barra de ferramentas personalizável.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.customize_toolbar");
+    harness.run_steps(2);
+    let before_tb = harness.state().prefs.toolbar_buttons.len();
+    harness.get_by_label("＋ Separador (|)").click();
+    harness.run_steps(1);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().prefs.toolbar_buttons.len(), before_tb + 1);
+
+    // 2. Grade da régua e Encaixar na grade.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.snap_to_grid");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.grid_cycle");
+    harness.run_steps(2);
+    assert!(harness.state().opts.snap_to_grid);
+    assert_ne!(
+        harness.state().opts.ruler_grid,
+        neoveg_engine::session::RulerGridSpacing::Auto
+    );
+
+    // 3. Marcadores de CD (faixa/índice) e Marcador de Comando.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_track");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_index");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_command");
+    harness.run_steps(2);
+    harness.get_by_label("Inserir marcador").click();
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdTrack));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdIndex));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::Command));
+
+    // 4. Modos de automação (Off / Read / Touch / Latch).
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.cycle_automation");
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.tracks[0].automation_mode,
+        crate::model::AutomationMode::Touch
+    );
+
+    // 5. Divisor de largura do cabeçalho de trilha recolhe progressivamente e restaura (p. 69).
+    assert!(harness
+        .query_by_label("Divisor de largura dos cabeçalhos")
+        .is_some());
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w < 100.0);
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w >= 180.0);
+
+    // 6. Novas abas de Preferências (Dispositivo de Prévia, Dispositivo de Áudio, MIDI/Sync, File I/O).
+    harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+    harness.run_steps(2);
+    for (tab_lbl, expected_txt) in [
+        (
+            "Dispositivo de Prévia",
+            "Dispositivo de Prévia Secundário (p. 1061)",
+        ),
+        ("Dispositivo de Áudio", "Compensação de gravação:"),
+        (
+            "MIDI / Sync / Controle",
+            "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+        ),
+        ("E/S de Arquivos (File I/O)", "FPS de sequências de imagem:"),
+    ] {
+        harness.get_by_label(tab_lbl).click();
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label(expected_txt).is_some(),
+            "aba '{tab_lbl}' não exibiu '{expected_txt}'"
+        );
+    }
+}
+
+#[test]
+fn kittest_visor_e_chips_sem_oscilacao_tabular() {
+    fn collect_text_shapes_with_seps(
+        shape: &egui::epaint::Shape,
+        out: &mut Vec<(String, egui::Rect, Vec<f32>)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(ts) => {
+                let rect = egui::Rect::from_min_size(ts.pos, ts.galley.size());
+                let seps = ts
+                    .galley
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.glyphs.iter())
+                    .filter(|g| g.chr == ':' || g.chr == ';')
+                    .map(|g| ts.pos.x + g.pos.x)
+                    .collect();
+                out.push((ts.galley.text().to_owned(), rect, seps));
+            }
+            egui::epaint::Shape::Vec(items) => {
+                for item in items {
+                    collect_text_shapes_with_seps(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+
+    let settings = harness.state().project.settings.clone();
+    let fmt = settings.effective_time_format(harness.state().opts.time_format);
+    let smpte_samples = [
+        "00:00:00;00",
+        "11:11:11;11",
+        "07:47:57;27",
+        "17:41:51;11",
+        "08:08:08;08",
+    ];
+
+    let mut pos_lbl_xs = Vec::new();
+    let mut tam_lbl_xs = Vec::new();
+    let mut pos_chip_rects = Vec::new();
+    let mut tam_chip_rects = Vec::new();
+    let mut visor_rects = Vec::new();
+    let mut visor_seps: Vec<Vec<f32>> = Vec::new();
+    let mut chip_seps: Vec<Vec<f32>> = Vec::new();
+
+    for tc in smpte_samples {
+        let t = neoveg_common::parse_time(tc, settings.fps, settings.sample_rate, fmt)
+            .expect("timecode SMPTE válido deve ser interpretado");
+        let rendered = harness.state().fmt_time(t);
+        assert_eq!(rendered, tc);
+
+        // 1) Sem seleção: mede `Pos:` e `Visor de tempo` com `cursor = t`.
+        harness.state_mut().session.time_sel = None;
+        harness.state_mut().session.cursor = t;
+        harness.run_steps(2);
+
+        let pos_lbl_bounds = harness
+            .get_by_label("Pos:")
+            .raw_bounds()
+            .expect("Pos: deve ter bounds");
+        let pos_chip_bounds = harness
+            .get_all_by_label(tc)
+            .filter_map(|n| n.raw_bounds())
+            .min_by(|a, b| a.x0.total_cmp(&b.x0))
+            .expect("chip de Pos: deve ter bounds");
+        let tam_lbl_bounds = harness
+            .get_by_label("Tam:")
+            .raw_bounds()
+            .expect("Tam: deve ter bounds");
+
+        pos_lbl_xs.push(pos_lbl_bounds.x0 as f32);
+        pos_chip_rects.push(pos_chip_bounds);
+        tam_lbl_xs.push(tam_lbl_bounds.x0 as f32);
+
+        let ctx = harness.ctx.clone();
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1480.0, 900.0),
+                )),
+                time: Some(1.0),
+                ..Default::default()
+            },
+            |c| harness.state_mut().frame_ui(c),
+        );
+        let mut text_shapes = Vec::new();
+        for clipped in &out.shapes {
+            collect_text_shapes_with_seps(&clipped.shape, &mut text_shapes);
+        }
+        let visor_lbl_rect = text_shapes
+            .iter()
+            .find(|(s, _, _)| s == "Visor de tempo")
+            .map(|(_, r, _)| *r)
+            .expect("Visor de tempo deve existir");
+        let (visor_tc_rect, visor_tc_seps) = text_shapes
+            .iter()
+            .find(|(s, r, _)| {
+                s == tc
+                    && r.left() < 260.0
+                    && r.top() > visor_lbl_rect.top()
+                    && r.top() < visor_lbl_rect.top() + 60.0
+            })
+            .map(|(_, r, seps)| (*r, seps.clone()))
+            .expect("timecode do Visor de tempo deve existir");
+        assert_eq!(visor_tc_seps.len(), 3);
+        visor_rects.push(visor_tc_rect);
+        visor_seps.push(visor_tc_seps);
+
+        let (_, _, pos_chip_seps) = text_shapes
+            .iter()
+            .filter(|(s, r, _)| s == tc && r.top() > visor_lbl_rect.bottom())
+            .min_by(|(_, a, _), (_, b, _)| a.left().total_cmp(&b.left()))
+            .cloned()
+            .expect("TextShape do chip Pos: deve existir na barra de transporte");
+        assert_eq!(pos_chip_seps.len(), 3);
+        chip_seps.push(pos_chip_seps);
+
+        // 2) Com seleção de duração `t`: mede `Tam:` com `sel_len = t` (cursor = 0).
+        harness.state_mut().session.cursor = neoveg_common::Ticks::ZERO;
+        harness.state_mut().session.time_sel = Some((neoveg_common::Ticks::ZERO, t));
+        harness.run_steps(2);
+        let tam_chip_bounds = harness
+            .get_all_by_label(tc)
+            .filter_map(|n| n.raw_bounds())
+            .max_by(|a, b| a.x0.total_cmp(&b.x0))
+            .expect("chip de Tam: deve ter bounds");
+        tam_chip_rects.push(tam_chip_bounds);
+    }
+
+    let assert_f32_spread = |name: &str, vals: &[f32]| {
+        let min = vals.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (max - min) < 0.05,
+            "{name} oscilou: min={min}, max={max}, diff={}",
+            max - min
+        );
+    };
+    let assert_f64_spread = |name: &str, vals: &[f64]| {
+        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (max - min) < 0.05,
+            "{name} oscilou: min={min}, max={max}, diff={}",
+            max - min
+        );
+    };
+
+    assert_f32_spread("Pos: label x0", &pos_lbl_xs);
+    assert_f32_spread("Tam: label x0", &tam_lbl_xs);
+    assert_f64_spread(
+        "Pos: chip x0",
+        &pos_chip_rects.iter().map(|r| r.x0).collect::<Vec<_>>(),
+    );
+    assert_f64_spread(
+        "Pos: chip width",
+        &pos_chip_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    assert_f64_spread(
+        "Tam: chip x0",
+        &tam_chip_rects.iter().map(|r| r.x0).collect::<Vec<_>>(),
+    );
+    assert_f64_spread(
+        "Tam: chip width",
+        &tam_chip_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Visor de tempo rect.left",
+        &visor_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    for col in 0..3 {
+        let v_col = visor_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
+        assert_f32_spread(&format!("Visor de tempo sep[{col}]"), &v_col);
+        let c_col = chip_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
+        assert_f32_spread(&format!("Chip Pos: sep[{col}]"), &c_col);
+    }
+
+    // 3) Valida também sequências literais com todos os dígitos críticos ('0','1','7','8'),
+    // incluindo "77:77:77;77" e "88:88:88;88", no mesmo padrão de Visor + chips `Pos:`/`Tam:`.
+    let literal_samples = [
+        "00:00:00;00",
+        "11:11:11;11",
+        "77:77:77;77",
+        "17:41:51;11",
+        "88:88:88;88",
+    ];
+    let probe_ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&probe_ctx, false);
+    let mut lit_visor_rects = Vec::new();
+    let mut lit_pos_rects = Vec::new();
+    let mut lit_tam_rects = Vec::new();
+    let mut lit_visor_seps: Vec<Vec<f32>> = Vec::new();
+
+    for tc in literal_samples {
+        let mut v_rect = egui::Rect::NOTHING;
+        let mut p_rect = egui::Rect::NOTHING;
+        let mut t_rect = egui::Rect::NOTHING;
+        let out = probe_ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::TopBottomPanel::top("lit_transport").show(ctx, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let chip = |ui: &mut egui::Ui, label: &str| {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin::symmetric(5, 1))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 3.0;
+                                        let name = egui::RichText::new(label).small();
+                                        if ui.layout().prefer_right_to_left() {
+                                            crate::fonts::tabular_label(
+                                                ui,
+                                                tc,
+                                                crate::fonts::visor_font(10.5),
+                                                egui::Color32::WHITE,
+                                            );
+                                            ui.label(name);
+                                        } else {
+                                            ui.label(name);
+                                            crate::fonts::tabular_label(
+                                                ui,
+                                                tc,
+                                                crate::fonts::visor_font(10.5),
+                                                egui::Color32::WHITE,
+                                            );
+                                        }
+                                    });
+                                })
+                                .response
+                                .rect
+                        };
+                        t_rect = chip(ui, "Tam:");
+                        p_rect = chip(ui, "Pos:");
+                    });
+                });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    v_rect = crate::fonts::paint_tabular_text(
+                        ui.painter(),
+                        egui::pos2(240.0, 80.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        tc,
+                        crate::fonts::visor_font(20.0),
+                        egui::Color32::WHITE,
+                    );
+                });
+            },
+        );
+        let mut shapes = Vec::new();
+        for clipped in &out.shapes {
+            collect_text_shapes_with_seps(&clipped.shape, &mut shapes);
+        }
+        let (_, _, seps) = shapes
+            .into_iter()
+            .find(|(s, r, _)| s == tc && r.top() > 40.0)
+            .expect("Visor literal deve existir");
+        assert_eq!(seps.len(), 3);
+        lit_visor_rects.push(v_rect);
+        lit_pos_rects.push(p_rect);
+        lit_tam_rects.push(t_rect);
+        lit_visor_seps.push(seps);
+    }
+
+    assert_f32_spread(
+        "Literal Visor left",
+        &lit_visor_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Visor width",
+        &lit_visor_rects
+            .iter()
+            .map(|r| r.width())
+            .collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Pos chip x0",
+        &lit_pos_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Pos chip width",
+        &lit_pos_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Tam chip x0",
+        &lit_tam_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Tam chip width",
+        &lit_tam_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    for col in 0..3 {
+        let v_col = lit_visor_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
+        assert_f32_spread(&format!("Literal Visor sep[{col}]"), &v_col);
+    }
 }

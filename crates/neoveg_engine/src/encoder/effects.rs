@@ -39,15 +39,20 @@ impl CropAspect {
         Self::Ratio24x1,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::Free => "Livre",
             Self::Ratio16x9 => "16:9 Widescreen",
             Self::Ratio4x3 => "4:3 Clássico",
             Self::Ratio9x16 => "9:16 Vertical",
             Self::Ratio1x1 => "1:1 Quadrado",
             Self::Ratio24x1 => "2.4:1 Escopo",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     pub fn ratio(self) -> Option<f32> {
@@ -127,14 +132,19 @@ impl SourceScalingMode {
         Self::MatchSource,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::ScaleToFit => "Dimensionar para ajustar",
             Self::ScaleToFill => "Dimensionar para preencher",
             Self::StretchToFill => "Esticar para preencher",
             Self::ScaleFitBlackBorders => "Ajustar com bordas pretas",
             Self::MatchSource => "Alterar saída para corresponder à origem",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -166,8 +176,8 @@ impl OverlayPosition {
         Self::BottomRight,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::TopLeft => "Superior esquerdo",
             Self::TopCenter => "Superior centro",
             Self::TopRight => "Superior direito",
@@ -177,7 +187,12 @@ impl OverlayPosition {
             Self::BottomLeft => "Inferior esquerdo",
             Self::BottomCenter => "Inferior centro",
             Self::BottomRight => "Inferior direito",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     fn anchor_factors(self) -> (f32, f32) {
@@ -226,8 +241,8 @@ impl GradePreset {
         ("Sépia Clássico", Self::VintageSepia),
     ];
 
-    pub fn name(&self) -> &'static str {
-        match self {
+    pub fn name_in(&self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::None => "Nenhum",
             Self::CinematicWarm => "Cinemático Quente",
             Self::CoolTeal => "Estilo Frio (Teal)",
@@ -236,7 +251,12 @@ impl GradePreset {
             Self::Monochrome => "Monocromático",
             Self::VintageSepia => "Sépia Clássico",
             Self::Custom { .. } => "Ajuste Personalizado",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     fn apply_rgb(&self, c: [f32; 3]) -> [f32; 3] {
@@ -380,14 +400,19 @@ impl NameFormat {
         Self::OutputStem,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::PrefixSuffixOnly => "Somente prefixo e sufixo",
             Self::SourceFilename => "Nome do arquivo de origem",
             Self::SourceStem => "Nome de origem (sem extensão)",
             Self::OutputFilename => "Nome do arquivo de saída",
             Self::OutputStem => "Nome de saída (sem extensão)",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 

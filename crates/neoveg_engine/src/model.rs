@@ -30,6 +30,128 @@ pub struct ProjectSettings {
     /// Layout de canais da mixagem (estéreo ou 5.1 surround).
     #[serde(default)]
     pub channel_layout: ChannelLayout,
+    /// Modo de visualização/renderização 3D estereoscópica (manual p. 426).
+    #[serde(default)]
+    pub stereo_3d: Stereo3dMode,
+    /// Tempo musical em batidas por minuto para régua e grade de compassos (p. 232).
+    #[serde(default = "default_bpm")]
+    pub bpm: f64,
+}
+
+fn default_bpm() -> f64 {
+    120.0
+}
+
+/// Modo 3D estereoscópico do projeto (*Project Properties → Video → Stereoscopic 3D mode*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Stereo3dMode {
+    #[default]
+    Off,
+    AnaglyphRedCyan,
+    SideBySideHalf,
+    SideBySideFull,
+    TopBottomHalf,
+    LeftOnly,
+    RightOnly,
+}
+
+impl Stereo3dMode {
+    pub const ALL: [Stereo3dMode; 7] = [
+        Stereo3dMode::Off,
+        Stereo3dMode::AnaglyphRedCyan,
+        Stereo3dMode::SideBySideHalf,
+        Stereo3dMode::SideBySideFull,
+        Stereo3dMode::TopBottomHalf,
+        Stereo3dMode::LeftOnly,
+        Stereo3dMode::RightOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stereo3dMode::Off => "Desligado (2D)",
+            Stereo3dMode::AnaglyphRedCyan => "Anáglifo (Vermelho / Ciano)",
+            Stereo3dMode::SideBySideHalf => "Lado a lado (50% largura)",
+            Stereo3dMode::SideBySideFull => "Lado a lado (largura cheia)",
+            Stereo3dMode::TopBottomHalf => "Acima / Abaixo (50% altura)",
+            Stereo3dMode::LeftOnly => "Somente olho esquerdo",
+            Stereo3dMode::RightOnly => "Somente olho direito",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Stereo3dMode::Off => "2D",
+            Stereo3dMode::AnaglyphRedCyan => "3D Anáglifo",
+            Stereo3dMode::SideBySideHalf => "3D L/R 50%",
+            Stereo3dMode::SideBySideFull => "3D L/R 100%",
+            Stereo3dMode::TopBottomHalf => "3D Cima/Baixo",
+            Stereo3dMode::LeftOnly => "3D Esq.",
+            Stereo3dMode::RightOnly => "3D Dir.",
+        }
+    }
+}
+
+/// Disposição de origem dos dois olhos em um clipe/evento 3D estereoscópico.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Stereo3dSourceLayout {
+    #[default]
+    Mono2D,
+    SideBySideHalf,
+    SideBySideFull,
+    TopBottomHalf,
+}
+
+impl Stereo3dSourceLayout {
+    pub const ALL: [Stereo3dSourceLayout; 4] = [
+        Stereo3dSourceLayout::Mono2D,
+        Stereo3dSourceLayout::SideBySideHalf,
+        Stereo3dSourceLayout::SideBySideFull,
+        Stereo3dSourceLayout::TopBottomHalf,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stereo3dSourceLayout::Mono2D => "2D padrão (sintetizar profundidade)",
+            Stereo3dSourceLayout::SideBySideHalf => "Lado a lado (50%)",
+            Stereo3dSourceLayout::SideBySideFull => "Lado a lado (completo)",
+            Stereo3dSourceLayout::TopBottomHalf => "Acima / Abaixo (50%)",
+        }
+    }
+}
+
+/// Ajuste 3D estereoscópico por evento de vídeo (convergência horizontal e inversão L/R).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Stereo3dClip {
+    pub layout: Stereo3dSourceLayout,
+    pub swap_lr: bool,
+    /// Deslocamento horizontal relativo à largura do quadro (`-0.25..=0.25`).
+    pub horizontal_offset: f32,
+}
+
+impl Stereo3dClip {
+    pub fn sanitized(self) -> Self {
+        let off = if self.horizontal_offset.is_finite() {
+            self.horizontal_offset.clamp(-0.25, 0.25)
+        } else {
+            0.0
+        };
+        Self {
+            layout: self.layout,
+            swap_lr: self.swap_lr,
+            horizontal_offset: off,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.layout == Stereo3dSourceLayout::Mono2D
+            && !self.swap_lr
+            && self.horizontal_offset.abs() <= 1e-6
+    }
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Layout de canais do projeto (*Project Properties → Audio → Master bus mode*).
@@ -51,11 +173,16 @@ impl ChannelLayout {
         }
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             ChannelLayout::Stereo => "Estéreo",
             ChannelLayout::Surround51 => "5.1 Surround",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -117,6 +244,8 @@ impl Default for ProjectSettings {
             background: default_bg(),
             manually_configured: false,
             channel_layout: ChannelLayout::Stereo,
+            stereo_3d: Stereo3dMode::Off,
+            bpm: default_bpm(),
         }
     }
 }
@@ -310,6 +439,124 @@ impl Project {
         order
     }
 
+    /// Índice da trilha por ID.
+    pub fn track_index(&self, track_id: Id) -> Option<usize> {
+        self.tracks.iter().position(|t| t.id == track_id)
+    }
+
+    /// Profundidade hierárquica da trilha (0 = raiz), protegida contra ciclos (§0.5).
+    pub fn track_depth(&self, track_id: Id) -> usize {
+        let mut depth = 0usize;
+        let mut cur = track_id;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(cur);
+        while depth < MAX_TRACK_DEPTH {
+            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+                break;
+            };
+            let Some(pid) = tr.parent_track_id else {
+                break;
+            };
+            if !visited.insert(pid) || !self.tracks.iter().any(|t| t.id == pid) {
+                break;
+            }
+            depth += 1;
+            cur = pid;
+        }
+        depth
+    }
+
+    /// Valida atribuição acíclica de `parent_id` para `child_id` dentro de `MAX_TRACK_DEPTH` (§0.5).
+    pub fn validate_track_parent(&self, child_id: Id, parent_id: Option<Id>) -> Result<(), String> {
+        let Some(pid) = parent_id else {
+            return Ok(());
+        };
+        if pid == child_id {
+            return Err("uma trilha não pode ser pai de si mesma".into());
+        }
+        let Some(child) = self.tracks.iter().find(|t| t.id == child_id) else {
+            return Err("trilha filha inexistente".into());
+        };
+        let Some(parent) = self.tracks.iter().find(|t| t.id == pid) else {
+            return Err("trilha pai inexistente".into());
+        };
+        if !parent.is_folder && parent.kind != child.kind {
+            return Err("composição pai/filho requer trilhas do mesmo tipo (ou uma pasta)".into());
+        }
+        let mut cur = pid;
+        let mut depth = 1usize;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(child_id);
+        while depth <= MAX_TRACK_DEPTH {
+            if !visited.insert(cur) {
+                return Err("vínculo pai/filho criaria ciclo".into());
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+                return Err("ancestral inexistente".into());
+            };
+            let Some(next) = tr.parent_track_id else {
+                return Ok(());
+            };
+            cur = next;
+            depth += 1;
+        }
+        Err(format!(
+            "hierarquia de trilhas excede o limite de {MAX_TRACK_DEPTH} níveis"
+        ))
+    }
+
+    /// Verdadeiro se alguma pasta ancestral da trilha está recolhida.
+    pub fn is_track_hidden_by_folder(&self, track_id: Id) -> bool {
+        let mut cur = self
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.parent_track_id);
+        let mut steps = 0usize;
+        while let Some(pid) = cur {
+            if steps >= MAX_TRACK_DEPTH || pid == track_id {
+                break;
+            }
+            let Some(anc) = self.tracks.iter().find(|t| t.id == pid) else {
+                break;
+            };
+            if anc.is_folder && anc.collapsed {
+                return true;
+            }
+            cur = anc.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se a trilha ou alguma pasta/pai ancestral estiver em mudo.
+    pub fn is_track_effectively_muted(&self, track_id: Id) -> bool {
+        let mut cur = Some(track_id);
+        let mut steps = 0usize;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(tid) = cur {
+            if steps > MAX_TRACK_DEPTH || !visited.insert(tid) {
+                break;
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == tid) else {
+                break;
+            };
+            if tr.mute {
+                return true;
+            }
+            cur = tr.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se houver pelo menos uma trilha filha apontando para `track_id`.
+    pub fn has_track_children(&self, track_id: Id) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.parent_track_id == Some(track_id))
+    }
+
     /// Maior id usado em qualquer objeto do projeto (para continuar a numeração
     /// após carregar um arquivo).
     pub fn max_id(&self) -> Id {
@@ -465,6 +712,9 @@ impl Project {
         for c in &mut s.background {
             *c = clampf(fin32(*c, 0.0), 0.0, 1.0);
         }
+        if !s.bpm.is_finite() || s.bpm < 20.0 || s.bpm > 300.0 {
+            s.bpm = default_bpm();
+        }
 
         // mídia
         let mut seen_media = std::collections::HashSet::new();
@@ -487,7 +737,7 @@ impl Project {
                     }
                 }
                 MediaSource::Generated(g) => sanitize_gen(g),
-                MediaSource::File { .. } => {}
+                MediaSource::File { .. } | MediaSource::NestedProject { .. } => {}
             }
         }
 
@@ -506,19 +756,23 @@ impl Project {
             t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
             t.surround = t.surround.sanitized();
             t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
-            for k in &mut t.motion.keys {
-                k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                let v = &mut k.value;
-                v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
-                v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
-                v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
-                v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
-                v.rot = fin32(v.rot, 0.0) % 3600.0;
-            }
-            t.motion.keys.sort_by_key(|k| k.t);
-            if t.motion.keys.is_empty() {
-                t.motion = Keyframes::default();
-            }
+            let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
+                for k in &mut mk.keys {
+                    k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                    let v = &mut k.value;
+                    v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
+                    v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
+                    v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
+                    v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
+                    v.rot = fin32(v.rot, 0.0) % 3600.0;
+                }
+                mk.keys.sort_by_key(|k| k.t);
+                if mk.keys.is_empty() {
+                    *mk = Keyframes::default();
+                }
+            };
+            sanitize_motion_list(&mut t.motion);
+            sanitize_motion_list(&mut t.parent_motion);
             sanitize_envelopes(
                 &mut t.envelopes,
                 &[
@@ -571,6 +825,23 @@ impl Project {
                 for f in &mut e.fx {
                     sanitize_fx(f);
                 }
+                e.stereo_3d = e.stereo_3d.sanitized();
+            }
+        }
+        // Saneamento da hierarquia pai/filho de trilhas (§0.5: referências inexistentes ou ciclos).
+        let track_ids: Vec<Id> = self.tracks.iter().map(|t| t.id).collect();
+        for ti in 0..track_ids.len() {
+            let tid = track_ids[ti];
+            if self.tracks[ti].parent_track_id.is_some()
+                && self
+                    .validate_track_parent(tid, self.tracks[ti].parent_track_id)
+                    .is_err()
+            {
+                let name = self.tracks[ti].name.clone();
+                self.tracks[ti].parent_track_id = None;
+                fixes.push(format!(
+                    "vínculo pai/filho inválido ou cíclico removido da trilha \"{name}\""
+                ));
             }
         }
         // Saneamento de Sync Links (§0.4 e §0.5: referências inexistentes ou ciclos).
@@ -680,6 +951,20 @@ impl Project {
         }
         for m in &mut self.markers {
             m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            m.label = m.label.chars().filter(|&c| c != '\0').take(256).collect();
+            m.command_type = m
+                .command_type
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(64)
+                .collect();
+            m.command_arg = m
+                .command_arg
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(512)
+                .collect();
         }
         for r in &mut self.regions {
             if r.end < r.start {
@@ -819,6 +1104,13 @@ fn sanitize_fx(f: &mut FxInstance) {
         }
     } else {
         f.vst3 = None;
+    }
+    if let Some(cg) = f.color_grade.as_mut() {
+        if f.kind == FxKind::ColorCorrector {
+            cg.sanitize();
+        } else {
+            f.color_grade = None;
+        }
     }
     let specs = f.kind.params();
     f.params.truncate(specs.len());
@@ -1032,9 +1324,18 @@ pub struct MediaItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MediaSource {
-    File { path: String },
-    ImageSequence { paths: Vec<String>, fps: FrameRate },
+    File {
+        path: String,
+    },
+    ImageSequence {
+        paths: Vec<String>,
+        fps: FrameRate,
+    },
     Generated(GenSpec),
+    /// Linha do tempo aninhada (projeto `.neoveg` inserido como evento, p. 114).
+    NestedProject {
+        path: String,
+    },
 }
 
 pub const MAX_MEDIA_BINS: usize = 256;
@@ -1193,14 +1494,19 @@ impl TextAnim {
         TextAnim::Typewriter,
         TextAnim::FadeInOut,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             TextAnim::None => "Nenhuma",
             TextAnim::ScrollUp => "Rolagem (créditos)",
             TextAnim::CrawlLeft => "Letreiro (crawl)",
             TextAnim::Typewriter => "Máquina de escrever",
             TextAnim::FadeInOut => "Fade in/out",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -1258,19 +1564,22 @@ impl Default for TextSpec {
 }
 
 impl GenSpec {
-    pub fn label(&self) -> String {
+    pub fn label_in(&self, lang: neoveg_common::Language) -> String {
+        use neoveg_common::{tr, tr_args};
         match self {
-            GenSpec::SolidColor { .. } => "Cor sólida".into(),
-            GenSpec::Gradient { radial, .. } => {
+            GenSpec::SolidColor { .. } => tr(lang, "Cor sólida").into(),
+            GenSpec::Gradient { radial, .. } => tr(
+                lang,
                 if *radial {
-                    "Gradiente radial".into()
+                    "Gradiente radial"
                 } else {
-                    "Gradiente linear".into()
-                }
-            }
-            GenSpec::Checkerboard { .. } => "Xadrez".into(),
-            GenSpec::ColorBars => "Barras de cor".into(),
-            GenSpec::Noise { .. } => "Ruído".into(),
+                    "Gradiente linear"
+                },
+            )
+            .into(),
+            GenSpec::Checkerboard { .. } => tr(lang, "Xadrez").into(),
+            GenSpec::ColorBars => tr(lang, "Barras de cor").into(),
+            GenSpec::Noise { .. } => tr(lang, "Ruído").into(),
             GenSpec::Text(t) => {
                 let first = t
                     .text
@@ -1280,9 +1589,13 @@ impl GenSpec {
                     .chars()
                     .take(24)
                     .collect::<String>();
-                format!("Texto: {first}")
+                tr_args(lang, "Texto: {first}", &[("first", &first)])
             }
         }
+    }
+
+    pub fn label(&self) -> String {
+        self.label_in(neoveg_common::Language::PtBr)
     }
     pub fn is_animated(&self) -> bool {
         match self {
@@ -1332,8 +1645,8 @@ impl BlendMode {
         BlendMode::Darken,
         BlendMode::Difference,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             BlendMode::SourceAlpha => "Alfa da origem",
             BlendMode::Add => "Adicionar",
             BlendMode::Subtract => "Subtrair",
@@ -1344,6 +1657,41 @@ impl BlendMode {
             BlendMode::Lighten => "Clarear",
             BlendMode::Darken => "Escurecer",
             BlendMode::Difference => "Diferença",
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            BlendMode::SourceAlpha => "SourceAlpha",
+            BlendMode::Add => "Add",
+            BlendMode::Subtract => "Subtract",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::HardLight => "HardLight",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::Darken => "Darken",
+            BlendMode::Difference => "Difference",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Self {
+        match raw.trim() {
+            "Add" => BlendMode::Add,
+            "Subtract" => BlendMode::Subtract,
+            "Multiply" => BlendMode::Multiply,
+            "Screen" => BlendMode::Screen,
+            "Overlay" => BlendMode::Overlay,
+            "HardLight" => BlendMode::HardLight,
+            "Lighten" => BlendMode::Lighten,
+            "Darken" => BlendMode::Darken,
+            "Difference" => BlendMode::Difference,
+            _ => BlendMode::SourceAlpha,
         }
     }
 }
@@ -1361,13 +1709,18 @@ pub enum EnvKind {
 }
 
 impl EnvKind {
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             EnvKind::Volume => "Volume",
             EnvKind::Pan => "Pan",
             EnvKind::Opacity => "Nível de composição",
             EnvKind::FadeToColor => "Fade para cor",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
     pub fn range(self) -> (f32, f32) {
         match self {
@@ -1501,6 +1854,26 @@ impl Envelope {
     pub fn sort(&mut self) {
         self.points.sort_by_key(|p| p.t);
     }
+
+    pub fn set_point(&mut self, t: Ticks, v: f32, tol: Ticks) {
+        let (lo, hi) = self.kind.range();
+        let v = if v.is_finite() {
+            crate::util::clampf(v, lo, hi)
+        } else {
+            self.kind.default_value()
+        };
+        let t = t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+        if let Some(p) = self.points.iter_mut().find(|p| p.t.abs_diff(t) <= tol) {
+            p.v = v;
+        } else {
+            self.points.push(EnvPoint {
+                t,
+                v,
+                curve: Curve::Linear,
+            });
+            self.sort();
+        }
+    }
 }
 
 /// Track Motion (movimento 2D da trilha inteira).
@@ -1535,6 +1908,44 @@ impl Lerp for MotionKey {
             scale_x: self.scale_x.lerp(&o.scale_x, t),
             scale_y: self.scale_y.lerp(&o.scale_y, t),
             rot: self.rot.lerp(&o.rot, t),
+        }
+    }
+}
+
+/// Profundidade máxima permitida na hierarquia de pastas e trilhas pai/filho (§0.5).
+pub const MAX_TRACK_DEPTH: usize = 16;
+
+/// Modo de máscara em composição Pai/Filho (VEGAS Pro p. 740).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum TrackMaskMode {
+    #[default]
+    None,
+    /// Usa luminância × alfa da trilha como máscara sobre a composição.
+    MultiplyMask,
+    /// Inverte a máscara de luminância (`1 - luma * alpha`).
+    InvertedMultiplyMask,
+    /// Usa exclusivamente o canal alfa da trilha como máscara.
+    AlphaMask,
+    /// Inverte a máscara de canal alfa (`1 - alpha`).
+    InvertedAlphaMask,
+}
+
+impl TrackMaskMode {
+    pub const ALL: [TrackMaskMode; 5] = [
+        TrackMaskMode::None,
+        TrackMaskMode::MultiplyMask,
+        TrackMaskMode::InvertedMultiplyMask,
+        TrackMaskMode::AlphaMask,
+        TrackMaskMode::InvertedAlphaMask,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackMaskMode::None => "Normal (sem máscara)",
+            TrackMaskMode::MultiplyMask => "Máscara por luminância",
+            TrackMaskMode::InvertedMultiplyMask => "Máscara por luminância invertida",
+            TrackMaskMode::AlphaMask => "Máscara por alfa",
+            TrackMaskMode::InvertedAlphaMask => "Máscara por alfa invertido",
         }
     }
 }
@@ -1592,6 +2003,72 @@ pub struct Track {
     /// Áudio: monitoração de entrada durante gravação/espera.
     #[serde(default)]
     pub input_monitor: bool,
+    /// Pasta de trilhas (Track Group) recolhível sem eventos próprios.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_folder: bool,
+    /// Pasta recolhida na timeline (oculta visualmente as trilhas filhas).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    /// Trilha pai (pasta de grupo ou composição Pai/Filho em vídeo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_track_id: Option<Id>,
+    /// Modo de máscara da trilha na composição Pai/Filho.
+    #[serde(default)]
+    pub mask_mode: TrackMaskMode,
+    /// Movimento 2D/3D do grupo Pai/Filho (Parent Track Motion, p. 740).
+    #[serde(default)]
+    pub parent_motion: Keyframes<MotionKey>,
+    /// Trilha marcada como multicâmera (angles em takes).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multicam: bool,
+    /// Modo de automação dos envelopes da faixa (Desligado / Ler / Touch / Latch, p. 1008).
+    #[serde(default)]
+    pub automation_mode: AutomationMode,
+}
+
+/// Modo de automação de envelopes por trilha ou barramento (manual VEGAS Pro 21, p. 1008).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AutomationMode {
+    /// Ignora os envelopes durante a reprodução/mixagem.
+    Off,
+    /// Apenas lê a curva de automação existente (padrão).
+    #[default]
+    Read,
+    /// Grava pontos ao arrastar durante a reprodução e retorna ao liberar.
+    Touch,
+    /// Grava pontos e mantém o último valor enquanto a reprodução continua.
+    Latch,
+}
+
+impl AutomationMode {
+    pub const ALL: [AutomationMode; 4] = [
+        AutomationMode::Off,
+        AutomationMode::Read,
+        AutomationMode::Touch,
+        AutomationMode::Latch,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Automação desligada (Off)",
+            AutomationMode::Read => "Automação: Ler (Read)",
+            AutomationMode::Touch => "Automação: Touch (Gravar ao tocar)",
+            AutomationMode::Latch => "Automação: Latch (Gravar e reter)",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Off",
+            AutomationMode::Read => "Read",
+            AutomationMode::Touch => "Touch",
+            AutomationMode::Latch => "Latch",
+        }
+    }
+
+    pub fn is_write(self) -> bool {
+        matches!(self, AutomationMode::Touch | AutomationMode::Latch)
+    }
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1630,6 +2107,8 @@ pub struct AudioBus {
     pub fx: Vec<FxInstance>,
     #[serde(default)]
     pub envelopes: Vec<Envelope>,
+    #[serde(default)]
+    pub automation_mode: AutomationMode,
 }
 
 impl AudioBus {
@@ -1645,11 +2124,18 @@ impl AudioBus {
             output_bus: None,
             fx: vec![],
             envelopes: vec![],
+            automation_mode: AutomationMode::Read,
         }
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
         self.envelopes.iter().find(|e| e.kind == kind)
+    }
+
+    pub fn active_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        (self.automation_mode != AutomationMode::Off)
+            .then(|| self.envelope(kind))
+            .flatten()
     }
 
     pub fn is_audible(&self, any_bus_solo: bool) -> bool {
@@ -1676,6 +2162,18 @@ const TRACK_COLORS: [[u8; 3]; 8] = [
 ];
 
 impl Track {
+    /// Modo de composição da camada da trilha no tempo `t`: o do evento ativo
+    /// que tiver um próprio (numa transição, o que entra, de início mais
+    /// tardio), senão o da trilha.
+    pub fn blend_at(&self, t: Ticks) -> BlendMode {
+        self.events
+            .iter()
+            .filter(|e| !e.mute && e.start <= t && t < e.end())
+            .max_by_key(|e| e.start)
+            .and_then(|e| e.blend)
+            .unwrap_or(self.blend)
+    }
+
     pub fn new(kind: TrackKind, name: &str) -> Self {
         let id = new_id();
         Track {
@@ -1701,26 +2199,44 @@ impl Track {
             adjustment: false,
             record_armed: false,
             input_monitor: false,
+            is_folder: false,
+            collapsed: false,
+            parent_track_id: None,
+            mask_mode: TrackMaskMode::None,
+            parent_motion: Keyframes::default(),
+            multicam: false,
+            automation_mode: AutomationMode::Read,
         }
+    }
+
+    /// Verdadeiro para pasta/grupo de trilhas.
+    pub fn is_folder_track(&self) -> bool {
+        self.is_folder
     }
 
     /// Verdadeiro para trilha de vídeo marcada como trilha de ajuste.
     pub fn is_adjustment(&self) -> bool {
-        self.kind == TrackKind::Video && self.adjustment
+        self.kind == TrackKind::Video && self.adjustment && !self.is_folder
     }
 
     /// Verdadeiro se a trilha pode receber eventos do tipo `kind`. Trilhas de
-    /// ajuste não recebem eventos: o compositor os ignoraria.
+    /// ajuste ou pastas não recebem eventos: o compositor os ignoraria.
     pub fn accepts(&self, kind: TrackKind) -> bool {
-        self.kind == kind && !self.is_adjustment()
+        self.kind == kind && !self.is_adjustment() && !self.is_folder
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
         self.envelopes.iter().find(|e| e.kind == kind)
     }
 
+    pub fn active_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        (self.automation_mode != AutomationMode::Off)
+            .then(|| self.envelope(kind))
+            .flatten()
+    }
+
     pub fn env_value(&self, kind: EnvKind, t: Ticks) -> f32 {
-        self.envelope(kind)
+        self.active_envelope(kind)
             .map(|e| e.eval(t))
             .unwrap_or(kind.default_value())
     }
@@ -1811,8 +2327,8 @@ impl TransitionKind {
         TransitionKind::Checker,
         TransitionKind::WarpFlow,
     ];
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             TransitionKind::Dissolve => "Dissolver (crossfade)",
             TransitionKind::FadeThroughBlack => "Fade pelo preto",
             TransitionKind::WipeLeft => "Wipe para a esquerda",
@@ -1830,7 +2346,12 @@ impl TransitionKind {
             TransitionKind::Blinds => "Persianas",
             TransitionKind::Checker => "Tabuleiro",
             TransitionKind::WarpFlow => "Warp Flow (fluxo óptico)",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -1905,6 +2426,14 @@ pub struct Event {
     /// ID do evento mestre para *Sync Link* unidirecional (manual VEGAS Pro 21 p. 351).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_link_master: Option<Id>,
+    /// Parâmetros 3D estereoscópicos do evento (disposição L/R, inversão e deslocamento).
+    #[serde(default, skip_serializing_if = "Stereo3dClip::is_default")]
+    pub stereo_3d: Stereo3dClip,
+    /// Modo de composição só deste evento (painel Compositores). `None` usa o
+    /// da trilha. Extensão do Neoveg: o manual do VEGAS Pro 21 (pp. 58 e
+    /// 746) aplica compositores só a trilhas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<BlendMode>,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -1949,6 +2478,8 @@ impl Event {
             pitch_semitones: 0.0,
             lock_pitch_to_stretch: false,
             sync_link_master: None,
+            stereo_3d: Stereo3dClip::default(),
+            blend: None,
         }
     }
 
@@ -2065,15 +2596,20 @@ impl FxCategory {
         FxCategory::Key,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             FxCategory::Color => "Cor",
             FxCategory::Light => "Luz",
             FxCategory::BlurSharpen => "Desfoque e nitidez",
             FxCategory::Stylize => "Estilizar",
             FxCategory::Transform => "Estabilização",
             FxCategory::Key => "Recorte",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 
@@ -2373,6 +2909,12 @@ pub struct ParamSpec {
     pub toggle: bool,
 }
 
+impl ParamSpec {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        neoveg_common::tr(lang, self.name)
+    }
+}
+
 const fn p(name: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
     ParamSpec {
         name,
@@ -2468,8 +3010,53 @@ impl FxKind {
         self == FxKind::Vst3 || Self::AUDIO.contains(&self)
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
+            FxKind::BrightnessContrast => "BrightnessContrast",
+            FxKind::HslAdjust => "HslAdjust",
+            FxKind::ColorCorrector => "ColorCorrector",
+            FxKind::Levels => "Levels",
+            FxKind::BlackWhite => "BlackWhite",
+            FxKind::Sepia => "Sepia",
+            FxKind::Invert => "Invert",
+            FxKind::GaussianBlur => "GaussianBlur",
+            FxKind::Sharpen => "Sharpen",
+            FxKind::Vignette => "Vignette",
+            FxKind::ChromaKeyer => "ChromaKeyer",
+            FxKind::Pixelate => "Pixelate",
+            FxKind::Mirror => "Mirror",
+            FxKind::Glow => "Glow",
+            FxKind::FilmGrain => "FilmGrain",
+            FxKind::Emboss => "Emboss",
+            FxKind::Posterize => "Posterize",
+            FxKind::Colorize => "Colorize",
+            FxKind::Stabilization => "Stabilization",
+            FxKind::Gain => "Gain",
+            FxKind::ParametricEq => "ParametricEq",
+            FxKind::HighPass => "HighPass",
+            FxKind::LowPass => "LowPass",
+            FxKind::Compressor => "Compressor",
+            FxKind::NoiseGate => "NoiseGate",
+            FxKind::Delay => "Delay",
+            FxKind::Reverb => "Reverb",
+            FxKind::Chorus => "Chorus",
+            FxKind::Distortion => "Distortion",
+            FxKind::Limiter => "Limiter",
+            FxKind::Ofx => "Ofx",
+            FxKind::Vst3 => "Vst3",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        Self::VIDEO
+            .into_iter()
+            .chain(Self::AUDIO)
+            .find(|&k| k.id() == trimmed)
+    }
+
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             FxKind::BrightnessContrast => "Brilho e Contraste",
             FxKind::HslAdjust => "Ajuste HSL",
             FxKind::ColorCorrector => "Corretor de Cor",
@@ -2502,7 +3089,12 @@ impl FxKind {
             FxKind::Limiter => "Limiter",
             FxKind::Ofx => "Plug-in OFX",
             FxKind::Vst3 => "Plug-in VST3",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     pub fn params(self) -> &'static [ParamSpec] {
@@ -2742,6 +3334,127 @@ impl AnimParam {
     }
 }
 
+/// Curvas RGB, bandas HSL e LUT (.cube ou predefinida) para Color Grading (pp. 769–781).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorGradeCurves {
+    /// Caminho para arquivo `.cube` externo ou `"builtin:<nome>"` (`"builtin:rec709"`, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lut_path: Option<String>,
+    /// Intensidade de mistura da LUT (`0.0..=1.0`).
+    pub lut_strength: f32,
+    /// Curva Master (luminância), pontos `(x, y)` em `[0..1]`. Vazio = identidade.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub master: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub green: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blue: Vec<[f32; 2]>,
+    /// 6 setores HSL (Vermelho, Amarelo, Verde, Ciano, Azul, Magenta): `[matiz (-0.5..0.5), sat (-1..1), lum (-1..1)]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hsl_bands: Vec<[f32; 3]>,
+}
+
+impl Default for ColorGradeCurves {
+    fn default() -> Self {
+        Self {
+            lut_path: None,
+            lut_strength: 1.0,
+            master: Vec::new(),
+            red: Vec::new(),
+            green: Vec::new(),
+            blue: Vec::new(),
+            hsl_bands: Vec::new(),
+        }
+    }
+}
+
+impl ColorGradeCurves {
+    pub const BUILTIN_LUTS: [(&'static str, &'static str); 4] = [
+        ("builtin:rec709", "Câmera: Log -> Rec.709"),
+        ("builtin:teal_orange", "Look: Cinema Teal & Orange"),
+        ("builtin:film_cool", "Look: Película Fria"),
+        ("builtin:mono_film", "Look: P&B Contraste Fílmico"),
+    ];
+
+    pub const HSL_BAND_NAMES: [&'static str; 6] =
+        ["Vermelho", "Amarelo", "Verde", "Ciano", "Azul", "Magenta"];
+
+    pub fn default_curve() -> Vec<[f32; 2]> {
+        vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]
+    }
+
+    pub fn default_hsl_bands() -> Vec<[f32; 3]> {
+        vec![[0.0, 0.0, 0.0]; 6]
+    }
+
+    pub fn sanitize(&mut self) {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        self.lut_strength = fin(self.lut_strength, 1.0).clamp(0.0, 1.0);
+        if self
+            .lut_path
+            .as_ref()
+            .is_some_and(|p| p.trim().is_empty() || p.len() > 1024 || p.contains('\0'))
+        {
+            self.lut_path = None;
+        }
+        let clean_curve = |pts: &mut Vec<[f32; 2]>| {
+            pts.truncate(32);
+            for pt in pts.iter_mut() {
+                pt[0] = fin(pt[0], 0.0).clamp(0.0, 1.0);
+                pt[1] = fin(pt[1], 0.0).clamp(0.0, 1.0);
+            }
+            pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        };
+        clean_curve(&mut self.master);
+        clean_curve(&mut self.red);
+        clean_curve(&mut self.green);
+        clean_curve(&mut self.blue);
+        self.hsl_bands.truncate(6);
+        for b in &mut self.hsl_bands {
+            b[0] = fin(b[0], 0.0).clamp(-0.5, 0.5);
+            b[1] = fin(b[1], 0.0).clamp(-1.0, 1.0);
+            b[2] = fin(b[2], 0.0).clamp(-1.0, 1.0);
+        }
+    }
+
+    /// Avalia uma curva linear por partes em `x in [0..1]`; curva vazia devolve `x`.
+    pub fn eval_curve(pts: &[[f32; 2]], x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        if pts.is_empty() {
+            return x;
+        }
+        if pts.len() == 1 {
+            return pts[0][1].clamp(0.0, 1.0);
+        }
+        if x <= pts[0][0] {
+            return pts[0][1].clamp(0.0, 1.0);
+        }
+        for w in pts.windows(2) {
+            if x <= w[1][0] {
+                let span = (w[1][0] - w[0][0]).max(1e-5);
+                let t = ((x - w[0][0]) / span).clamp(0.0, 1.0);
+                return (w[0][1] + (w[1][1] - w[0][1]) * t).clamp(0.0, 1.0);
+            }
+        }
+        pts.last().map(|p| p[1].clamp(0.0, 1.0)).unwrap_or(x)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.lut_path.is_none()
+            && self.master.is_empty()
+            && self.red.is_empty()
+            && self.green.is_empty()
+            && self.blue.is_empty()
+            && self
+                .hsl_bands
+                .iter()
+                .all(|b| b[0].abs() < 1e-4 && b[1].abs() < 1e-4 && b[2].abs() < 1e-4)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FxInstance {
     pub id: Id,
@@ -2755,6 +3468,9 @@ pub struct FxInstance {
     /// Só em `FxKind::Vst3`: o plug-in VST3 e os valores dos parâmetros dele.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vst3: Option<Vst3FxRef>,
+    /// Curvas RGB/HSL e LUT (.cube) para `FxKind::ColorCorrector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_grade: Option<Box<ColorGradeCurves>>,
 }
 
 impl FxInstance {
@@ -2773,6 +3489,7 @@ impl FxInstance {
                 .collect(),
             ofx: None,
             vst3: None,
+            color_grade: None,
         }
     }
 
@@ -2854,11 +3571,67 @@ pub struct MasterBus {
     pub video_fx: Vec<FxInstance>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Tipo de marcador na timeline (padrão, faixa/índice de CD ou comando, pp. 131, 495, 725).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MarkerKind {
+    #[default]
+    Standard,
+    CdTrack,
+    CdIndex,
+    Command,
+}
+
+impl MarkerKind {
+    pub const ALL: [MarkerKind; 4] = [
+        MarkerKind::Standard,
+        MarkerKind::CdTrack,
+        MarkerKind::CdIndex,
+        MarkerKind::Command,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkerKind::Standard => "Marcador padrão",
+            MarkerKind::CdTrack => "Faixa de CD de áudio",
+            MarkerKind::CdIndex => "Índice de CD de áudio",
+            MarkerKind::Command => "Marcador de comando",
+        }
+    }
+
+    pub fn short_prefix(self) -> &'static str {
+        match self {
+            MarkerKind::Standard => "",
+            MarkerKind::CdTrack => "CD",
+            MarkerKind::CdIndex => "IDX",
+            MarkerKind::Command => "CMD",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Marker {
     pub id: Id,
     pub t: Ticks,
     pub label: String,
+    pub kind: MarkerKind,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub command_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub command_arg: String,
+}
+
+impl Marker {
+    pub fn new(t: Ticks, kind: MarkerKind, label: impl Into<String>) -> Self {
+        Self {
+            id: new_id(),
+            t,
+            label: label.into(),
+            kind,
+            command_type: String::new(),
+            command_arg: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2888,6 +3661,60 @@ pub fn lin_to_db(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn media_teste() -> MediaItem {
+        MediaItem {
+            id: new_id(),
+            name: "m".into(),
+            source: MediaSource::File {
+                path: "m.avi".into(),
+            },
+            duration: Some(Ticks::from_secs_i64(60)),
+            has_video: true,
+            has_audio: false,
+            width: 64,
+            height: 36,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        }
+    }
+
+    /// Compositor por evento (extensão do Neoveg; o VEGAS só tem na trilha):
+    /// vale o do evento ativo; sem ele, o da trilha; na transição, o do
+    /// evento que entra; evento mudo não conta; arquivos antigos abrem sem o
+    /// campo e o campo vazio nem é gravado.
+    #[test]
+    fn compositor_do_evento_vale_so_no_trecho_dele() {
+        let s = Ticks::from_secs_i64;
+        let m = media_teste();
+        let mut t = Track::new(TrackKind::Video, "V");
+        t.blend = BlendMode::Screen;
+        let a = Event::new(&m, s(0), s(4));
+        let mut b = Event::new(&m, s(3), s(4));
+        b.blend = Some(BlendMode::Multiply);
+        t.events = vec![a, b];
+        assert_eq!(
+            t.blend_at(s(1)),
+            BlendMode::Screen,
+            "evento sem modo próprio"
+        );
+        assert_eq!(
+            t.blend_at(s(3)),
+            BlendMode::Multiply,
+            "transição: o que entra"
+        );
+        assert_eq!(t.blend_at(s(5)), BlendMode::Multiply);
+        assert_eq!(t.blend_at(s(9)), BlendMode::Screen, "fora dos eventos");
+        t.events[1].mute = true;
+        assert_eq!(t.blend_at(s(5)), BlendMode::Screen, "evento mudo não conta");
+
+        let json = serde_json::to_string(&t.events[0]).expect("json");
+        assert!(!json.contains("\"blend\""), "None não é gravado");
+        let json = serde_json::to_string(&t.events[1]).expect("json");
+        let volta: Event = serde_json::from_str(&json).expect("volta");
+        assert_eq!(volta.blend, Some(BlendMode::Multiply));
+    }
 
     /// Keyframes de parâmetros OFX: interpolação linear, `hold` para Boolean
     /// e Choice, arredondamento para Integer, e saneamento de entrada hostil.

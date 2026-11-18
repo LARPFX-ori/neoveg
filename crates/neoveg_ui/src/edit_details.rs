@@ -5,6 +5,7 @@ use super::{App, FxTarget};
 use crate::model::*;
 use eframe::egui;
 use neoveg_common::time::{format_ticks, parse_time, TimeFormat};
+use neoveg_common::{tr, Language};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,14 +27,19 @@ impl DetailsCategory {
         DetailsCategory::Buses,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
             DetailsCategory::Events => "Eventos",
             DetailsCategory::Markers => "Marcadores",
             DetailsCategory::Regions => "Regiões",
             DetailsCategory::Tracks => "Trilhas",
             DetailsCategory::Buses => "Barramentos",
-        }
+        };
+        tr(lang, key)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
     }
 }
 
@@ -75,33 +81,38 @@ fn time_cell_editor(
 
 impl App {
     pub(crate) fn edit_details_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let mut copy_tsv = false;
         let mut add_marker = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Exibir:").strong().small());
+            ui.label(egui::RichText::new(tr(lang, "Exibir:")).strong().small());
             egui::ComboBox::from_id_salt("edit_details_category")
-                .selected_text(self.edit_details.category.label())
+                .selected_text(self.edit_details.category.label_in(lang))
                 .show_ui(ui, |ui| {
                     for cat in DetailsCategory::ALL {
                         if ui
-                            .selectable_value(&mut self.edit_details.category, cat, cat.label())
+                            .selectable_value(
+                                &mut self.edit_details.category,
+                                cat,
+                                cat.label_in(lang),
+                            )
                             .changed()
                         {
                             self.edit_details.edit_buf.clear();
                         }
                     }
                 });
-            ui.label("Filtro:");
+            ui.label(tr(lang, "Filtro:"));
             ui.add(egui::TextEdit::singleline(&mut self.edit_details.filter).desired_width(110.0));
             if ui
-                .button("Copiar TSV")
-                .on_hover_text("Copia a tabela visível separada por tabulação")
+                .button(tr(lang, "Copiar TSV"))
+                .on_hover_text(tr(lang, "Copia a tabela visível separada por tabulação"))
                 .clicked()
             {
                 copy_tsv = true;
             }
             if self.edit_details.category == DetailsCategory::Markers
-                && ui.button("＋ Marcador no Cursor").clicked()
+                && ui.button(tr(lang, "＋ Marcador no Cursor")).clicked()
             {
                 add_marker = true;
             }
@@ -113,7 +124,10 @@ impl App {
         if copy_tsv {
             let tsv = self.build_details_tsv();
             ui.ctx().copy_text(tsv);
-            self.set_status("Tabela copiada para a área de transferência (TSV).");
+            self.set_status(tr(
+                lang,
+                "Tabela copiada para a área de transferência (TSV).",
+            ));
         }
         ui.separator();
 
@@ -130,6 +144,7 @@ impl App {
     }
 
     fn details_events_table(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let lang = self.lang();
         let fps = self.project.settings.fps;
         let sr = self.project.settings.sample_rate;
         let fmt = self.opts.time_format;
@@ -182,7 +197,8 @@ impl App {
 
         if rows.is_empty() {
             ui.label(
-                egui::RichText::new("Nenhum evento correspondente.").color(self.theme.text_muted),
+                egui::RichText::new(tr(lang, "Nenhum evento correspondente."))
+                    .color(self.theme.text_muted),
             );
             return;
         }
@@ -217,7 +233,7 @@ impl App {
                     "Bloq",
                     "Ir",
                 ] {
-                    ui.label(egui::RichText::new(hdr).strong().small());
+                    ui.label(egui::RichText::new(tr(lang, hdr)).strong().small());
                 }
                 ui.end_row();
 
@@ -335,7 +351,7 @@ impl App {
                     if ui.selectable_label(row.locked, "L").clicked() {
                         toggle_lock = Some((row.ti, row.ei));
                     }
-                    if ui.small_button("Ir").clicked() {
+                    if ui.small_button(tr(lang, "Ir")).clicked() {
                         goto = Some((row.ti, row.id, row.start));
                     }
                     ui.end_row();
@@ -467,6 +483,7 @@ impl App {
     }
 
     fn details_markers_table(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let lang = self.lang();
         let fps = self.project.settings.fps;
         let sr = self.project.settings.sample_rate;
         let fmt = self.opts.time_format;
@@ -480,34 +497,98 @@ impl App {
             .collect();
         if items.is_empty() {
             ui.label(
-                egui::RichText::new("Nenhum marcador no projeto.").color(self.theme.text_muted),
+                egui::RichText::new(tr(lang, "Nenhum marcador no projeto."))
+                    .color(self.theme.text_muted),
             );
             return;
         }
         let mut rename: Option<(usize, String)> = None;
+        let mut rekind: Option<(usize, MarkerKind)> = None;
+        let mut recmd: Option<(usize, String, String)> = None;
         let mut retime: Option<(usize, Ticks)> = None;
         let mut remove: Option<usize> = None;
         let mut jump: Option<Ticks> = None;
+        let has_cd = self
+            .project
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::CdTrack | MarkerKind::CdIndex));
+
+        if has_cd && ui.small_button("Exportar CUE Sheet (.cue)...").clicked() {
+            let cue = self.session.export_cd_cue_sheet("audio.wav");
+            if let Some(p) = rfd::FileDialog::new()
+                .add_filter("CD Cue Sheet", &["cue"])
+                .set_file_name("disco.cue")
+                .save_file()
+            {
+                match std::fs::write(&p, cue.as_bytes()) {
+                    Ok(()) => self.set_status("CUE Sheet exportado."),
+                    Err(e) => self.set_status(format!("Erro gravando CUE: {e}")),
+                }
+            }
+        }
 
         egui::Grid::new("ed_markers_grid")
             .striped(true)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                for h in ["#", "Rótulo", "Tempo", "Ir", "×"] {
-                    ui.label(egui::RichText::new(h).strong().small());
+                for h in ["#", "Tipo", "Rótulo", "Comando", "Tempo", "Ir", "×"] {
+                    let lbl = if matches!(h, "#" | "×") {
+                        h
+                    } else {
+                        tr(lang, h)
+                    };
+                    ui.label(egui::RichText::new(lbl).strong().small());
                 }
                 ui.end_row();
                 for (row_idx, (i, m)) in items.iter_mut().enumerate() {
                     ui.label(format!("{}", row_idx + 1));
+                    let prev_kind = m.kind;
+                    egui::ComboBox::from_id_salt(("mk_kind", m.id))
+                        .selected_text(m.kind.label())
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            for k in MarkerKind::ALL {
+                                ui.selectable_value(&mut m.kind, k, k.label());
+                            }
+                        });
+                    if m.kind != prev_kind {
+                        rekind = Some((*i, m.kind));
+                    }
                     if ui
                         .add(
                             egui::TextEdit::singleline(&mut m.label)
-                                .desired_width(160.0)
+                                .desired_width(140.0)
                                 .font(egui::TextStyle::Small),
                         )
                         .changed()
                     {
                         rename = Some((*i, m.label.clone()));
+                    }
+                    if m.kind == MarkerKind::Command {
+                        ui.horizontal(|ui| {
+                            let c1 = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut m.command_type)
+                                        .hint_text("TEXT/URL")
+                                        .desired_width(58.0)
+                                        .font(egui::TextStyle::Small),
+                                )
+                                .changed();
+                            let c2 = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut m.command_arg)
+                                        .hint_text("parâmetro")
+                                        .desired_width(90.0)
+                                        .font(egui::TextStyle::Small),
+                                )
+                                .changed();
+                            if c1 || c2 {
+                                recmd = Some((*i, m.command_type.clone(), m.command_arg.clone()));
+                            }
+                        });
+                    } else {
+                        ui.label(egui::RichText::new("—").small().weak());
                     }
                     if let Some(nt) = time_cell_editor(
                         ui,
@@ -520,7 +601,7 @@ impl App {
                     ) {
                         retime = Some((*i, nt.clamp_safe(Ticks::ZERO, Ticks::from_raw(MAX_TICKS))));
                     }
-                    if ui.small_button("Ir").clicked() {
+                    if ui.small_button(tr(lang, "Ir")).clicked() {
                         jump = Some(m.t);
                     }
                     if ui.small_button("×").clicked() {
@@ -529,6 +610,21 @@ impl App {
                     ui.end_row();
                 }
             });
+
+        if let Some((i, k)) = rekind {
+            self.checkpoint();
+            if let Some(m) = self.project.markers.get_mut(i) {
+                m.kind = k;
+                self.changed();
+            }
+        }
+        if let Some((i, ctype, carg)) = recmd {
+            if let Some(m) = self.project.markers.get_mut(i) {
+                m.command_type = ctype;
+                m.command_arg = carg;
+                self.dirty = true;
+            }
+        }
 
         if let Some((i, lbl)) = rename {
             if let Some(m) = self.project.markers.get_mut(i) {
@@ -557,6 +653,7 @@ impl App {
     }
 
     fn details_regions_table(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let lang = self.lang();
         let fps = self.project.settings.fps;
         let sr = self.project.settings.sample_rate;
         let fmt = self.opts.time_format;
@@ -571,7 +668,8 @@ impl App {
             .collect();
         if items.is_empty() {
             ui.label(
-                egui::RichText::new("Nenhuma região no projeto.").color(self.theme.text_muted),
+                egui::RichText::new(tr(lang, "Nenhuma região no projeto."))
+                    .color(self.theme.text_muted),
             );
             return;
         }
@@ -586,7 +684,12 @@ impl App {
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 for h in ["#", "Rótulo", "Início", "Fim", "Duração", "Selecionar", "×"] {
-                    ui.label(egui::RichText::new(h).strong().small());
+                    let lbl = if matches!(h, "#" | "×") {
+                        h
+                    } else {
+                        tr(lang, h)
+                    };
+                    ui.label(egui::RichText::new(lbl).strong().small());
                 }
                 ui.end_row();
                 for (row_idx, (i, reg)) in items.iter_mut().enumerate() {
@@ -636,7 +739,7 @@ impl App {
                         .monospace()
                         .small(),
                     );
-                    if ui.small_button("Selecionar").clicked() {
+                    if ui.small_button(tr(lang, "Selecionar")).clicked() {
                         select = Some((reg.start, reg.end));
                     }
                     if ui.small_button("×").clicked() {
@@ -681,6 +784,7 @@ impl App {
     }
 
     fn details_tracks_table(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let lang = self.lang();
         let bus_choices: Vec<(Id, String)> = self
             .project
             .audio_buses
@@ -703,7 +807,8 @@ impl App {
                     "S",
                     "Sel",
                 ] {
-                    ui.label(egui::RichText::new(h).strong().small());
+                    let lbl = if h == "#" { h } else { tr(lang, h) };
+                    ui.label(egui::RichText::new(lbl).strong().small());
                 }
                 ui.end_row();
                 for ti in 0..n {
@@ -715,9 +820,9 @@ impl App {
                     }
                     ui.label(format!("{}", ti + 1));
                     ui.label(if t_kind == TrackKind::Video {
-                        "Vídeo"
+                        tr(lang, "Vídeo")
                     } else {
-                        "Áudio"
+                        tr(lang, "Áudio")
                     });
                     if ui
                         .add(
@@ -768,7 +873,7 @@ impl App {
                                     .find(|(id, _)| *id == bid)
                                     .map(|(_, nm)| nm.as_str())
                             })
-                            .unwrap_or("Master");
+                            .unwrap_or_else(|| tr(lang, "Master"));
                         ui.label(egui::RichText::new(out_lbl).small());
                     } else {
                         let mut op = self.project.tracks[ti].opacity * 100.0;
@@ -786,8 +891,11 @@ impl App {
                             self.project.tracks[ti].opacity = (op / 100.0).clamp(0.0, 1.0);
                             self.changed();
                         }
-                        ui.label(egui::RichText::new(self.project.tracks[ti].blend.name()).small());
-                        ui.label(egui::RichText::new("Master Video").small().weak());
+                        ui.label(
+                            egui::RichText::new(self.project.tracks[ti].blend.name_in(lang))
+                                .small(),
+                        );
+                        ui.label(egui::RichText::new(tr(lang, "Master Video")).small().weak());
                     }
                     let mute = self.project.tracks[ti].mute;
                     if ui.selectable_label(mute, "M").clicked() {
@@ -802,7 +910,7 @@ impl App {
                         self.changed();
                     }
                     if ui
-                        .selectable_label(self.sel_track == Some(ti), "Selecionar")
+                        .selectable_label(self.sel_track == Some(ti), tr(lang, "Selecionar"))
                         .clicked()
                     {
                         self.sel_track = Some(ti);
@@ -814,10 +922,14 @@ impl App {
     }
 
     fn details_buses_table(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let lang = self.lang();
         if self.project.audio_buses.is_empty() {
             ui.label(
-                egui::RichText::new("Nenhum barramento auxiliar. Adicione um barramento no Mixer.")
-                    .color(self.theme.text_muted),
+                egui::RichText::new(tr(
+                    lang,
+                    "Nenhum barramento auxiliar. Adicione um barramento no Mixer.",
+                ))
+                .color(self.theme.text_muted),
             );
             return;
         }
@@ -833,7 +945,8 @@ impl App {
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 for h in ["#", "Nome", "Saída", "Vol", "Pan", "M", "S", "FX"] {
-                    ui.label(egui::RichText::new(h).strong().small());
+                    let lbl = if h == "#" { h } else { tr(lang, h) };
+                    ui.label(egui::RichText::new(lbl).strong().small());
                 }
                 ui.end_row();
                 for bi in 0..nb {
@@ -870,7 +983,7 @@ impl App {
                                 .find(|(id, _)| *id == out_id)
                                 .map(|(_, nm)| nm.as_str())
                         })
-                        .unwrap_or("Master");
+                        .unwrap_or_else(|| tr(lang, "Master"));
                     ui.label(egui::RichText::new(out_lbl).small());
 
                     let mut vol = self.project.audio_buses[bi].volume_db;
@@ -923,13 +1036,24 @@ impl App {
     }
 
     fn build_details_tsv(&self) -> String {
+        let lang = self.lang();
         let fps = self.project.settings.fps;
         let sr = self.project.settings.sample_rate;
         let fmt = self.opts.time_format;
         let mut out = String::new();
         match self.edit_details.category {
             DetailsCategory::Events => {
-                out.push_str("Trilha\tEvento\tInício\tFim\tDuração\tOffset\tTaxa\tGanho\n");
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    tr(lang, "Trilha"),
+                    tr(lang, "Evento"),
+                    tr(lang, "Início"),
+                    tr(lang, "Fim"),
+                    tr(lang, "Duração"),
+                    tr(lang, "Offset"),
+                    tr(lang, "Taxa"),
+                    tr(lang, "Ganho"),
+                ));
                 for (ti, t) in self.project.tracks.iter().enumerate() {
                     for e in &t.events {
                         out.push_str(&format!(
@@ -947,7 +1071,11 @@ impl App {
                 }
             }
             DetailsCategory::Markers => {
-                out.push_str("#\tRótulo\tTempo\n");
+                out.push_str(&format!(
+                    "#\t{}\t{}\n",
+                    tr(lang, "Rótulo"),
+                    tr(lang, "Tempo")
+                ));
                 for (i, m) in self.project.markers.iter().enumerate() {
                     out.push_str(&format!(
                         "{}\t{}\t{}\n",
@@ -958,7 +1086,13 @@ impl App {
                 }
             }
             DetailsCategory::Regions => {
-                out.push_str("#\tRótulo\tInício\tFim\tDuração\n");
+                out.push_str(&format!(
+                    "#\t{}\t{}\t{}\t{}\n",
+                    tr(lang, "Rótulo"),
+                    tr(lang, "Início"),
+                    tr(lang, "Fim"),
+                    tr(lang, "Duração"),
+                ));
                 for (i, r) in self.project.regions.iter().enumerate() {
                     out.push_str(&format!(
                         "{}\t{}\t{}\t{}\t{}\n",
@@ -971,15 +1105,21 @@ impl App {
                 }
             }
             DetailsCategory::Tracks => {
-                out.push_str("#\tTipo\tNome\tMute\tSolo\n");
+                out.push_str(&format!(
+                    "#\t{}\t{}\t{}\t{}\n",
+                    tr(lang, "Tipo"),
+                    tr(lang, "Nome"),
+                    tr(lang, "Mute"),
+                    tr(lang, "Solo"),
+                ));
                 for (i, t) in self.project.tracks.iter().enumerate() {
                     out.push_str(&format!(
                         "{}\t{}\t{}\t{}\t{}\n",
                         i + 1,
                         if t.kind == TrackKind::Video {
-                            "Vídeo"
+                            tr(lang, "Vídeo")
                         } else {
-                            "Áudio"
+                            tr(lang, "Áudio")
                         },
                         t.name,
                         t.mute,
@@ -988,7 +1128,14 @@ impl App {
                 }
             }
             DetailsCategory::Buses => {
-                out.push_str("#\tNome\tVol_dB\tPan\tMute\tSolo\n");
+                out.push_str(&format!(
+                    "#\t{}\t{}\t{}\t{}\t{}\n",
+                    tr(lang, "Nome"),
+                    tr(lang, "Vol_dB"),
+                    tr(lang, "Pan"),
+                    tr(lang, "Mute"),
+                    tr(lang, "Solo"),
+                ));
                 for (i, b) in self.project.audio_buses.iter().enumerate() {
                     out.push_str(&format!(
                         "{}\t{}\t{:+.1}\t{:.2}\t{}\t{}\n",

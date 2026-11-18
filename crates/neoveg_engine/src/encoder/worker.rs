@@ -330,7 +330,11 @@ fn resolve_audio_only_fallback(fmt: RenderFormat) -> RenderFormat {
     match fmt {
         RenderFormat::Mp4H264
         | RenderFormat::Mp4Hevc
+        | RenderFormat::Mp4Av1
         | RenderFormat::MovH264
+        | RenderFormat::MovHevc
+        | RenderFormat::MovAv1
+        | RenderFormat::MovMpeg4
         | RenderFormat::ThreeGp => {
             #[cfg(windows)]
             {
@@ -351,6 +355,13 @@ fn resolve_audio_only_fallback(fmt: RenderFormat) -> RenderFormat {
                 RenderFormat::Wav
             }
         }
+        RenderFormat::MkvFfv1
+        | RenderFormat::MkvMjpeg
+        | RenderFormat::MkvPng
+        | RenderFormat::MkvH264
+        | RenderFormat::MkvHevc
+        | RenderFormat::MkvAv1
+        | RenderFormat::MkvVp9 => RenderFormat::Flac,
         _ => RenderFormat::Wav,
     }
 }

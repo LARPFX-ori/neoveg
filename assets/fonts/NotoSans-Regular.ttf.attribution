@@ -1,0 +1,9 @@
+asset:        NotoSans-Regular.ttf
+title:        Noto Sans Regular (fallback multilíngue e de diacríticos da interface)
+author:       The Noto Project Authors / Monotype Design Team
+source:       https://github.com/notofonts/latin-greek-cyrillic/releases/download/NotoSans-v2.015/NotoSans-v2.015.zip
+license:      OFL-1.1
+license-file: assets/fonts/NotoSans.LICENSE.txt
+added:        2026-11-18 por contribuidores do projeto Neoveg
+notes:        Versão NotoSans-v2.015 (hinted), caminho interno NotoSans/hinted/ttf/NotoSans-Regular.ttf (SHA-256: 478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823).
+              Utilizada como fallback principal para caracteres latinos estendidos, gregos, cirílicos, ordinais (º) e símbolos (ℹ).

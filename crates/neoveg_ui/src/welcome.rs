@@ -14,6 +14,7 @@ use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Shape,
     Stroke, StrokeKind, Vec2,
 };
+use neoveg_common::{tr, tr_args, Language};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -31,12 +32,13 @@ impl WelcomeSection {
         WelcomeSection::GettingStarted,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
             WelcomeSection::NewProject => "Novo Projeto",
             WelcomeSection::OpenProject => "Abrir Projeto",
             WelcomeSection::GettingStarted => "Primeiros Passos",
-        }
+        };
+        tr(lang, key)
     }
 }
 
@@ -216,14 +218,15 @@ impl WelcomeAspect {
         WelcomeAspect::Scope240_1,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
             WelcomeAspect::Widescreen16_9 => "Widescreen (16:9)",
             WelcomeAspect::Fullscreen4_3 => "Fullscreen (4:3)",
             WelcomeAspect::Portrait9_16 => "Portrait (9:16)",
             WelcomeAspect::Square1_1 => "Square (1:1)",
             WelcomeAspect::Scope240_1 => "Scope (2.4:1)",
-        }
+        };
+        tr(lang, key)
     }
 
     pub fn short_label(self) -> &'static str {
@@ -403,8 +406,13 @@ fn draw_nav_tile(
     sec: WelcomeSection,
     active: bool,
     theme: &ThemeColors,
+    lang: Language,
 ) -> bool {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let label = sec.label_in(lang);
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     let bg = if active {
         theme.selection_bg
     } else if resp.hovered() {
@@ -438,7 +446,7 @@ fn draw_nav_tile(
     p.text(
         pos2(rect.center().x, rect.bottom() - rect.height() * 0.22),
         Align2::CENTER_CENTER,
-        sec.label(),
+        sec.label_in(lang),
         FontId::proportional(if size.x < 92.0 { 10.5 } else { 11.5 }),
         fg,
     );
@@ -521,6 +529,7 @@ fn draw_aspect_tile(
     active: bool,
     compact: bool,
     theme: &ThemeColors,
+    lang: Language,
 ) -> bool {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let bg = if active {
@@ -554,7 +563,7 @@ fn draw_aspect_tile(
     let text = if compact {
         aspect.short_label()
     } else {
-        aspect.label()
+        aspect.label_in(lang)
     };
     p.text(
         pos2(rect.center().x, rect.bottom() - rect.height() * 0.20),
@@ -563,7 +572,8 @@ fn draw_aspect_tile(
         FontId::proportional(if rect.width() < 110.0 { 9.5 } else { 10.8 }),
         fg,
     );
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, aspect.label()));
+    let full_label = aspect.label_in(lang);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, full_label));
     resp.clicked()
 }
 
@@ -763,14 +773,17 @@ impl App {
         p.settings.fps = fps;
         p.settings.drop_frame = fps.is_ntsc_drop_eligible() && drop_frame;
         p.settings.manually_configured = manually_configured;
+        let lang = self.lang();
         self.session.reset_project(p, None);
         self.thumbs.clear();
         self.project_media.clear_thumbs();
-        self.set_status(format!(
-            "Novo projeto: {}×{} @ {} qps",
-            self.project.settings.width,
-            self.project.settings.height,
-            self.project.settings.fps.label()
+        let w_s = self.project.settings.width.to_string();
+        let h_s = self.project.settings.height.to_string();
+        let fps_s = self.project.settings.fps.label_in(lang);
+        self.set_status(tr_args(
+            lang,
+            "Novo projeto: {w}×{h} @ {fps} qps",
+            &[("w", &w_s), ("h", &h_s), ("fps", &fps_s)],
         ));
     }
 
@@ -783,6 +796,7 @@ impl App {
             return;
         }
 
+        let lang = self.lang();
         let sr = ctx.screen_rect();
         let backdrop_col = if self.theme.high_contrast {
             Color32::from_black_alpha(230)
@@ -793,6 +807,7 @@ impl App {
         };
 
         let mut action = WelcomeAction::None;
+        let mut lang_change: Option<Language> = None;
         egui::Area::new(egui::Id::new("neoveg_welcome_backdrop"))
             .fixed_pos(sr.min)
             .order(egui::Order::Middle)
@@ -860,7 +875,7 @@ impl App {
             .frame(frame)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                // Barra superior centralizada com logo e nome Neoveg + botão Fechar
+                // Barra superior centralizada com logo e nome Neoveg + seletor de idioma + botão Fechar
                 let header_h = 40.0;
                 let (h_rect, _) = ui.allocate_exact_size(vec2(card_w, header_h), Sense::hover());
                 let hp = ui.painter_at(h_rect);
@@ -870,6 +885,28 @@ impl App {
                     theme.panel_fill
                 };
                 hp.rect_filled(h_rect, 0.0_f32, header_fill);
+                let lang_w = if compact_w { 88.0 } else { 128.0 };
+                let lang_rect = Rect::from_center_size(
+                    pos2(h_rect.left() + lang_w * 0.5 + 10.0, h_rect.center().y),
+                    vec2(lang_w, 24.0),
+                );
+                let mut lang_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(lang_rect)
+                        .id_salt("welcome_lang_child"),
+                );
+                egui::ComboBox::from_id_salt("welcome_language_combo")
+                    .width(lang_w)
+                    .selected_text(lang.native_name())
+                    .show_ui(&mut lang_ui, |ui| {
+                        for l in Language::ALL {
+                            if ui.selectable_label(lang == l, l.native_name()).clicked()
+                                && l != lang
+                            {
+                                lang_change = Some(l);
+                            }
+                        }
+                    });
                 let mark_rect = Rect::from_center_size(
                     pos2(h_rect.center().x - 42.0, h_rect.center().y),
                     vec2(24.0, 24.0),
@@ -892,7 +929,7 @@ impl App {
                         .id_salt("welcome_close_child"),
                 );
                 if icons::small_icon_button(&mut close_ui, Icon::CloseX, None, false, &theme)
-                    .on_hover_text("Fechar (Esc)")
+                    .on_hover_text(tr(lang, "Fechar (Esc)"))
                     .clicked()
                 {
                     action = WelcomeAction::Close;
@@ -935,6 +972,7 @@ impl App {
                                 sec,
                                 state.section == sec,
                                 &theme,
+                                lang,
                             ) {
                                 state.section = sec;
                             }
@@ -949,12 +987,15 @@ impl App {
                                         .add_sized(
                                             [nav_w - 10.0, 26.0],
                                             egui::Button::new(
-                                                RichText::new("Recuperar")
+                                                RichText::new(tr(lang, "Recuperar"))
                                                     .small()
                                                     .color(theme.accent),
                                             ),
                                         )
-                                        .on_hover_text("Recuperar projeto salvo automaticamente")
+                                        .on_hover_text(tr(
+                                            lang,
+                                            "Recuperar projeto salvo automaticamente",
+                                        ))
                                         .clicked()
                                     {
                                         action = WelcomeAction::RecoverSession;
@@ -980,6 +1021,7 @@ impl App {
                                     &mut right_ui,
                                     &mut state,
                                     &theme,
+                                    lang,
                                     compact_w,
                                     compact_h,
                                 );
@@ -990,10 +1032,11 @@ impl App {
                                     &recents,
                                     has_recovery,
                                     &theme,
+                                    lang,
                                 );
                             }
                             WelcomeSection::GettingStarted => {
-                                action = draw_getting_started_pane(&mut right_ui, &theme);
+                                action = draw_getting_started_pane(&mut right_ui, &theme, lang);
                             }
                         }
                     },
@@ -1015,15 +1058,17 @@ impl App {
                 foot_ui.horizontal(|ui| {
                     ui.checkbox(
                         &mut show_on_startup,
-                        "Mostrar tela de boas-vindas ao iniciar",
+                        tr(lang, "Mostrar tela de boas-vindas ao iniciar"),
                     );
                     if !compact_w {
+                        let ver_s = env!("CARGO_PKG_VERSION");
+                        let w_s = workers.to_string();
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                RichText::new(format!(
-                                    "v{} • {} worker(s)",
-                                    env!("CARGO_PKG_VERSION"),
-                                    workers
+                                RichText::new(tr_args(
+                                    lang,
+                                    "v{ver} • {n} worker(s)",
+                                    &[("ver", &ver_s), ("n", &w_s)],
                                 ))
                                 .small()
                                 .color(theme.text_muted),
@@ -1035,10 +1080,19 @@ impl App {
 
         self.welcome = state;
 
+        if let Some(new_lang) = lang_change {
+            self.apply_language(Some(ctx), new_lang, true);
+        }
+
         if show_on_startup != show_before {
             self.prefs.show_welcome = show_on_startup;
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!("Aviso ao salvar preferência: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    self.lang(),
+                    "Aviso ao salvar preferência: {err}",
+                    &[("err", &err_s)],
+                ));
             }
         }
 
@@ -1075,13 +1129,23 @@ impl App {
             WelcomeAction::RemoveRecent(raw) => {
                 self.prefs.remove_recent_project(&raw);
                 if let Err(e) = self.prefs.save() {
-                    self.set_status(format!("Aviso ao atualizar recentes: {e}"));
+                    let err_s = e.to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "Aviso ao atualizar recentes: {err}",
+                        &[("err", &err_s)],
+                    ));
                 }
             }
             WelcomeAction::ClearRecents => {
                 self.prefs.clear_recent_projects();
                 if let Err(e) = self.prefs.save() {
-                    self.set_status(format!("Aviso ao limpar recentes: {e}"));
+                    let err_s = e.to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "Aviso ao limpar recentes: {err}",
+                        &[("err", &err_s)],
+                    ));
                 }
             }
             WelcomeAction::RecoverSession => {
@@ -1090,7 +1154,7 @@ impl App {
                     self.open_project_path(p);
                     self.path = None;
                     self.dirty = true;
-                    self.set_status("Projeto recuperado. Salve-o com Salvar como...");
+                    self.set_status(tr(lang, "Projeto recuperado. Salve-o com Salvar como..."));
                 }
             }
             WelcomeAction::OpenLayoutProps => {
@@ -1114,6 +1178,7 @@ fn draw_new_project_pane(
     ui: &mut egui::Ui,
     state: &mut WelcomeState,
     theme: &ThemeColors,
+    lang: Language,
     compact_w: bool,
     compact_h: bool,
 ) -> WelcomeAction {
@@ -1145,6 +1210,7 @@ fn draw_new_project_pane(
                 state.aspect == aspect,
                 compact_w,
                 theme,
+                lang,
             ) {
                 state.select_aspect(aspect);
             }
@@ -1161,7 +1227,7 @@ fn draw_new_project_pane(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("Criar um novo projeto")
+                        RichText::new(tr(lang, "Criar um novo projeto"))
                             .strong()
                             .color(theme.text_primary),
                     );
@@ -1175,20 +1241,27 @@ fn draw_new_project_pane(
                     let field_w = (ui.available_width() - label_w - 8.0).max(120.0);
 
                     ui.horizontal(|ui| {
-                        ui.add_sized([label_w, 22.0], egui::Label::new("Resolução:"));
+                        ui.add_sized([label_w, 22.0], egui::Label::new(tr(lang, "Resolução:")));
                         egui::ComboBox::from_id_salt("welcome_res_combo")
                             .width(field_w)
-                            .selected_text(cur_res.label)
+                            .selected_text(tr(lang, cur_res.label))
                             .show_ui(ui, |ui| {
                                 for (idx, item) in res_list.iter().enumerate() {
-                                    ui.selectable_value(&mut state.res_idx, idx, item.label);
+                                    ui.selectable_value(
+                                        &mut state.res_idx,
+                                        idx,
+                                        tr(lang, item.label),
+                                    );
                                 }
                             });
                     });
 
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
-                        ui.add_sized([label_w, 22.0], egui::Label::new("Taxa de quadros:"));
+                        ui.add_sized(
+                            [label_w, 22.0],
+                            egui::Label::new(tr(lang, "Taxa de quadros:")),
+                        );
                         let fps_w = if compact_w {
                             field_w.max(120.0)
                         } else {
@@ -1198,10 +1271,14 @@ fn draw_new_project_pane(
                         let prev_fps_idx = state.fps_idx;
                         egui::ComboBox::from_id_salt("welcome_fps_combo")
                             .width(fps_w)
-                            .selected_text(cur_fps.label)
+                            .selected_text(tr(lang, cur_fps.label))
                             .show_ui(ui, |ui| {
                                 for (idx, item) in WELCOME_FPS.iter().enumerate() {
-                                    ui.selectable_value(&mut state.fps_idx, idx, item.label);
+                                    ui.selectable_value(
+                                        &mut state.fps_idx,
+                                        idx,
+                                        tr(lang, item.label),
+                                    );
                                 }
                             });
                         if state.fps_idx != prev_fps_idx {
@@ -1210,14 +1287,14 @@ fn draw_new_project_pane(
 
                         let drop_label = if drop_eligible {
                             if state.drop_frame {
-                                "Drop Frame (1/1.001)"
+                                tr(lang, "Drop Frame (1/1.001)")
                             } else {
-                                "Non-Drop Frame (NTSC)"
+                                tr(lang, "Non-Drop Frame (NTSC)")
                             }
                         } else if cur_fps.fps == FrameRate::FPS_23_976 {
-                            "NTSC Film (1/1.001)"
+                            tr(lang, "NTSC Film (1/1.001)")
                         } else {
-                            "Taxa inteira (1/1)"
+                            tr(lang, "Taxa inteira (1/1)")
                         };
                         egui::ComboBox::from_id_salt("welcome_drop_combo")
                             .width(drop_w)
@@ -1227,18 +1304,19 @@ fn draw_new_project_pane(
                                     ui.selectable_value(
                                         &mut state.drop_frame,
                                         true,
-                                        "Drop Frame (1/1.001)",
+                                        tr(lang, "Drop Frame (1/1.001)"),
                                     );
                                     ui.selectable_value(
                                         &mut state.drop_frame,
                                         false,
-                                        "Non-Drop Frame (NTSC)",
+                                        tr(lang, "Non-Drop Frame (NTSC)"),
                                     );
                                 } else {
                                     ui.label(
-                                        RichText::new(
+                                        RichText::new(tr(
+                                            lang,
                                             "Drop Frame aplica-se a 29,970 e 59,940 qps.",
-                                        )
+                                        ))
                                         .small()
                                         .color(theme.text_muted),
                                     );
@@ -1251,7 +1329,7 @@ fn draw_new_project_pane(
                         if !compact_w {
                             ui.add_space(label_w + 6.0);
                         }
-                        if ui.button("Criar Projeto").clicked() {
+                        if ui.button(tr(lang, "Criar Projeto")).clicked() {
                             act = WelcomeAction::CreateProject {
                                 width: cur_res.width,
                                 height: cur_res.height,
@@ -1260,7 +1338,7 @@ fn draw_new_project_pane(
                                 open_advanced: false,
                             };
                         }
-                        if ui.button("Configurações Avançadas...").clicked() {
+                        if ui.button(tr(lang, "Configurações Avançadas...")).clicked() {
                             act = WelcomeAction::CreateProject {
                                 width: cur_res.width,
                                 height: cur_res.height,
@@ -1280,13 +1358,14 @@ fn draw_open_project_pane(
     recents: &[String],
     has_recovery: bool,
     theme: &ThemeColors,
+    lang: Language,
 ) -> WelcomeAction {
     let mut act = WelcomeAction::None;
     egui::Frame::NONE
         .inner_margin(Margin::symmetric(18, 14))
         .show(ui, |ui| {
             ui.label(
-                RichText::new("Abrir Projeto")
+                RichText::new(tr(lang, "Abrir Projeto"))
                     .size(16.0)
                     .strong()
                     .color(theme.text_primary),
@@ -1296,7 +1375,7 @@ fn draw_open_project_pane(
                 if icons::icon_button(
                     ui,
                     Icon::OpenFolder,
-                    Some("Procurar arquivo (.neoveg / .nvp)..."),
+                    Some(tr(lang, "Procurar arquivo (.neoveg / .nvp)...")),
                     false,
                     true,
                     theme,
@@ -1308,7 +1387,7 @@ fn draw_open_project_pane(
                 if icons::icon_button(
                     ui,
                     Icon::ImportMedia,
-                    Some("Importar mídia..."),
+                    Some(tr(lang, "Importar mídia...")),
                     false,
                     true,
                     theme,
@@ -1317,21 +1396,24 @@ fn draw_open_project_pane(
                 {
                     act = WelcomeAction::ImportMedia;
                 }
-                if !recents.is_empty() && ui.small_button("Limpar lista").clicked() {
+                if !recents.is_empty() && ui.small_button(tr(lang, "Limpar lista")).clicked() {
                     act = WelcomeAction::ClearRecents;
                 }
             });
 
             if has_recovery {
                 ui.add_space(6.0);
-                if ui.button("Recuperar sessão anterior...").clicked() {
+                if ui
+                    .button(tr(lang, "Recuperar sessão anterior..."))
+                    .clicked()
+                {
                     act = WelcomeAction::RecoverSession;
                 }
             }
 
             ui.add_space(10.0);
             ui.label(
-                RichText::new("Projetos recentes")
+                RichText::new(tr(lang, "Projetos recentes"))
                     .strong()
                     .color(theme.text_primary),
             );
@@ -1339,7 +1421,7 @@ fn draw_open_project_pane(
             if recents.is_empty() {
                 ui.group(|ui| {
                     ui.label(
-                        RichText::new("Nenhum projeto recente registrado ainda.")
+                        RichText::new(tr(lang, "Nenhum projeto recente registrado ainda."))
                             .color(theme.text_muted),
                     );
                 });
@@ -1365,8 +1447,12 @@ fn draw_open_project_pane(
                                         let title_rt = if exists {
                                             RichText::new(&name).strong()
                                         } else {
-                                            RichText::new(format!("{name} (ausente)"))
-                                                .color(theme.text_muted)
+                                            RichText::new(tr_args(
+                                                lang,
+                                                "{name} (ausente)",
+                                                &[("name", &name)],
+                                            ))
+                                            .color(theme.text_muted)
                                         };
                                         if ui
                                             .add(egui::Button::new(title_rt).frame(false))
@@ -1386,7 +1472,7 @@ fn draw_open_project_pane(
                                                 false,
                                                 theme,
                                             )
-                                            .on_hover_text("Remover dos recentes")
+                                            .on_hover_text(tr(lang, "Remover dos recentes"))
                                             .clicked()
                                             {
                                                 act = WelcomeAction::RemoveRecent(raw.clone());
@@ -1394,7 +1480,7 @@ fn draw_open_project_pane(
                                             if ui
                                                 .add_enabled(
                                                     exists,
-                                                    egui::Button::new("Abrir").small(),
+                                                    egui::Button::new(tr(lang, "Abrir")).small(),
                                                 )
                                                 .clicked()
                                             {
@@ -1411,13 +1497,17 @@ fn draw_open_project_pane(
     act
 }
 
-fn draw_getting_started_pane(ui: &mut egui::Ui, theme: &ThemeColors) -> WelcomeAction {
+fn draw_getting_started_pane(
+    ui: &mut egui::Ui,
+    theme: &ThemeColors,
+    lang: Language,
+) -> WelcomeAction {
     let mut act = WelcomeAction::None;
     egui::Frame::NONE
         .inner_margin(Margin::symmetric(18, 14))
         .show(ui, |ui| {
             ui.label(
-                RichText::new("Primeiros Passos no Neoveg")
+                RichText::new(tr(lang, "Primeiros Passos no Neoveg"))
                     .size(16.0)
                     .strong()
                     .color(theme.text_primary),
@@ -1447,8 +1537,16 @@ fn draw_getting_started_pane(ui: &mut egui::Ui, theme: &ThemeColors) -> WelcomeA
                     ];
                     for (title, body) in tips {
                         ui.group(|ui| {
-                            ui.label(RichText::new(title).strong().color(theme.text_primary));
-                            ui.label(RichText::new(body).small().color(theme.text_muted));
+                            ui.label(
+                                RichText::new(tr(lang, title))
+                                    .strong()
+                                    .color(theme.text_primary),
+                            );
+                            ui.label(
+                                RichText::new(tr(lang, body))
+                                    .small()
+                                    .color(theme.text_muted),
+                            );
                         });
                         ui.add_space(4.0);
                     }
@@ -1457,7 +1555,7 @@ fn draw_getting_started_pane(ui: &mut egui::Ui, theme: &ThemeColors) -> WelcomeA
                         if icons::small_icon_button(
                             ui,
                             Icon::LayoutWindow,
-                            Some("Layout da interface..."),
+                            Some(tr(lang, "Layout da interface...")),
                             false,
                             theme,
                         )
@@ -1468,7 +1566,7 @@ fn draw_getting_started_pane(ui: &mut egui::Ui, theme: &ThemeColors) -> WelcomeA
                         if icons::small_icon_button(
                             ui,
                             Icon::GearProps,
-                            Some("Preferências..."),
+                            Some(tr(lang, "Preferências...")),
                             false,
                             theme,
                         )
@@ -1476,7 +1574,7 @@ fn draw_getting_started_pane(ui: &mut egui::Ui, theme: &ThemeColors) -> WelcomeA
                         {
                             act = WelcomeAction::OpenPrefs;
                         }
-                        if ui.button("Atalhos de teclado...").clicked() {
+                        if ui.button(tr(lang, "Atalhos de teclado...")).clicked() {
                             act = WelcomeAction::OpenShortcuts;
                         }
                     });
@@ -1493,6 +1591,7 @@ mod tests {
 
     #[test]
     fn welcome_screen_desenha_em_todos_os_temas_sem_panico() {
+        let _lock = crate::kittest_tests::lock_test_prefs();
         let ctx = egui::Context::default();
         let mut app = App::with_context(&ctx, None);
         app.dismiss_splash();

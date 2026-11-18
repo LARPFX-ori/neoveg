@@ -31,6 +31,8 @@ pub enum ImageSeqFormat {
     Pnm,
     Qoi,
     Dpx,
+    Dpx10,
+    Cineon,
     Exr,
 }
 
@@ -45,7 +47,8 @@ impl ImageSeqFormat {
             Self::Webp => "webp",
             Self::Pnm => "ppm",
             Self::Qoi => "qoi",
-            Self::Dpx => "dpx",
+            Self::Dpx | Self::Dpx10 => "dpx",
+            Self::Cineon => "cin",
             Self::Exr => "exr",
         }
     }
@@ -236,7 +239,10 @@ fn rgba_to_rgb(img: &RgbaImage) -> Vec<u8> {
 }
 
 pub fn encode_seq_frame(img: &RgbaImage, fmt: ImageSeqFormat, quality: u8) -> Result<Vec<u8>> {
-    encode_image_for_ext(img, fmt.ext(), quality)
+    match fmt {
+        ImageSeqFormat::Dpx10 => encode_dpx_10bit(img),
+        _ => encode_image_for_ext(img, fmt.ext(), quality),
+    }
 }
 
 /// Codifica RGBA8 em OpenEXR (`Rgba32F` em bytes little-endian, sem `unsafe`).
@@ -489,22 +495,26 @@ fn map_dpx_pixel(desc: u8, c: [u8; 4], dst: &mut [u8]) {
     }
 }
 
-/// Codifica uma imagem RGBA em DPX 2.0 (SMPTE 268M, 8 bits RGB/RGBA BE não comprimido).
-pub fn encode_dpx(img: &RgbaImage) -> Result<Vec<u8>> {
-    let w = img.width();
-    let h = img.height();
-    let has_alpha = img.as_raw().as_chunks::<4>().0.iter().any(|p| p[3] < 255);
-    let comps = if has_alpha { 4usize } else { 3usize };
-    let desc = if has_alpha { 51u8 } else { 50u8 };
+fn init_dpx_buffer(
+    w: u32,
+    h: u32,
+    desc: u8,
+    bit_depth: u8,
+    packing: u16,
+    ref_high: u32,
+    pixel_bytes: usize,
+) -> Result<(Vec<u8>, usize)> {
     let data_offset = 2048usize;
-    let pixel_bytes = (w as usize) * (h as usize) * comps;
-    let total_size = data_offset + pixel_bytes;
+    let total_size = data_offset
+        .checked_add(pixel_bytes)
+        .ok_or_else(|| anyhow!("DPX grande demais"))?;
+    let total_u32 = u32::try_from(total_size).map_err(|_| anyhow!("DPX excede 4 GiB"))?;
 
     let mut buf = vec![0u8; total_size];
     buf[0..4].copy_from_slice(b"SDPX");
     buf[4..8].copy_from_slice(&(data_offset as u32).to_be_bytes());
     buf[8..16].copy_from_slice(b"V2.0\0\0\0\0");
-    buf[16..20].copy_from_slice(&(total_size as u32).to_be_bytes());
+    buf[16..20].copy_from_slice(&total_u32.to_be_bytes());
     buf[20..24].copy_from_slice(&1u32.to_be_bytes()); // ditto key
     buf[24..28].copy_from_slice(&1664u32.to_be_bytes()); // generic header size
     buf[28..32].copy_from_slice(&384u32.to_be_bytes()); // industry header size
@@ -516,14 +526,27 @@ pub fn encode_dpx(img: &RgbaImage) -> Result<Vec<u8>> {
     buf[772..776].copy_from_slice(&w.to_be_bytes());
     buf[776..780].copy_from_slice(&h.to_be_bytes());
     buf[780..784].copy_from_slice(&0u32.to_be_bytes()); // data sign = unsigned
-    buf[792..796].copy_from_slice(&255u32.to_be_bytes()); // ref high
+    buf[792..796].copy_from_slice(&ref_high.to_be_bytes()); // ref high
     buf[800] = desc;
     buf[801] = 2; // linear transfer
     buf[802] = 2; // colorimetric
-    buf[803] = 8; // bit depth
-    buf[804..806].copy_from_slice(&0u16.to_be_bytes()); // packing
+    buf[803] = bit_depth;
+    buf[804..806].copy_from_slice(&packing.to_be_bytes());
     buf[806..808].copy_from_slice(&0u16.to_be_bytes()); // encoding = none
     buf[808..812].copy_from_slice(&(data_offset as u32).to_be_bytes());
+    Ok((buf, data_offset))
+}
+
+/// Codifica uma imagem RGBA em DPX 2.0 (SMPTE 268M, 8 bits RGB/RGBA BE não comprimido).
+pub fn encode_dpx(img: &RgbaImage) -> Result<Vec<u8>> {
+    let w = img.width();
+    let h = img.height();
+    let _ = validate_dims(w, h, "DPX8")?;
+    let has_alpha = img.as_raw().as_chunks::<4>().0.iter().any(|p| p[3] < 255);
+    let comps = if has_alpha { 4usize } else { 3usize };
+    let desc = if has_alpha { 51u8 } else { 50u8 };
+    let pixel_bytes = (w as usize) * (h as usize) * comps;
+    let (mut buf, data_offset) = init_dpx_buffer(w, h, desc, 8, 0, 255, pixel_bytes)?;
 
     let dst = &mut buf[data_offset..];
     if has_alpha {
@@ -534,6 +557,30 @@ pub fn encode_dpx(img: &RgbaImage) -> Result<Vec<u8>> {
             dst[i * 3 + 1] = px[1];
             dst[i * 3 + 2] = px[2];
         }
+    }
+    Ok(buf)
+}
+
+/// Codifica uma imagem RGBA em DPX 2.0 de 10 bits por canal RGB
+/// (ANSI/SMPTE 268M-2003 Packing Method A, MSB-aligned big-endian).
+pub fn encode_dpx_10bit(img: &RgbaImage) -> Result<Vec<u8>> {
+    let w = img.width();
+    let h = img.height();
+    let _ = validate_dims(w, h, "DPX10")?;
+    let pixel_bytes = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|p| p.checked_mul(4))
+        .ok_or_else(|| anyhow!("DPX 10 bits grande demais"))?;
+    let (mut buf, data_offset) = init_dpx_buffer(w, h, 50, 10, 1, 1023, pixel_bytes)?;
+
+    let mut off = data_offset;
+    for px in img.as_raw().as_chunks::<4>().0 {
+        let r10 = (u32::from(px[0]) << 2) | (u32::from(px[0]) >> 6);
+        let g10 = (u32::from(px[1]) << 2) | (u32::from(px[1]) >> 6);
+        let b10 = (u32::from(px[2]) << 2) | (u32::from(px[2]) >> 6);
+        let word = (r10 << 22) | (g10 << 12) | (b10 << 2);
+        buf[off..off + 4].copy_from_slice(&word.to_be_bytes());
+        off += 4;
     }
     Ok(buf)
 }
@@ -1377,6 +1424,33 @@ mod tests {
         for ext in ["dpx", "cin", "wbmp", "xbm", "xpm", "iff"] {
             assert!(decode_extra_image(ext, b"").is_err());
             assert!(decode_extra_image(ext, b"garbage").is_err());
+        }
+    }
+
+    #[test]
+    fn roundtrip_dpx10_cineon_exr_1x1_and_odd_dims() {
+        for (w, h) in [(1u32, 1u32), (17u32, 13u32)] {
+            let mut img = RgbaImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let r = ((x * 29 + y * 7) % 255) as u8;
+                    let g = ((x * 13 + y * 41) % 255) as u8;
+                    let b = ((x * 5 + y * 19 + 80) % 255) as u8;
+                    img.put_pixel(x, y, Rgba([r, g, b, 255]));
+                }
+            }
+            let dpx10 = encode_seq_frame(&img, ImageSeqFormat::Dpx10, 90).unwrap();
+            let dpx_dec = decode_dpx(&dpx10).unwrap();
+            assert_eq!(dpx_dec.dimensions(), (w, h));
+            assert_eq!(dpx_dec.get_pixel(0, 0).0, img.get_pixel(0, 0).0);
+
+            let cin = encode_seq_frame(&img, ImageSeqFormat::Cineon, 90).unwrap();
+            let cin_dec = decode_cineon(&cin).unwrap();
+            assert_eq!(cin_dec.dimensions(), (w, h));
+            assert_eq!(cin_dec.get_pixel(0, 0).0, img.get_pixel(0, 0).0);
+
+            let exr = encode_seq_frame(&img, ImageSeqFormat::Exr, 90).unwrap();
+            assert!(exr.starts_with(&[0x76, 0x2F, 0x31, 0x01]));
         }
     }
 

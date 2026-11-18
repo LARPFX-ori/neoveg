@@ -559,6 +559,7 @@ pub fn import_fcp7_str(text: &str) -> Result<(Project, Vec<String>), NeovegError
                 id: new_id(),
                 t: frames_to_ticks(f, fps),
                 label: child_text(m, "name").unwrap_or("").to_string(),
+                ..Default::default()
             })
         })
         .collect();
@@ -666,7 +667,7 @@ impl Exporter<'_> {
             return;
         };
         let path = match &m.source {
-            MediaSource::File { path } => path.clone(),
+            MediaSource::File { path } | MediaSource::NestedProject { path } => path.clone(),
             MediaSource::ImageSequence { paths, .. } => paths.first().cloned().unwrap_or_default(),
             MediaSource::Generated(GenSpec::Text(spec)) if kind == TrackKind::Video => {
                 self.text_generator(e, spec, m.duration);

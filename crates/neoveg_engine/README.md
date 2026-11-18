@@ -44,10 +44,19 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 - **Edição de referência:** Especificações públicas **SubRip Text (`.srt`)** (`HH:MM:SS,mmm --> HH:MM:SS,mmm`) e **W3C WebVTT — *Web Video Text Tracks Format*** (cabeçalho `WEBVTT`, blocos `NOTE`/`STYLE`/`REGION`, deixas `(HH:)?MM:SS.mmm --> ...`, ajustes `align:` / `line:`).
 - **Método de implementação:** Sala limpa com aritmética exata de milissegundos em `Ticks`, sanitização linear de tags inline sem retrocesso e criação de faixas superiores `GenSpec::Text` compatíveis com Desfazer e exportação bidirecional (`fuzz_subtitles_srt_and_vtt`).
 
-### AVI (`.avi`, MJPEG / RGB24 / YUV + PCM / G.711) — `src/media/avi.rs`
+### AVI (`.avi`, MJPEG / RGB24 / BGRA / UYVY / r210 + PCM / G.711) — `src/media/avi.rs`
 
-- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`, bitmaps `BI_RGB`/`DIB `, `YUY2`/`UYVY`, `I420`/`IYUV`) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
-- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`), decodifica `MJPEG`, `BI_RGB`/`DIB ` (24/32 bpp) e YUV (`YUY2`/`UYVY` 4:2:2 e `I420`/`IYUV` 4:2:0) e áudio PCM/G.711. A escrita grava `MJPEG` ou `AVI Não Comprimido RGB24` (`AviVideoCodec::UncompressedRgb24`) em segmentos de até 1 GB: o primeiro é um AVI 1.0 completo com `idx1`, e os seguintes são `AVIX`. Cada stream ganha um `indx` com até 256 entradas (cerca de 256 GB) e um `ix##` por segmento; passar desse limite é um erro, nunca um arquivo corrompido. Áudio grande é dividido em chunks limitados. O tamanho de cada entrada do super-índice inclui os 8 bytes de cabeçalho do `ix##`, um ponto que a especificação deixa em aberto. Os testes percorrem `indx` → `ix##` → chunk e usam o `ffprobe` como oráculo externo.
+- **Edição de referência:** AVI RIFF (documentação pública da Microsoft: `avih`, `strh`, `strf`, `idx1`, bitmaps `BI_RGB`/`DIB ` 24/32 bpp, `YUY2`/`UYVY`, `I420`/`IYUV`, Blackmagic 10-bit RGB `r210` alinhado a 256 bytes/linha) e **OpenDML AVI File Format Extensions v1.02** (OpenDML AVI M-JPEG File Format Subcommittee, 28/02/1996): segmentos `RIFF 'AVIX'`, super-índice `indx`, índices padrão `ix##`, `LIST 'odml'` / `dmlh`.
+- **Método de implementação:** A leitura percorre todas as listas `movi` (de `RIFF 'AVI '` e `RIFF 'AVIX'`), decodifica `MJPEG`, `BI_RGB`/`DIB ` (24/32 bpp), `r210` e YUV (`YUY2`/`UYVY` 4:2:2 e `I420`/`IYUV` 4:2:0) e áudio PCM/G.711. A escrita grava `MJPEG` ou quadros não comprimidos (`RGB24`, `BGRA` 32 bits, `UYVY` 4:2:2 e `r210` 10 bits) em segmentos de até 1 GB com super-índice `indx`, índices `ix##` e `idx1`, testados sob oráculo `ffprobe`/`ffmpeg`.
+
+### QuickTime (`.mov`), Matroska (`.mkv`), FFV1 e FLAC — `src/media/{mov,mkv,ffv1,flac}.rs`
+
+- **Edições de referência:**
+  - **Apple QuickTime File Format / ISO/IEC 14496-12** (`ftyp` com marca `'qt  '`, `mdat` 64-bit, `moov`/`mvhd`/`trak`/`mdia`/`stbl` com `stsd` `BGRA`/`2vuy`/`jpeg`/`png ` + áudio PCM `sowt` e tabelas `stco`/`co64`);
+  - **IETF RFC 8794** (*EBML*) e **IETF RFC 9559** (*Matroska Media Container Format*: `Segment`/`Info`/`Tracks`/`Cluster`/`SimpleBlock`/`Cues` para `V_FFV1`, `V_MJPEG`, `V_PNG`, `V_MPEG4/ISO/AVC`, `V_MPEGH/ISO/HEVC`, `V_AV1`, `V_VP9`, `A_PCM/INT/LIT`, `A_FLAC`, `A_AAC`);
+  - **IETF RFC 9043** (*FFV1 Video Coding Format* v3: Range Coder padrão, JPEG 2000 RCT RGB + plano extra Alfa, slices independentes acima de 352×288 e CRC-32 IEEE);
+  - **IETF RFC 9639** (*Free Lossless Audio Codec — FLAC*: `fLaC` + `STREAMINFO`, quadros fixos com CRC-8/CRC-16, subquadros `CONSTANT`/`VERBATIM`/`FIXED` ordens 0..=4 e partições Rice em até 8 canais 16/24 bits).
+- **Método de implementação:** Gravadores e codificadores próprios em 100% Rust seguro (`#[forbid(unsafe_code)]`) com temporização exata inteira (`i128`), sem código de terceiros e validados contra `claxon`, demuxers internos (`media::demux`) e oráculo `ffmpeg`/`ffprobe`.
 
 ### Integrações ArtCraft & Blender — `src/integrations/`
 
@@ -81,13 +90,13 @@ Núcleo de edição, mixer de áudio multifaixa, compositor de vídeo, efeitos/t
 
 ### Formatos Adicionais de Imagem e Sequências — `src/media/img_extra.rs`
 
-- **Edições de referência:** **ANSI/SMPTE 268M-2003** (*DPX File Format*, big/little-endian 8/10/16 bits), **Kodak Cineon File Format v4.5** (`.cin`, cabeçalho 1024 B e empacotamento 10 bits), **WAP Wireless Bitmap Type 0** (`.wbmp`, *uintvar* multibyte + 1 bpp), **X Window System XBM & XPM v3** (`.xbm`, `.xpm` ASCII), **EA IFF 85 ILBM / PBM** (`.iff`, `.ilbm`, `.lbm`, `BMHD`/`CMAP`/`CAMG` EHB/HAM/`BODY` com compressão `ByteRun1`), além dos formatos licenciados do crate `image` 0.25 (`TGA`, `PNM`/`PBM`/`PGM`/`PPM`/`PAM`, `ICO`/`CUR`, `Radiance HDR`, `DDS`, `Farbfeld`, `QOI`, `OpenEXR`, `WebP` estático/animado).
+- **Edições de referência:** **ANSI/SMPTE 268M-2003** (*DPX File Format*, big/little-endian 8 bits RGB/RGBA e 10 bits Packing Method A MSB-aligned), **Kodak Cineon File Format v4.5** (`.cin`, cabeçalho 1024 B e empacotamento 10 bits), **WAP Wireless Bitmap Type 0** (`.wbmp`, *uintvar* multibyte + 1 bpp), **X Window System XBM & XPM v3** (`.xbm`, `.xpm` ASCII), **EA IFF 85 ILBM / PBM** (`.iff`, `.ilbm`, `.lbm`, `BMHD`/`CMAP`/`CAMG` EHB/HAM/`BODY` com compressão `ByteRun1`), além dos formatos licenciados do crate `image` 0.25 (`TGA`, `PNM`/`PBM`/`PGM`/`PPM`/`PAM`, `ICO`/`CUR`, `Radiance HDR`, `DDS`, `Farbfeld`, `QOI`, `OpenEXR`, `WebP` estático/animado).
 - **Método de implementação:** Leitores e escritores em sala limpa protegidos por `MAX_DIM` / orçamento de 512 MiB e testados sob mutação (`fuzz_imagens_extras`) e oráculo `ffmpeg`/`ffprobe` (`dpx`).
 
 ### Media Foundation no Windows (Decodificação e Codificação) — `src/media/mf/{mod,encode}.rs`
 
-- **Edição de referência:** Documentação pública da Microsoft Win32 Media Foundation (`IMFSourceReader`, `IMFSinkWriter`, `MFTranscodeGetAudioOutputAvailableTypes`, formato de entrada `MFVideoFormat_NV12`).
-- **Método de implementação:** Fronteira FFI isolada com RAII e `// SAFETY:`, gravação atômica em arquivo temporário com `drop` explícito antes da renomeação e testes locais com oráculo `ffprobe`.
+- **Edição de referência:** Documentação pública da Microsoft Win32 Media Foundation (`IMFSourceReader`, `IMFSinkWriter`, `MFTranscodeGetAudioOutputAvailableTypes`, codecs `H264`/`HEVC`/`AV1`/`MP4V`/`VP90`/`WMV3` e áudio `AAC`/`WMA`/`MP3` a partir de entradas `MFVideoFormat_NV12` e PCM 16-bit).
+- **Método de implementação:** Fronteira FFI isolada com RAII e `// SAFETY:`, gravação atômica em arquivo temporário com `drop` explícito antes da renomeação (incluindo remux direto MP4 → MKV via `media::demux` + `media::mkv` quando o codec de saída alvo é Matroska) e testes locais com oráculo `ffprobe`/`ffmpeg`.
 
 ### Neoveg Encoder e LUTs `.cube` 1D/3D — `src/encoder/`
 

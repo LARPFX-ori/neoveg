@@ -5,7 +5,7 @@
 use crate::media::MediaCache;
 use crate::model::*;
 use crate::prefs::PreviewQuality;
-use neoveg_common::{NeovegError, Result};
+use neoveg_common::{tr, tr_args, Language, NeovegError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,8 +49,8 @@ impl EditMode {
         EditMode::Roll,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             EditMode::Normal => "Normal",
             EditMode::Shuffle => "Shuffle (reordenar)",
             EditMode::Slip => "Slip (deslizar conteúdo)",
@@ -59,7 +59,12 @@ impl EditMode {
             EditMode::SplitTrim => "Split Trim (dividir e aparar)",
             EditMode::Roll => "Roll (ajuste conjunto de corte)",
             EditMode::Ripple => "Ripple (ondulação)",
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(Language::PtBr)
     }
 
     pub fn short_name(self) -> &'static str {
@@ -275,6 +280,88 @@ pub struct EditorOptions {
     /// vertically (audio only)"). Passos inteiros: subir e descer volta
     /// exatamente a 1×.
     pub waveform_zoom_steps: u8,
+    /// Prévia em tela dividida (Desligada, FX ignorados ou Área de transferência).
+    pub preview_split_mode: crate::playback::PreviewSplitMode,
+    /// Posição da divisória da prévia dividida (`0.08..=0.92`).
+    pub preview_split_pos: f32,
+    /// Divisão horizontal (cima/baixo) quando `true`, ou vertical (esquerda/direita).
+    pub preview_split_horizontal: bool,
+    /// Silencia todo o áudio apenas na monitoração da prévia (p. 200).
+    pub preview_mute_audio: bool,
+    /// Silencia toda a imagem na monitoração da prévia (p. 200).
+    pub preview_mute_video: bool,
+    /// Modo de edição multicâmera (grade de ângulos na Prévia + corte por tecla 1..9, p. 416).
+    pub multicam_mode: bool,
+    /// Ignora globalmente todos os efeitos de áudio (eventos, trilhas, barramentos e Master, p. 946).
+    pub bypass_all_audio_fx: bool,
+    /// Espaçamento da grade da régua da timeline (p. 232).
+    pub ruler_grid: RulerGridSpacing,
+    /// Encaixar edições na grade da régua (Snap to Grid, Ctrl+F8).
+    pub snap_to_grid: bool,
+    /// Travar envelopes nos eventos (menu Opções, p. 1014): mover um evento
+    /// leva junto os pontos de envelope e os quadros-chave da trilha no
+    /// trecho dele.
+    pub lock_envelopes: bool,
+}
+
+/// Espaçamento configurável da grade vertical da régua da timeline (pp. 86, 232).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum RulerGridSpacing {
+    #[default]
+    Auto,
+    Frame,
+    HalfSecond,
+    OneSecond,
+    TwoSeconds,
+    FiveSeconds,
+    TenSeconds,
+    Beats,
+}
+
+impl RulerGridSpacing {
+    pub const ALL: [RulerGridSpacing; 8] = [
+        RulerGridSpacing::Auto,
+        RulerGridSpacing::Frame,
+        RulerGridSpacing::HalfSecond,
+        RulerGridSpacing::OneSecond,
+        RulerGridSpacing::TwoSeconds,
+        RulerGridSpacing::FiveSeconds,
+        RulerGridSpacing::TenSeconds,
+        RulerGridSpacing::Beats,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RulerGridSpacing::Auto => "Automático (zoom)",
+            RulerGridSpacing::Frame => "Por quadro",
+            RulerGridSpacing::HalfSecond => "0,5 segundo",
+            RulerGridSpacing::OneSecond => "1 segundo",
+            RulerGridSpacing::TwoSeconds => "2 segundos",
+            RulerGridSpacing::FiveSeconds => "5 segundos",
+            RulerGridSpacing::TenSeconds => "10 segundos",
+            RulerGridSpacing::Beats => "Batidas musicais (BPM)",
+        }
+    }
+
+    pub fn step_ticks(self, settings: &ProjectSettings) -> Option<Ticks> {
+        match self {
+            RulerGridSpacing::Auto => None,
+            RulerGridSpacing::Frame => Some(settings.frame_dur().max(Ticks::from_raw(1))),
+            RulerGridSpacing::HalfSecond => Some(Ticks::from_millis_i64(500)),
+            RulerGridSpacing::OneSecond => Some(Ticks::from_secs_i64(1)),
+            RulerGridSpacing::TwoSeconds => Some(Ticks::from_secs_i64(2)),
+            RulerGridSpacing::FiveSeconds => Some(Ticks::from_secs_i64(5)),
+            RulerGridSpacing::TenSeconds => Some(Ticks::from_secs_i64(10)),
+            RulerGridSpacing::Beats => {
+                let bpm = if settings.bpm.is_finite() {
+                    settings.bpm.clamp(20.0, 300.0)
+                } else {
+                    120.0
+                };
+                Some(Ticks::from_secs_f64_clamped(60.0 / bpm).max(Ticks::from_raw(1)))
+            }
+        }
+    }
 }
 
 /// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
@@ -305,6 +392,16 @@ impl Default for EditorOptions {
             loop_playback: false,
             slip_all_takes: false,
             waveform_zoom_steps: 0,
+            preview_split_mode: crate::playback::PreviewSplitMode::Off,
+            preview_split_pos: 0.5,
+            preview_split_horizontal: false,
+            preview_mute_audio: false,
+            preview_mute_video: false,
+            multicam_mode: false,
+            bypass_all_audio_fx: false,
+            ruler_grid: RulerGridSpacing::Auto,
+            snap_to_grid: false,
+            lock_envelopes: false,
         }
     }
 }
@@ -337,6 +434,7 @@ pub struct EditorSession {
     pub opts: EditorOptions,
     /// Modo da ferramenta Normal (Normal, Shuffle, Slip, Slide, Stretch, SplitTrim, Roll).
     pub edit_mode: EditMode,
+    pub lang: Language,
     /// Ferramenta de edição ativa (Normal, Envelope, Seleção, Zoom).
     pub edit_tool: EditTool,
     /// Modo de eixo das ferramentas Seleção e Zoom em caixa (Livre, Horizontal, Vertical).
@@ -355,6 +453,10 @@ pub struct EditorSession {
 
 impl EditorSession {
     pub fn new(project: Project) -> Self {
+        Self::new_in(project, neoveg_common::active_language())
+    }
+
+    pub fn new_in(project: Project, lang: Language) -> Self {
         let snapshot = Arc::new(project.clone());
         crate::recovery::remember_snapshot(snapshot.clone());
         let sel_track = if project.tracks.is_empty() {
@@ -381,12 +483,17 @@ impl EditorSession {
             clip_base: Ticks::ZERO,
             opts: EditorOptions::default(),
             edit_mode: EditMode::Normal,
+            lang,
             edit_tool: EditTool::Normal,
             box_axis: BoxAxisMode::Both,
             expanded_edit: None,
             active_media_id: None,
             active_storyboard_id,
-            status: "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.".into(),
+            status: tr(
+                lang,
+                "Pronto. Arraste arquivos de mídia para a timeline ou use Ctrl+I.",
+            )
+            .into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),
         }
@@ -466,7 +573,7 @@ impl EditorSession {
         };
         self.redo.push(std::mem::replace(&mut self.project, p));
         self.after_history();
-        self.set_status("Desfazer");
+        self.set_status(tr(self.lang, "Desfazer"));
         true
     }
 
@@ -476,7 +583,7 @@ impl EditorSession {
         };
         self.undo.push(std::mem::replace(&mut self.project, p));
         self.after_history();
-        self.set_status("Refazer");
+        self.set_status(tr(self.lang, "Refazer"));
         true
     }
 
@@ -527,8 +634,8 @@ impl EditorSession {
             .count()
             + 1;
         let name = match kind {
-            TrackKind::Video => format!("Vídeo {n}"),
-            TrackKind::Audio => format!("Áudio {n}"),
+            TrackKind::Video => tr_args(self.lang, "Vídeo {n}", &[("n", &n)]),
+            TrackKind::Audio => tr_args(self.lang, "Áudio {n}", &[("n", &n)]),
         };
         let t = Track::new(kind, &name);
         // vídeo: insere acima das trilhas de áudio; áudio: no final
@@ -565,7 +672,7 @@ impl EditorSession {
         let idx = self.insert_track(TrackKind::Video);
         if let Some(t) = self.project.tracks.get_mut(idx) {
             t.adjustment = true;
-            t.name = format!("Ajuste {n}");
+            t.name = tr_args(self.lang, "Ajuste {n}", &[("n", &n)]);
         }
         self.changed();
         idx
@@ -698,7 +805,12 @@ impl EditorSession {
             }
         }
         self.clip_base = min_t;
-        self.set_status(format!("{} evento(s) copiado(s)", items.len()));
+        let count = items.len();
+        self.set_status(tr_args(
+            self.lang,
+            "{n} evento(s) copiado(s)",
+            &[("n", &count)],
+        ));
         self.clipboard = items;
     }
 
@@ -1123,7 +1235,10 @@ impl EditorSession {
     /// Insere tempo vazio do tamanho da seleção (Insert Time).
     pub fn insert_time(&mut self) {
         let Some((a, b)) = self.time_sel else {
-            self.set_status("Crie uma seleção de tempo para inserir tempo");
+            self.set_status(tr(
+                self.lang,
+                "Crie uma seleção de tempo para inserir tempo",
+            ));
             return;
         };
         if b <= a {
@@ -1191,7 +1306,7 @@ impl EditorSession {
                 e.group = Some(g);
             }
         }
-        self.set_status("Eventos agrupados");
+        self.set_status(tr(self.lang, "Eventos agrupados"));
         self.changed();
     }
 
@@ -1205,7 +1320,7 @@ impl EditorSession {
                 e.group = None;
             }
         }
-        self.set_status("Eventos desagrupados");
+        self.set_status(tr(self.lang, "Eventos desagrupados"));
         self.changed();
     }
 
@@ -1258,21 +1373,192 @@ impl EditorSession {
     }
 
     pub fn insert_marker(&mut self) {
+        self.insert_marker_kind(MarkerKind::Standard, "", "", "");
+    }
+
+    pub fn insert_marker_kind(
+        &mut self,
+        kind: MarkerKind,
+        label: &str,
+        command_type: &str,
+        command_arg: &str,
+    ) {
         self.checkpoint();
-        let n = self.project.markers.len() + 1;
-        self.project.markers.push(Marker {
-            id: new_id(),
-            t: self.cursor,
-            label: format!("Marcador {n}"),
-        });
+        let same_kind = self
+            .project
+            .markers
+            .iter()
+            .filter(|m| m.kind == kind)
+            .count()
+            + 1;
+        let resolved_label = if label.trim().is_empty() {
+            let n2 = format!("{same_kind:02}");
+            match kind {
+                MarkerKind::Standard => tr_args(self.lang, "Marcador {n}", &[("n", &same_kind)]),
+                MarkerKind::CdTrack => tr_args(self.lang, "Faixa CD {n}", &[("n", &n2)]),
+                MarkerKind::CdIndex => tr_args(self.lang, "Índice {n}", &[("n", &n2)]),
+                MarkerKind::Command => tr_args(self.lang, "Comando {n}", &[("n", &same_kind)]),
+            }
+        } else {
+            label.trim().chars().take(256).collect()
+        };
+        let mut mk = Marker::new(
+            self.cursor.clamp_safe(Ticks::ZERO, Ticks::MAX),
+            kind,
+            resolved_label,
+        );
+        if kind == MarkerKind::Command {
+            mk.command_type = command_type
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(64)
+                .collect();
+            if mk.command_type.is_empty() {
+                mk.command_type = "TEXT".to_string();
+            }
+            mk.command_arg = command_arg
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(512)
+                .collect();
+        }
+        self.project.markers.push(mk);
+        self.project.markers.sort_by_key(|m| m.t);
         self.changed();
+        self.set_status(format!("{} inserido.", kind.label()));
+    }
+
+    /// Gera um arquivo Red Book CUE Sheet (75 quadros/s) a partir dos marcadores de CD do projeto.
+    pub fn export_cd_cue_sheet(&self, audio_filename: &str) -> String {
+        let mut cd_marks: Vec<&Marker> = self
+            .project
+            .markers
+            .iter()
+            .filter(|m| matches!(m.kind, MarkerKind::CdTrack | MarkerKind::CdIndex))
+            .collect();
+        cd_marks.sort_by_key(|m| m.t);
+        let safe_file = if audio_filename.trim().is_empty() {
+            "audio.wav"
+        } else {
+            audio_filename.trim()
+        };
+        let mut out = format!("FILE \"{safe_file}\" WAVE\n");
+        let mut track_num = 0usize;
+        let mut index_num = 1usize;
+        for m in cd_marks {
+            let secs_total = m.t.as_secs_f64().max(0.0);
+            let total_cd_frames = (secs_total * 75.0).round() as u64;
+            let mm = total_cd_frames / (60 * 75);
+            let ss = (total_cd_frames / 75) % 60;
+            let ff = total_cd_frames % 75;
+            match m.kind {
+                MarkerKind::CdTrack => {
+                    track_num += 1;
+                    index_num = 1;
+                    out.push_str(&format!("  TRACK {track_num:02} AUDIO\n"));
+                    out.push_str(&format!("    TITLE \"{}\"\n", m.label.replace('"', "'")));
+                    out.push_str(&format!("    INDEX 01 {mm:02}:{ss:02}:{ff:02}\n"));
+                }
+                MarkerKind::CdIndex => {
+                    if track_num == 0 {
+                        track_num = 1;
+                        out.push_str("  TRACK 01 AUDIO\n");
+                    }
+                    index_num = (index_num + 1).min(99);
+                    out.push_str(&format!(
+                        "    INDEX {index_num:02} {mm:02}:{ss:02}:{ff:02}\n"
+                    ));
+                }
+                MarkerKind::Standard | MarkerKind::Command => {}
+            }
+        }
+        out
+    }
+
+    pub fn set_track_automation_mode(&mut self, ti: usize, mode: AutomationMode) -> bool {
+        let Some(cur) = self.project.tracks.get(ti).map(|t| t.automation_mode) else {
+            return false;
+        };
+        if cur == mode {
+            return true;
+        }
+        self.checkpoint();
+        if let Some(tr) = self.project.tracks.get_mut(ti) {
+            tr.automation_mode = mode;
+        }
+        self.changed();
+        self.set_status(mode.label());
+        true
+    }
+
+    pub fn cycle_track_automation_mode(&mut self, ti: usize) -> Option<AutomationMode> {
+        let cur = self.project.tracks.get(ti)?.automation_mode;
+        let next = match cur {
+            AutomationMode::Off => AutomationMode::Read,
+            AutomationMode::Read => AutomationMode::Touch,
+            AutomationMode::Touch => AutomationMode::Latch,
+            AutomationMode::Latch => AutomationMode::Off,
+        };
+        self.set_track_automation_mode(ti, next);
+        Some(next)
+    }
+
+    /// Grava ou atualiza ponto de automação ao vivo (modos Touch/Latch, p. 1008).
+    pub fn record_automation_point(
+        &mut self,
+        ti: usize,
+        env_kind: EnvKind,
+        t: Ticks,
+        v: f32,
+        tol: Ticks,
+    ) -> bool {
+        let Some(tr) = self.project.tracks.get_mut(ti) else {
+            return false;
+        };
+        if !tr.automation_mode.is_write() {
+            return false;
+        }
+        let env = match tr.envelopes.iter_mut().find(|e| e.kind == env_kind) {
+            Some(e) => {
+                e.visible = true;
+                e
+            }
+            None => {
+                let mut e = Envelope::new(env_kind);
+                e.visible = true;
+                tr.envelopes.push(e);
+                let last_idx = tr.envelopes.len() - 1;
+                &mut tr.envelopes[last_idx]
+            }
+        };
+        env.set_point(t, v, tol);
+        self.changed();
+        true
+    }
+
+    pub fn cycle_ruler_grid(&mut self) -> RulerGridSpacing {
+        let cur = self.opts.ruler_grid;
+        let idx = RulerGridSpacing::ALL
+            .iter()
+            .position(|g| *g == cur)
+            .map(|p| (p + 1) % RulerGridSpacing::ALL.len())
+            .unwrap_or(0);
+        let next = RulerGridSpacing::ALL[idx];
+        self.opts.ruler_grid = next;
+        self.set_status(format!("Grade da régua: {}", next.label()));
+        next
     }
 
     pub fn insert_region(&mut self) {
         let (a, b) = match self.time_sel.or(self.project.loop_region) {
             Some(r) if r.1 > r.0 => r,
             _ => {
-                self.set_status("Crie uma seleção de tempo para inserir uma região");
+                self.set_status(tr(
+                    self.lang,
+                    "Crie uma seleção de tempo para inserir uma região",
+                ));
                 return;
             }
         };
@@ -1282,7 +1568,7 @@ impl EditorSession {
             id: new_id(),
             start: a,
             end: b,
-            label: format!("Região {n}"),
+            label: tr_args(self.lang, "Região {n}", &[("n", &n)]),
         });
         self.changed();
     }
@@ -1368,7 +1654,7 @@ impl EditorSession {
         };
         let c = self.cursor;
         if !e.contains(c) {
-            self.set_status("Posicione o cursor sobre o evento");
+            self.set_status(tr(self.lang, "Posicione o cursor sobre o evento"));
             return;
         }
         let m = self.project.media(e.media_id).cloned();
@@ -1391,7 +1677,7 @@ impl EditorSession {
         fr.group = None;
         fr.fade_in = Fade::default();
         fr.fade_out = Fade::default();
-        fr.name = format!("{} (congelado)", e.name);
+        fr.name = tr_args(self.lang, "{name} (congelado)", &[("name", &e.name)]);
         if let Some(track) = self.project.tracks.get_mut(ti) {
             for ev in &mut track.events {
                 if ev.start >= c {
@@ -1438,7 +1724,7 @@ impl EditorSession {
         self.checkpoint();
         let mut t = orig;
         t.id = new_id();
-        t.name = format!("{} (cópia)", t.name);
+        t.name = tr_args(self.lang, "{name} (cópia)", &[("name", &t.name)]);
         let mut gm: HashMap<Id, Id> = HashMap::new();
         for e in &mut t.events {
             e.id = new_id();
@@ -1555,9 +1841,11 @@ impl EditorSession {
             }
         }
         self.removed_media_ids.extend_from_slice(&removed);
-        self.set_status(format!(
-            "{} mídia(s) removida(s)",
-            n0 - self.project.media.len()
+        let removed_count = n0 - self.project.media.len();
+        self.set_status(tr_args(
+            self.lang,
+            "{n} mídia(s) removida(s)",
+            &[("n", &removed_count)],
         ));
         self.changed();
         removed
@@ -3217,6 +3505,7 @@ impl EditorSession {
                         id: new_id(),
                         t,
                         label: format!("Cena {}", idx + 1),
+                        ..Default::default()
                     });
                     count += 1;
                 }
@@ -4209,6 +4498,910 @@ impl EditorSession {
         ));
         created
     }
+
+    /// Aplica um efeito de vídeo à saída mestre de vídeo (Video Output FX,
+    /// ao soltar um efeito diretamente na janela Prévia de Vídeo, p. 55).
+    pub fn apply_video_fx_to_output(&mut self, kind: FxKind) -> bool {
+        if kind.is_audio() {
+            self.set_status("Efeitos de áudio devem ser aplicados em trilhas ou eventos de áudio.");
+            return false;
+        }
+        self.checkpoint();
+        self.project.master.video_fx.push(FxInstance::new(kind));
+        self.changed();
+        self.set_status(format!(
+            "Efeito \"{}\" aplicado à saída de vídeo (Prévia).",
+            kind.name()
+        ));
+        true
+    }
+
+    // -----------------------------------------------------------------
+    // Trilhas: pastas, composição Pai/Filho, máscaras, aninhamento,
+    // multicâmera, padrões e renderizar para nova trilha (p. 382–426, 740)
+    // -----------------------------------------------------------------
+
+    /// Insere uma nova trilha aplicando propriedades padrão configuradas pelo usuário (p. 414).
+    pub fn insert_track_with_defaults(
+        &mut self,
+        kind: TrackKind,
+        defaults: &crate::prefs::DefaultTrackPrefs,
+    ) -> usize {
+        let idx = self.insert_track(kind);
+        self.apply_default_track_props(idx, defaults);
+        idx
+    }
+
+    /// Aplica `defaults` à trilha `ti`.
+    pub fn apply_default_track_props(
+        &mut self,
+        ti: usize,
+        defaults: &crate::prefs::DefaultTrackPrefs,
+    ) -> bool {
+        let Some(t) = self.project.tracks.get_mut(ti) else {
+            return false;
+        };
+        t.mute = defaults.mute;
+        t.solo = defaults.solo;
+        match t.kind {
+            TrackKind::Video => {
+                t.height = defaults.video_height.clamp(28.0, 400.0);
+                t.opacity = defaults.video_opacity.clamp(0.0, 1.0);
+                t.blend = BlendMode::from_id(&defaults.video_blend);
+            }
+            TrackKind::Audio => {
+                t.height = defaults.audio_height.clamp(28.0, 400.0);
+                t.volume_db = defaults.audio_volume_db.clamp(-120.0, 24.0);
+                t.pan = defaults.audio_pan.clamp(-1.0, 1.0);
+            }
+        }
+        self.changed();
+        true
+    }
+
+    /// Captura as propriedades da trilha `ti` como padrão para futuras trilhas (p. 414).
+    pub fn capture_default_track_props(
+        &self,
+        ti: usize,
+        base: &crate::prefs::DefaultTrackPrefs,
+    ) -> Option<crate::prefs::DefaultTrackPrefs> {
+        let t = self.project.tracks.get(ti)?;
+        let mut out = base.clone();
+        out.mute = t.mute;
+        out.solo = t.solo;
+        match t.kind {
+            TrackKind::Video => {
+                out.video_height = t.height.clamp(28.0, 400.0);
+                out.video_opacity = t.opacity.clamp(0.0, 1.0);
+                out.video_blend = t.blend.id().to_string();
+            }
+            TrackKind::Audio => {
+                out.audio_height = t.height.clamp(28.0, 400.0);
+                out.audio_volume_db = t.volume_db.clamp(-120.0, 24.0);
+                out.audio_pan = t.pan.clamp(-1.0, 1.0);
+            }
+        }
+        out.sanitize();
+        Some(out)
+    }
+
+    /// Insere uma pasta recolhível de trilhas (Track Group, p. 382), envolvendo
+    /// a trilha selecionada caso ela ainda não tenha pai.
+    pub fn insert_track_folder(&mut self, kind: TrackKind) -> usize {
+        self.checkpoint();
+        let n = self.project.tracks.iter().filter(|t| t.is_folder).count() + 1;
+        let sel_info = self.sel_track.and_then(|i| {
+            self.project
+                .tracks
+                .get(i)
+                .map(|t| (i, t.id, t.kind, t.parent_track_id, t.is_folder))
+        });
+        let insert_idx = sel_info
+            .map(|(i, _, _, _, _)| i)
+            .unwrap_or_else(|| match kind {
+                TrackKind::Video => self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|t| t.kind == TrackKind::Audio)
+                    .unwrap_or(self.project.tracks.len()),
+                TrackKind::Audio => self.project.tracks.len(),
+            });
+        let folder_kind = sel_info.map(|(_, _, k, _, _)| k).unwrap_or(kind);
+        let mut folder = Track::new(folder_kind, &format!("Pasta {n}"));
+        folder.is_folder = true;
+        folder.height = 44.0;
+        if let Some((_, _, _, cur_parent, _)) = sel_info {
+            folder.parent_track_id = cur_parent;
+        }
+        let folder_id = folder.id;
+        self.project.tracks.insert(insert_idx, folder);
+        if let Some((_, child_id, _, cur_parent, is_folder)) = sel_info {
+            if !is_folder && cur_parent.is_none() {
+                if let Some(child_idx) = self.project.track_index(child_id) {
+                    if self
+                        .project
+                        .validate_track_parent(child_id, Some(folder_id))
+                        .is_ok()
+                    {
+                        self.project.tracks[child_idx].parent_track_id = Some(folder_id);
+                    }
+                }
+            }
+        }
+        self.sel_track = Some(insert_idx);
+        self.changed();
+        self.set_status(format!("Pasta de trilhas \"Pasta {n}\" criada."));
+        insert_idx
+    }
+
+    /// Alterna o estado recolhido/expandido da pasta `ti` (ou da pasta pai, se `ti` estiver dentro dela).
+    pub fn toggle_track_folder(&mut self, ti: usize) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        let target_id = if t.is_folder {
+            t.id
+        } else if let Some(pid) = t.parent_track_id.filter(|pid| {
+            self.project
+                .tracks
+                .iter()
+                .any(|p| p.id == *pid && p.is_folder)
+        }) {
+            pid
+        } else {
+            return false;
+        };
+        let Some(fi) = self.project.track_index(target_id) else {
+            return false;
+        };
+        let collapsed = !self.project.tracks[fi].collapsed;
+        self.project.tracks[fi].collapsed = collapsed;
+        self.changed();
+        self.set_status(if collapsed {
+            format!("Pasta \"{}\" recolhida.", self.project.tracks[fi].name)
+        } else {
+            format!("Pasta \"{}\" expandida.", self.project.tracks[fi].name)
+        });
+        true
+    }
+
+    /// Vincula a trilha `ti` como filha da trilha/pasta acima mais próxima ou `parent_id` explícito.
+    pub fn set_track_parent(&mut self, ti: usize, parent_id: Option<Id>) -> Result<()> {
+        let Some(child_id) = self.project.tracks.get(ti).map(|t| t.id) else {
+            return Err(NeovegError::InvalidInput("trilha inválida".into()));
+        };
+        self.project
+            .validate_track_parent(child_id, parent_id)
+            .map_err(NeovegError::InvalidInput)?;
+        self.checkpoint();
+        self.project.tracks[ti].parent_track_id = parent_id;
+        self.changed();
+        Ok(())
+    }
+
+    /// Torna a trilha `ti` filha de composição da trilha acima compatível mais próxima (p. 740).
+    pub fn make_compositing_child(&mut self, ti: usize) -> Result<()> {
+        let Some(child) = self.project.tracks.get(ti) else {
+            return Err(NeovegError::InvalidInput("trilha inválida".into()));
+        };
+        let child_id = child.id;
+        let child_kind = child.kind;
+        let cur_parent = child.parent_track_id;
+        let mut candidate: Option<Id> = None;
+        for up in (0..ti).rev() {
+            let t = &self.project.tracks[up];
+            if t.id == child_id || Some(t.id) == cur_parent {
+                continue;
+            }
+            if !t.is_folder && t.kind != child_kind {
+                continue;
+            }
+            if t.parent_track_id == cur_parent && !t.is_adjustment() {
+                candidate = Some(t.id);
+                break;
+            }
+        }
+        let pid = candidate.ok_or_else(|| {
+            NeovegError::InvalidInput(
+                "não há trilha superior compatível para composição pai/filho".into(),
+            )
+        })?;
+        self.set_track_parent(ti, Some(pid))?;
+        self.set_status(format!(
+            "Trilha \"{}\" definida como filha de composição.",
+            self.project.tracks[ti].name
+        ));
+        Ok(())
+    }
+
+    /// Remove o vínculo Pai/Filho da trilha `ti`, promovendo-a a trilha raiz.
+    pub fn unmake_compositing_child(&mut self, ti: usize) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        if t.parent_track_id.is_none() {
+            return false;
+        }
+        self.checkpoint();
+        self.project.tracks[ti].parent_track_id = None;
+        self.changed();
+        self.set_status(format!(
+            "Trilha \"{}\" promovida para o nível raiz.",
+            self.project.tracks[ti].name
+        ));
+        true
+    }
+
+    /// Define o modo de máscara de composição da trilha `ti`.
+    pub fn set_track_mask_mode(&mut self, ti: usize, mode: TrackMaskMode) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        if t.mask_mode == mode {
+            return false;
+        }
+        self.checkpoint();
+        self.project.tracks[ti].mask_mode = mode;
+        self.changed();
+        true
+    }
+
+    /// Insere um projeto `.neoveg` importado como evento de linha do tempo aninhada (p. 114).
+    pub fn insert_nested_project_event(
+        &mut self,
+        imported: crate::media::Imported,
+        cache: &MediaCache,
+        at: Ticks,
+    ) -> Vec<Id> {
+        self.checkpoint();
+        let item = imported.item.clone();
+        let dur = item.duration.unwrap_or_else(|| {
+            self.project
+                .settings
+                .frame_dur()
+                .max(Ticks::from_secs_i64(5))
+        });
+        let media_id = item.id;
+        cache.insert(media_id, imported.entry);
+        let registered_id = self.register_imported_media(item, None);
+
+        let mut created = Vec::new();
+        let group = (self
+            .project
+            .media(registered_id)
+            .is_some_and(|m| m.has_video && m.has_audio))
+        .then(new_id);
+        let m_clone = self.project.media(registered_id).cloned();
+        if let Some(m) = m_clone {
+            if m.has_video {
+                let v_ti = self
+                    .sel_track
+                    .filter(|&i| {
+                        self.project
+                            .tracks
+                            .get(i)
+                            .is_some_and(|t| t.accepts(TrackKind::Video))
+                    })
+                    .or_else(|| {
+                        self.project
+                            .tracks
+                            .iter()
+                            .position(|t| t.accepts(TrackKind::Video))
+                    })
+                    .unwrap_or_else(|| self.insert_track(TrackKind::Video));
+                let mut ev = Event::new(&m, at, dur);
+                ev.group = group;
+                created.push(ev.id);
+                self.project.tracks[v_ti].events.push(ev);
+            }
+            if m.has_audio {
+                let a_ti = self
+                    .project
+                    .tracks
+                    .iter()
+                    .position(|t| t.accepts(TrackKind::Audio))
+                    .unwrap_or_else(|| self.insert_track(TrackKind::Audio));
+                let mut ev = Event::new(&m, at, dur);
+                ev.group = group;
+                created.push(ev.id);
+                self.project.tracks[a_ti].events.push(ev);
+            }
+        }
+        self.project.sort_events();
+        self.sel_events = created.iter().copied().collect();
+        self.changed();
+        self.set_status(format!(
+            "Projeto aninhado inserido na timeline ({} evento(s)).",
+            created.len()
+        ));
+        created
+    }
+
+    /// Renderiza o intervalo selecionado (ou o projeto inteiro) e insere em uma nova trilha (p. 415).
+    pub fn render_to_new_track(
+        &mut self,
+        cache: &MediaCache,
+        range: Option<(Ticks, Ticks)>,
+        out_dir: &std::path::Path,
+    ) -> Result<Vec<Id>> {
+        let (start, end) = range
+            .or(self.time_sel)
+            .filter(|(a, b)| b > a)
+            .unwrap_or((Ticks::ZERO, self.project.duration()));
+        if end <= start {
+            return Err(NeovegError::InvalidInput(
+                "projeto ou seleção vazia para renderizar em nova trilha".into(),
+            ));
+        }
+        std::fs::create_dir_all(out_dir).map_err(|e| {
+            NeovegError::InvalidInput(format!("erro criando pasta temporária: {e}"))
+        })?;
+        let any_video_solo = self.project.any_solo(TrackKind::Video);
+        let has_video = self.project.tracks.iter().any(|t| {
+            t.kind == TrackKind::Video
+                && !t.is_folder
+                && !t.is_adjustment()
+                && !self.project.is_track_effectively_muted(t.id)
+                && (!any_video_solo || t.solo)
+                && t.events
+                    .iter()
+                    .any(|e| !e.mute && e.end() > start && e.start < end)
+        });
+        let any_audio_solo = self.project.any_solo(TrackKind::Audio);
+        let has_audio = self.project.tracks.iter().any(|t| {
+            t.kind == TrackKind::Audio
+                && !t.is_folder
+                && !self.project.is_track_effectively_muted(t.id)
+                && (!any_audio_solo || t.solo)
+                && t.events
+                    .iter()
+                    .any(|e| !e.mute && e.end() > start && e.start < end)
+        });
+        let ext = if has_video { "avi" } else { "wav" };
+        let path = out_dir.join(format!("render_nova_trilha_{}.{}", new_id(), ext));
+        let rs = crate::render::RenderSettings {
+            path: path.clone(),
+            format: if has_video {
+                crate::render::RenderFormat::AviMjpeg
+            } else {
+                crate::render::RenderFormat::Wav
+            },
+            width: self.project.settings.width.clamp(16, 1920),
+            height: self.project.settings.height.clamp(16, 1080),
+            start,
+            end,
+            include_audio: has_audio,
+            ..Default::default()
+        };
+        let prog = crate::render::RenderProgress::default();
+        crate::render::run(&self.project, cache, &rs, &prog).map_err(|e| {
+            NeovegError::InvalidInput(format!("falha ao renderizar nova trilha: {e}"))
+        })?;
+
+        let imported = crate::media::import_file(&path)
+            .map_err(|e| NeovegError::InvalidInput(format!("falha ao reimportar render: {e}")))?;
+        self.checkpoint();
+        let media_id = imported.item.id;
+        cache.insert(media_id, imported.entry);
+        let reg_id = self.register_imported_media(imported.item, None);
+        let Some(m) = self.project.media(reg_id).cloned() else {
+            return Err(NeovegError::InvalidInput(
+                "mídia renderizada indisponível".into(),
+            ));
+        };
+        let dur = end - start;
+        let group = (m.has_video && m.has_audio).then(new_id);
+        let mut created = Vec::new();
+        if m.has_video {
+            let mut tr = Track::new(TrackKind::Video, "Trilha Renderizada");
+            let mut ev = Event::new(&m, start, dur);
+            ev.group = group;
+            created.push(ev.id);
+            tr.events.push(ev);
+            self.project.tracks.insert(0, tr);
+            self.sel_track = Some(0);
+        }
+        if m.has_audio {
+            let mut tr = Track::new(TrackKind::Audio, "Áudio Renderizado");
+            let mut ev = Event::new(&m, start, dur);
+            ev.group = group;
+            created.push(ev.id);
+            tr.events.push(ev);
+            self.project.tracks.push(tr);
+            if created.len() == 1 {
+                self.sel_track = Some(self.project.tracks.len().saturating_sub(1));
+            }
+        }
+        self.project.sort_events();
+        self.sel_events = created.iter().copied().collect();
+        self.changed();
+        self.set_status(format!(
+            "Trecho renderizado para nova trilha ({} evento(s)).",
+            created.len()
+        ));
+        Ok(created)
+    }
+
+    /// Agrupa trilhas de vídeo em uma nova trilha multicâmera com múltiplos *takes* sincronizados (p. 416).
+    pub fn create_multicam_track(&mut self) -> Result<usize> {
+        let mut sources: Vec<(usize, Event)> = Vec::new();
+        if !self.sel_events.is_empty() {
+            for (ti, t) in self.project.tracks.iter().enumerate() {
+                if t.kind != TrackKind::Video || t.is_folder || t.is_adjustment() {
+                    continue;
+                }
+                if let Some(ev) = t.events.iter().find(|e| self.sel_events.contains(&e.id)) {
+                    sources.push((ti, ev.clone()));
+                }
+            }
+        }
+        if sources.len() < 2 {
+            sources.clear();
+            for (ti, t) in self.project.tracks.iter().enumerate() {
+                if t.kind != TrackKind::Video || t.is_folder || t.is_adjustment() {
+                    continue;
+                }
+                if let Some(ev) = t
+                    .events
+                    .iter()
+                    .find(|e| !e.mute && e.contains(self.cursor))
+                    .or_else(|| t.events.first())
+                {
+                    sources.push((ti, ev.clone()));
+                }
+            }
+        }
+        if sources.len() < 2 {
+            return Err(NeovegError::InvalidInput(
+                "são necessárias pelo menos 2 trilhas/eventos de vídeo para criar trilha multicâmera"
+                    .into(),
+            ));
+        }
+        sources.truncate(crate::takes::MAX_TAKES.min(16));
+        let start = sources
+            .iter()
+            .map(|(_, e)| e.start)
+            .min()
+            .unwrap_or(Ticks::ZERO);
+        let end = sources
+            .iter()
+            .map(|(_, e)| e.end())
+            .max()
+            .unwrap_or(start + self.project.settings.frame_dur());
+        let len = (end - start).max(self.project.settings.frame_dur());
+
+        self.checkpoint();
+        let mut mc_track = Track::new(TrackKind::Video, "Multicâmera");
+        mc_track.multicam = true;
+        let first = &sources[0].1;
+        let first_media = self
+            .project
+            .media(first.media_id)
+            .cloned()
+            .unwrap_or_else(|| MediaItem {
+                id: first.media_id,
+                name: first.name.clone(),
+                source: MediaSource::Generated(GenSpec::ColorBars),
+                duration: Some(len),
+                width: self.project.settings.width,
+                height: self.project.settings.height,
+                fps: Some(self.project.settings.fps),
+                has_video: true,
+                has_audio: false,
+                info: String::new(),
+                proxy_path: None,
+            });
+        let mut mc_event = Event::new(&first_media, start, len);
+        mc_event.offset = if first.start <= start {
+            first.offset + first.rate.scale_ticks(start - first.start)
+        } else {
+            first.offset
+        };
+        mc_event.rate = first.rate;
+        mc_event.take_name = format!("Câm 1 — {}", first.name);
+        mc_event.name = mc_event.take_name.clone();
+        for (idx, (_, src_ev)) in sources.iter().enumerate().skip(1) {
+            let take_off = if src_ev.start <= start {
+                src_ev.offset + src_ev.rate.scale_ticks(start - src_ev.start)
+            } else {
+                src_ev.offset
+            };
+            let _ = crate::takes::add_take(
+                &mut mc_event,
+                Take {
+                    media_id: src_ev.media_id,
+                    offset: take_off,
+                    name: format!("Câm {} — {}", idx + 1, src_ev.name),
+                },
+                false,
+            );
+        }
+        let mc_ev_id = mc_event.id;
+        mc_track.events.push(mc_event);
+        for (src_ti, _) in &sources {
+            if let Some(t) = self.project.tracks.get_mut(*src_ti) {
+                t.mute = true;
+            }
+        }
+        self.project.tracks.insert(0, mc_track);
+        self.sel_track = Some(0);
+        self.sel_events.clear();
+        self.sel_events.insert(mc_ev_id);
+        self.opts.multicam_mode = true;
+        self.changed();
+        self.set_status(format!(
+            "Trilha Multicâmera criada com {} câmeras.",
+            sources.len()
+        ));
+        Ok(0)
+    }
+
+    /// Retorna `(track_idx, event_idx, event_id, active_take, take_count)` para o evento multicâmera sob `t`.
+    pub fn active_multicam_event_at(&self, t: Ticks) -> Option<(usize, usize, Id, usize, usize)> {
+        let mut best: Option<(usize, usize, Id, usize, usize)> = None;
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            if tr.kind != TrackKind::Video || tr.is_folder || tr.mute {
+                continue;
+            }
+            for (ei, ev) in tr.events.iter().enumerate() {
+                let count = crate::takes::take_count(ev);
+                if count > 1 && ev.contains(t) {
+                    let item = (ti, ei, ev.id, crate::takes::active_index(ev), count);
+                    if tr.multicam || self.sel_track == Some(ti) {
+                        return Some(item);
+                    }
+                    if best.is_none() {
+                        best = Some(item);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Alterna o ângulo multicâmera em `t` dividindo o evento no cursor se necessário e ativando `angle_idx`.
+    pub fn switch_multicam_angle(&mut self, t: Ticks, angle_idx: usize) -> bool {
+        let Some((ti, ei, ev_id, cur_take, count)) = self.active_multicam_event_at(t) else {
+            return false;
+        };
+        if angle_idx >= count {
+            return false;
+        }
+        let fd = self.project.settings.frame_dur();
+        let (ev_start, ev_end) = {
+            let e = &self.project.tracks[ti].events[ei];
+            (e.start, e.end())
+        };
+        if t <= ev_start + fd && cur_take == angle_idx {
+            return false;
+        }
+        self.checkpoint();
+        let mut target_id = ev_id;
+        if t > ev_start + fd && t < ev_end - fd {
+            let mut gm = HashMap::new();
+            if let Some(new_id_val) =
+                split_event_in_track(&mut self.project.tracks[ti], ei, t, &mut gm)
+            {
+                target_id = new_id_val;
+            }
+        }
+        if let Some(ev) = self.project.event_mut(target_id) {
+            if crate::takes::set_active(ev, angle_idx) {
+                ev.name = if ev.take_name.is_empty() {
+                    format!("Câm {}", angle_idx + 1)
+                } else {
+                    ev.take_name.clone()
+                };
+            }
+        }
+        self.sel_track = Some(ti);
+        self.sel_events.clear();
+        self.sel_events.insert(target_id);
+        self.changed();
+        self.set_status(format!("Multicâmera: Câmera {}", angle_idx + 1));
+        true
+    }
+
+    // -----------------------------------------------------------------
+    // Efeitos, cadeias salvas, rastreamento, legendas por região e
+    // áudio fora de tempo real (pp. 54–56, 514, 713, 722, 940, 946)
+    // -----------------------------------------------------------------
+
+    /// Cria uma instância de `FxInstance` preenchida com os valores salvos de um preset.
+    pub fn instantiate_fx_with_preset(kind: FxKind, values: &[f32]) -> FxInstance {
+        let mut fx = FxInstance::new(kind);
+        let specs = kind.params();
+        for (p, (spec, &val)) in fx.params.iter_mut().zip(specs.iter().zip(values.iter())) {
+            if val.is_finite() {
+                p.value = val.clamp(spec.min, spec.max);
+            }
+        }
+        fx
+    }
+
+    /// Converte uma lista de efeitos de uma cadeia para formato serializável salvo em Preferências.
+    pub fn capture_saved_fx_chain(
+        name: &str,
+        audio: bool,
+        fxs: &[FxInstance],
+    ) -> Option<crate::prefs::SavedFxChainPref> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() || fxs.is_empty() {
+            return None;
+        }
+        let mut items = Vec::new();
+        for fx in fxs.iter().take(crate::prefs::MAX_FX_CHAIN_ITEMS) {
+            if matches!(fx.kind, FxKind::Ofx | FxKind::Vst3) {
+                continue;
+            }
+            items.push(crate::prefs::SavedFxChainItemPref {
+                fx_kind: fx.kind.id().to_string(),
+                enabled: fx.enabled,
+                values: fx.params.iter().map(|p| p.value).collect(),
+            });
+        }
+        let mut chain = crate::prefs::SavedFxChainPref {
+            name: trimmed.to_string(),
+            audio,
+            items,
+        };
+        chain.sanitize().then_some(chain)
+    }
+
+    /// Constrói novas instâncias independentes a partir de uma cadeia salva.
+    pub fn instantiate_saved_fx_chain(chain: &crate::prefs::SavedFxChainPref) -> Vec<FxInstance> {
+        chain
+            .items
+            .iter()
+            .filter_map(|it| {
+                let kind = FxKind::from_id(&it.fx_kind)?;
+                if kind.is_audio() != chain.audio {
+                    return None;
+                }
+                let mut fx = Self::instantiate_fx_with_preset(kind, &it.values);
+                fx.enabled = it.enabled;
+                Some(fx)
+            })
+            .collect()
+    }
+
+    /// Converte todas as regiões do projeto em legendas de texto na timeline (p. 722).
+    pub fn insert_subtitles_from_regions(&mut self) -> usize {
+        if !self.project.regions.iter().any(|r| r.end > r.start) {
+            self.set_status("Não há regiões válidas para gerar legendas.");
+            return 0;
+        }
+        self.checkpoint();
+        let count = crate::subtitles::regions_to_subtitles(&mut self.project, "Legendas");
+        self.changed();
+        self.set_status(format!(
+            "{count} legenda(s) gerada(s) a partir das regiões."
+        ));
+        count
+    }
+
+    /// Rastreia o deslocamento planar quadro a quadro de `src_ev_id` e grava quadros-chave
+    /// de movimento em um evento (`PanCrop`) ou trilha (`TrackMotion`, p. 713).
+    pub fn track_event_motion(
+        &mut self,
+        media: &MediaCache,
+        src_ev_id: Id,
+        target_event_id: Option<Id>,
+        target_track_id: Option<Id>,
+        invert_motion: bool,
+        step_frames: usize,
+    ) -> Result<usize> {
+        let Some((src_ti, src_ei)) = self.project.find_event(src_ev_id) else {
+            return Err(NeovegError::InvalidInput(
+                "evento de origem inválido para rastreamento".into(),
+            ));
+        };
+        let src_ev = self.project.tracks[src_ti].events[src_ei].clone();
+        let Some(src_media) = self.project.media(src_ev.media_id).cloned() else {
+            return Err(NeovegError::InvalidInput(
+                "mídia de origem indisponível".into(),
+            ));
+        };
+        if !src_media.has_video {
+            return Err(NeovegError::InvalidInput(
+                "rastreamento de movimento requer evento com vídeo".into(),
+            ));
+        }
+
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let total_frames = ((src_ev.length.0 / fd.0).max(1)) as usize;
+        let auto_step = total_frames.div_ceil(180).max(1);
+        let step = step_frames.max(auto_step).min(total_frames.max(1));
+
+        let mut samples: Vec<(Ticks, f32, f32)> = Vec::new();
+        let mut prev_img = src_ev
+            .media_time(src_ev.start, src_media.duration)
+            .and_then(|mt| media.video_frame_for_quality(&src_media, mt, 96, 54, true));
+        let mut acc_dx = 0.0f32;
+        let mut acc_dy = 0.0f32;
+        let sign = if invert_motion { -1.0 } else { 1.0 };
+        samples.push((Ticks::ZERO, 0.0, 0.0));
+
+        let mut frame_i = step;
+        while frame_i <= total_frames && samples.len() < 240 {
+            let local_t = Ticks::from_raw((frame_i as i64).saturating_mul(fd.0))
+                .min(Ticks::from_raw(src_ev.length.0.saturating_sub(1)).max(Ticks::ZERO));
+            let abs_t = src_ev.start + local_t;
+            if let Some(mt) = src_ev.media_time(abs_t, src_media.duration) {
+                if let Some(cur_img) = media.video_frame_for_quality(&src_media, mt, 96, 54, true) {
+                    if let Some(ref prev) = prev_img {
+                        let (dx, dy, _) =
+                            crate::engine::vfx::estimate_global_motion(prev, &cur_img);
+                        acc_dx = (acc_dx + dx * sign).clamp(-0.45, 0.45);
+                        acc_dy = (acc_dy + dy * sign).clamp(-0.45, 0.45);
+                    }
+                    samples.push((local_t, acc_dx, acc_dy));
+                    prev_img = Some(cur_img);
+                }
+            }
+            frame_i += step;
+        }
+        if samples.len() < 2 {
+            samples.push((src_ev.length, acc_dx, acc_dy));
+        }
+
+        let tol = fd.div_i64(2);
+        self.checkpoint();
+        if let Some(tr_id) = target_track_id {
+            let Some(ti) = self.project.track_index(tr_id) else {
+                return Err(NeovegError::InvalidInput(
+                    "trilha de destino inexistente".into(),
+                ));
+            };
+            let base = self.project.tracks[ti].motion.eval(src_ev.start);
+            self.project.tracks[ti].motion.keys.clear();
+            for &(lt, dx, dy) in &samples {
+                self.project.tracks[ti].motion.set(
+                    src_ev.start + lt,
+                    MotionKey {
+                        x: (base.x + dx).clamp(-1.5, 1.5),
+                        y: (base.y + dy).clamp(-1.5, 1.5),
+                        scale_x: base.scale_x,
+                        scale_y: base.scale_y,
+                        rot: base.rot,
+                    },
+                    tol,
+                );
+            }
+        } else {
+            let dst_id = target_event_id.unwrap_or(src_ev_id);
+            let Some(dst_ev) = self.project.event_mut(dst_id) else {
+                return Err(NeovegError::InvalidInput(
+                    "evento de destino inexistente".into(),
+                ));
+            };
+            let base = dst_ev.pan_crop.eval(Ticks::ZERO);
+            dst_ev.pan_crop.keys.clear();
+            for &(lt, dx, dy) in &samples {
+                dst_ev.pan_crop.set(
+                    lt,
+                    PanCropKey {
+                        cx: (base.cx + dx).clamp(-1.0, 2.0),
+                        cy: (base.cy + dy).clamp(-1.0, 2.0),
+                        size: base.size,
+                        rot: base.rot,
+                    },
+                    tol,
+                );
+            }
+        }
+        let n_keys = samples.len();
+        self.changed();
+        self.set_status(format!(
+            "Rastreamento de movimento aplicado ({n_keys} quadros-chave)."
+        ));
+        Ok(n_keys)
+    }
+
+    /// Aplica os efeitos de áudio de eventos selecionados fora de tempo real (WAV),
+    /// adicionando o resultado como *take* ativo e desativando os plug-ins em tempo real (p. 940).
+    pub fn apply_audio_fx_non_realtime(
+        &mut self,
+        media: &MediaCache,
+        out_dir: &std::path::Path,
+    ) -> Result<usize> {
+        let mut targets: Vec<(usize, usize, Event)> = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            if tr.kind != TrackKind::Audio || tr.is_folder {
+                continue;
+            }
+            for (ei, ev) in tr.events.iter().enumerate() {
+                if self.sel_events.contains(&ev.id) && ev.fx.iter().any(|f| f.enabled) {
+                    targets.push((ti, ei, ev.clone()));
+                }
+            }
+        }
+        if targets.is_empty() {
+            if let Some(ti) = self.sel_track {
+                if let Some(tr) = self
+                    .project
+                    .tracks
+                    .get(ti)
+                    .filter(|t| t.kind == TrackKind::Audio)
+                {
+                    if let Some((ei, ev)) =
+                        tr.events.iter().enumerate().find(|(_, e)| {
+                            e.contains(self.cursor) && e.fx.iter().any(|f| f.enabled)
+                        })
+                    {
+                        targets.push((ti, ei, ev.clone()));
+                    }
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Err(NeovegError::InvalidInput(
+                "selecione evento(s) de áudio com efeitos ativos para aplicar fora de tempo real"
+                    .into(),
+            ));
+        }
+
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| NeovegError::InvalidInput(format!("erro criando pasta de bounce: {e}")))?;
+        let sr = self.project.settings.sample_rate.clamp(8000, 192_000);
+        let mut rendered: Vec<(Id, crate::media::Imported)> = Vec::new();
+        for (_, _, ev) in &targets {
+            let Some(pcm) = crate::engine::audio::render_event_fx_stereo(&self.project, media, ev)
+            else {
+                return Err(NeovegError::InvalidInput(format!(
+                    "áudio do evento \"{}\" indisponível",
+                    ev.name
+                )));
+            };
+            let wav_path = out_dir.join(format!("fx_aplicado_{}.wav", new_id()));
+            let mut wr =
+                crate::render::WavWriter::create(&wav_path, sr, crate::render::WavBits::Pcm24)
+                    .map_err(|e| NeovegError::InvalidInput(format!("erro criando WAV: {e}")))?;
+            wr.write(&pcm)
+                .map_err(|e| NeovegError::InvalidInput(format!("erro gravando WAV: {e}")))?;
+            wr.finish()
+                .map_err(|e| NeovegError::InvalidInput(format!("erro finalizando WAV: {e}")))?;
+            let imp = crate::media::import_file(&wav_path)
+                .map_err(|e| NeovegError::InvalidInput(format!("erro reimportando WAV: {e}")))?;
+            rendered.push((ev.id, imp));
+        }
+
+        self.checkpoint();
+        let count = rendered.len();
+        for (ev_id, imp) in rendered {
+            let mid = imp.item.id;
+            media.insert(mid, imp.entry);
+            let reg_id = self.register_imported_media(imp.item, None);
+            if let Some(ev) = self.project.event_mut(ev_id) {
+                let take_name = format!("FX aplicado — {}", ev.name);
+                let _ = crate::takes::add_take(
+                    ev,
+                    Take {
+                        media_id: reg_id,
+                        offset: Ticks::ZERO,
+                        name: take_name.clone(),
+                    },
+                    true,
+                );
+                ev.rate = Rate::NORMAL;
+                ev.pitch_semitones = 0.0;
+                ev.take_name = take_name;
+                for fx in &mut ev.fx {
+                    fx.enabled = false;
+                }
+            }
+        }
+        self.changed();
+        self.set_status(format!(
+            "Efeitos de áudio aplicados fora de tempo real em {count} evento(s)."
+        ));
+        Ok(count)
+    }
 }
 
 fn split_event_in_track(
@@ -5134,5 +6327,252 @@ mod tests {
         assert_eq!(sess.cursor, Ticks::from_secs_i64(17));
         assert!(sess.undo());
         assert_eq!(sess.project.tracks[0].events.len(), 1);
+    }
+
+    #[test]
+    fn trilhas_pastas_pai_filho_padroes_multicam_e_render_nova_trilha() {
+        let mut p = Project::new_default();
+        let mut m1 = sample_media(101, 64, 36, Some(FrameRate::FPS_30));
+        m1.source = MediaSource::Generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        });
+        m1.has_audio = false;
+        let mut m2 = sample_media(102, 64, 36, Some(FrameRate::FPS_30));
+        m2.source = MediaSource::Generated(GenSpec::SolidColor {
+            color: [0.0, 0.0, 1.0, 1.0],
+        });
+        m2.has_audio = false;
+        p.media = vec![m1.clone(), m2.clone()];
+
+        let ev1 = Event::new(&m1, Ticks::ZERO, Ticks::from_secs_i64(4));
+        p.tracks[0].events.push(ev1);
+        let mut v2 = Track::new(TrackKind::Video, "Vídeo 2");
+        v2.events
+            .push(Event::new(&m2, Ticks::ZERO, Ticks::from_secs_i64(4)));
+        p.tracks.insert(1, v2);
+
+        let mut sess = EditorSession::new(p);
+        sess.sel_track = Some(0);
+
+        // 1. Pasta de trilhas + recolher/expandir + validação anti-ciclo
+        let fi = sess.insert_track_folder(TrackKind::Video);
+        assert!(sess.project.tracks[fi].is_folder);
+        let folder_id = sess.project.tracks[fi].id;
+        let child_id = sess.project.tracks[fi + 1].id;
+        assert_eq!(sess.project.tracks[fi + 1].parent_track_id, Some(folder_id));
+        assert!(sess
+            .project
+            .validate_track_parent(folder_id, Some(child_id))
+            .is_err());
+        assert!(sess.toggle_track_folder(fi));
+        assert!(sess.project.is_track_hidden_by_folder(child_id));
+        assert!(sess.toggle_track_folder(fi));
+        assert!(!sess.project.is_track_hidden_by_folder(child_id));
+
+        // 2. Pai/Filho composição e promoção
+        sess.sel_track = Some(2);
+        assert!(sess.make_compositing_child(2).is_ok());
+        assert!(sess.project.tracks[2].parent_track_id.is_some());
+        assert!(sess.unmake_compositing_child(2));
+        assert!(sess.project.tracks[2].parent_track_id.is_none());
+
+        // 3. Propriedades padrão da trilha
+        sess.project.tracks[1].height = 120.0;
+        let defs = sess
+            .capture_default_track_props(1, &crate::prefs::DefaultTrackPrefs::default())
+            .unwrap();
+        let nt = sess.insert_track_with_defaults(TrackKind::Video, &defs);
+        assert!((sess.project.tracks[nt].height - 120.0).abs() < 0.01);
+
+        // 4. Multicâmera: cria trilha multicâmera e corta para Câmera 2 aos 2 s
+        sess.sel_events.clear();
+        let mc_ti = sess.create_multicam_track().unwrap();
+        assert!(sess.project.tracks[mc_ti].multicam);
+        assert!(sess.opts.multicam_mode);
+        let mid = Ticks::from_secs_i64(2);
+        assert!(sess.switch_multicam_angle(mid, 1));
+        let (_, _, _, active, count) = sess.active_multicam_event_at(mid).unwrap();
+        assert_eq!(active, 1);
+        assert!(count >= 2);
+
+        // 5. Renderizar para nova trilha (AVI + Undo em 1 passo)
+        let out_dir = std::env::temp_dir().join(format!("neoveg_rtn_{}", new_id()));
+        let cache = MediaCache::default();
+        let before_tracks = sess.project.tracks.len();
+        let created = sess
+            .render_to_new_track(
+                &cache,
+                Some((Ticks::ZERO, Ticks::from_secs_i64(1))),
+                &out_dir,
+            )
+            .unwrap();
+        assert!(!created.is_empty());
+        assert_eq!(sess.project.tracks.len(), before_tracks + 1);
+        assert!(sess.undo());
+        assert_eq!(sess.project.tracks.len(), before_tracks);
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn efeitos_cadeias_rastreamento_legendas_e_audio_nao_realtime() {
+        // 1. Cadeia de efeitos salva e instanciada com segurança.
+        let mut fx_sepia = FxInstance::new(FxKind::Sepia);
+        fx_sepia.params[0].value = 0.75;
+        let chain_pref = EditorSession::capture_saved_fx_chain(
+            "Look Quente",
+            false,
+            &[fx_sepia, FxInstance::new(FxKind::Vignette)],
+        )
+        .expect("cadeia válida");
+        let built = EditorSession::instantiate_saved_fx_chain(&chain_pref);
+        assert_eq!(built.len(), 2);
+        assert!((built[0].params[0].value - 0.75).abs() < 1e-4);
+        assert!(EditorSession::capture_saved_fx_chain("", false, &built).is_none());
+
+        // 2. Legendas a partir de regiões + Undo em passo único.
+        let mut p = Project::new_default();
+        p.regions.push(Region {
+            id: 1,
+            start: Ticks::ZERO,
+            end: Ticks::from_secs_i64(2),
+            label: "Título Inicial".into(),
+        });
+        let imp_vid = crate::media::import_generated(GenSpec::Text(TextSpec {
+            text: "Alvo".into(),
+            anim: TextAnim::CrawlLeft,
+            anim_duration: 2.0,
+            ..TextSpec::default()
+        }));
+        let ev_vid = Event::new(&imp_vid.item, Ticks::ZERO, Ticks::from_secs_i64(2));
+        let ev_vid_id = ev_vid.id;
+        p.media.push(imp_vid.item);
+        p.tracks[0].events.push(ev_vid);
+
+        let mut sess = EditorSession::new(p);
+        let cache = MediaCache::default();
+        cache.insert(p_media_id(&sess.project), imp_vid.entry);
+
+        assert_eq!(sess.insert_subtitles_from_regions(), 1);
+        assert!(sess
+            .project
+            .tracks
+            .iter()
+            .any(|t| t.name.starts_with("Legendas") && !t.events.is_empty()));
+        assert!(sess.undo());
+
+        // 3. Rastreamento planar de movimento para Pan/Crop + Undo.
+        let keys_n = sess
+            .track_event_motion(&cache, ev_vid_id, Some(ev_vid_id), None, true, 6)
+            .expect("rastreamento");
+        assert!(keys_n >= 2);
+        assert!(sess.project.event(ev_vid_id).unwrap().pan_crop.keys.len() >= 2);
+        assert!(sess.undo());
+
+        // 4. Bypass global no Mixer e aplicar efeitos de áudio fora de tempo real.
+        let dir = std::env::temp_dir().join(format!("neoveg_afxbounce_{}", new_id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let wav_path = dir.join("tone.wav");
+        let sr = sess.project.settings.sample_rate;
+        let samples = vec![0.25f32; (sr as usize / 2) * 2];
+        let mut wr = crate::render::WavWriter::create(&wav_path, sr, crate::render::WavBits::Pcm16)
+            .expect("wav create");
+        wr.write(&samples).expect("wav write");
+        wr.finish().expect("wav finish");
+        let imp_aud = crate::media::import_file(&wav_path).expect("import wav");
+        let mid_aud = imp_aud.item.id;
+        let mut ev_aud = Event::new(&imp_aud.item, Ticks::ZERO, Ticks::from_millis_i64(500));
+        let ev_aud_id = ev_aud.id;
+        let mut gain = FxInstance::new(FxKind::Gain);
+        gain.params[0].value = 6.0;
+        ev_aud.fx.push(gain);
+        cache.insert(mid_aud, imp_aud.entry);
+        sess.project.media.push(imp_aud.item);
+        sess.project.tracks[1].events.push(ev_aud);
+        sess.sel_events.insert(ev_aud_id);
+
+        // Verifica bypass global no Mixer.
+        let audio_map = cache.audio_map();
+        let mut mixer = crate::engine::audio::Mixer::new_offline(sr);
+        let mut wet = vec![0.0f32; 512 * 2];
+        let mut bypassed = vec![0.0f32; 512 * 2];
+        mixer.bypass_fx = false;
+        mixer.process(&sess.project, &audio_map, 0, &mut wet);
+        mixer.reset();
+        mixer.bypass_fx = true;
+        mixer.process(&sess.project, &audio_map, 0, &mut bypassed);
+        let max_wet = wet.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        let max_byp = bypassed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(max_wet > max_byp * 1.4, "wet={max_wet} bypassed={max_byp}");
+
+        // Aplica fora de tempo real (adiciona take e desativa o FX em tempo real).
+        let applied = sess
+            .apply_audio_fx_non_realtime(&cache, &dir)
+            .expect("bounce");
+        assert_eq!(applied, 1);
+        let ev_after = sess.project.event(ev_aud_id).unwrap();
+        assert!(!ev_after.alt_takes.is_empty());
+        assert!(!ev_after.fx[0].enabled);
+        assert!(sess.undo());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grade_marcadores_cd_comando_e_modos_de_automacao() {
+        let mut p = Project::new_default();
+        p.settings.bpm = 120.0;
+        assert!(RulerGridSpacing::Beats
+            .step_ticks(&p.settings)
+            .is_some_and(|t| (t.as_secs_f64() - 0.5).abs() < 1e-4));
+
+        // Entrada hostil no BPM não entra em pânico na grade musical.
+        p.settings.bpm = f64::NAN;
+        assert!(RulerGridSpacing::Beats.step_ticks(&p.settings).is_some());
+        p.settings.bpm = -999.0;
+        p.sanitize();
+        assert!((p.settings.bpm - 120.0).abs() < 1e-6);
+
+        let mut sess = EditorSession::new(p);
+        assert_eq!(sess.cycle_ruler_grid(), RulerGridSpacing::Frame);
+        sess.cursor = Ticks::from_secs_i64(2);
+        sess.insert_marker_kind(MarkerKind::CdTrack, "Abertura", "", "");
+        sess.cursor = Ticks::from_secs_i64(4);
+        sess.insert_marker_kind(MarkerKind::CdIndex, "Refrão", "", "");
+        sess.cursor = Ticks::from_secs_i64(5);
+        sess.insert_marker_kind(MarkerKind::Command, "Legenda", "TEXT", "Olá");
+
+        assert_eq!(sess.project.markers.len(), 3);
+        let cue = sess.export_cd_cue_sheet("album.wav");
+        assert!(cue.contains("FILE \"album.wav\" WAVE"));
+        assert!(cue.contains("TRACK 01 AUDIO"));
+        assert!(cue.contains("INDEX 01 00:02:00"));
+        assert!(cue.contains("INDEX 02 00:04:00"));
+
+        // Automação: Touch grava ponto visível; Off desativa leitura sem apagar pontos.
+        assert_eq!(
+            sess.cycle_track_automation_mode(0),
+            Some(AutomationMode::Touch)
+        );
+        assert!(sess.record_automation_point(
+            0,
+            EnvKind::Opacity,
+            Ticks::from_secs_i64(1),
+            0.35,
+            Ticks::from_millis_i64(10),
+        ));
+        assert!(
+            (sess.project.tracks[0].env_value(EnvKind::Opacity, Ticks::from_secs_i64(1)) - 0.35)
+                .abs()
+                < 1e-3
+        );
+        sess.set_track_automation_mode(0, AutomationMode::Off);
+        assert!(
+            (sess.project.tracks[0].env_value(EnvKind::Opacity, Ticks::from_secs_i64(1)) - 1.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    fn p_media_id(p: &Project) -> Id {
+        p.media[0].id
     }
 }

@@ -51,8 +51,13 @@ pub struct ScriptContext {
 impl ScriptContext {
     #[forbid(unsafe_code)]
     pub fn new(project: Project) -> Self {
+        Self::new_in(project, neoveg_common::Language::PtBr)
+    }
+
+    #[forbid(unsafe_code)]
+    pub fn new_in(project: Project, lang: neoveg_common::Language) -> Self {
         Self {
-            session: EditorSession::new(project),
+            session: EditorSession::new_in(project, lang),
             host: HeadlessHost,
             messages: Vec::new(),
         }
@@ -166,11 +171,27 @@ pub fn run_command_headless(
     project_path: Option<&Path>,
     save_path: Option<&Path>,
 ) -> Result<String, String> {
+    run_command_headless_in(
+        command_id,
+        project_path,
+        save_path,
+        neoveg_common::Language::PtBr,
+    )
+}
+
+/// Versão localizada de [`run_command_headless`].
+#[forbid(unsafe_code)]
+pub fn run_command_headless_in(
+    command_id: &str,
+    project_path: Option<&Path>,
+    save_path: Option<&Path>,
+    lang: neoveg_common::Language,
+) -> Result<String, String> {
     let project = match project_path {
         Some(p) => Project::load_file(p)?.0,
         None => Project::new_default(),
     };
-    let mut ctx = ScriptContext::new(project);
+    let mut ctx = ScriptContext::new_in(project, lang);
     ctx.session.path = project_path.map(Path::to_path_buf);
     let outcome = ctx.execute(command_id)?;
     if let Some(out) = save_path {
@@ -182,6 +203,25 @@ pub fn run_command_headless(
         ctx.session.project.media.len(),
         ctx.session.project.markers.len(),
     ))
+}
+
+/// Lista todos os comandos disponíveis na Tabela Única no idioma solicitado.
+#[forbid(unsafe_code)]
+pub fn list_commands_in(
+    overrides: &HashMap<String, Option<String>>,
+    lang: neoveg_common::Language,
+) -> Vec<(&'static str, String, &'static str, Option<String>)> {
+    COMMANDS
+        .iter()
+        .map(|c| {
+            (
+                c.id,
+                c.menu_path_in(lang),
+                c.label_in(lang),
+                resolved_shortcut(c, overrides).map(|s| s.format_in(lang)),
+            )
+        })
+        .collect()
 }
 
 /// Lista todos os comandos disponíveis na Tabela Única (para CLI/documentação).
@@ -633,6 +673,7 @@ public class EntryPoint
                 id: neoveg_engine::model::new_id(),
                 t: neoveg_engine::time::Ticks::from_secs_i64(i + 1),
                 label: format!("M{i}"),
+                ..Default::default()
             })
             .collect();
         p
@@ -1525,5 +1566,127 @@ public class EntryPoint
         r2.unwrap();
         assert_eq!(c2.session.project.media.len(), 4);
         assert_eq!(c2.session.undo.len(), 1);
+    }
+
+    /// Efeitos e envelopes pela API (Scripting API Summary: Effects,
+    /// Effect, PlugInNode, Vegas.VideoFX/AudioFX, Envelopes, Envelope,
+    /// EnvelopePoint, CurveType): o script adiciona efeitos na trilha e no
+    /// evento, liga o Bypass e cria um envelope de volume com dois pontos.
+    #[test]
+    fn script_adiciona_efeitos_e_envelopes() {
+        use neoveg_engine::model::{Curve, EnvKind, FxKind};
+        use neoveg_engine::time::Ticks;
+        let p = projeto_com_eventos();
+        let corpo = r#"
+        var v = vegas.Project.Tracks[0];
+        var blur = v.Effects.AddEffect(vegas.VideoFX.FindChildByUniqueID("GaussianBlur"));
+        blur.Bypass = true;
+        var a = vegas.Project.Tracks[1];
+        a.Effects.AddEffect(vegas.AudioFX.FindChildByName("Reverb"));
+        var env = new Envelope(EnvelopeType.Volume);
+        a.Envelopes.Add(env);
+        env.Points.Add(new EnvelopePoint(Timecode.FromSeconds(2), 0.5, CurveType.Fast));
+        v.Events[0].Effects.Add(new Effect(vegas.VideoFX.FindChildByUniqueID("Sepia")));
+        if (blur.Index != 0 || !a.Envelopes.HasEnvelope(EnvelopeType.Volume))
+        {
+            throw new System.Exception("Index ou HasEnvelope errados");
+        }"#;
+        let Some((ctx, r)) = roda_script("efeitos", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        let pr = &ctx.session.project;
+        let v = &pr.tracks[0];
+        assert_eq!(v.fx.len(), 1);
+        assert_eq!(v.fx[0].kind, FxKind::GaussianBlur);
+        assert!(!v.fx[0].enabled, "Bypass desliga o efeito");
+        assert_eq!(v.events[0].fx.len(), 1);
+        assert_eq!(v.events[0].fx[0].kind, FxKind::Sepia);
+        let a = &pr.tracks[1];
+        assert_eq!(a.fx.len(), 1);
+        assert_eq!(a.fx[0].kind, FxKind::Reverb);
+        let env = a
+            .envelopes
+            .iter()
+            .find(|e| e.kind == EnvKind::Volume)
+            .expect("envelope de volume");
+        assert_eq!(env.points.len(), 2, "ponto neutro do início + o novo");
+        assert_eq!(env.points[0].t, Ticks::ZERO);
+        assert_eq!(env.points[0].v, 1.0);
+        assert_eq!(env.points[1].t, Ticks::from_secs_i64(2));
+        assert_eq!(env.points[1].v, 0.5);
+        assert_eq!(env.points[1].curve, Curve::Fast);
+        assert_eq!(ctx.session.undo.len(), 1, "um passo de Desfazer");
+    }
+
+    /// Efeito de áudio em trilha de vídeo, plug-in inexistente e envelope que
+    /// o Neoveg não tem recusam o script sem mudar nada.
+    #[test]
+    fn script_efeito_ou_envelope_invalido_e_recusado_sem_mudar_nada() {
+        for (tag, corpo) in [
+            (
+                "fx_tipo",
+                r#"
+        vegas.Project.Tracks[0].Effects.AddEffect(vegas.AudioFX.FindChildByUniqueID("Reverb"));"#,
+            ),
+            (
+                "env_tipo",
+                r#"
+        vegas.Project.Tracks[1].Envelopes.Add(new Envelope(EnvelopeType.BusA));"#,
+            ),
+            (
+                "env_video",
+                r#"
+        vegas.Project.Tracks[0].Envelopes.Add(new Envelope(EnvelopeType.Volume));"#,
+            ),
+        ] {
+            let p = projeto_com_eventos();
+            let Some((ctx, r)) = roda_script(tag, corpo, p) else {
+                return;
+            };
+            assert!(r.is_err(), "{tag} deveria falhar");
+            let pr = &ctx.session.project;
+            assert!(pr.tracks.iter().all(|t| t.fx.is_empty()), "{tag}");
+            assert!(ctx.session.undo.is_empty(), "{tag}");
+        }
+    }
+
+    /// Script que só lê efeitos e envelopes (e remove e recoloca o mesmo
+    /// efeito) não cria passo de Desfazer.
+    #[test]
+    fn script_que_so_le_efeitos_e_envelopes_nao_muda_o_projeto() {
+        use neoveg_engine::model::{EnvKind, EnvPoint, Envelope, FxInstance, FxKind};
+        use neoveg_engine::time::Ticks;
+        let mut p = projeto_com_eventos();
+        p.tracks[0].fx.push(FxInstance::new(FxKind::Glow));
+        let mut env = Envelope::new(EnvKind::Volume);
+        env.points.push(EnvPoint {
+            t: Ticks::from_secs_i64(1),
+            v: 0.25,
+            curve: Default::default(),
+        });
+        p.tracks[1].envelopes.push(env);
+        let corpo = r#"
+        double soma = 0;
+        foreach (var t in vegas.Project.Tracks)
+        {
+            foreach (Effect fx in t.Effects) { soma += fx.Description.Length + (fx.Bypass ? 1 : 0); }
+            foreach (Envelope e in t.Envelopes)
+            {
+                foreach (EnvelopePoint pt in e.Points) { soma += pt.Y + pt.X.ToMilliseconds(); }
+                soma += e.ValueAt(Timecode.FromSeconds(0.5));
+            }
+        }
+        var v = vegas.Project.Tracks[0];
+        var glow = v.Effects[0];
+        v.Effects.RemoveAt(0);
+        v.Effects.Add(glow);
+        vegas.ShowMessage("soma " + soma);"#;
+        let Some((ctx, r)) = roda_script("le_fx", corpo, p) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ctx.session.undo.is_empty(), "nada mudou: sem Desfazer");
+        assert_eq!(ctx.session.project.tracks[0].fx.len(), 1);
     }
 }

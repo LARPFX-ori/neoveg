@@ -663,6 +663,8 @@ pub struct Mixer {
     /// Render/análise offline: espera o plug-in VST3 abrir em vez de passar
     /// o sinal seco nos primeiros blocos.
     offline: bool,
+    /// Ignora globalmente todos os efeitos de áudio (eventos, trilhas, barramentos e master).
+    pub bypass_fx: bool,
 }
 
 impl Drop for Mixer {
@@ -781,6 +783,7 @@ impl Mixer {
             delay_lines: HashMap::new(),
             vst3_owner: crate::plugin_host::new_vst3_owner(),
             offline: false,
+            bypass_fx: false,
         }
     }
 
@@ -966,6 +969,9 @@ impl Mixer {
     }
 
     fn run_fx(&mut self, fx: &FxInstance, buf: &mut [f32], t: Ticks) {
+        if self.bypass_fx {
+            return;
+        }
         if fx.kind == FxKind::Vst3 {
             self.run_vst3(fx, buf);
             return;
@@ -1236,10 +1242,10 @@ impl Mixer {
         pad_buf.resize(n * 2, 0.0);
 
         for (ti, track) in p.tracks.iter().enumerate() {
-            if track.kind != TrackKind::Audio {
+            if track.kind != TrackKind::Audio || track.is_folder {
                 continue;
             }
-            if !track.is_audible(any_solo) {
+            if p.is_track_effectively_muted(track.id) || (any_solo && !track.solo) {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
                 continue;
             }
@@ -1322,11 +1328,11 @@ impl Mixer {
                 start,
                 track.volume_db,
                 if is_surround { 0.0 } else { track.pan },
-                track.envelope(EnvKind::Volume),
+                track.active_envelope(EnvKind::Volume),
                 if is_surround {
                     None
                 } else {
-                    track.envelope(EnvKind::Pan)
+                    track.active_envelope(EnvKind::Pan)
                 },
             );
             self.meters.tracks.insert(track.id, peak);
@@ -1412,11 +1418,11 @@ impl Mixer {
                 start,
                 bus.volume_db,
                 if is_surround { 0.0 } else { bus.pan },
-                bus.envelope(EnvKind::Volume),
+                bus.active_envelope(EnvKind::Volume),
                 if is_surround {
                     None
                 } else {
-                    bus.envelope(EnvKind::Pan)
+                    bus.active_envelope(EnvKind::Pan)
                 },
             );
             self.meters.buses.insert(bus.id, bpeak);
@@ -1481,6 +1487,54 @@ impl Mixer {
         self.pad_buf = pad_buf;
         is_surround
     }
+}
+
+/// Renderiza fora de tempo real (offline) a cadeia `ev.fx` de um evento de áudio em
+/// PCM estéreo intercalado na taxa do projeto (`p.settings.sample_rate`), para
+/// *Apply Non-Real-Time Audio FX* (manual p. 940).
+pub fn render_event_fx_stereo(
+    p: &Project,
+    media: &crate::media::MediaCache,
+    ev: &Event,
+) -> Option<Vec<f32>> {
+    let audio_map = media.audio_map();
+    if !audio_map.contains_key(&ev.media_id) {
+        return None;
+    }
+    let sr = p.settings.sample_rate.clamp(8000, 192_000);
+    let mut iso = Project {
+        settings: p.settings.clone(),
+        ..Default::default()
+    };
+    iso.settings.channel_layout = ChannelLayout::Stereo;
+    if let Some(m) = p.media(ev.media_id) {
+        iso.media.push(m.clone());
+    }
+    let mut iso_ev = ev.clone();
+    iso_ev.start = Ticks::ZERO;
+    iso_ev.gain_db = 0.0;
+    iso_ev.fade_in = Fade::default();
+    iso_ev.fade_out = Fade::default();
+    iso_ev.mute = false;
+    let mut tr = Track::new(TrackKind::Audio, "FXBounce");
+    tr.events.push(iso_ev);
+    iso.tracks.push(tr);
+
+    let max_samples = (sr as usize).saturating_mul(600);
+    let total = (ev.length.to_samples_round(sr).max(1) as usize).min(max_samples);
+    let mut mixer = Mixer::new_offline(sr);
+    let pdc = mixer.total_latency(&iso) as i64;
+    let mut out = Vec::with_capacity(total.saturating_mul(2));
+    let mut pos = 0usize;
+    let chunk = 2048usize;
+    while pos < total {
+        let n = (total - pos).min(chunk);
+        let mut blk = vec![0.0f32; n * 2];
+        mixer.process(&iso, &audio_map, pos as i64 + pdc, &mut blk);
+        out.extend_from_slice(&blk);
+        pos += n;
+    }
+    Some(out)
 }
 
 fn master_gain(p: &Project) -> f32 {

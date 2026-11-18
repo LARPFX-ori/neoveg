@@ -519,6 +519,7 @@ fn import_track(
                 id: crate::model::new_id(),
                 t: t.clamp_safe(Ticks::ZERO, Ticks::MAX),
                 label,
+                ..Default::default()
             });
         }
     }
@@ -656,6 +657,7 @@ fn import_track(
                         id: crate::model::new_id(),
                         t: tl_t,
                         label: m_label,
+                        ..Default::default()
                     });
                 }
             }
@@ -690,6 +692,7 @@ fn collect_stack_tracks(
                 id: crate::model::new_id(),
                 t: t.clamp_safe(Ticks::ZERO, Ticks::MAX),
                 label,
+                ..Default::default()
             });
         }
     }
@@ -1005,7 +1008,7 @@ fn export_media_ref(item: Option<&MediaItem>, fps: FrameRate, sr: Option<u32>) -
         .map(|d| ticks_range(Ticks::ZERO, d, fps, sr));
 
     match &m.source {
-        MediaSource::File { path } => serde_json::json!({
+        MediaSource::File { path } | MediaSource::NestedProject { path } => serde_json::json!({
             "OTIO_SCHEMA": "ExternalReference.1",
             "name": m.name,
             "target_url": encode_target_url(path),
@@ -1295,6 +1298,7 @@ mod tests {
             id: crate::model::new_id(),
             t: Ticks::from_secs_i64(3),
             label: "Corte principal".into(),
+            ..Default::default()
         });
 
         let otio_json = export_otio_string(&p, Some("Teste")).unwrap();

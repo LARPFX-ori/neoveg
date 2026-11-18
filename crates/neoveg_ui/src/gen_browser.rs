@@ -7,6 +7,7 @@
 use crate::app::{App, DndPayload};
 use crate::fx_browser::{category_row, BrowserCat};
 use eframe::egui;
+use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::engine::fx_preview::{THUMB_H, THUMB_W};
 use neoveg_engine::media::generate;
 use neoveg_engine::model::{GenSpec, TextAlign, TextAnim, TextSpec};
@@ -28,12 +29,17 @@ impl GenCategory {
         GenCategory::Utility,
     ];
 
-    pub(crate) fn name(self) -> &'static str {
-        match self {
+    pub(crate) fn name_in(self, lang: Language) -> &'static str {
+        let key = match self {
             GenCategory::Text => "Texto e títulos",
             GenCategory::Backgrounds => "Fundos e cores",
             GenCategory::Utility => "Utilitários",
-        }
+        };
+        tr(lang, key)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        self.name_in(Language::PtBr)
     }
 }
 
@@ -71,15 +77,20 @@ impl GenKind {
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
-        match self {
+    pub(crate) fn name_in(self, lang: Language) -> &'static str {
+        let key = match self {
             GenKind::Text => "Texto",
             GenKind::SolidColor => "Cor sólida",
             GenKind::Gradient => "Gradiente",
             GenKind::Checkerboard => "Quadriculado",
             GenKind::ColorBars => "Barras de teste",
             GenKind::Noise => "Ruído",
-        }
+        };
+        tr(lang, key)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        self.name_in(Language::PtBr)
     }
 
     pub(crate) fn category(self) -> GenCategory {
@@ -234,6 +245,8 @@ pub(crate) struct GenBrowser {
     /// Preset escolhido (índice em `gen_presets`).
     pub(crate) preset: Option<usize>,
     thumbs: HashMap<usize, egui::TextureHandle>,
+    hover_fonts: Option<generate::Fonts>,
+    hover_anim: Option<(usize, egui::TextureHandle, std::time::Instant, u64)>,
     rx: Option<Receiver<(usize, egui::ColorImage)>>,
     started: bool,
 }
@@ -285,25 +298,29 @@ impl GenBrowser {
 
 impl App {
     pub(crate) fn generators_browser(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let presets = gen_presets();
         self.gen_browser.start_thumbs();
         self.gen_browser.poll(ui.ctx(), presets.len());
 
-        let cats: Vec<(GenCategory, &str)> =
-            GenCategory::ALL.iter().map(|c| (*c, c.name())).collect();
-        category_row(ui, &mut self.gen_browser.cat, &cats);
+        let cats: Vec<(GenCategory, &str)> = GenCategory::ALL
+            .iter()
+            .map(|c| (*c, c.name_in(lang)))
+            .collect();
+        category_row(ui, lang, &mut self.gen_browser.cat, &cats);
         ui.add(
             egui::TextEdit::singleline(&mut self.gen_browser.search)
-                .hint_text("Buscar plug-ins")
+                .hint_text(tr(lang, "Buscar plug-ins"))
                 .desired_width(220.0),
         );
         ui.separator();
 
         if self.gen_browser.cat == BrowserCat::ThirdParty {
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(tr(
+                    lang,
                     "Nenhum gerador de terceiros: geradores de mídia OFX ainda não são suportados.",
-                )
+                ))
                 .small()
                 .weak(),
             );
@@ -324,11 +341,15 @@ impl App {
             })
             .filter(|k| {
                 q.is_empty()
+                    || k.name_in(lang).to_lowercase().contains(&q)
                     || k.name().to_lowercase().contains(&q)
+                    || k.category().name_in(lang).to_lowercase().contains(&q)
                     || k.category().name().to_lowercase().contains(&q)
-                    || presets
-                        .iter()
-                        .any(|(n, s)| GenKind::of(s) == *k && n.to_lowercase().contains(&q))
+                    || presets.iter().any(|(n, s)| {
+                        GenKind::of(s) == *k
+                            && (tr(lang, n).to_lowercase().contains(&q)
+                                || n.to_lowercase().contains(&q))
+                    })
             })
             .collect();
         if !self.gen_browser.selected.is_some_and(|k| list.contains(&k)) {
@@ -337,9 +358,12 @@ impl App {
         if list.is_empty() {
             ui.label(
                 egui::RichText::new(if cat == BrowserCat::Favorites {
-                    "Nenhum favorito. Clique na estrela de um gerador para marcá-lo."
+                    tr(
+                        lang,
+                        "Nenhum favorito. Clique na estrela de um gerador para marcá-lo.",
+                    )
                 } else {
-                    "Nenhum gerador encontrado."
+                    tr(lang, "Nenhum gerador encontrado.")
                 })
                 .small()
                 .weak(),
@@ -382,15 +406,15 @@ impl App {
                                 if ui
                                     .selectable_label(fav, if fav { "★" } else { "☆" })
                                     .on_hover_text(if fav {
-                                        "Tirar dos favoritos"
+                                        tr(lang, "Tirar dos favoritos")
                                     } else {
-                                        "Marcar como favorito"
+                                        tr(lang, "Marcar como favorito")
                                     })
                                     .clicked()
                                 {
                                     toggle_fav = Some(*k);
                                 }
-                                if ui.selectable_label(kind == *k, k.name()).clicked() {
+                                if ui.selectable_label(kind == *k, k.name_in(lang)).clicked() {
                                     select = Some(*k);
                                 }
                             });
@@ -400,7 +424,11 @@ impl App {
             ui.separator();
             ui.vertical(|ui| {
                 ui.set_max_width(right_w);
-                ui.strong(format!("Presets: {}", kind.name()));
+                ui.strong(tr_args(
+                    lang,
+                    "Presets: {name}",
+                    &[("name", &kind.name_in(lang))],
+                ));
                 // linhas montadas aqui: o `horizontal_wrapped` do egui não
                 // quebra antes de grupos (miniatura + nome) de tamanho
                 // desconhecido
@@ -411,6 +439,8 @@ impl App {
                     .map(|(i, _)| i)
                     .collect();
                 let per_row = ((right_w + 8.0) / (THUMB_W as f32 + 24.0)).floor().max(1.0) as usize;
+                let (widget_bg, accent) = (self.theme.widget_bg, self.theme.accent);
+                let mut any_hovered = false;
                 for row in idxs.chunks(per_row) {
                     ui.horizontal(|ui| {
                         for &i in row {
@@ -418,7 +448,7 @@ impl App {
                                 continue;
                             };
                             let chosen = self.gen_browser.preset == Some(i);
-                            let thumb = self.gen_browser.thumbs.get(&i).cloned();
+                            let static_thumb = self.gen_browser.thumbs.get(&i).cloned();
                             let r = ui.dnd_drag_source(
                                 egui::Id::new(("genb_preset", i)),
                                 DndPayload::Generator(spec.clone()),
@@ -434,29 +464,94 @@ impl App {
                                             2.0,
                                             egui::Color32::from_gray(16),
                                         );
+                                        let thumb = if ui.rect_contains_pointer(r) {
+                                            any_hovered = true;
+                                            let fonts = self
+                                                .gen_browser
+                                                .hover_fonts
+                                                .get_or_insert_with(generate::Fonts::default);
+                                            let needs_new = self
+                                                .gen_browser
+                                                .hover_anim
+                                                .as_ref()
+                                                .is_none_or(|(pi, _, _, _)| *pi != i);
+                                            if needs_new {
+                                                let img_raw = generate::render(
+                                                    spec,
+                                                    0.0,
+                                                    THUMB_W as u32,
+                                                    THUMB_H as u32,
+                                                    fonts,
+                                                );
+                                                let img = egui::ColorImage::from_rgba_unmultiplied(
+                                                    [
+                                                        img_raw.width() as usize,
+                                                        img_raw.height() as usize,
+                                                    ],
+                                                    img_raw.as_raw(),
+                                                );
+                                                let tex = ui.ctx().load_texture(
+                                                    format!("gen_hover_anim_{i}"),
+                                                    img,
+                                                    egui::TextureOptions::LINEAR,
+                                                );
+                                                self.gen_browser.hover_anim =
+                                                    Some((i, tex, std::time::Instant::now(), 0));
+                                            }
+                                            if let Some((_, tex, started, prev_bucket)) =
+                                                self.gen_browser.hover_anim.as_mut()
+                                            {
+                                                let bucket =
+                                                    (started.elapsed().as_millis() / 80) as u64;
+                                                if bucket != *prev_bucket {
+                                                    *prev_bucket = bucket;
+                                                    let t = ((bucket % 60) as f64) * 0.1;
+                                                    let img_raw = generate::render(
+                                                        spec,
+                                                        t,
+                                                        THUMB_W as u32,
+                                                        THUMB_H as u32,
+                                                        fonts,
+                                                    );
+                                                    let img =
+                                                        egui::ColorImage::from_rgba_unmultiplied(
+                                                            [
+                                                                img_raw.width() as usize,
+                                                                img_raw.height() as usize,
+                                                            ],
+                                                            img_raw.as_raw(),
+                                                        );
+                                                    tex.set(img, egui::TextureOptions::LINEAR);
+                                                }
+                                                ui.ctx().request_repaint_after(
+                                                    std::time::Duration::from_millis(80),
+                                                );
+                                                Some(tex.clone())
+                                            } else {
+                                                static_thumb.clone()
+                                            }
+                                        } else {
+                                            static_thumb.clone()
+                                        };
                                         match &thumb {
                                             Some(t) => {
                                                 egui::Image::new((t.id(), size)).paint_at(ui, r);
                                             }
                                             None => {
-                                                ui.painter().rect_filled(
-                                                    r,
-                                                    2.0,
-                                                    self.theme.widget_bg,
-                                                );
+                                                ui.painter().rect_filled(r, 2.0, widget_bg);
                                             }
                                         }
                                         if chosen {
                                             ui.painter().rect_stroke(
                                                 r,
                                                 2.0,
-                                                egui::Stroke::new(2.0_f32, self.theme.accent),
+                                                egui::Stroke::new(2.0_f32, accent),
                                                 egui::StrokeKind::Outside,
                                             );
                                         }
                                         ui.selectable_label(
                                             chosen,
-                                            egui::RichText::new(*name).small(),
+                                            egui::RichText::new(tr(lang, name)).small(),
                                         )
                                     })
                                     .inner
@@ -465,14 +560,21 @@ impl App {
                             if r.inner.clicked() {
                                 pick = Some(i);
                             }
-                            r.response.on_hover_text("Arraste para a timeline");
+                            r.response
+                                .on_hover_text(tr(lang, "Arraste para a timeline"));
                         }
                     });
+                }
+                if !any_hovered {
+                    self.gen_browser.hover_anim = None;
                 }
                 ui.separator();
                 let cur = self.gen_browser.preset.and_then(|i| presets.get(i));
                 if ui
-                    .add_enabled(cur.is_some(), egui::Button::new("Inserir no cursor"))
+                    .add_enabled(
+                        cur.is_some(),
+                        egui::Button::new(tr(lang, "Inserir no cursor")),
+                    )
                     .clicked()
                 {
                     insert = cur.map(|(_, s)| s.clone());

@@ -1,0 +1,9 @@
+asset:        NotoSansMath-Regular.ttf
+title:        Noto Sans Math Regular (fallback de símbolos matemáticos e de menu como ⋮ e ─)
+author:       The Noto Project Authors / Monotype Design Team, Delve Withrington, Jeff Kellem
+source:       https://github.com/notofonts/math/releases/download/NotoSansMath-v3.000/NotoSansMath-v3.000.zip
+license:      OFL-1.1
+license-file: assets/fonts/NotoSansMath.LICENSE.txt
+added:        2026-11-18 por contribuidores do projeto Neoveg
+notes:        Versão NotoSansMath-v3.000 (hinted), caminho interno NotoSansMath/hinted/ttf/NotoSansMath-Regular.ttf (SHA-256: d51afd5739c7ba6c44fcab35a88160e25dfb69a2d4ad0bd99533f8d894af1f96).
+              Utilizada como fallback para glifos técnicos ausentes em Selawik/Inter/NotoSans-Regular, incluindo reticências verticais (U+22EE '⋮') e traço horizontal (U+2500 '─').

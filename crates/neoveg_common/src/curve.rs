@@ -46,15 +46,20 @@ impl Curve {
         Curve::Hold,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: crate::i18n::Language) -> &'static str {
+        let pt = match self {
             Curve::Linear => "Linear",
             Curve::Fast => "Rápida",
             Curve::Slow => "Lenta",
             Curve::Smooth => "Suave",
             Curve::Sharp => "Abrupta",
             Curve::Hold => "Manter",
-        }
+        };
+        crate::i18n::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(crate::i18n::Language::PtBr)
     }
 
     /// Mapeia `x` em `[0, 1]` para `y` em `[0, 1]` segundo a curva.

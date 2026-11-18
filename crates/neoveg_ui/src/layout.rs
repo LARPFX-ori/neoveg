@@ -4,7 +4,7 @@
 use crate::{DockTab, Preferences};
 use neoveg_common::EditLayoutPrefs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const MAX_LAYOUT_BYTES: u64 = 256 * 1024;
@@ -63,6 +63,68 @@ pub struct WindowLayout {
     pub edit_layout: Option<EditLayoutPrefs>,
     #[serde(default)]
     pub tile_tree: Option<egui_tiles::Tree<crate::dock::DockPane>>,
+    /// Painéis fechados (fora da área de janelas e sem janela própria); voltam
+    /// pelo menu Exibir. `None` (layout antigo ou preset): usa
+    /// [`DEFAULT_CLOSED_TABS`].
+    #[serde(default)]
+    pub closed_tabs: Option<Vec<String>>,
+    /// Posição e tamanho de cada janela destacada (Prévia, Master Bus e
+    /// painéis), por chave: `[x, y, largura, altura]` em pontos.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub floating_windows: BTreeMap<String, FloatingGeom>,
+}
+
+/// Posição (canto de fora) e tamanho interno de uma janela destacada:
+/// `[x, y, largura, altura]`.
+pub type FloatingGeom = [f32; 4];
+
+/// Chaves das janelas destacadas que não são painéis do dock.
+pub const FLOATING_PREVIEW_KEY: &str = "preview";
+pub const FLOATING_MASTER_KEY: &str = "master_bus";
+const MAX_FLOATING_WINDOWS: usize = 64;
+
+/// Geometria de janela válida, ou `None` (valores não finitos). Tamanho entre
+/// 120 e 8192 e posição entre -16384 e 16384 (vários monitores, inclusive à
+/// esquerda ou acima do principal).
+pub fn sanitize_floating_geom(g: FloatingGeom) -> Option<FloatingGeom> {
+    if !g.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    Some([
+        g[0].clamp(-16384.0, 16384.0),
+        g[1].clamp(-16384.0, 16384.0),
+        g[2].clamp(120.0, 8192.0),
+        g[3].clamp(120.0, 8192.0),
+    ])
+}
+
+fn floating_key_ok(k: &str) -> bool {
+    k == FLOATING_PREVIEW_KEY || k == FLOATING_MASTER_KEY || panel_from_key(k).is_some()
+}
+
+/// Painéis do grupo à esquerda da Prévia num layout novo. O Trimmer fica no
+/// grupo da Prévia de Vídeo; os outros painéis começam fechados e abrem pelo
+/// menu Exibir.
+pub const DEFAULT_DOCK_TABS: [DockTab; 5] = [
+    DockTab::ProjectMedia,
+    DockTab::Transitions,
+    DockTab::VideoFx,
+    DockTab::Generators,
+    DockTab::PluginManager,
+];
+
+/// Painéis que começam fechados num layout novo.
+/// Painéis que só abrem em janela própria, fora da área de janelas: o
+/// Neoveg Encoder é uma ferramenta à parte, como um programa separado.
+pub fn window_only(tab: DockTab) -> bool {
+    matches!(tab, DockTab::Encoder)
+}
+
+pub fn default_closed_tabs() -> HashSet<DockTab> {
+    DockTab::ALL
+        .into_iter()
+        .filter(|t| !DEFAULT_DOCK_TABS.contains(t) && *t != DockTab::Trimmer)
+        .collect()
 }
 
 fn default_dock_height() -> f32 {
@@ -97,6 +159,8 @@ impl Default for WindowLayout {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
+            floating_windows: BTreeMap::new(),
         }
     }
 }
@@ -134,6 +198,22 @@ impl WindowLayout {
                 *k = panel_key(tab).to_string();
             }
         }
+        if let Some(list) = self.closed_tabs.as_mut() {
+            let mut seen = HashSet::new();
+            list.retain(|k| panel_from_key(k).is_some_and(|tab| seen.insert(panel_key(tab))));
+            for k in list.iter_mut() {
+                if let Some(tab) = panel_from_key(k) {
+                    *k = panel_key(tab).to_string();
+                }
+            }
+        }
+        let floating = std::mem::take(&mut self.floating_windows);
+        self.floating_windows = floating
+            .into_iter()
+            .filter(|(k, _)| floating_key_ok(k))
+            .filter_map(|(k, g)| sanitize_floating_geom(g).map(|g| (k, g)))
+            .take(MAX_FLOATING_WINDOWS)
+            .collect();
         self.px_per_sec = self
             .px_per_sec
             .filter(|v| v.is_finite() && *v > 0.0)
@@ -150,7 +230,10 @@ impl WindowLayout {
     }
 
     pub fn active_panel(&self) -> DockTab {
-        panel_from_key(&self.active_tab).unwrap_or(DockTab::ProjectMedia)
+        // painel só de janela (Encoder) nunca é a aba ativa do dock
+        panel_from_key(&self.active_tab)
+            .filter(|t| !window_only(*t))
+            .unwrap_or(DockTab::ProjectMedia)
     }
 
     pub fn detached_panels(&self) -> HashSet<DockTab> {
@@ -158,6 +241,20 @@ impl WindowLayout {
             .iter()
             .filter_map(|k| panel_from_key(k))
             .collect()
+    }
+
+    /// Painéis fechados. O painel ativo e os destacados nunca contam como
+    /// fechados (um preset que abre nos Escopos mostra os Escopos).
+    pub fn closed_panels(&self) -> HashSet<DockTab> {
+        let mut closed = match &self.closed_tabs {
+            Some(list) => list.iter().filter_map(|k| panel_from_key(k)).collect(),
+            None => default_closed_tabs(),
+        };
+        closed.remove(&self.active_panel());
+        for t in self.detached_panels() {
+            closed.remove(&t);
+        }
+        closed
     }
 }
 
@@ -178,6 +275,8 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
+            floating_windows: BTreeMap::new(),
         },
         WindowLayout {
             name: "Mixagem de Áudio".into(),
@@ -193,6 +292,8 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
+            floating_windows: BTreeMap::new(),
         },
         WindowLayout {
             name: "Timeline Ampla".into(),
@@ -208,8 +309,14 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             px_per_sec: None,
             edit_layout: None,
             tile_tree: None,
+            closed_tabs: None,
+            floating_windows: BTreeMap::new(),
         },
     ]
+}
+
+pub fn localized_preset_name(name: &str, lang: neoveg_common::Language) -> &str {
+    neoveg_common::tr(lang, name)
 }
 
 pub fn sanitize_layout_filename(name: &str) -> String {
@@ -310,6 +417,8 @@ mod tests {
             px_per_sec: Some(-10.0),
             edit_layout: Some(EditLayoutPrefs::for_type(neoveg_common::LayoutType::Sony)),
             tile_tree: None,
+            closed_tabs: None,
+            floating_windows: BTreeMap::new(),
         };
         bad.sanitize();
         assert_eq!(bad.dock_height, 320.0);
@@ -346,5 +455,37 @@ mod tests {
             p.sanitize();
             assert_eq!(p, before);
         }
+    }
+
+    #[test]
+    fn geometria_das_janelas_destacadas_e_saneada_e_volta_no_arquivo() {
+        let mut l = WindowLayout::default();
+        l.floating_windows
+            .insert(FLOATING_PREVIEW_KEY.into(), [10.0, 20.0, 640.0, 360.0]);
+        l.floating_windows
+            .insert("mixer".into(), [f32::NAN, 0.0, 300.0, 300.0]);
+        l.floating_windows
+            .insert("encoder".into(), [-1.0e9, 1.0e9, 1.0, 1.0e9]);
+        l.floating_windows
+            .insert("chave_inexistente".into(), [0.0, 0.0, 300.0, 300.0]);
+        l.sanitize();
+        assert_eq!(
+            l.floating_windows.get(FLOATING_PREVIEW_KEY),
+            Some(&[10.0, 20.0, 640.0, 360.0])
+        );
+        assert!(!l.floating_windows.contains_key("mixer"), "NaN sai");
+        assert!(!l.floating_windows.contains_key("chave_inexistente"));
+        assert_eq!(
+            l.floating_windows.get("encoder"),
+            Some(&[-16384.0, 16384.0, 120.0, 8192.0])
+        );
+        let json = serde_json::to_string(&l).expect("json");
+        let back: WindowLayout = serde_json::from_str(&json).expect("volta");
+        assert_eq!(back.floating_windows, l.floating_windows);
+        // layout antigo, sem o campo
+        let mut antigo = WindowLayout::default();
+        antigo.floating_windows.clear();
+        let json = serde_json::to_string(&antigo).expect("json");
+        assert!(!json.contains("floating_windows"));
     }
 }

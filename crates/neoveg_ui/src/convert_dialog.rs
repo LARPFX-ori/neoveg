@@ -8,7 +8,7 @@
 
 use crate::app::{App, LoadMsg, PlaceTarget};
 use eframe::egui;
-use neoveg_common::util;
+use neoveg_common::{tr, tr_args, util};
 use neoveg_engine::media::convert::{self, ConvertProgress, Converted};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -50,17 +50,20 @@ impl App {
 
     /// Comando `file.convert_media`: escolhe arquivos e oferece a conversão.
     pub fn convert_media_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter("Todos os arquivos", &["*"])
+            .add_filter(tr(lang, "Todos os arquivos"), &["*"])
             .pick_files()
         {
+            let reason = tr(lang, "escolhido para conversão");
             for f in files {
-                self.offer_conversion(f, None, "escolhido para conversão");
+                self.offer_conversion(f, None, reason);
             }
         }
     }
 
     fn start_conversion(&mut self, offer: ConvertOffer) {
+        let lang = self.lang();
         let n = offer.files.len();
         if n == 0 {
             return;
@@ -74,12 +77,13 @@ impl App {
         let worker_progress = progress.clone();
         let tx = self.loader_tx.clone();
         let files = offer.files;
+        let cancel_msg = tr(lang, "conversão cancelada").to_string();
         // uma mensagem `Converted` por arquivo, mesmo se cancelado
         self.loading += n;
         let spawned = util::spawn("converter-midia", move || {
             for (src, place, _) in files {
                 let result = if worker_progress.cancel.load(Ordering::Relaxed) {
-                    Err("conversão cancelada".to_string())
+                    Err(cancel_msg.clone())
                 } else {
                     let dir = folder
                         .clone()
@@ -113,6 +117,7 @@ impl App {
         result: Result<Converted, String>,
         place: Option<PlaceTarget>,
     ) {
+        let lang = self.lang();
         if let Some(job) = &mut self.dlg.convert_job {
             job.finished += 1;
             if job.finished >= job.total {
@@ -124,14 +129,27 @@ impl App {
                 for w in &c.warnings {
                     util::log_warn(&format!("conversão de {}: {w}", src.display()));
                 }
-                let mut msg = format!("Convertido: {} → {}", src.display(), c.path.display());
+                let src_s = src.display().to_string();
+                let dst_s = c.path.display().to_string();
+                let mut msg = tr_args(
+                    lang,
+                    "Convertido: {src} → {dst}",
+                    &[("src", &src_s), ("dst", &dst_s)],
+                );
                 if !c.warnings.is_empty() {
                     msg.push_str(&format!(" ({})", c.warnings.join("; ")));
                 }
                 self.set_status(msg);
                 self.spawn_import(c.path, place);
             }
-            Err(e) => self.set_status(format!("Conversão de {} falhou: {e}", src.display())),
+            Err(e) => {
+                let src_s = src.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Conversão de {src} falhou: {err}",
+                    &[("src", &src_s), ("err", &e)],
+                ));
+            }
         }
     }
 
@@ -142,6 +160,7 @@ impl App {
     }
 
     fn convert_offer_window(&mut self, ctx: &egui::Context) {
+        let lang = self.lang();
         let busy = self.dlg.convert_job.is_some();
         let Some(offer) = self.dlg.convert_offer.as_mut() else {
             return;
@@ -150,17 +169,19 @@ impl App {
         let mut start = false;
         let mut cancel = false;
         let mut pick_folder = false;
-        egui::Window::new("Converter mídia")
+        egui::Window::new(tr(lang, "Converter mídia"))
+            .id(egui::Id::new("convert_offer_win"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_width(520.0)
             .show(ctx, |ui| {
-                ui.label(
+                ui.label(tr(
+                    lang,
                     "Estes arquivos não podem ser abertos diretamente. O Neoveg pode \
                      convertê-los com o decodificador do sistema para um arquivo \
                      compatível (vídeo: AVI MJPEG + PCM; só áudio: WAV 24 bits).",
-                );
+                ));
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(160.0)
@@ -176,38 +197,44 @@ impl App {
                         }
                     });
                 ui.separator();
-                ui.label("Gravar o arquivo convertido:");
-                ui.radio_value(&mut offer.next_to_original, true, "Na pasta do original");
+                ui.label(tr(lang, "Gravar o arquivo convertido:"));
+                ui.radio_value(
+                    &mut offer.next_to_original,
+                    true,
+                    tr(lang, "Na pasta do original"),
+                );
                 ui.horizontal(|ui| {
-                    ui.radio_value(&mut offer.next_to_original, false, "Nesta pasta:");
+                    ui.radio_value(&mut offer.next_to_original, false, tr(lang, "Nesta pasta:"));
                     let label = offer
                         .folder
                         .as_ref()
                         .map(|f| f.display().to_string())
-                        .unwrap_or_else(|| "(nenhuma escolhida)".into());
+                        .unwrap_or_else(|| tr(lang, "(nenhuma escolhida)").into());
                     ui.label(label);
-                    if ui.button("Escolher...").clicked() {
+                    if ui.button(tr(lang, "Escolher...")).clicked() {
                         pick_folder = true;
                     }
                 });
                 ui.label(
-                    egui::RichText::new(
+                    egui::RichText::new(tr(
+                        lang,
                         "O AVI MJPEG ocupa bastante espaço (centenas de MB por minuto em HD). \
                          Evite pastas sincronizadas na nuvem.",
-                    )
+                    ))
                     .small()
                     .weak(),
                 );
                 ui.separator();
                 ui.horizontal(|ui| {
                     let can_start = !busy && (offer.next_to_original || offer.folder.is_some());
-                    let btn = ui.add_enabled(can_start, egui::Button::new("Converter"));
+                    let btn = ui.add_enabled(can_start, egui::Button::new(tr(lang, "Converter")));
                     if busy {
-                        let _ = btn.on_disabled_hover_text("Aguarde a conversão em andamento.");
+                        let _ = btn
+                            .on_disabled_hover_text(tr(lang, "Aguarde a conversão em andamento."));
                     } else if btn.clicked() {
                         start = true;
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(tr(lang, "Cancelar")).clicked() {
                         cancel = true;
                     }
                 });
@@ -228,6 +255,7 @@ impl App {
     }
 
     fn convert_progress_window(&mut self, ctx: &egui::Context) {
+        let lang = self.lang();
         let Some(job) = &self.dlg.convert_job else {
             return;
         };
@@ -239,14 +267,17 @@ impl App {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut cancel = false;
-        egui::Window::new("Convertendo mídia...")
+        let idx_s = (finished + 1).min(total).to_string();
+        let total_s = total.to_string();
+        egui::Window::new(tr(lang, "Convertendo mídia..."))
+            .id(egui::Id::new("convert_progress_win"))
             .collapsible(true)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "Arquivo {} de {}: {current}",
-                    (finished + 1).min(total),
-                    total
+                ui.label(tr_args(
+                    lang,
+                    "Arquivo {idx} de {total}: {name}",
+                    &[("idx", &idx_s), ("total", &total_s), ("name", &current)],
                 ));
                 ui.add(
                     egui::ProgressBar::new(p.fraction())
@@ -255,7 +286,7 @@ impl App {
                 );
                 let cancelling = p.cancel.load(Ordering::Relaxed);
                 if ui
-                    .add_enabled(!cancelling, egui::Button::new("Cancelar"))
+                    .add_enabled(!cancelling, egui::Button::new(tr(lang, "Cancelar")))
                     .clicked()
                 {
                     cancel = true;

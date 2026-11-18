@@ -10,7 +10,11 @@ use crate::media::audio_extra::{
     AiffWriter, AuWriter, CafWriter, ExtWaveWriter, QoaWriter, W64Writer,
 };
 use crate::media::avi::{AviVideoCodec, AviWriter};
+use crate::media::ffv1::Ffv1Encoder;
+use crate::media::flac::FlacWriter;
 use crate::media::img_extra::{encode_image_for_ext, encode_seq_frame, ImageSeqFormat};
+use crate::media::mkv::{MkvAudioCodec, MkvVideoCodec, MkvWriter};
+use crate::media::mov::{MovVideoCodec, MovWriter};
 use crate::media::y4m::Y4mWriter;
 use crate::media::MediaCache;
 use crate::model::{FrameRate, Project, Ticks, TICKS_PER_SEC};
@@ -29,11 +33,29 @@ use std::time::Instant;
 pub enum RenderFormat {
     Mp4H264,
     Mp4Hevc,
+    Mp4Av1,
     MovH264,
+    MovHevc,
+    MovAv1,
+    MovMpeg4,
+    MkvH264,
+    MkvHevc,
+    MkvAv1,
+    MkvVp9,
     ThreeGp,
     Wmv,
     AviMjpeg,
     AviUncompressed,
+    AviUncompressedBgra,
+    AviUncompressedYuv422,
+    AviUncompressedRgb10,
+    MovUncompressedRgb,
+    MovUncompressedYuv422,
+    MovMjpeg,
+    MovPng,
+    MkvFfv1,
+    MkvMjpeg,
+    MkvPng,
     AnimatedGif,
     Y4m,
     PngSequence,
@@ -45,6 +67,8 @@ pub enum RenderFormat {
     PnmSequence,
     QoiSequence,
     DpxSequence,
+    Dpx10Sequence,
+    CineonSequence,
     ExrSequence,
     Wav,
     Bwf,
@@ -54,6 +78,7 @@ pub enum RenderFormat {
     Au,
     Caf,
     Qoa,
+    Flac,
     AacM4a,
     AacAdts,
     Wma,
@@ -61,14 +86,32 @@ pub enum RenderFormat {
 }
 
 impl RenderFormat {
-    pub const ALL: [RenderFormat; 31] = [
+    pub const ALL: [RenderFormat; 52] = [
         RenderFormat::Mp4H264,
         RenderFormat::Mp4Hevc,
+        RenderFormat::Mp4Av1,
         RenderFormat::MovH264,
+        RenderFormat::MovHevc,
+        RenderFormat::MovAv1,
+        RenderFormat::MovMpeg4,
+        RenderFormat::MkvH264,
+        RenderFormat::MkvHevc,
+        RenderFormat::MkvAv1,
+        RenderFormat::MkvVp9,
         RenderFormat::ThreeGp,
         RenderFormat::Wmv,
         RenderFormat::AviMjpeg,
         RenderFormat::AviUncompressed,
+        RenderFormat::AviUncompressedBgra,
+        RenderFormat::AviUncompressedYuv422,
+        RenderFormat::AviUncompressedRgb10,
+        RenderFormat::MovUncompressedRgb,
+        RenderFormat::MovUncompressedYuv422,
+        RenderFormat::MovMjpeg,
+        RenderFormat::MovPng,
+        RenderFormat::MkvFfv1,
+        RenderFormat::MkvMjpeg,
+        RenderFormat::MkvPng,
         RenderFormat::AnimatedGif,
         RenderFormat::Y4m,
         RenderFormat::PngSequence,
@@ -80,6 +123,8 @@ impl RenderFormat {
         RenderFormat::PnmSequence,
         RenderFormat::QoiSequence,
         RenderFormat::DpxSequence,
+        RenderFormat::Dpx10Sequence,
+        RenderFormat::CineonSequence,
         RenderFormat::ExrSequence,
         RenderFormat::Wav,
         RenderFormat::Bwf,
@@ -89,21 +134,39 @@ impl RenderFormat {
         RenderFormat::Au,
         RenderFormat::Caf,
         RenderFormat::Qoa,
+        RenderFormat::Flac,
         RenderFormat::AacM4a,
         RenderFormat::AacAdts,
         RenderFormat::Wma,
         RenderFormat::Mp3,
     ];
-
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::Mp4H264 => "MP4 H.264 / AVC (+ AAC)",
             Self::Mp4Hevc => "MP4 H.265 / HEVC (+ AAC)",
+            Self::Mp4Av1 => "MP4 AV1 (+ AAC)",
             Self::MovH264 => "QuickTime MOV H.264 (+ AAC)",
+            Self::MovHevc => "QuickTime MOV H.265 / HEVC (+ AAC)",
+            Self::MovAv1 => "QuickTime MOV AV1 (+ AAC)",
+            Self::MovMpeg4 => "QuickTime MOV MPEG-4 Part 2 (+ AAC)",
+            Self::MkvH264 => "Matroska MKV H.264 / AVC (+ AAC)",
+            Self::MkvHevc => "Matroska MKV H.265 / HEVC (+ AAC)",
+            Self::MkvAv1 => "Matroska MKV AV1 (+ AAC)",
+            Self::MkvVp9 => "Matroska MKV VP9 (+ AAC)",
             Self::ThreeGp => "3GPP H.264 (+ AAC)",
             Self::Wmv => "Windows Media Video (.wmv)",
             Self::AviMjpeg => "AVI (Motion-JPEG + PCM)",
             Self::AviUncompressed => "AVI não comprimido RGB24 (+ PCM)",
+            Self::AviUncompressedBgra => "AVI não comprimido BGRA 32-bit (+ PCM)",
+            Self::AviUncompressedYuv422 => "AVI não comprimido YUV 4:2:2 UYVY (+ PCM)",
+            Self::AviUncompressedRgb10 => "AVI não comprimido 10-bit RGB r210 (+ PCM)",
+            Self::MovUncompressedRgb => "QuickTime MOV não comprimido BGRA (+ PCM)",
+            Self::MovUncompressedYuv422 => "QuickTime MOV não comprimido YUV 4:2:2 2vuy (+ PCM)",
+            Self::MovMjpeg => "QuickTime MOV Photo-JPEG (+ PCM)",
+            Self::MovPng => "QuickTime MOV PNG com Alfa (+ PCM)",
+            Self::MkvFfv1 => "Matroska MKV FFV1 sem perdas (+ PCM)",
+            Self::MkvMjpeg => "Matroska MKV Motion-JPEG (+ PCM)",
+            Self::MkvPng => "Matroska MKV PNG sem perdas (+ PCM)",
             Self::AnimatedGif => "GIF animado (+ WAV opcional)",
             Self::Y4m => "YUV4MPEG2 .y4m não comprimido (+ WAV)",
             Self::PngSequence => "Sequência de imagens PNG (+ WAV)",
@@ -114,7 +177,9 @@ impl RenderFormat {
             Self::WebpSequence => "Sequência de imagens WebP (+ WAV)",
             Self::PnmSequence => "Sequência de imagens PNM/PPM (+ WAV)",
             Self::QoiSequence => "Sequência de imagens QOI (+ WAV)",
-            Self::DpxSequence => "Sequência DPX SMPTE 268M (+ WAV)",
+            Self::DpxSequence => "Sequência DPX SMPTE 268M 8-bit (+ WAV)",
+            Self::Dpx10Sequence => "Sequência DPX SMPTE 268M 10-bit (+ WAV)",
+            Self::CineonSequence => "Sequência Kodak Cineon 10-bit (.cin + WAV)",
             Self::ExrSequence => "Sequência OpenEXR HDR (+ WAV)",
             Self::Wav => "Somente áudio WAV",
             Self::Bwf => "Broadcast Wave BWF (EBU bext)",
@@ -124,20 +189,44 @@ impl RenderFormat {
             Self::Au => "Sun / NeXT AU (.au)",
             Self::Caf => "Apple Core Audio Format (.caf)",
             Self::Qoa => "Áudio QOA (Quite OK Audio)",
+            Self::Flac => "Áudio FLAC sem perdas (.flac)",
             Self::AacM4a => "Áudio AAC (.m4a)",
             Self::AacAdts => "Áudio AAC ADTS (.aac)",
             Self::Wma => "Windows Media Audio (.wma)",
             Self::Mp3 => "Áudio MP3 (.mp3)",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 
     pub fn ext(self) -> &'static str {
         match self {
-            Self::Mp4H264 | Self::Mp4Hevc => "mp4",
-            Self::MovH264 => "mov",
+            Self::Mp4H264 | Self::Mp4Hevc | Self::Mp4Av1 => "mp4",
+            Self::MovH264
+            | Self::MovHevc
+            | Self::MovAv1
+            | Self::MovMpeg4
+            | Self::MovUncompressedRgb
+            | Self::MovUncompressedYuv422
+            | Self::MovMjpeg
+            | Self::MovPng => "mov",
             Self::ThreeGp => "3gp",
             Self::Wmv => "wmv",
-            Self::AviMjpeg | Self::AviUncompressed => "avi",
+            Self::AviMjpeg
+            | Self::AviUncompressed
+            | Self::AviUncompressedBgra
+            | Self::AviUncompressedYuv422
+            | Self::AviUncompressedRgb10 => "avi",
+            Self::MkvFfv1
+            | Self::MkvMjpeg
+            | Self::MkvPng
+            | Self::MkvH264
+            | Self::MkvHevc
+            | Self::MkvAv1
+            | Self::MkvVp9 => "mkv",
             Self::AnimatedGif => "gif",
             Self::Y4m => "y4m",
             Self::PngSequence => "png",
@@ -148,7 +237,8 @@ impl RenderFormat {
             Self::WebpSequence => "webp",
             Self::PnmSequence => "ppm",
             Self::QoiSequence => "qoi",
-            Self::DpxSequence => "dpx",
+            Self::DpxSequence | Self::Dpx10Sequence => "dpx",
+            Self::CineonSequence => "cin",
             Self::ExrSequence => "exr",
             Self::Wav => "wav",
             Self::Bwf => "bwf",
@@ -158,6 +248,7 @@ impl RenderFormat {
             Self::Au => "au",
             Self::Caf => "caf",
             Self::Qoa => "qoa",
+            Self::Flac => "flac",
             Self::AacM4a => "m4a",
             Self::AacAdts => "aac",
             Self::Wma => "wma",
@@ -176,6 +267,8 @@ impl RenderFormat {
             Self::PnmSequence => Some(ImageSeqFormat::Pnm),
             Self::QoiSequence => Some(ImageSeqFormat::Qoi),
             Self::DpxSequence => Some(ImageSeqFormat::Dpx),
+            Self::Dpx10Sequence => Some(ImageSeqFormat::Dpx10),
+            Self::CineonSequence => Some(ImageSeqFormat::Cineon),
             Self::ExrSequence => Some(ImageSeqFormat::Exr),
             _ => None,
         }
@@ -192,6 +285,7 @@ impl RenderFormat {
                 | Self::Au
                 | Self::Caf
                 | Self::Qoa
+                | Self::Flac
                 | Self::AacM4a
                 | Self::AacAdts
                 | Self::Wma
@@ -205,22 +299,55 @@ impl RenderFormat {
                 self,
                 Self::AviMjpeg
                     | Self::AviUncompressed
+                    | Self::AviUncompressedBgra
+                    | Self::AviUncompressedYuv422
+                    | Self::AviUncompressedRgb10
+                    | Self::MovUncompressedRgb
+                    | Self::MovUncompressedYuv422
+                    | Self::MovMjpeg
+                    | Self::MovPng
+                    | Self::MkvFfv1
+                    | Self::MkvMjpeg
+                    | Self::MkvPng
                     | Self::Mp4H264
                     | Self::Mp4Hevc
+                    | Self::Mp4Av1
                     | Self::MovH264
+                    | Self::MovHevc
+                    | Self::MovAv1
+                    | Self::MovMpeg4
+                    | Self::MkvH264
+                    | Self::MkvHevc
+                    | Self::MkvAv1
+                    | Self::MkvVp9
                     | Self::ThreeGp
                     | Self::Wmv
             )
     }
 
     pub fn uses_jpeg_quality(self) -> bool {
-        matches!(self, Self::AviMjpeg | Self::JpegSequence)
+        matches!(
+            self,
+            Self::AviMjpeg | Self::MovMjpeg | Self::MkvMjpeg | Self::JpegSequence
+        )
     }
 
     pub fn uses_video_bitrate(self) -> bool {
         matches!(
             self,
-            Self::Mp4H264 | Self::Mp4Hevc | Self::MovH264 | Self::ThreeGp | Self::Wmv
+            Self::Mp4H264
+                | Self::Mp4Hevc
+                | Self::Mp4Av1
+                | Self::MovH264
+                | Self::MovHevc
+                | Self::MovAv1
+                | Self::MovMpeg4
+                | Self::MkvH264
+                | Self::MkvHevc
+                | Self::MkvAv1
+                | Self::MkvVp9
+                | Self::ThreeGp
+                | Self::Wmv
         )
     }
 
@@ -232,7 +359,14 @@ impl RenderFormat {
     pub fn uses_wav_bits(self) -> bool {
         matches!(
             self,
-            Self::Wav | Self::Bwf | Self::Rf64 | Self::Wave64 | Self::Aiff | Self::Au | Self::Caf
+            Self::Wav
+                | Self::Bwf
+                | Self::Rf64
+                | Self::Wave64
+                | Self::Aiff
+                | Self::Au
+                | Self::Caf
+                | Self::Flac
         ) || (!self.has_embedded_audio())
     }
 
@@ -250,6 +384,7 @@ impl RenderFormat {
         match ext.as_str() {
             "mp4" | "m4v" => Self::Mp4H264,
             "mov" => Self::MovH264,
+            "mkv" => Self::MkvFfv1,
             "3gp" => Self::ThreeGp,
             "wmv" => Self::Wmv,
             "gif" => Self::AnimatedGif,
@@ -263,6 +398,7 @@ impl RenderFormat {
             "ppm" | "pnm" => Self::PnmSequence,
             "qoi" => Self::QoiSequence,
             "dpx" => Self::DpxSequence,
+            "cin" => Self::CineonSequence,
             "exr" => Self::ExrSequence,
             "wav" | "wave" => Self::Wav,
             "bwf" => Self::Bwf,
@@ -272,6 +408,7 @@ impl RenderFormat {
             "au" | "snd" => Self::Au,
             "caf" => Self::Caf,
             "qoa" => Self::Qoa,
+            "flac" => Self::Flac,
             "m4a" => Self::AacM4a,
             "aac" => Self::AacAdts,
             "wma" => Self::Wma,
@@ -522,7 +659,15 @@ fn mf_output_format(fmt: RenderFormat) -> Option<crate::media::mf::encode::MfOut
     match fmt {
         RenderFormat::Mp4H264 => Some(MfOutputFormat::Mp4H264),
         RenderFormat::Mp4Hevc => Some(MfOutputFormat::Mp4Hevc),
+        RenderFormat::Mp4Av1 => Some(MfOutputFormat::Mp4Av1),
         RenderFormat::MovH264 => Some(MfOutputFormat::MovH264),
+        RenderFormat::MovHevc => Some(MfOutputFormat::MovHevc),
+        RenderFormat::MovAv1 => Some(MfOutputFormat::MovAv1),
+        RenderFormat::MovMpeg4 => Some(MfOutputFormat::MovMpeg4),
+        RenderFormat::MkvH264 => Some(MfOutputFormat::MkvH264),
+        RenderFormat::MkvHevc => Some(MfOutputFormat::MkvHevc),
+        RenderFormat::MkvAv1 => Some(MfOutputFormat::MkvAv1),
+        RenderFormat::MkvVp9 => Some(MfOutputFormat::MkvVp9),
         RenderFormat::ThreeGp => Some(MfOutputFormat::ThreeGp),
         RenderFormat::Wmv => Some(MfOutputFormat::Wmv),
         RenderFormat::AacM4a => Some(MfOutputFormat::M4aAac),
@@ -544,6 +689,31 @@ fn wait_if_paused(prog: &RenderProgress, pause: Option<&AtomicBool>) -> Result<(
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
     Ok(())
+}
+
+fn encode_jpeg_rgb(f: &Frame, w: usize, h: usize, quality: u8) -> Result<Vec<u8>> {
+    let rgb = f.to_rgb8_opaque();
+    let mut jpg = Vec::with_capacity((w * h / 4).max(512));
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, quality).encode(
+        &rgb,
+        w as u32,
+        h as u32,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(jpg)
+}
+
+fn encode_png_rgba(f: &Frame, w: usize, h: usize) -> Result<Vec<u8>> {
+    use image::ImageEncoder;
+    let rgba = f.to_rgba8();
+    let mut png = Vec::with_capacity((w * h / 2).max(512));
+    image::codecs::png::PngEncoder::new(&mut png).write_image(
+        &rgba,
+        w as u32,
+        h as u32,
+        image::ExtendedColorType::Rgba8,
+    )?;
+    Ok(png)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -571,6 +741,7 @@ fn run_audio_only_with_pause(
         Au(AuWriter),
         Caf(CafWriter),
         Qoa(Box<QoaWriter>),
+        Flac(FlacWriter),
         #[cfg(windows)]
         Mf(MfAudioEnc),
     }
@@ -623,12 +794,12 @@ fn run_audio_only_with_pause(
             proj_ch,
         ),
         RenderFormat::Au => (
-            AudioSink::Au(AuWriter::create(&s.path, sr, s.wav_bits, 2)?),
-            2,
+            AudioSink::Au(AuWriter::create(&s.path, sr, s.wav_bits, proj_ch as u16)?),
+            proj_ch,
         ),
         RenderFormat::Caf => (
-            AudioSink::Caf(CafWriter::create(&s.path, sr, s.wav_bits, 2)?),
-            2,
+            AudioSink::Caf(CafWriter::create(&s.path, sr, s.wav_bits, proj_ch as u16)?),
+            proj_ch,
         ),
         RenderFormat::Qoa => (
             AudioSink::Qoa(Box::new(QoaWriter::create_with_channels(
@@ -636,6 +807,10 @@ fn run_audio_only_with_pause(
                 sr,
                 proj_ch as u16,
             )?)),
+            proj_ch,
+        ),
+        RenderFormat::Flac => (
+            AudioSink::Flac(FlacWriter::create(&s.path, sr, s.wav_bits, proj_ch as u16)?),
             proj_ch,
         ),
         RenderFormat::AacM4a | RenderFormat::AacAdts | RenderFormat::Wma | RenderFormat::Mp3 => {
@@ -710,6 +885,7 @@ fn run_audio_only_with_pause(
             AudioSink::Au(w) => w.write(slice)?,
             AudioSink::Caf(w) => w.write(slice)?,
             AudioSink::Qoa(w) => w.write(slice)?,
+            AudioSink::Flac(w) => w.write(slice)?,
             #[cfg(windows)]
             AudioSink::Mf(w) => w.write_audio_f32(slice)?,
         }
@@ -725,6 +901,7 @@ fn run_audio_only_with_pause(
         AudioSink::Au(w) => w.finish(),
         AudioSink::Caf(w) => w.finish(),
         AudioSink::Qoa(w) => w.finish(),
+        AudioSink::Flac(w) => w.finish(),
         #[cfg(windows)]
         AudioSink::Mf(w) => w.finish(),
     }
@@ -784,6 +961,12 @@ pub fn run_with_options(
     enum Sink {
         // encaixotado: o gravador OpenDML guarda índices e é bem maior que as outras variantes
         Avi(Box<AviWriter>),
+        Mov(Box<MovWriter>),
+        Mkv {
+            writer: Box<MkvWriter>,
+            ffv1: Option<Arc<Ffv1Encoder>>,
+            audio_samples: u64,
+        },
         Gif(
             Box<image::codecs::gif::GifEncoder<BufWriter<File>>>,
             image::Delay,
@@ -801,23 +984,94 @@ pub fn run_with_options(
     }
 
     let (w_even, h_even) = ((w / 2).max(1) * 2, (h / 2).max(1) * 2);
+    let (render_w, render_h) = if s.format.uses_windows_mf() {
+        (w_even, h_even)
+    } else if matches!(
+        s.format,
+        RenderFormat::AviUncompressedYuv422 | RenderFormat::MovUncompressedYuv422
+    ) {
+        (w_even, h)
+    } else {
+        (w, h)
+    };
+    let avi_codec = |codec| {
+        Ok::<_, anyhow::Error>(Sink::Avi(Box::new(AviWriter::create_with_codec(
+            &s.path,
+            render_w as u32,
+            render_h as u32,
+            fps,
+            if has_audio { Some(sr) } else { None },
+            codec,
+        )?)))
+    };
+    let mov_codec = |codec| {
+        Ok::<_, anyhow::Error>(Sink::Mov(Box::new(MovWriter::create(
+            &s.path,
+            render_w as u32,
+            render_h as u32,
+            fps,
+            if has_audio { Some(sr) } else { None },
+            codec,
+        )?)))
+    };
+    let mkv_audio = if has_audio {
+        Some(MkvAudioCodec::Pcm16Le {
+            sample_rate: sr,
+            channels: 2,
+        })
+    } else {
+        None
+    };
+
     let mut sink = match s.format {
-        RenderFormat::AviMjpeg => Sink::Avi(Box::new(AviWriter::create_with_codec(
-            &s.path,
-            w as u32,
-            h as u32,
-            fps,
-            if has_audio { Some(sr) } else { None },
-            AviVideoCodec::Mjpeg,
-        )?)),
-        RenderFormat::AviUncompressed => Sink::Avi(Box::new(AviWriter::create_with_codec(
-            &s.path,
-            w as u32,
-            h as u32,
-            fps,
-            if has_audio { Some(sr) } else { None },
-            AviVideoCodec::UncompressedRgb24,
-        )?)),
+        RenderFormat::AviMjpeg => avi_codec(AviVideoCodec::Mjpeg)?,
+        RenderFormat::AviUncompressed => avi_codec(AviVideoCodec::UncompressedRgb24)?,
+        RenderFormat::AviUncompressedBgra => avi_codec(AviVideoCodec::UncompressedBgra)?,
+        RenderFormat::AviUncompressedYuv422 => avi_codec(AviVideoCodec::UncompressedUyvy)?,
+        RenderFormat::AviUncompressedRgb10 => avi_codec(AviVideoCodec::UncompressedR210)?,
+        RenderFormat::MovUncompressedRgb => mov_codec(MovVideoCodec::UncompressedBgra)?,
+        RenderFormat::MovUncompressedYuv422 => mov_codec(MovVideoCodec::UncompressedYuv422)?,
+        RenderFormat::MovMjpeg => mov_codec(MovVideoCodec::PhotoJpeg)?,
+        RenderFormat::MovPng => mov_codec(MovVideoCodec::Png)?,
+        RenderFormat::MkvFfv1 => {
+            let ffv1 = Arc::new(Ffv1Encoder::new(render_w as u32, render_h as u32, true)?);
+            let writer = MkvWriter::create(
+                &s.path,
+                render_w as u32,
+                render_h as u32,
+                fps,
+                MkvVideoCodec::Ffv1 {
+                    codec_private: ffv1.configuration_record().to_vec(),
+                    has_alpha: ffv1.has_alpha(),
+                },
+                mkv_audio,
+            )?;
+            Sink::Mkv {
+                writer: Box::new(writer),
+                ffv1: Some(ffv1),
+                audio_samples: 0,
+            }
+        }
+        RenderFormat::MkvMjpeg | RenderFormat::MkvPng => {
+            let vcodec = if s.format == RenderFormat::MkvMjpeg {
+                MkvVideoCodec::Mjpeg
+            } else {
+                MkvVideoCodec::Png
+            };
+            let writer = MkvWriter::create(
+                &s.path,
+                render_w as u32,
+                render_h as u32,
+                fps,
+                vcodec,
+                mkv_audio,
+            )?;
+            Sink::Mkv {
+                writer: Box::new(writer),
+                ffv1: None,
+                audio_samples: 0,
+            }
+        }
         RenderFormat::AnimatedGif => {
             let bw = BufWriter::new(
                 File::create(&s.path).with_context(|| format!("criando {}", s.path.display()))?,
@@ -832,23 +1086,24 @@ pub fn run_with_options(
                 image::Delay::from_numer_denom_ms(delay_ms, 1),
             )
         }
-        RenderFormat::Y4m => Sink::Y4m(Y4mWriter::create(&s.path, w as u32, h as u32, fps)?),
-        RenderFormat::Mp4H264
-        | RenderFormat::Mp4Hevc
-        | RenderFormat::MovH264
-        | RenderFormat::ThreeGp
-        | RenderFormat::Wmv => {
+        RenderFormat::Y4m => Sink::Y4m(Y4mWriter::create(
+            &s.path,
+            render_w as u32,
+            render_h as u32,
+            fps,
+        )?),
+        other if other.uses_windows_mf() => {
             #[cfg(windows)]
             {
-                let Some(fmt) = mf_output_format(s.format) else {
+                let Some(fmt) = mf_output_format(other) else {
                     bail!("formato MF inválido");
                 };
                 let enc = crate::media::mf::encode::MfSinkEncoder::create(
                     crate::media::mf::encode::MfEncodeConfig {
                         format: fmt,
                         path: s.path.clone(),
-                        width: w_even as u32,
-                        height: h_even as u32,
+                        width: render_w as u32,
+                        height: render_h as u32,
                         fps,
                         video_bitrate_bps: s.video_bitrate_kbps.clamp(300, 200_000) * 1000,
                         audio_sr: if has_audio { Some(sr) } else { None },
@@ -859,7 +1114,7 @@ pub fn run_with_options(
             }
             #[cfg(not(windows))]
             {
-                let _ = (w_even, h_even);
+                let _ = (w_even, h_even, other);
                 bail!(
                     "exportação {} via Media Foundation disponível apenas no Windows até os backends nativos VideoToolbox/VA-API",
                     s.format.name()
@@ -884,42 +1139,46 @@ pub fn run_with_options(
             Sink::Seq(dir, stem, seq)
         }
     };
-    let (render_w, render_h) = if matches!(
-        s.format,
-        RenderFormat::Mp4H264
-            | RenderFormat::Mp4Hevc
-            | RenderFormat::MovH264
-            | RenderFormat::ThreeGp
-            | RenderFormat::Wmv
-    ) {
-        (w_even, h_even)
-    } else {
-        (w, h)
+    let ffv1_enc = match &sink {
+        Sink::Mkv { ffv1, .. } => ffv1.clone(),
+        _ => None,
     };
+    let proj_ch = p.settings.channel_layout.channels();
     // WAV separado para formatos sem áudio embutido
     let mut side_wav = if has_audio && !s.format.has_embedded_audio() {
-        Some(WavWriter::create(
+        Some(WavWriter::create_with_channels(
             &s.path.with_extension("wav"),
             sr,
             s.wav_bits,
+            proj_ch as u16,
         )?)
     } else {
         None
     };
+    let audio_ch = if side_wav.is_some() { proj_ch } else { 2 };
 
     let batch = rayon::current_num_threads().clamp(1, 8) as u64;
     if has_audio && pdc > 0 {
         let mut pre = 0_i64;
         let base = sample_at(0);
-        let mut prime_buf = vec![0f32; 8192 * 2];
+        let mut prime_buf = vec![0f32; 8192 * audio_ch];
         while pre < pdc {
             let n = ((pdc - pre) as usize).min(8192);
-            mixer.process(
-                p,
-                &audio_map,
-                base.saturating_add(pre),
-                &mut prime_buf[..n * 2],
-            );
+            if audio_ch == 2 {
+                mixer.process(
+                    p,
+                    &audio_map,
+                    base.saturating_add(pre),
+                    &mut prime_buf[..n * 2],
+                );
+            } else {
+                mixer.process_multichannel(
+                    p,
+                    &audio_map,
+                    base.saturating_add(pre),
+                    &mut prime_buf[..n * audio_ch],
+                );
+            }
             pre += n as i64;
         }
     }
@@ -965,28 +1224,49 @@ pub fn run_with_options(
                 }
                 let _ = &mut f;
                 match s.format {
-                    RenderFormat::AviMjpeg => {
-                        let rgb = f.to_rgb8_opaque();
-                        let mut jpg = Vec::with_capacity(render_w * render_h / 4);
-                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, quality)
-                            .encode(
-                                &rgb,
-                                render_w as u32,
-                                render_h as u32,
-                                image::ExtendedColorType::Rgb8,
-                            )?;
-                        Ok(jpg)
+                    RenderFormat::AviMjpeg | RenderFormat::MovMjpeg | RenderFormat::MkvMjpeg => {
+                        encode_jpeg_rgb(&f, render_w, render_h, quality)
+                    }
+                    RenderFormat::MovPng | RenderFormat::MkvPng => {
+                        encode_png_rgba(&f, render_w, render_h)
                     }
                     RenderFormat::AviUncompressed => Ok(AviWriter::rgba_to_dib_bgr24(
                         &f.to_rgba8(),
                         render_w as u32,
                         render_h as u32,
                     )),
-                    RenderFormat::Mp4H264
-                    | RenderFormat::Mp4Hevc
-                    | RenderFormat::MovH264
-                    | RenderFormat::ThreeGp
-                    | RenderFormat::Wmv => {
+                    RenderFormat::AviUncompressedBgra => Ok(AviWriter::rgba_to_dib_bgra32(
+                        &f.to_rgba8(),
+                        render_w as u32,
+                        render_h as u32,
+                    )),
+                    RenderFormat::AviUncompressedYuv422 => Ok(AviWriter::rgba_to_uyvy(
+                        &f.to_rgba8(),
+                        render_w as u32,
+                        render_h as u32,
+                    )),
+                    RenderFormat::AviUncompressedRgb10 => Ok(AviWriter::rgba_to_r210(
+                        &f.to_rgba8(),
+                        render_w as u32,
+                        render_h as u32,
+                    )),
+                    RenderFormat::MovUncompressedRgb => Ok(MovWriter::rgba_to_bgra_topdown(
+                        &f.to_rgba8(),
+                        render_w as u32,
+                        render_h as u32,
+                    )),
+                    RenderFormat::MovUncompressedYuv422 => Ok(MovWriter::rgba_to_2vuy(
+                        &f.to_rgba8(),
+                        render_w as u32,
+                        render_h as u32,
+                    )),
+                    RenderFormat::MkvFfv1 => {
+                        let Some(enc) = ffv1_enc.as_ref() else {
+                            bail!("codificador FFV1 não inicializado");
+                        };
+                        enc.encode_frame(&f.to_rgba8())
+                    }
+                    other if other.uses_windows_mf() => {
                         #[cfg(windows)]
                         {
                             Ok(crate::media::mf::encode::rgba_to_nv12(
@@ -1018,6 +1298,11 @@ pub fn run_with_options(
             let data = data?;
             match &mut sink {
                 Sink::Avi(wr) => wr.write_video_jpeg(&data)?,
+                Sink::Mov(wr) => wr.write_video_frame(&data)?,
+                Sink::Mkv { writer, .. } => {
+                    let vts = writer.frame_pts_ms(fi);
+                    writer.write_video_packet(vts, true, data)?;
+                }
                 Sink::Gif(enc, delay) => {
                     let Some(rgba_img) =
                         image::RgbaImage::from_raw(render_w as u32, render_h as u32, data)
@@ -1037,10 +1322,27 @@ pub fn run_with_options(
                 let a0 = sample_at(fi);
                 let a1 = sample_at(fi + 1);
                 let n = (a1 - a0).max(0) as usize;
-                let mut buf = vec![0f32; n * 2];
-                mixer.process(p, &audio_map, a0.saturating_add(pdc), &mut buf);
+                let mut buf = vec![0f32; n * audio_ch];
+                if audio_ch == 2 {
+                    mixer.process(p, &audio_map, a0.saturating_add(pdc), &mut buf);
+                } else {
+                    mixer.process_multichannel(p, &audio_map, a0.saturating_add(pdc), &mut buf);
+                }
                 match (&mut sink, &mut side_wav) {
                     (Sink::Avi(wr), _) => wr.write_audio(&to_i16(&buf))?,
+                    (Sink::Mov(wr), _) => wr.write_audio(&to_i16(&buf))?,
+                    (
+                        Sink::Mkv {
+                            writer,
+                            audio_samples,
+                            ..
+                        },
+                        _,
+                    ) => {
+                        let pts_ms = MkvWriter::samples_pts_ms(*audio_samples, sr);
+                        writer.write_audio_pcm_i16(pts_ms, &to_i16(&buf))?;
+                        *audio_samples = audio_samples.saturating_add(n as u64);
+                    }
                     #[cfg(windows)]
                     (Sink::Mf(wr), _) => wr.write_audio_f32(&buf)?,
                     (_, Some(wav)) => wav.write(&buf)?,
@@ -1053,6 +1355,8 @@ pub fn run_with_options(
     }
     match sink {
         Sink::Avi(wr) => (*wr).finish()?,
+        Sink::Mov(wr) => (*wr).finish()?,
+        Sink::Mkv { writer, .. } => (*writer).finish()?,
         Sink::Y4m(wr) => wr.finish()?,
         #[cfg(windows)]
         Sink::Mf(wr) => (*wr).finish()?,
@@ -1201,6 +1505,9 @@ mod wav_tests {
 
         let multi_fmts = [
             RenderFormat::AviUncompressed,
+            RenderFormat::AviUncompressedBgra,
+            RenderFormat::AviUncompressedYuv422,
+            RenderFormat::AviUncompressedRgb10,
             RenderFormat::AnimatedGif,
             RenderFormat::PngSequence,
             RenderFormat::JpegSequence,
@@ -1211,6 +1518,8 @@ mod wav_tests {
             RenderFormat::PnmSequence,
             RenderFormat::QoiSequence,
             RenderFormat::DpxSequence,
+            RenderFormat::Dpx10Sequence,
+            RenderFormat::CineonSequence,
             RenderFormat::ExrSequence,
             RenderFormat::Bwf,
             RenderFormat::Rf64,
@@ -1219,9 +1528,10 @@ mod wav_tests {
             RenderFormat::Au,
             RenderFormat::Caf,
             RenderFormat::Qoa,
+            RenderFormat::Flac,
         ];
         for fmt in multi_fmts {
-            let out = dir.join(format!("clip_{}.{}", fmt.ext(), fmt.ext()));
+            let out = dir.join(format!("clip_{fmt:?}.{}", fmt.ext()));
             let s = RenderSettings {
                 format: fmt,
                 path: out.clone(),
@@ -1235,8 +1545,8 @@ mod wav_tests {
             let prog = RenderProgress::default();
             run(&p, &cache, &s, &prog)
                 .unwrap_or_else(|e| panic!("falha ao renderizar {}: {e}", fmt.name()));
-            if fmt.image_seq().is_some() {
-                let first = dir.join(format!("clip_{}_000000.{}", fmt.ext(), fmt.ext()));
+            if let Some(seq) = fmt.image_seq() {
+                let first = dir.join(format!("clip_{fmt:?}_000000.{}", seq.ext()));
                 assert!(first.exists(), "quadro inicial ausente para {}", fmt.name());
                 let decoded = crate::media::img_extra::open_image_file(&first).unwrap();
                 assert_eq!(decoded.dimensions(), (64, 48));
@@ -1251,6 +1561,74 @@ mod wav_tests {
                 }
             }
         }
+
+        // Novos contêineres em Rust puro (.mov / .mkv) validados por demux próprio e ffmpeg
+        for fmt in [
+            RenderFormat::MovUncompressedRgb,
+            RenderFormat::MovUncompressedYuv422,
+            RenderFormat::MovMjpeg,
+            RenderFormat::MovPng,
+            RenderFormat::MkvFfv1,
+            RenderFormat::MkvMjpeg,
+            RenderFormat::MkvPng,
+        ] {
+            let out = dir.join(format!("pure_{fmt:?}.{}", fmt.ext()));
+            let s = RenderSettings {
+                format: fmt,
+                path: out.clone(),
+                width: 64,
+                height: 48,
+                start: Ticks::ZERO,
+                end: dur,
+                include_audio: true,
+                ..RenderSettings::default()
+            };
+            run(&p, &cache, &s, &RenderProgress::default())
+                .unwrap_or_else(|e| panic!("falha ao renderizar {}: {e}", fmt.name()));
+            let idx = crate::media::demux::demux_file(&out)
+                .unwrap_or_else(|e| panic!("demux falhou para {fmt:?}: {e}"));
+            assert!(idx
+                .tracks
+                .iter()
+                .any(|t| t.kind == crate::media::demux::TrackKind::Video));
+        }
+
+        // Paridade 5.1 surround em FLAC / AU / CAF
+        p.settings.channel_layout = crate::model::ChannelLayout::Surround51;
+        for fmt in [RenderFormat::Flac, RenderFormat::Au, RenderFormat::Caf] {
+            let out = dir.join(format!("sur51_{fmt:?}.{}", fmt.ext()));
+            let s = RenderSettings {
+                format: fmt,
+                path: out.clone(),
+                width: 64,
+                height: 48,
+                start: Ticks::ZERO,
+                end: dur,
+                ..RenderSettings::default()
+            };
+            run(&p, &cache, &s, &RenderProgress::default()).unwrap();
+            let raw = std::fs::read(&out).unwrap();
+            match fmt {
+                RenderFormat::Flac => {
+                    assert_eq!(
+                        claxon::FlacReader::open(&out)
+                            .unwrap()
+                            .streaminfo()
+                            .channels,
+                        6
+                    );
+                }
+                RenderFormat::Au => {
+                    assert_eq!(u32::from_be_bytes([raw[20], raw[21], raw[22], raw[23]]), 6);
+                }
+                RenderFormat::Caf => {
+                    // caff(8) + desc(4) + size(8) + sr(8) + id(4) + flags(4) + bpp(4) + fpp(4) + ch_per_frame(4)
+                    assert_eq!(u32::from_be_bytes([raw[44], raw[45], raw[46], raw[47]]), 6);
+                }
+                _ => {}
+            }
+        }
+        p.settings.channel_layout = crate::model::ChannelLayout::Stereo;
 
         // Snapshots nos formatos novos
         for ext in [

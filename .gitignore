@@ -1,4 +1,5 @@
 /target
+/dist
 # material de refer?ncia local (AGENTS.md ?1.4) e m?dia de teste (?3.4)
 /manuais/
 /plan/
@@ -13,3 +14,7 @@
 /filmcraft-main
 filmcraft-main.zip
 /.claude
+
+# cache de bytecode Python (suíte tests/e2e)
+__pycache__/
+*.pyc

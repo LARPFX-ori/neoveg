@@ -17,9 +17,12 @@ mod convert_dialog;
 mod crash_report;
 mod dialogs;
 mod dock;
+mod dock_drop;
 mod edit;
 mod edit_details;
 mod encoder_panel;
+mod float_dock;
+pub mod fonts;
 mod fx_browser;
 mod gen_browser;
 mod icons;
@@ -27,6 +30,7 @@ pub mod integrations_ui;
 pub mod layout;
 mod panels;
 mod plugin_manager;
+mod preview_overlays;
 mod project_media;
 mod script_forms;
 mod scrollbars;
@@ -52,14 +56,31 @@ pub use neoveg_engine::{media, model, playback, recovery, render, session, util}
 use eframe::egui;
 use std::path::PathBuf;
 
-fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
+/// Tamanho da janela principal depois da tela de abertura.
+pub(crate) const MAIN_WINDOW_SIZE: [f32; 2] = [1480.0, 900.0];
+pub(crate) const MAIN_WINDOW_MIN: [f32; 2] = [900.0, 600.0];
+
+/// Com `splash_window`, a janela começa do tamanho da tela de abertura, sem
+/// bordas e centralizada: a tela de abertura aparece sozinha e a janela do
+/// programa só surge depois de carregar, como no VEGAS Pro.
+fn native_options(renderer: eframe::Renderer, splash_window: bool) -> eframe::NativeOptions {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Neoveg")
+        .with_icon(std::sync::Arc::new(crate::splash::window_icon_data()));
+    let viewport = if splash_window {
+        viewport
+            .with_inner_size(crate::splash::SPLASH_WINDOW_SIZE)
+            .with_decorations(false)
+            .with_resizable(false)
+    } else {
+        viewport
+            .with_inner_size(MAIN_WINDOW_SIZE)
+            .with_min_inner_size(MAIN_WINDOW_MIN)
+    };
     eframe::NativeOptions {
         renderer,
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1480.0, 900.0])
-            .with_min_inner_size([900.0, 600.0])
-            .with_title("Neoveg")
-            .with_icon(std::sync::Arc::new(crate::splash::window_icon_data())),
+        viewport,
+        centered: true,
         ..Default::default()
     }
 }
@@ -71,14 +92,25 @@ pub fn run_gui(
     open: Option<PathBuf>,
     crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
 ) -> eframe::Result<()> {
+    run_gui_in(open, crash_reports, None)
+}
+
+/// Versão de [`run_gui`] com idioma inicial explícito (por exemplo `--lang` na CLI).
+pub fn run_gui_in(
+    open: Option<PathBuf>,
+    crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
+    initial_lang: Option<neoveg_common::Language>,
+) -> eframe::Result<()> {
     let open_wgpu = open.clone();
     let crash_wgpu = crash_reports.clone();
+    let splash_window = Preferences::load_or_default().show_splash;
     match eframe::run_native(
         "Neoveg",
-        native_options(eframe::Renderer::Wgpu),
+        native_options(eframe::Renderer::Wgpu, splash_window),
         Box::new(move |cc| {
-            let mut app = App::new(cc, open_wgpu.clone());
+            let mut app = App::with_context_in(&cc.egui_ctx, open_wgpu.clone(), initial_lang);
             app.set_crash_reports(crash_wgpu.clone());
+            app.set_startup_splash_window(splash_window);
             Ok(Box::new(app))
         }),
     ) {
@@ -89,11 +121,16 @@ pub fn run_gui(
             util::log_warn(&warn);
             eframe::run_native(
                 "Neoveg",
-                native_options(eframe::Renderer::Glow),
+                native_options(eframe::Renderer::Glow, splash_window),
                 Box::new(move |cc| {
-                    let mut app = App::new(cc, open.clone());
+                    let mut app = App::with_context_in(&cc.egui_ctx, open.clone(), initial_lang);
                     app.set_crash_reports(crash_reports.clone());
-                    app.set_status("Modo gráfico alternativo (OpenGL/software): WGPU indisponível");
+                    app.set_startup_splash_window(splash_window);
+                    let lang = app.lang();
+                    app.set_status(neoveg_common::tr(
+                        lang,
+                        "Modo gráfico alternativo (OpenGL/software): WGPU indisponível",
+                    ));
                     Ok(Box::new(app))
                 }),
             )

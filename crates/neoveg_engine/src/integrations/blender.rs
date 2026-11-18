@@ -295,6 +295,7 @@ pub fn merge_markers_into_project(
                 id: new_id(),
                 t,
                 label,
+                ..Default::default()
             });
             added += 1;
         }
@@ -946,6 +947,7 @@ mod tests {
             id: new_id(),
             t: Ticks::from_secs_i64(2),
             label: "Cena \"Alfa\"\nLinha2".into(),
+            ..Default::default()
         });
         let py = generate_export_to_blender_py(
             &proj,

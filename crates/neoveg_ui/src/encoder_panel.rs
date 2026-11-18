@@ -7,6 +7,7 @@ use crate::theme::ThemeColors;
 use eframe::egui;
 use egui::{Color32, RichText, TextureHandle};
 use neoveg_common::time::format_ticks;
+use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::encoder::effects::{
     CropAspect, GradePreset, NameFormat, OverlayPosition, SourceScalingMode, TimecodeSource,
 };
@@ -47,13 +48,38 @@ impl EncoderSubView {
         Self::WatchFolders,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: Language) -> &'static str {
+        let key = match self {
             Self::AllPanels => "Painéis (4)",
             Self::QueueAndLive => "Fila + Ao Vivo",
             Self::Presets => "Predefinições",
             Self::WatchFolders => "Pastas Monitoradas",
-        }
+        };
+        tr(lang, key)
+    }
+}
+
+fn preset_display_name(pr: &EncoderPreset, lang: Language) -> &str {
+    if pr.system {
+        tr(lang, &pr.name)
+    } else {
+        &pr.name
+    }
+}
+
+fn preset_display_notes(pr: &EncoderPreset, lang: Language) -> &str {
+    if pr.system && !pr.notes.is_empty() {
+        tr(lang, &pr.notes)
+    } else {
+        &pr.notes
+    }
+}
+
+fn output_preset_label(catalog: &PresetCatalog, out: &OutputJob, lang: Language) -> String {
+    if let Some(pr) = catalog.resolve(&out.preset_id) {
+        preset_display_name(pr, lang).to_string()
+    } else {
+        out.preset_name.clone()
     }
 }
 
@@ -215,6 +241,7 @@ impl EncoderPanelState {
         ctx: &egui::Context,
         dt: f64,
         cache: &Arc<neoveg_engine::media::MediaCache>,
+        lang: Language,
     ) -> Option<String> {
         let mut status_msg = None;
         for upd in self.runtime.drain_updates() {
@@ -267,7 +294,8 @@ impl EncoderPanelState {
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if self.runtime.finished_chime.swap(false, Ordering::Relaxed) {
-            status_msg = Some("Neoveg Encoder: fila de codificação concluída.".to_string());
+            status_msg =
+                Some(tr(lang, "Neoveg Encoder: fila de codificação concluída.").to_string());
         }
 
         // Varredura periódica das Pastas Monitoradas (Watch Folders)
@@ -278,8 +306,11 @@ impl EncoderPanelState {
                 let (added, auto_start) = scan_watch_folders(&mut self.state, &self.catalog);
                 if added > 0 {
                     self.persist_dirty = true;
-                    status_msg = Some(format!(
-                        "Pastas monitoradas: {added} arquivo(s) adicionado(s) à fila"
+                    let added_s = added.to_string();
+                    status_msg = Some(tr_args(
+                        lang,
+                        "Pastas monitoradas: {added} arquivo(s) adicionado(s) à fila",
+                        &[("added", &added_s)],
                     ));
                     if auto_start && !self.runtime.is_running() {
                         self.start_queue(cache);
@@ -348,6 +379,7 @@ fn format_eta(secs: Option<f64>) -> String {
 
 impl App {
     pub(crate) fn send_timeline_to_encoder(&mut self) {
+        let lang = self.lang();
         let in_out = self
             .session
             .time_sel
@@ -359,36 +391,45 @@ impl App {
             .as_deref()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Timeline Atual".to_string());
+            .unwrap_or_else(|| tr(lang, "Timeline Atual").to_string());
         self.encoder.enqueue_project_snapshot(
             title,
             self.session.path.clone(),
             self.session.project.clone(),
             in_out,
         );
-        self.dock_visible = true;
-        self.detached_tabs.remove(&DockTab::Encoder);
-        self.dock_tab = DockTab::Encoder;
-        self.pending_dock_focus = Some(DockTab::Encoder);
-        self.set_status("Timeline enviada para a fila do Neoveg Encoder");
+        // o Encoder abre na janela própria, fora da área de janelas
+        self.open_window_panel(None, DockTab::Encoder);
+        self.set_status(tr(lang, "Timeline enviada para a fila do Neoveg Encoder"));
     }
 
     pub(crate) fn encoder_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let theme = self.theme.clone();
         let running = self.encoder.runtime.is_running();
         let paused = self.encoder.runtime.is_paused();
 
         // Barra superior do estúdio Neoveg Encoder (estilo VEGAS Pro)
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Neoveg Encoder").strong().color(theme.accent));
+            ui.label(
+                RichText::new(tr(lang, "Neoveg Encoder"))
+                    .strong()
+                    .color(theme.accent),
+            );
             ui.separator();
 
-            if icons::small_icon_button(ui, Icon::ImportMedia, Some("+ Arquivo..."), false, &theme)
-                .clicked()
+            if icons::small_icon_button(
+                ui,
+                Icon::ImportMedia,
+                Some(tr(lang, "+ Arquivo...")),
+                false,
+                &theme,
+            )
+            .clicked()
             {
                 let exts = media_filter_extensions();
                 if let Some(files) = rfd::FileDialog::new()
-                    .add_filter("Mídia e Sequências", &exts)
+                    .add_filter(tr(lang, "Mídia e Sequências"), &exts)
                     .pick_files()
                 {
                     let mut n = 0usize;
@@ -401,15 +442,26 @@ impl App {
                     }
                     self.encoder.persist_dirty = true;
                     if n > 0 {
-                        self.set_status(format!("{n} arquivo(s) adicionado(s) ao Neoveg Encoder"));
+                        let n_s = n.to_string();
+                        self.set_status(tr_args(
+                            lang,
+                            "{n} arquivo(s) adicionado(s) ao Neoveg Encoder",
+                            &[("n", &n_s)],
+                        ));
                     }
                 }
             }
-            if icons::small_icon_button(ui, Icon::OpenFolder, Some("+ Sequência..."), false, &theme)
-                .clicked()
+            if icons::small_icon_button(
+                ui,
+                Icon::OpenFolder,
+                Some(tr(lang, "+ Sequência...")),
+                false,
+                &theme,
+            )
+            .clicked()
             {
                 if let Some(first) = rfd::FileDialog::new()
-                    .add_filter("Quadros de imagem", IMAGE_EXTS)
+                    .add_filter(tr(lang, "Quadros de imagem"), IMAGE_EXTS)
                     .pick_file()
                 {
                     let fps = self.encoder.state.prefs.undefined_media_fps;
@@ -422,26 +474,39 @@ impl App {
                             self.encoder.selected_item = Some(id);
                             self.encoder.persist_dirty = true;
                         }
-                        Err(e) => self.set_status(format!("Erro na sequência: {e}")),
+                        Err(e) => {
+                            let err_s = e.to_string();
+                            self.set_status(tr_args(
+                                lang,
+                                "Erro na sequência: {e}",
+                                &[("e", &err_s)],
+                            ));
+                        }
                     }
                 }
             }
             if ui
-                .small_button("+ Timeline Atual")
-                .on_hover_text("Adiciona a timeline do projeto à fila de codificação")
+                .small_button(tr(lang, "+ Timeline Atual"))
+                .on_hover_text(tr(
+                    lang,
+                    "Adiciona a timeline do projeto à fila de codificação",
+                ))
                 .clicked()
             {
                 self.send_timeline_to_encoder();
             }
 
             ui.separator();
-            let play_label = if running && paused {
-                "Retomar Fila"
-            } else if running {
-                "Codificando..."
-            } else {
-                "Iniciar Fila"
-            };
+            let play_label = tr(
+                lang,
+                if running && paused {
+                    "Retomar Fila"
+                } else if running {
+                    "Codificando..."
+                } else {
+                    "Iniciar Fila"
+                },
+            );
             if icons::small_icon_button(
                 ui,
                 Icon::Play,
@@ -453,45 +518,54 @@ impl App {
             {
                 self.encoder.start_queue(&self.media);
             }
-            if icons::small_icon_button(ui, Icon::Pause, Some("Pausar"), paused, &theme).clicked()
+            if icons::small_icon_button(ui, Icon::Pause, Some(tr(lang, "Pausar")), paused, &theme)
+                .clicked()
                 && running
             {
                 self.encoder.runtime.toggle_pause();
             }
-            if icons::small_icon_button(ui, Icon::Stop, Some("Parar Fila"), false, &theme).clicked()
+            if icons::small_icon_button(ui, Icon::Stop, Some(tr(lang, "Parar Fila")), false, &theme)
+                .clicked()
                 && running
             {
                 self.encoder.runtime.stop_queue();
             }
-            if running && ui.small_button("Parar Atual").clicked() {
+            if running && ui.small_button(tr(lang, "Parar Atual")).clicked() {
                 self.encoder.runtime.stop_current();
             }
 
             ui.separator();
             for sv in EncoderSubView::ALL {
-                ui.selectable_value(&mut self.encoder.sub_view, sv, sv.name());
+                ui.selectable_value(&mut self.encoder.sub_view, sv, sv.name_in(lang));
             }
 
             ui.separator();
-            if icons::small_icon_button(ui, Icon::SaveDisk, Some("Salvar Fila"), false, &theme)
-                .clicked()
+            if icons::small_icon_button(
+                ui,
+                Icon::SaveDisk,
+                Some(tr(lang, "Salvar Fila")),
+                false,
+                &theme,
+            )
+            .clicked()
             {
                 self.encoder.save_to_disk();
-                self.set_status("Fila do Neoveg Encoder salva");
+                self.set_status(tr(lang, "Fila do Neoveg Encoder salva"));
             }
-            if ui.small_button("Preferências...").clicked() {
+            if ui.small_button(tr(lang, "Preferências...")).clicked() {
                 self.encoder.prefs_open = true;
             }
-            if ui.small_button("Registro").clicked() {
+            if ui.small_button(tr(lang, "Registro")).clicked() {
                 let (ok_log, _) = encoder_log_paths();
-                let txt = std::fs::read_to_string(&ok_log)
-                    .unwrap_or_else(|_| "(Nenhuma entrada registrada ainda.)".into());
+                let txt = std::fs::read_to_string(&ok_log).unwrap_or_else(|_| {
+                    tr(lang, "(Nenhuma entrada registrada ainda.)").to_string()
+                });
                 self.encoder.log_modal = Some(("Registro de Codificação", ok_log, txt));
             }
-            if ui.small_button("Erros").clicked() {
+            if ui.small_button(tr(lang, "Erros")).clicked() {
                 let (_, err_log) = encoder_log_paths();
                 let txt = std::fs::read_to_string(&err_log)
-                    .unwrap_or_else(|_| "(Nenhum erro registrado.)".into());
+                    .unwrap_or_else(|_| tr(lang, "(Nenhum erro registrado.)").to_string());
                 self.encoder.log_modal = Some(("Registro de Erros do Encoder", err_log, txt));
             }
         });
@@ -555,12 +629,13 @@ impl App {
     }
 
     fn encoder_queue_section(&mut self, ui: &mut egui::Ui, theme: &ThemeColors, max_h: f32) {
+        let lang = self.lang();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Fila de Codificação").strong());
+            ui.label(RichText::new(tr(lang, "Fila de Codificação")).strong());
             let sel_item = self.encoder.selected_item;
             let sel_out = self.encoder.selected_output;
             ui.add_enabled_ui(sel_item.is_some(), |ui| {
-                if ui.small_button("+ Saída").clicked() {
+                if ui.small_button(tr(lang, "+ Saída")).clicked() {
                     if let Some(iid) = sel_item {
                         let pid = self
                             .encoder
@@ -579,15 +654,15 @@ impl App {
                         }
                     }
                 }
-                if ui.small_button("Configurações...").clicked() {
+                if ui.small_button(tr(lang, "Configurações...")).clicked() {
                     if let (Some(iid), Some(oid)) = (sel_item, sel_out) {
                         self.open_export_settings_modal(iid, oid);
                     }
                 }
-                if ui.small_button("Interpretar...").clicked() {
+                if ui.small_button(tr(lang, "Interpretar...")).clicked() {
                     self.encoder.interpret_item_id = sel_item;
                 }
-                if ui.small_button("Duplicar").clicked() {
+                if ui.small_button(tr(lang, "Duplicar")).clicked() {
                     if let Some(iid) = sel_item {
                         if let Some(oid) = sel_out {
                             self.encoder.selected_output =
@@ -598,13 +673,13 @@ impl App {
                         self.encoder.persist_dirty = true;
                     }
                 }
-                if ui.small_button("Ignorar").clicked() {
+                if ui.small_button(tr(lang, "Ignorar")).clicked() {
                     if let Some(iid) = sel_item {
                         self.encoder.state.set_skipped(iid, sel_out, true);
                         self.encoder.persist_dirty = true;
                     }
                 }
-                if ui.small_button("Redefinir").clicked() {
+                if ui.small_button(tr(lang, "Redefinir")).clicked() {
                     if let Some(iid) = sel_item {
                         self.encoder.state.reset_status(iid, sel_out);
                         self.encoder.persist_dirty = true;
@@ -622,7 +697,7 @@ impl App {
                         self.encoder.persist_dirty = true;
                     }
                 }
-                if ui.small_button("Remover").clicked() {
+                if ui.small_button(tr(lang, "Remover")).clicked() {
                     if let Some(iid) = sel_item {
                         if let Some(oid) = sel_out {
                             self.encoder.state.remove_output(iid, oid);
@@ -635,7 +710,7 @@ impl App {
                     }
                 }
             });
-            if ui.small_button("Limpar Concluídos").clicked() {
+            if ui.small_button(tr(lang, "Limpar Concluídos")).clicked() {
                 self.encoder.state.clear_completed();
                 self.encoder.persist_dirty = true;
             }
@@ -654,9 +729,10 @@ impl App {
             .show(ui, |ui| {
                 if self.encoder.state.items.is_empty() {
                     ui.label(
-                        RichText::new(
+                        RichText::new(tr(
+                            lang,
                             "Fila vazia. Clique em '+ Arquivo...', '+ Timeline Atual' ou adicione uma Pasta Monitorada.",
-                        )
+                        ))
                         .weak(),
                     );
                     return;
@@ -671,14 +747,15 @@ impl App {
                         if ui.small_button(arrow).clicked() {
                             item.expanded = !item.expanded;
                         }
+                        let src_disp = item.source.display_name();
+                        let out_count = item.outputs.len().to_string();
                         if ui
                             .selectable_label(
                                 is_item_sel && self.encoder.selected_output.is_none(),
-                                format!(
-                                    "{} ({} saída{})",
-                                    item.source.display_name(),
-                                    item.outputs.len(),
-                                    if item.outputs.len() == 1 { "" } else { "s" }
+                                tr_args(
+                                    lang,
+                                    "{src} ({n} saída(s))",
+                                    &[("src", &src_disp), ("n", &out_count)],
                                 ),
                             )
                             .clicked()
@@ -687,7 +764,11 @@ impl App {
                             self.encoder.selected_output =
                                 item.outputs.first().map(|o| o.id);
                         }
-                        ui.label(RichText::new(agg.name()).small().color(status_color(agg, theme)));
+                        ui.label(
+                            RichText::new(agg.name_in(lang))
+                                .small()
+                                .color(status_color(agg, theme)),
+                        );
                     });
 
                     if !item.expanded {
@@ -699,7 +780,7 @@ impl App {
                                 && self.encoder.selected_output == Some(out.id);
                             let busy = out.status == JobStatus::Encoding;
                             ui.horizontal_wrapped(|ui| {
-                                if ui.selectable_label(is_out_sel, "Saída").clicked() {
+                                if ui.selectable_label(is_out_sel, tr(lang, "Saída")).clicked() {
                                     self.encoder.selected_item = Some(item.id);
                                     self.encoder.selected_output = Some(out.id);
                                 }
@@ -707,11 +788,15 @@ impl App {
                                     let mut cur_fmt = out.format;
                                     egui::ComboBox::from_id_salt(("enc_fmt", out.id))
                                         .width(145.0)
-                                        .selected_text(cur_fmt.name())
+                                        .selected_text(cur_fmt.name_in(lang))
                                         .show_ui(ui, |ui| {
                                             for f in RenderFormat::ALL {
                                                 if ui
-                                                    .selectable_value(&mut cur_fmt, f, f.name())
+                                                    .selectable_value(
+                                                        &mut cur_fmt,
+                                                        f,
+                                                        f.name_in(lang),
+                                                    )
                                                     .clicked()
                                                 {
                                                     format_change_req =
@@ -719,15 +804,17 @@ impl App {
                                                 }
                                             }
                                         });
+                                    let sel_pre_lbl =
+                                        output_preset_label(&self.encoder.catalog, out, lang);
                                     egui::ComboBox::from_id_salt(("enc_pre", out.id))
                                         .width(165.0)
-                                        .selected_text(&out.preset_name)
+                                        .selected_text(sel_pre_lbl)
                                         .show_ui(ui, |ui| {
                                             for pr in &all_presets {
                                                 if ui
                                                     .selectable_label(
                                                         out.preset_id == pr.id,
-                                                        &pr.name,
+                                                        preset_display_name(pr, lang),
                                                     )
                                                     .clicked()
                                                 {
@@ -752,13 +839,13 @@ impl App {
                                     pick_path_req =
                                         Some((item.id, out.id, out.output_path.clone()));
                                 }
-                                if ui.small_button("Ajustar...").clicked() {
+                                if ui.small_button(tr(lang, "Ajustar...")).clicked() {
                                     open_settings_req = Some((item.id, out.id));
                                 }
 
                                 let st_resp = ui.add(
                                     egui::Button::new(
-                                        RichText::new(out.status.name())
+                                        RichText::new(out.status.name_in(lang))
                                             .small()
                                             .color(status_color(out.status, theme)),
                                     )
@@ -781,7 +868,7 @@ impl App {
                                 }
                                 if (out.status == JobStatus::Stopped
                                     || out.status == JobStatus::Failed)
-                                    && ui.small_button("Reativar").clicked()
+                                    && ui.small_button(tr(lang, "Reativar")).clicked()
                                 {
                                     reset_req = Some((item.id, out.id));
                                 }
@@ -822,7 +909,8 @@ impl App {
             if let Some(it) = self.encoder.state.items.iter_mut().find(|i| i.id == iid) {
                 if let Some(o) = it.outputs.iter_mut().find(|o| o.id == oid) {
                     o.format = fmt;
-                    o.preset_name = format!("Personalizado ({})", fmt.name());
+                    let fmt_n = fmt.name_in(lang);
+                    o.preset_name = tr_args(lang, "Personalizado ({fmt})", &[("fmt", &fmt_n)]);
                     o.output_path = o.output_path.with_extension(fmt.ext());
                     if fmt.is_audio_only() {
                         o.include_video = false;
@@ -854,17 +942,18 @@ impl App {
             let (ok_log, err_log) = encoder_log_paths();
             let target = if err_log.exists() { err_log } else { ok_log };
             let txt = std::fs::read_to_string(&target)
-                .unwrap_or_else(|_| "(Nenhuma entrada registrada.)".into());
+                .unwrap_or_else(|_| tr(lang, "(Nenhuma entrada registrada.)").into());
             self.encoder.log_modal = Some(("Registro de Codificação", target, txt));
         }
     }
 
     fn encoder_live_section(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
+        let lang = self.lang();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Painel Codificação (Ao Vivo)").strong());
+            ui.label(RichText::new(tr(lang, "Painel Codificação (Ao Vivo)")).strong());
             ui.checkbox(
                 &mut self.encoder.state.prefs.preview_during_encoding,
-                "Prévia visual",
+                tr(lang, "Prévia visual"),
             );
         });
 
@@ -875,13 +964,14 @@ impl App {
             .iter()
             .flat_map(|item| {
                 let sname = item.source.display_name();
+                let cat = &self.encoder.catalog;
                 item.outputs.iter().filter_map(move |o| {
                     if o.status == JobStatus::Encoding
                         || (o.progress > 0.0 && o.status == JobStatus::Done)
                     {
                         Some((
                             sname.clone(),
-                            o.preset_name.clone(),
+                            output_preset_label(cat, o, lang),
                             o.status,
                             o.progress,
                             o.elapsed_secs,
@@ -907,15 +997,18 @@ impl App {
                     egui::Stroke::new(1.0_f32, theme.border),
                     egui::StrokeKind::Inside,
                 );
-                let msg = if self.encoder.runtime.is_running() {
-                    if self.encoder.runtime.is_paused() {
-                        "Pausado"
+                let msg = tr(
+                    lang,
+                    if self.encoder.runtime.is_running() {
+                        if self.encoder.runtime.is_paused() {
+                            "Pausado"
+                        } else {
+                            "Renderizando..."
+                        }
                     } else {
-                        "Renderizando..."
-                    }
-                } else {
-                    "Ocioso"
-                };
+                        "Ocioso"
+                    },
+                );
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -927,7 +1020,9 @@ impl App {
 
             ui.vertical(|ui| {
                 if active_rows.is_empty() {
-                    ui.label(RichText::new("Nenhuma codificação ativa no momento.").weak());
+                    ui.label(
+                        RichText::new(tr(lang, "Nenhuma codificação ativa no momento.")).weak(),
+                    );
                 } else {
                     for (src_n, pre_n, st, prog, elapsed, eta) in active_rows.iter().take(4) {
                         ui.label(
@@ -942,11 +1037,13 @@ impl App {
                                     .show_percentage(),
                             );
                             if self.encoder.state.prefs.show_elapsed_time {
+                                let el_s = format!("{elapsed:.1}");
+                                let eta_s = format_eta(*eta);
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{:.1}s | ETA {}",
-                                        elapsed,
-                                        format_eta(*eta)
+                                    RichText::new(tr_args(
+                                        lang,
+                                        "{elapsed}s | ETA {eta}",
+                                        &[("elapsed", &el_s), ("eta", &eta_s)],
                                     ))
                                     .small()
                                     .weak(),
@@ -960,22 +1057,23 @@ impl App {
     }
 
     fn encoder_presets_section(&mut self, ui: &mut egui::Ui, _theme: &ThemeColors, max_h: f32) {
+        let lang = self.lang();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Navegador de Predefinições").strong());
+            ui.label(RichText::new(tr(lang, "Navegador de Predefinições")).strong());
             ui.add(
                 egui::TextEdit::singleline(&mut self.encoder.preset_search)
                     .desired_width(130.0)
-                    .hint_text("Pesquisar..."),
+                    .hint_text(tr(lang, "Pesquisar...")),
             );
-            if ui.small_button("+ Predefinição").clicked() {
+            if ui.small_button(tr(lang, "+ Predefinição")).clicked() {
                 self.encoder.create_preset_open = true;
             }
-            if ui.small_button("+ Grupo").clicked() {
+            if ui.small_button(tr(lang, "+ Grupo")).clicked() {
                 self.encoder.create_group_open = true;
             }
-            if ui.small_button("Importar").clicked() {
+            if ui.small_button(tr(lang, "Importar")).clicked() {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("Predefinição Neoveg", &["neovegpreset"])
+                    .add_filter(tr(lang, "Predefinição Neoveg"), &["neovegpreset"])
                     .pick_file()
                 {
                     match import_preset_file(&p) {
@@ -984,20 +1082,32 @@ impl App {
                             self.encoder.selected_preset = Some(id);
                             self.encoder.persist_dirty = true;
                         }
-                        Err(e) => self.set_status(format!("Erro ao importar predefinição: {e}")),
+                        Err(e) => {
+                            let err_s = e.to_string();
+                            self.set_status(tr_args(
+                                lang,
+                                "Erro ao importar predefinição: {e}",
+                                &[("e", &err_s)],
+                            ));
+                        }
                     }
                 }
             }
-            if ui.small_button("Exportar").clicked() {
+            if ui.small_button(tr(lang, "Exportar")).clicked() {
                 if let Some(pid) = &self.encoder.selected_preset {
                     if let Some(pr) = self.encoder.catalog.resolve(pid).cloned() {
                         if let Some(dest) = rfd::FileDialog::new()
-                            .add_filter("Predefinição Neoveg", &["neovegpreset"])
+                            .add_filter(tr(lang, "Predefinição Neoveg"), &["neovegpreset"])
                             .set_file_name(format!("{}.neovegpreset", pr.name))
                             .save_file()
                         {
                             if let Err(e) = export_preset_file(&pr, &dest) {
-                                self.set_status(format!("Erro ao exportar: {e}"));
+                                let err_s = e.to_string();
+                                self.set_status(tr_args(
+                                    lang,
+                                    "Erro ao exportar: {e}",
+                                    &[("e", &err_s)],
+                                ));
                             }
                         }
                     }
@@ -1010,7 +1120,7 @@ impl App {
             ui.add_enabled_ui(
                 sel_item.is_some() && self.encoder.selected_preset.is_some(),
                 |ui| {
-                    if ui.small_button("Aplicar à Origem").clicked() {
+                    if ui.small_button(tr(lang, "Aplicar à Origem")).clicked() {
                         if let (Some(iid), Some(pid)) =
                             (sel_item, self.encoder.selected_preset.clone())
                         {
@@ -1023,7 +1133,7 @@ impl App {
                             self.encoder.persist_dirty = true;
                         }
                     }
-                    if ui.small_button("Adicionar como Saída").clicked() {
+                    if ui.small_button(tr(lang, "Adicionar como Saída")).clicked() {
                         if let (Some(iid), Some(pid)) =
                             (sel_item, self.encoder.selected_preset.clone())
                         {
@@ -1041,24 +1151,23 @@ impl App {
             if let Some(pid) = self.encoder.selected_preset.clone() {
                 if let Some(u) = self.encoder.catalog.user.iter().find(|u| u.id == pid) {
                     let cur_name = u.name.clone();
-                    if ui.small_button("Renomear").clicked() {
+                    if ui.small_button(tr(lang, "Renomear")).clicked() {
                         self.encoder.rename_preset_target = Some((pid.clone(), cur_name));
                     }
-                    if ui.small_button("Criar Apelido").clicked() {
-                        let name = format!(
-                            "Apelido ({})",
-                            self.encoder
-                                .catalog
-                                .resolve(&pid)
-                                .map(|p| p.name.as_str())
-                                .unwrap_or("Predefinição")
-                        );
+                    if ui.small_button(tr(lang, "Criar Apelido")).clicked() {
+                        let base_name = self
+                            .encoder
+                            .catalog
+                            .resolve(&pid)
+                            .map(|p| preset_display_name(p, lang))
+                            .unwrap_or_else(|| tr(lang, "Predefinição"));
+                        let name = tr_args(lang, "Apelido ({name})", &[("name", &base_name)]);
                         if let Ok(aid) = self.encoder.catalog.create_alias(&name, &pid, None) {
                             self.encoder.selected_preset = Some(aid);
                             self.encoder.persist_dirty = true;
                         }
                     }
-                    if ui.small_button("Excluir").clicked() {
+                    if ui.small_button(tr(lang, "Excluir")).clicked() {
                         self.encoder.catalog.delete_custom(&pid);
                         self.encoder.selected_preset = Some("sys.web_1080p_hq".into());
                         self.encoder.persist_dirty = true;
@@ -1071,12 +1180,12 @@ impl App {
         let mut rename_cancel = false;
         if let Some((ref target_id, ref mut draft_name)) = self.encoder.rename_preset_target {
             ui.horizontal(|ui| {
-                ui.label("Novo nome:");
+                ui.label(tr(lang, "Novo nome:"));
                 ui.add(egui::TextEdit::singleline(draft_name).desired_width(150.0));
-                if ui.small_button("OK").clicked() {
+                if ui.small_button(tr(lang, "OK")).clicked() {
                     rename_commit = Some((target_id.clone(), draft_name.clone()));
                 }
-                if ui.small_button("Cancelar").clicked() {
+                if ui.small_button(tr(lang, "Cancelar")).clicked() {
                     rename_cancel = true;
                 }
             });
@@ -1090,24 +1199,37 @@ impl App {
             self.encoder.rename_preset_target = None;
         }
 
-        let q = self.encoder.preset_search.trim().to_ascii_lowercase();
+        let q = self.encoder.preset_search.trim().to_lowercase();
         egui::ScrollArea::vertical()
             .id_salt("encoder_preset_scroll")
             .max_height(max_h)
             .show(ui, |ui| {
                 // Grupos de múltiplas saídas
-                egui::CollapsingHeader::new("Grupos de Predefinições (Múltiplas Saídas)")
+                egui::CollapsingHeader::new(tr(lang, "Grupos de Predefinições (Múltiplas Saídas)"))
                     .default_open(true)
                     .show(ui, |ui| {
                         for grp in &self.encoder.catalog.groups {
-                            if !q.is_empty() && !grp.name.to_ascii_lowercase().contains(&q) {
+                            let disp_grp = if grp.id == "grp.web_multi" {
+                                tr(lang, &grp.name)
+                            } else {
+                                grp.name.as_str()
+                            };
+                            if !q.is_empty()
+                                && !disp_grp.to_lowercase().contains(&q)
+                                && !grp.name.to_lowercase().contains(&q)
+                            {
                                 continue;
                             }
                             let sel = self.encoder.selected_preset.as_deref() == Some(&grp.id);
+                            let n_s = grp.preset_ids.len().to_string();
                             if ui
                                 .selectable_label(
                                     sel,
-                                    format!("{} ({} itens)", grp.name, grp.preset_ids.len()),
+                                    tr_args(
+                                        lang,
+                                        "{name} ({n} item(ns))",
+                                        &[("name", &disp_grp), ("n", &n_s)],
+                                    ),
                                 )
                                 .clicked()
                             {
@@ -1118,9 +1240,9 @@ impl App {
 
                 // Apelidos
                 if !self.encoder.catalog.aliases.is_empty() {
-                    egui::CollapsingHeader::new("Apelidos (Aliases)").show(ui, |ui| {
+                    egui::CollapsingHeader::new(tr(lang, "Apelidos (Aliases)")).show(ui, |ui| {
                         for als in &self.encoder.catalog.aliases {
-                            if !q.is_empty() && !als.name.to_ascii_lowercase().contains(&q) {
+                            if !q.is_empty() && !als.name.to_lowercase().contains(&q) {
                                 continue;
                             }
                             let sel = self.encoder.selected_preset.as_deref() == Some(&als.id);
@@ -1140,21 +1262,22 @@ impl App {
                         .filter(|p| {
                             p.category == cat
                                 && (q.is_empty()
-                                    || p.name.to_ascii_lowercase().contains(&q)
-                                    || p.format.name().to_ascii_lowercase().contains(&q))
+                                    || preset_display_name(p, lang).to_lowercase().contains(&q)
+                                    || p.name.to_lowercase().contains(&q)
+                                    || p.format.name_in(lang).to_lowercase().contains(&q))
                         })
                         .collect();
                     if list.is_empty() {
                         continue;
                     }
-                    egui::CollapsingHeader::new(cat.name())
+                    egui::CollapsingHeader::new(cat.name_in(lang))
                         .default_open(cat == PresetCategory::Web || cat == PresetCategory::Custom)
                         .show(ui, |ui| {
                             for p in list {
                                 let sel = self.encoder.selected_preset.as_deref() == Some(&p.id);
                                 if ui
-                                    .selectable_label(sel, &p.name)
-                                    .on_hover_text(&p.notes)
+                                    .selectable_label(sel, preset_display_name(p, lang))
+                                    .on_hover_text(preset_display_notes(p, lang))
                                     .clicked()
                                 {
                                     self.encoder.selected_preset = Some(p.id.clone());
@@ -1166,9 +1289,10 @@ impl App {
     }
 
     fn encoder_watch_section(&mut self, ui: &mut egui::Ui, _theme: &ThemeColors) {
+        let lang = self.lang();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Pastas Monitoradas").strong());
-            if ui.small_button("+ Adicionar Pasta...").clicked() {
+            ui.label(RichText::new(tr(lang, "Pastas Monitoradas")).strong());
+            if ui.small_button(tr(lang, "+ Adicionar Pasta...")).clicked() {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     let pid = self
                         .encoder
@@ -1182,18 +1306,23 @@ impl App {
                     self.encoder.persist_dirty = true;
                 }
             }
-            if ui.small_button("Varrer Agora").clicked() {
+            if ui.small_button(tr(lang, "Varrer Agora")).clicked() {
                 let (added, auto_start) =
                     scan_watch_folders(&mut self.encoder.state, &self.encoder.catalog);
                 self.encoder.persist_dirty = true;
-                self.set_status(format!("{added} novo(s) arquivo(s) encontrado(s)"));
+                let added_s = added.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "{added} novo(s) arquivo(s) encontrado(s)",
+                    &[("added", &added_s)],
+                ));
                 if auto_start && !self.encoder.runtime.is_running() {
                     self.encoder.start_queue(&self.media);
                 }
             }
             ui.checkbox(
                 &mut self.encoder.state.prefs.auto_encode_watch_folders,
-                "Codificar automático",
+                tr(lang, "Codificar automático"),
             );
         });
 
@@ -1207,9 +1336,10 @@ impl App {
             .show(ui, |ui| {
                 if self.encoder.state.watch_folders.is_empty() {
                     ui.label(
-                        RichText::new(
+                        RichText::new(tr(
+                            lang,
                             "Nenhuma pasta monitorada configurada. Novos arquivos adicionados serão codificados na fila.",
-                        )
+                        ))
                         .weak(),
                     );
                     return;
@@ -1218,7 +1348,7 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.checkbox(&mut wf.enabled, "");
                         ui.label(wf.folder.display().to_string());
-                        if ui.small_button("Saída...").clicked() {
+                        if ui.small_button(tr(lang, "Saída...")).clicked() {
                             pick_out_for = Some(wf.id);
                         }
                         let mut cur_pid = wf
@@ -1230,15 +1360,19 @@ impl App {
                             .encoder
                             .catalog
                             .resolve(&cur_pid)
-                            .map(|p| p.name.as_str())
-                            .unwrap_or("Selecionar...");
+                            .map(|p| preset_display_name(p, lang))
+                            .unwrap_or_else(|| tr(lang, "Selecionar..."));
                         egui::ComboBox::from_id_salt(("wf_pre", wf.id))
                             .width(155.0)
                             .selected_text(cur_name)
                             .show_ui(ui, |ui| {
                                 for pr in &all_presets {
                                     if ui
-                                        .selectable_value(&mut cur_pid, pr.id.clone(), &pr.name)
+                                        .selectable_value(
+                                            &mut cur_pid,
+                                            pr.id.clone(),
+                                            preset_display_name(pr, lang),
+                                        )
                                         .clicked()
                                     {
                                         if wf.preset_ids.is_empty() {
@@ -1250,7 +1384,7 @@ impl App {
                                     }
                                 }
                             });
-                        ui.checkbox(&mut wf.auto_encode, "Auto");
+                        ui.checkbox(&mut wf.auto_encode, tr(lang, "Auto"));
                         if ui.small_button("X").clicked() {
                             remove_id = Some(wf.id);
                         }
@@ -1312,6 +1446,7 @@ impl App {
         let Some(mut modal) = self.encoder.export_modal.take() else {
             return;
         };
+        let lang = self.lang();
         let mut keep_open = true;
         let mut save_clicked = false;
         let mut run_now_clicked = false;
@@ -1325,7 +1460,8 @@ impl App {
             .find(|i| i.id == modal.item_id)
             .map(|i| i.source.clone());
 
-        egui::Window::new("Configurações de Exportação — Neoveg Encoder")
+        egui::Window::new(tr(lang, "Configurações de Exportação — Neoveg Encoder"))
+            .id(egui::Id::new("enc_export_win"))
             .open(&mut keep_open)
             .default_size([780.0, 520.0])
             .resizable(true)
@@ -1337,12 +1473,12 @@ impl App {
                         ui.selectable_value(
                             &mut modal.preview_pane,
                             SettingsPreviewPane::Source,
-                            "Origem",
+                            tr(lang, "Origem"),
                         );
                         ui.selectable_value(
                             &mut modal.preview_pane,
                             SettingsPreviewPane::Output,
-                            "Saída",
+                            tr(lang, "Saída"),
                         );
                     });
 
@@ -1418,30 +1554,30 @@ impl App {
                         self.session.opts.time_format,
                     );
                     left.horizontal(|ui| {
-                        ui.label("Tempo:");
+                        ui.label(tr(lang, "Tempo:"));
                         ui.add(egui::Slider::new(&mut modal.preview_sec, 0.0..=60.0).text(tc_str));
                     });
 
                     left.separator();
-                    left.label(RichText::new("Intervalo de Origem").strong());
+                    left.label(RichText::new(tr(lang, "Intervalo de Origem")).strong());
                     egui::ComboBox::from_id_salt("enc_range_mode")
-                        .selected_text(modal.draft.range.name())
+                        .selected_text(modal.draft.range.name_in(lang))
                         .show_ui(left, |ui| {
                             for rm in SourceRangeMode::ALL {
-                                ui.selectable_value(&mut modal.draft.range, rm, rm.name());
+                                ui.selectable_value(&mut modal.draft.range, rm, rm.name_in(lang));
                             }
                         });
                     if modal.draft.range == SourceRangeMode::Custom {
                         let mut in_s = modal.draft.custom_in.as_secs_f64();
                         let mut out_s = modal.draft.custom_out.as_secs_f64().max(in_s + 0.1);
                         left.horizontal(|ui| {
-                            ui.label("Entrada (s):");
+                            ui.label(tr(lang, "Entrada (s):"));
                             ui.add(
                                 egui::DragValue::new(&mut in_s)
                                     .speed(0.1)
                                     .range(0.0..=86400.0),
                             );
-                            ui.label("Saída (s):");
+                            ui.label(tr(lang, "Saída (s):"));
                             ui.add(
                                 egui::DragValue::new(&mut out_s)
                                     .speed(0.1)
@@ -1455,16 +1591,19 @@ impl App {
 
                     left.separator();
                     left.horizontal(|ui| {
-                        ui.checkbox(&mut modal.draft.crop.enabled, "Cortar Origem (Crop)");
+                        ui.checkbox(
+                            &mut modal.draft.crop.enabled,
+                            tr(lang, "Cortar Origem (Crop)"),
+                        );
                         if modal.draft.crop.enabled {
                             egui::ComboBox::from_id_salt("enc_crop_ar")
-                                .selected_text(modal.draft.crop.aspect.name())
+                                .selected_text(modal.draft.crop.aspect.name_in(lang))
                                 .show_ui(ui, |ui| {
                                     for ar in CropAspect::ALL {
                                         ui.selectable_value(
                                             &mut modal.draft.crop.aspect,
                                             ar,
-                                            ar.name(),
+                                            ar.name_in(lang),
                                         );
                                     }
                                 });
@@ -1472,20 +1611,20 @@ impl App {
                     });
                     if modal.draft.crop.enabled {
                         left.horizontal(|ui| {
-                            ui.label("E:");
+                            ui.label(tr(lang, "E:"));
                             ui.add(
                                 egui::DragValue::new(&mut modal.draft.crop.left_px).range(0..=4096),
                             );
-                            ui.label("S:");
+                            ui.label(tr(lang, "S:"));
                             ui.add(
                                 egui::DragValue::new(&mut modal.draft.crop.top_px).range(0..=4096),
                             );
-                            ui.label("D:");
+                            ui.label(tr(lang, "D:"));
                             ui.add(
                                 egui::DragValue::new(&mut modal.draft.crop.right_px)
                                     .range(0..=4096),
                             );
-                            ui.label("I:");
+                            ui.label(tr(lang, "I:"));
                             ui.add(
                                 egui::DragValue::new(&mut modal.draft.crop.bottom_px)
                                     .range(0..=4096),
@@ -1493,12 +1632,16 @@ impl App {
                         });
                     }
                     left.horizontal(|ui| {
-                        ui.label("Escala de Origem:");
+                        ui.label(tr(lang, "Escala de Origem:"));
                         egui::ComboBox::from_id_salt("enc_scale_mode")
-                            .selected_text(modal.draft.scaling.name())
+                            .selected_text(modal.draft.scaling.name_in(lang))
                             .show_ui(ui, |ui| {
                                 for sm in SourceScalingMode::ALL {
-                                    ui.selectable_value(&mut modal.draft.scaling, sm, sm.name());
+                                    ui.selectable_value(
+                                        &mut modal.draft.scaling,
+                                        sm,
+                                        sm.name_in(lang),
+                                    );
                                 }
                             });
                     });
@@ -1506,12 +1649,20 @@ impl App {
                     // Coluna Direita: Abas Vídeo / Áudio / Efeitos
                     let right = &mut cols[1];
                     right.horizontal(|ui| {
-                        ui.selectable_value(&mut modal.tab, ExportSettingsTab::Video, "Vídeo");
-                        ui.selectable_value(&mut modal.tab, ExportSettingsTab::Audio, "Áudio");
+                        ui.selectable_value(
+                            &mut modal.tab,
+                            ExportSettingsTab::Video,
+                            tr(lang, "Vídeo"),
+                        );
+                        ui.selectable_value(
+                            &mut modal.tab,
+                            ExportSettingsTab::Audio,
+                            tr(lang, "Áudio"),
+                        );
                         ui.selectable_value(
                             &mut modal.tab,
                             ExportSettingsTab::Effects,
-                            "Efeitos e Sobreposições",
+                            tr(lang, "Efeitos e Sobreposições"),
                         );
                     });
                     right.separator();
@@ -1522,16 +1673,16 @@ impl App {
                         .show(right, |ui| match modal.tab {
                             ExportSettingsTab::Video => {
                                 ui.horizontal(|ui| {
-                                    ui.label("Formato:");
+                                    ui.label(tr(lang, "Formato:"));
                                     egui::ComboBox::from_id_salt("modal_fmt")
-                                        .selected_text(modal.draft.format.name())
+                                        .selected_text(modal.draft.format.name_in(lang))
                                         .show_ui(ui, |ui| {
                                             for f in RenderFormat::ALL {
                                                 if ui
                                                     .selectable_value(
                                                         &mut modal.draft.format,
                                                         f,
-                                                        f.name(),
+                                                        f.name_in(lang),
                                                     )
                                                     .clicked()
                                                 {
@@ -1543,19 +1694,22 @@ impl App {
                                             }
                                         });
                                 });
-                                ui.checkbox(&mut modal.draft.include_video, "Exportar Vídeo");
+                                ui.checkbox(
+                                    &mut modal.draft.include_video,
+                                    tr(lang, "Exportar Vídeo"),
+                                );
                                 ui.checkbox(
                                     &mut modal.draft.match_source_dims,
-                                    "Corresponder à resolução da origem",
+                                    tr(lang, "Corresponder à resolução da origem"),
                                 );
                                 ui.add_enabled_ui(!modal.draft.match_source_dims, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label("Largura:");
+                                        ui.label(tr(lang, "Largura:"));
                                         ui.add(
                                             egui::DragValue::new(&mut modal.draft.width)
                                                 .range(16..=7680),
                                         );
-                                        ui.label("Altura:");
+                                        ui.label(tr(lang, "Altura:"));
                                         ui.add(
                                             egui::DragValue::new(&mut modal.draft.height)
                                                 .range(16..=4320),
@@ -1564,7 +1718,7 @@ impl App {
                                 });
                                 if modal.draft.format.uses_video_bitrate() {
                                     ui.horizontal(|ui| {
-                                        ui.label("Taxa de vídeo (kbps):");
+                                        ui.label(tr(lang, "Taxa de vídeo (kbps):"));
                                         ui.add(
                                             egui::Slider::new(
                                                 &mut modal.draft.video_bitrate_kbps,
@@ -1576,7 +1730,7 @@ impl App {
                                 }
                                 if modal.draft.format.uses_jpeg_quality() {
                                     ui.horizontal(|ui| {
-                                        ui.label("Qualidade JPEG:");
+                                        ui.label(tr(lang, "Qualidade JPEG:"));
                                         ui.add(egui::Slider::new(
                                             &mut modal.draft.jpeg_quality,
                                             10..=100,
@@ -1585,10 +1739,13 @@ impl App {
                                 }
                             }
                             ExportSettingsTab::Audio => {
-                                ui.checkbox(&mut modal.draft.include_audio, "Exportar Áudio");
+                                ui.checkbox(
+                                    &mut modal.draft.include_audio,
+                                    tr(lang, "Exportar Áudio"),
+                                );
                                 if modal.draft.format.uses_audio_bitrate() {
                                     ui.horizontal(|ui| {
-                                        ui.label("Taxa de áudio (kbps):");
+                                        ui.label(tr(lang, "Taxa de áudio (kbps):"));
                                         ui.add(egui::Slider::new(
                                             &mut modal.draft.audio_bitrate_kbps,
                                             64..=512,
@@ -1597,35 +1754,38 @@ impl App {
                                 }
                                 if modal.draft.format.uses_wav_bits() {
                                     ui.horizontal(|ui| {
-                                        ui.label("Profundidade PCM:");
+                                        ui.label(tr(lang, "Profundidade PCM:"));
                                         ui.selectable_value(
                                             &mut modal.draft.wav_bits,
                                             WavBits::Pcm16,
-                                            "16-bit",
+                                            tr(lang, "16 bits"),
                                         );
                                         ui.selectable_value(
                                             &mut modal.draft.wav_bits,
                                             WavBits::Pcm24,
-                                            "24-bit",
+                                            tr(lang, "24 bits"),
                                         );
                                         ui.selectable_value(
                                             &mut modal.draft.wav_bits,
                                             WavBits::Float32,
-                                            "Float32",
+                                            tr(lang, "32 bits float"),
                                         );
                                     });
                                 }
                             }
                             ExportSettingsTab::Effects => {
-                                ui.label(RichText::new("Correção de Cor / LUT (.cube)").strong());
+                                ui.label(
+                                    RichText::new(tr(lang, "Correção de Cor / LUT (.cube)"))
+                                        .strong(),
+                                );
                                 egui::ComboBox::from_id_salt("modal_grade")
-                                    .selected_text(modal.draft.effects.grade.name())
+                                    .selected_text(modal.draft.effects.grade.name_in(lang))
                                     .show_ui(ui, |ui| {
                                         for (label, g) in GradePreset::NAMED {
                                             ui.selectable_value(
                                                 &mut modal.draft.effects.grade,
                                                 g,
-                                                label,
+                                                tr(lang, label),
                                             );
                                         }
                                     });
@@ -1637,18 +1797,20 @@ impl App {
                                         .as_deref()
                                         .and_then(|p| p.file_name())
                                         .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "Nenhuma LUT selecionada".into());
+                                        .unwrap_or_else(|| {
+                                            tr(lang, "Nenhuma LUT selecionada").into()
+                                        });
                                     ui.label(ltxt);
-                                    if ui.small_button("Selecionar .cube...").clicked() {
+                                    if ui.small_button(tr(lang, "Selecionar .cube...")).clicked() {
                                         if let Some(p) = rfd::FileDialog::new()
-                                            .add_filter("Tabela LUT", &["cube"])
+                                            .add_filter(tr(lang, "Tabela LUT"), &["cube"])
                                             .pick_file()
                                         {
                                             modal.draft.effects.lut_path = Some(p);
                                         }
                                     }
                                     if modal.draft.effects.lut_path.is_some()
-                                        && ui.small_button("Limpar").clicked()
+                                        && ui.small_button(tr(lang, "Limpar")).clicked()
                                     {
                                         modal.draft.effects.lut_path = None;
                                     }
@@ -1657,27 +1819,28 @@ impl App {
                                 ui.separator();
                                 ui.checkbox(
                                     &mut modal.draft.effects.timecode_overlay.enabled,
-                                    "Sobreposição de Timecode",
+                                    tr(lang, "Sobreposição de Timecode"),
                                 );
                                 if modal.draft.effects.timecode_overlay.enabled {
                                     ui.horizontal(|ui| {
                                         ui.selectable_value(
                                             &mut modal.draft.effects.timecode_overlay.source,
                                             TimecodeSource::MediaTime,
-                                            "Tempo da Mídia",
+                                            tr(lang, "Tempo da Mídia"),
                                         );
                                         ui.selectable_value(
                                             &mut modal.draft.effects.timecode_overlay.source,
                                             TimecodeSource::CustomStart,
-                                            "Timecode Inicial",
+                                            tr(lang, "Timecode Inicial"),
                                         );
                                         ui.checkbox(
                                             &mut modal.draft.effects.timecode_overlay.drop_frame,
-                                            "Drop-Frame",
+                                            tr(lang, "Drop-Frame"),
                                         );
                                     });
                                     overlay_pos_controls(
                                         ui,
+                                        lang,
                                         "tc_pos",
                                         &mut modal.draft.effects.timecode_overlay.position,
                                         &mut modal.draft.effects.timecode_overlay.size_pct,
@@ -1688,31 +1851,31 @@ impl App {
                                 ui.separator();
                                 ui.checkbox(
                                     &mut modal.draft.effects.name_overlay.enabled,
-                                    "Sobreposição de Nome",
+                                    tr(lang, "Sobreposição de Nome"),
                                 );
                                 if modal.draft.effects.name_overlay.enabled {
                                     egui::ComboBox::from_id_salt("name_fmt")
                                         .selected_text(
-                                            modal.draft.effects.name_overlay.format.name(),
+                                            modal.draft.effects.name_overlay.format.name_in(lang),
                                         )
                                         .show_ui(ui, |ui| {
                                             for nf in NameFormat::ALL {
                                                 ui.selectable_value(
                                                     &mut modal.draft.effects.name_overlay.format,
                                                     nf,
-                                                    nf.name(),
+                                                    nf.name_in(lang),
                                                 );
                                             }
                                         });
                                     ui.horizontal(|ui| {
-                                        ui.label("Prefixo:");
+                                        ui.label(tr(lang, "Prefixo:"));
                                         ui.add(
                                             egui::TextEdit::singleline(
                                                 &mut modal.draft.effects.name_overlay.prefix,
                                             )
                                             .desired_width(80.0),
                                         );
-                                        ui.label("Sufixo:");
+                                        ui.label(tr(lang, "Sufixo:"));
                                         ui.add(
                                             egui::TextEdit::singleline(
                                                 &mut modal.draft.effects.name_overlay.suffix,
@@ -1722,6 +1885,7 @@ impl App {
                                     });
                                     overlay_pos_controls(
                                         ui,
+                                        lang,
                                         "nm_pos",
                                         &mut modal.draft.effects.name_overlay.position,
                                         &mut modal.draft.effects.name_overlay.size_pct,
@@ -1732,13 +1896,14 @@ impl App {
                                 ui.separator();
                                 ui.checkbox(
                                     &mut modal.draft.effects.image_overlay.enabled,
-                                    "Sobreposição de Imagem (Marca d'água)",
+                                    tr(lang, "Sobreposição de Imagem (Marca d'água)"),
                                 );
                                 if modal.draft.effects.image_overlay.enabled {
                                     ui.horizontal(|ui| {
-                                        if ui.small_button("Escolher imagem...").clicked() {
+                                        if ui.small_button(tr(lang, "Escolher imagem...")).clicked()
+                                        {
                                             if let Some(p) = rfd::FileDialog::new()
-                                                .add_filter("Imagens", IMAGE_EXTS)
+                                                .add_filter(tr(lang, "Imagens"), IMAGE_EXTS)
                                                 .pick_file()
                                             {
                                                 modal.draft.effects.image_overlay.path = Some(p);
@@ -1746,11 +1911,12 @@ impl App {
                                         }
                                         ui.checkbox(
                                             &mut modal.draft.effects.image_overlay.absolute_size,
-                                            "Tamanho absoluto",
+                                            tr(lang, "Tamanho absoluto"),
                                         );
                                     });
                                     overlay_pos_controls(
                                         ui,
+                                        lang,
                                         "im_pos",
                                         &mut modal.draft.effects.image_overlay.position,
                                         &mut modal.draft.effects.image_overlay.size_pct,
@@ -1761,11 +1927,11 @@ impl App {
                                 ui.separator();
                                 ui.checkbox(
                                     &mut modal.draft.effects.time_tuner.enabled,
-                                    "Ajustador de Tempo (Time Tuner)",
+                                    tr(lang, "Ajustador de Tempo (Time Tuner)"),
                                 );
                                 if modal.draft.effects.time_tuner.enabled {
                                     ui.horizontal(|ui| {
-                                        ui.label("Duração (%):");
+                                        ui.label(tr(lang, "Duração (%):"));
                                         ui.add(egui::Slider::new(
                                             &mut modal.draft.effects.time_tuner.duration_pct,
                                             25.0..=200.0,
@@ -1778,14 +1944,17 @@ impl App {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("OK (Salvar na Fila)").clicked() {
+                    if ui.button(tr(lang, "OK (Salvar na Fila)")).clicked() {
                         save_clicked = true;
                     }
-                    if ui.button("Codificar Agora (Teste Síncrono)").clicked() {
+                    if ui
+                        .button(tr(lang, "Codificar Agora (Teste Síncrono)"))
+                        .clicked()
+                    {
                         save_clicked = true;
                         run_now_clicked = true;
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(tr(lang, "Cancelar")).clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -1834,6 +2003,7 @@ impl App {
         let Some(iid) = self.encoder.interpret_item_id else {
             return;
         };
+        let lang = self.lang();
         let mut keep = true;
         let Some(idx) = self.encoder.state.items.iter().position(|i| i.id == iid) else {
             self.encoder.interpret_item_id = None;
@@ -1841,10 +2011,14 @@ impl App {
         };
         let QueueSource::MediaFile { mut interpret, .. } = self.encoder.state.items[idx].source
         else {
-            egui::Window::new("Interpretar Gravação")
+            egui::Window::new(tr(lang, "Interpretar Gravação"))
+                .id(egui::Id::new("enc_interpret_na_win"))
                 .open(&mut keep)
                 .show(ctx, |ui| {
-                    ui.label("A interpretação de pixel/FPS se aplica apenas a arquivos de mídia importados.");
+                    ui.label(tr(
+                        lang,
+                        "A interpretação de pixel/FPS se aplica apenas a arquivos de mídia importados.",
+                    ));
                 });
             if !keep {
                 self.encoder.interpret_item_id = None;
@@ -1852,23 +2026,27 @@ impl App {
             return;
         };
         let mut dirty = false;
-        egui::Window::new("Interpretar Gravação — Neoveg Encoder")
+        egui::Window::new(tr(lang, "Interpretar Gravação — Neoveg Encoder"))
+            .id(egui::Id::new("enc_interpret_win"))
             .open(&mut keep)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Taxa de quadros:");
+                    ui.label(tr(lang, "Taxa de quadros:"));
                     let lbl = interpret
                         .fps_override
-                        .map(|f| format!("{:.3} qps", f.as_f64()))
-                        .unwrap_or_else(|| "Usar taxa do arquivo".into());
+                        .map(|f| {
+                            let fps_s = format!("{:.3}", f.as_f64());
+                            tr_args(lang, "{fps} qps", &[("fps", &fps_s)])
+                        })
+                        .unwrap_or_else(|| tr(lang, "Usar taxa do arquivo").into());
                     egui::ComboBox::from_id_salt("interp_fps")
                         .selected_text(lbl)
                         .show_ui(ui, |ui| {
                             if ui
                                 .selectable_label(
                                     interpret.fps_override.is_none(),
-                                    "Usar taxa do arquivo",
+                                    tr(lang, "Usar taxa do arquivo"),
                                 )
                                 .clicked()
                             {
@@ -1885,10 +2063,11 @@ impl App {
                                 FrameRate::FPS_59_94,
                                 FrameRate::FPS_60,
                             ] {
+                                let fps_s = format!("{:.3}", fps.as_f64());
                                 if ui
                                     .selectable_label(
                                         interpret.fps_override == Some(fps),
-                                        format!("{:.3} qps", fps.as_f64()),
+                                        tr_args(lang, "{fps} qps", &[("fps", &fps_s)]),
                                     )
                                     .clicked()
                                 {
@@ -1899,7 +2078,7 @@ impl App {
                         });
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Proporção de pixel (PAR):");
+                    ui.label(tr(lang, "Proporção de pixel (PAR):"));
                     if ui
                         .add(
                             egui::DragValue::new(&mut interpret.pixel_aspect)
@@ -1912,13 +2091,13 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Canal Alfa:");
+                    ui.label(tr(lang, "Canal Alfa:"));
                     egui::ComboBox::from_id_salt("interp_alpha")
-                        .selected_text(interpret.alpha.name())
+                        .selected_text(interpret.alpha.name_in(lang))
                         .show_ui(ui, |ui| {
                             for a in AlphaInterpret::ALL {
                                 if ui
-                                    .selectable_value(&mut interpret.alpha, a, a.name())
+                                    .selectable_value(&mut interpret.alpha, a, a.name_in(lang))
                                     .clicked()
                                 {
                                     dirty = true;
@@ -1946,9 +2125,11 @@ impl App {
         if !self.encoder.prefs_open {
             return;
         }
+        let lang = self.lang();
         let mut open = true;
         let mut dirty = false;
-        egui::Window::new("Preferências do Neoveg Encoder")
+        egui::Window::new(tr(lang, "Preferências do Neoveg Encoder"))
+            .id(egui::Id::new("enc_prefs_win"))
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
@@ -1957,7 +2138,7 @@ impl App {
                 if ui
                     .checkbox(
                         &mut auto_idle,
-                        "Iniciar fila automaticamente quando ocioso por:",
+                        tr(lang, "Iniciar fila automaticamente quando ocioso por:"),
                     )
                     .changed()
                 {
@@ -1966,37 +2147,40 @@ impl App {
                 }
                 if let Some(secs) = &mut p.auto_start_idle_secs {
                     ui.horizontal(|ui| {
-                        ui.label("Tempo ocioso (segundos):");
+                        ui.label(tr(lang, "Tempo ocioso (segundos):"));
                         if ui.add(egui::DragValue::new(secs).range(5..=3600)).changed() {
                             dirty = true;
                         }
                     });
                 }
                 dirty |= ui
-                    .checkbox(&mut p.show_elapsed_time, "Mostrar tempo decorrido e ETA")
+                    .checkbox(
+                        &mut p.show_elapsed_time,
+                        tr(lang, "Mostrar tempo decorrido e ETA"),
+                    )
                     .changed();
                 dirty |= ui
                     .checkbox(
                         &mut p.preview_during_encoding,
-                        "Visualizar durante a codificação",
+                        tr(lang, "Visualizar durante a codificação"),
                     )
                     .changed();
                 dirty |= ui
                     .checkbox(
                         &mut p.play_chime_on_finish,
-                        "Notificar ao concluir a codificação",
+                        tr(lang, "Notificar ao concluir a codificação"),
                     )
                     .changed();
                 dirty |= ui
                     .checkbox(
                         &mut p.remove_completed_on_exit,
-                        "Remover arquivos concluídos da fila ao sair",
+                        tr(lang, "Remover arquivos concluídos da fila ao sair"),
                     )
                     .changed();
                 dirty |= ui
                     .checkbox(
                         &mut p.increment_existing_output,
-                        "Incrementar nome do arquivo de saída se já existir",
+                        tr(lang, "Incrementar nome do arquivo de saída se já existir"),
                     )
                     .changed();
                 ui.horizontal(|ui| {
@@ -2004,15 +2188,21 @@ impl App {
                         .default_output_dir
                         .as_deref()
                         .map(|d| d.display().to_string())
-                        .unwrap_or_else(|| "Mesma pasta da origem".into());
-                    ui.label(format!("Pasta padrão de saída: {lbl}"));
-                    if ui.small_button("Escolher...").clicked() {
+                        .unwrap_or_else(|| tr(lang, "Mesma pasta da origem").into());
+                    ui.label(tr_args(
+                        lang,
+                        "Pasta padrão de saída: {lbl}",
+                        &[("lbl", &lbl)],
+                    ));
+                    if ui.small_button(tr(lang, "Escolher...")).clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                             p.default_output_dir = Some(dir);
                             dirty = true;
                         }
                     }
-                    if p.default_output_dir.is_some() && ui.small_button("Padrão").clicked() {
+                    if p.default_output_dir.is_some()
+                        && ui.small_button(tr(lang, "Padrão")).clicked()
+                    {
                         p.default_output_dir = None;
                         dirty = true;
                     }
@@ -2030,22 +2220,27 @@ impl App {
         if !self.encoder.create_preset_open {
             return;
         }
+        let lang = self.lang();
         let mut open = true;
         let mut create = false;
-        egui::Window::new("Nova Predefinição Personalizada")
+        egui::Window::new(tr(lang, "Nova Predefinição Personalizada"))
+            .id(egui::Id::new("enc_new_preset_win"))
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Nome:");
+                    ui.label(tr(lang, "Nome:"));
                     ui.text_edit_singleline(&mut self.encoder.new_preset_name);
                 });
                 ui.label(
-                    RichText::new("Baseia-se na saída ou predefinição atualmente selecionada.")
-                        .small()
-                        .weak(),
+                    RichText::new(tr(
+                        lang,
+                        "Baseia-se na saída ou predefinição atualmente selecionada.",
+                    ))
+                    .small()
+                    .weak(),
                 );
-                if ui.button("Salvar Predefinição").clicked() {
+                if ui.button(tr(lang, "Salvar Predefinição")).clicked() {
                     create = true;
                 }
             });
@@ -2105,14 +2300,16 @@ impl App {
         if !self.encoder.create_group_open {
             return;
         }
+        let lang = self.lang();
         let mut open = true;
         let mut create = false;
-        egui::Window::new("Novo Grupo de Predefinições")
+        egui::Window::new(tr(lang, "Novo Grupo de Predefinições"))
+            .id(egui::Id::new("enc_new_group_win"))
             .open(&mut open)
             .default_size([380.0, 320.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Nome do grupo:");
+                    ui.label(tr(lang, "Nome do grupo:"));
                     ui.text_edit_singleline(&mut self.encoder.new_group_name);
                 });
                 ui.separator();
@@ -2121,7 +2318,10 @@ impl App {
                     .show(ui, |ui| {
                         for pr in self.encoder.catalog.all_presets() {
                             let mut chk = self.encoder.new_group_presets.contains(&pr.id);
-                            if ui.checkbox(&mut chk, &pr.name).changed() {
+                            if ui
+                                .checkbox(&mut chk, preset_display_name(pr, lang))
+                                .changed()
+                            {
                                 if chk {
                                     self.encoder.new_group_presets.push(pr.id.clone());
                                 } else {
@@ -2130,7 +2330,8 @@ impl App {
                             }
                         }
                     });
-                if ui.button("Criar Grupo").clicked() && !self.encoder.new_group_presets.is_empty()
+                if ui.button(tr(lang, "Criar Grupo")).clicked()
+                    && !self.encoder.new_group_presets.is_empty()
                 {
                     create = true;
                 }
@@ -2153,14 +2354,16 @@ impl App {
         let Some((title, path, mut content)) = self.encoder.log_modal.take() else {
             return;
         };
+        let lang = self.lang();
         let mut open = true;
-        egui::Window::new(title)
+        egui::Window::new(tr(lang, title))
+            .id(egui::Id::new("enc_log_win"))
             .open(&mut open)
             .default_size([560.0, 340.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(path.display().to_string());
-                    if ui.small_button("Limpar Registro").clicked() {
+                    if ui.small_button(tr(lang, "Limpar Registro")).clicked() {
                         let _ = std::fs::write(&path, "");
                         content.clear();
                     }
@@ -2182,27 +2385,28 @@ impl App {
 
 fn overlay_pos_controls(
     ui: &mut egui::Ui,
+    lang: Language,
     salt: &str,
     pos: &mut OverlayPosition,
     size_or_pct: &mut f32,
     opacity: &mut f32,
 ) {
     ui.horizontal_wrapped(|ui| {
-        ui.label("Posição:");
+        ui.label(tr(lang, "Posição:"));
         egui::ComboBox::from_id_salt(salt)
-            .selected_text(pos.name())
+            .selected_text(pos.name_in(lang))
             .show_ui(ui, |ui| {
                 for p in OverlayPosition::ALL {
-                    ui.selectable_value(pos, p, p.name());
+                    ui.selectable_value(pos, p, p.name_in(lang));
                 }
             });
-        ui.label("Tam %:");
+        ui.label(tr(lang, "Tam %:"));
         ui.add(
             egui::DragValue::new(size_or_pct)
                 .speed(0.5)
                 .range(1.5..=50.0),
         );
-        ui.label("Opac:");
+        ui.label(tr(lang, "Opac:"));
         ui.add(egui::DragValue::new(opacity).speed(0.05).range(0.0..=1.0));
     });
 }

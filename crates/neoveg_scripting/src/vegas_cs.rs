@@ -5,7 +5,10 @@ use crate::dotnet_host::{self, DotnetEnv};
 use neoveg_common::error::NeovegError;
 use neoveg_engine::commands::{run_command, CommandHost, HeadlessHost};
 use neoveg_engine::media;
-use neoveg_engine::model::{Marker, MediaItem, MediaSource, Take, Track, TrackKind};
+use neoveg_engine::model::{
+    Curve, EnvKind, EnvPoint, Envelope, FxInstance, FxKind, Marker, MediaItem, MediaSource, Take,
+    Track, TrackKind,
+};
 use neoveg_engine::session::{EditorSession, MAX_UNDO};
 use neoveg_engine::takes;
 use neoveg_engine::time::Ticks;
@@ -36,6 +39,40 @@ struct ScriptEventSnap {
     fade_out: i64,
     takes: Vec<ScriptTakeSnap>,
     active_take: usize,
+    effects: Vec<ScriptFxSnap>,
+}
+
+/// Efeito de trilha ou de evento como o script o vê (`Effect`).
+#[derive(Serialize)]
+struct ScriptFxSnap {
+    id: u64,
+    unique_id: String,
+    name: String,
+    bypass: bool,
+}
+
+/// Ponto de envelope (`EnvelopePoint`): tempo em ticks, valor e curva
+/// (nome de `CurveType`).
+#[derive(Serialize)]
+struct ScriptEnvPointSnap {
+    x: i64,
+    y: f64,
+    curve: &'static str,
+}
+
+/// Envelope de trilha (`Envelope`): tipo pelo nome de `EnvelopeType`.
+#[derive(Serialize)]
+struct ScriptEnvSnap {
+    kind: &'static str,
+    points: Vec<ScriptEnvPointSnap>,
+}
+
+/// Efeito nativo disponível em `Vegas.VideoFX` / `Vegas.AudioFX`.
+#[derive(Serialize)]
+struct ScriptPluginSnap {
+    unique_id: &'static str,
+    name: String,
+    is_audio: bool,
 }
 
 #[derive(Serialize)]
@@ -69,6 +106,8 @@ struct ScriptTrackSnap {
     mute: bool,
     solo: bool,
     events: Vec<ScriptEventSnap>,
+    effects: Vec<ScriptFxSnap>,
+    envelopes: Vec<ScriptEnvSnap>,
 }
 
 #[derive(Serialize)]
@@ -92,6 +131,8 @@ struct ScriptInputPayload {
     markers: Vec<ScriptMarkerSnap>,
     audio_buses: Vec<String>,
     media: Vec<ScriptMediaSnap>,
+    /// Efeitos nativos para `Vegas.VideoFX` e `Vegas.AudioFX`.
+    plugins: Vec<ScriptPluginSnap>,
     /// Endereço da função que importa mídia durante o script
     /// (`dotnet_host::media_probe_fn_addr`) e a execução a que pertence.
     probe_fn: u64,
@@ -103,7 +144,7 @@ struct ScriptInputPayload {
 
 /// Versão do formato de saída da ponte. Uma saída de outra versão veio de
 /// uma ponte antiga embutida numa `.dll`: é recusada, nunca reinterpretada.
-const SCRIPT_OUTPUT_PROTOCOL: u32 = 4;
+const SCRIPT_OUTPUT_PROTOCOL: u32 = 5;
 
 /// Take na lista final de um evento.
 #[derive(Deserialize, Default)]
@@ -132,6 +173,33 @@ struct ScriptEventOut {
     locked: Option<bool>,
     fade_in: Option<i64>,
     fade_out: Option<i64>,
+    effects: Option<Vec<ScriptFxOut>>,
+}
+
+/// Efeito na lista final (`Effects`): `id` do efeito original, ou 0 para um
+/// efeito criado pelo script (`unique_id` diz qual).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptFxOut {
+    id: u64,
+    unique_id: String,
+    bypass: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptEnvPointOut {
+    x: i64,
+    y: f64,
+    curve: String,
+}
+
+/// Envelope na lista final de uma trilha (vem inteiro quando muda).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptEnvOut {
+    kind: String,
+    points: Vec<ScriptEnvPointOut>,
 }
 
 impl ScriptEventOut {
@@ -146,6 +214,7 @@ impl ScriptEventOut {
             && self.locked.is_none()
             && self.fade_in.is_none()
             && self.fade_out.is_none()
+            && self.effects.is_none()
     }
 }
 
@@ -162,6 +231,8 @@ struct ScriptTrackOut {
     solo: Option<bool>,
     selected: bool,
     events: Vec<ScriptEventOut>,
+    effects: Option<Vec<ScriptFxOut>>,
+    envelopes: Option<Vec<ScriptEnvOut>>,
 }
 
 /// Marcador na lista final devolvida pelo script (mesma convenção).
@@ -241,6 +312,7 @@ fn cs_project_xml(tfm: &str, winforms: bool) -> String {
 const SCRIPT_PORTAL_VEGAS_CS: &str = r#"using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Numerics;
 using System.Reflection;
@@ -705,6 +777,9 @@ namespace ScriptPortal.Vegas
             }
         }
 
+        // VideoEvent.Effects / AudioEvent.Effects (Scripting API Summary).
+        public Effects Effects { get; } = new Effects();
+
         public Take AddTake(MediaStream mediaStream) => AddTake(mediaStream, true, null);
 
         public Take AddTake(MediaStream mediaStream, bool makeActive) => AddTake(mediaStream, makeActive, null);
@@ -762,6 +837,9 @@ namespace ScriptPortal.Vegas
         public bool Solo { get; set; }
         public bool Selected { get; set; }
         public TrackEvents Events { get; } = new TrackEvents();
+        // Track.Effects / Track.Envelopes (Scripting API Summary).
+        public Effects Effects { get; } = new Effects();
+        public Envelopes Envelopes { get; } = new Envelopes();
         public virtual bool IsVideo() => false;
         public virtual bool IsAudio() => false;
         // Track.IsValid (Scripting API Summary: Track): está no projeto.
@@ -801,6 +879,473 @@ namespace ScriptPortal.Vegas
             Events.Add(ev);
             return ev;
         }
+    }
+
+    // CurveType, EnvelopeType, PlugInNode, Effect(s), EnvelopePoint(s) e
+    // Envelope(s): nomes e comportamento da VEGAS Pro Scripting API Summary
+    // (documentação pública da MAGIX). O Neoveg tem os envelopes Volume e Pan
+    // (áudio), Composite e FadeToColor (vídeo); os outros tipos compilam, mas
+    // recusam o script ao aplicar, com o nome do tipo.
+    public enum CurveType
+    {
+        Invalid,
+        Sharp,
+        Slow,
+        None,
+        Linear,
+        Fast,
+        Smooth
+    }
+
+    public enum EnvelopeType
+    {
+        Volume,
+        Pan,
+        BusA,
+        BusB,
+        BusC,
+        BusD,
+        BusE,
+        BusF,
+        BusG,
+        BusH,
+        BusI,
+        BusJ,
+        BusK,
+        BusL,
+        BusM,
+        BusN,
+        BusO,
+        BusP,
+        BusQ,
+        BusR,
+        BusS,
+        BusT,
+        BusU,
+        BusV,
+        BusW,
+        BusX,
+        BusY,
+        BusZ,
+        Composite,
+        FadeToColor,
+        Mute,
+        MotionBlurLength,
+        VideoSupersampling,
+        FX1,
+        FX2,
+        FX3,
+        FX4,
+        FX5,
+        FX6,
+        FX7,
+        FX8,
+        FX9,
+        FX10,
+        FX11,
+        FX12,
+        FX13,
+        FX14,
+        FX15,
+        FX16,
+        FX17,
+        FX18,
+        FX19,
+        FX20,
+        FX21,
+        FX22,
+        FX23,
+        FX24,
+        FX25,
+        FX26,
+        FX27,
+        FX28,
+        FX29,
+        FX30,
+        FX31,
+        FX32,
+        PanY,
+        PanSmoothness,
+        PanCenter,
+        TransitionProgress,
+        Fade,
+        Velocity,
+        AutomationMin,
+        AutomationMax
+    }
+
+    // Nó da árvore de plug-ins (Vegas.VideoFX / Vegas.AudioFX). Os efeitos
+    // nativos do Neoveg têm UniqueID igual ao identificador interno (ex.:
+    // "GaussianBlur"); FindChildByName aceita o nome mostrado ou o UniqueID.
+    public sealed class PlugInNode : IEnumerable<PlugInNode>
+    {
+        internal readonly List<PlugInNode> _children = new List<PlugInNode>();
+        public string Name { get; internal set; } = "";
+        public string UniqueID { get; internal set; } = "";
+        public string Group { get; internal set; } = "";
+        public string Info => Name;
+        public bool IsVideo { get; internal set; }
+        public bool IsAudio { get; internal set; }
+        public bool IsOFX { get; internal set; }
+        public bool IsContainer => _children.Count > 0;
+        public bool IsFixedSize => true;
+        public bool IsReadOnly => true;
+        public bool CanCreateSubnodes => false;
+        public bool IsDisabled => false;
+        public bool IsPackage => false;
+        public bool IsAutomatable => false;
+        public PlugInNode GetChild(int index) => index >= 0 && index < _children.Count ? _children[index] : null;
+
+        public PlugInNode FindChildByName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return null;
+            }
+            foreach (var c in _children)
+            {
+                if (string.Equals(c.Name, name.Trim(), StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.UniqueID, name.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return c;
+                }
+                var deep = c.FindChildByName(name);
+                if (deep != null)
+                {
+                    return deep;
+                }
+            }
+            return null;
+        }
+
+        public PlugInNode FindChildByUniqueID(string uniqueID)
+        {
+            if (string.IsNullOrWhiteSpace(uniqueID))
+            {
+                return null;
+            }
+            foreach (var c in _children)
+            {
+                if (string.Equals(c.UniqueID, uniqueID.Trim(), StringComparison.Ordinal))
+                {
+                    return c;
+                }
+                var deep = c.FindChildByUniqueID(uniqueID);
+                if (deep != null)
+                {
+                    return deep;
+                }
+            }
+            return null;
+        }
+
+        public PlugInNode GetChildByName(string val) => FindChildByName(val);
+        public PlugInNode GetChildByUniqueID(string val) => FindChildByUniqueID(val);
+        public IEnumerator<PlugInNode> GetEnumerator() => _children.GetEnumerator();
+        IEnumerator IEnumerable.GetEnumerator() => _children.GetEnumerator();
+    }
+
+    public sealed class Effect
+    {
+        internal ulong _id;
+        internal Effects _owner;
+
+        public Effect(PlugInNode plugIn)
+        {
+            if (plugIn is null || plugIn.IsContainer || string.IsNullOrEmpty(plugIn.UniqueID))
+            {
+                throw new ArgumentException("Effect: escolha um plug-in de Vegas.VideoFX ou Vegas.AudioFX");
+            }
+            PlugIn = plugIn;
+        }
+
+        public PlugInNode PlugIn { get; }
+        public string Description => PlugIn.Name;
+        public bool Bypass { get; set; }
+        public bool IsOFX => PlugIn.IsOFX;
+        public int Index => _owner == null ? -1 : _owner.IndexOf(this);
+        public bool IsValid() => _owner != null;
+    }
+
+    public sealed class Effects : Collection<Effect>
+    {
+        internal Effects() { }
+
+        public Effect AddEffect(PlugInNode plugIn)
+        {
+            var fx = new Effect(plugIn);
+            Add(fx);
+            return fx;
+        }
+
+        protected override void InsertItem(int index, Effect item)
+        {
+            if (item is null)
+            {
+                throw new ArgumentNullException(nameof(item));
+            }
+            if (item._owner != null && !ReferenceEquals(item._owner, this))
+            {
+                throw new InvalidOperationException("o efeito já está em outra lista");
+            }
+            item._owner = this;
+            base.InsertItem(index, item);
+        }
+
+        protected override void SetItem(int index, Effect item)
+        {
+            if (item is null)
+            {
+                throw new ArgumentNullException(nameof(item));
+            }
+            this[index]._owner = null;
+            item._owner = this;
+            base.SetItem(index, item);
+        }
+
+        protected override void RemoveItem(int index)
+        {
+            this[index]._owner = null;
+            base.RemoveItem(index);
+        }
+
+        protected override void ClearItems()
+        {
+            foreach (var e in this)
+            {
+                e._owner = null;
+            }
+            base.ClearItems();
+        }
+    }
+
+    public sealed class EnvelopePoint
+    {
+        internal EnvelopePoints _owner;
+
+        public EnvelopePoint(Timecode x, double y) : this(x, y, CurveType.Linear) { }
+
+        public EnvelopePoint(Timecode x, double y, CurveType curveType)
+        {
+            X = x ?? new Timecode();
+            Y = y;
+            Curve = curveType;
+        }
+
+        public Timecode X { get; set; }
+        public double Y { get; set; }
+        public CurveType Curve { get; set; }
+        public int Index => _owner == null ? -1 : _owner.IndexOf(this);
+        public bool IsValid() => _owner != null;
+    }
+
+    public sealed class EnvelopePoints : Collection<EnvelopePoint>
+    {
+        internal EnvelopePoints() { }
+
+        // EnvelopePoints.Clear: "remove todos os itens, menos o primeiro".
+        protected override void ClearItems()
+        {
+            while (Count > 1)
+            {
+                RemoveAt(Count - 1);
+            }
+        }
+
+        protected override void InsertItem(int index, EnvelopePoint item)
+        {
+            if (item is null)
+            {
+                throw new ArgumentNullException(nameof(item));
+            }
+            item._owner = this;
+            base.InsertItem(index, item);
+        }
+
+        protected override void RemoveItem(int index)
+        {
+            this[index]._owner = null;
+            base.RemoveItem(index);
+        }
+
+        public EnvelopePoint GetPointAtX(Timecode x)
+        {
+            if (x is null)
+            {
+                return null;
+            }
+            foreach (var p in this)
+            {
+                if (p.X != null && p.X._ticks == x._ticks)
+                {
+                    return p;
+                }
+            }
+            return null;
+        }
+    }
+
+    public sealed class Envelope
+    {
+        internal Envelopes _owner;
+
+        // Envelope novo nasce com um ponto no início, no valor neutro.
+        public Envelope(EnvelopeType type) : this(type, true) { }
+
+        internal Envelope(EnvelopeType type, bool withDefaultPoint)
+        {
+            Type = type;
+            if (withDefaultPoint)
+            {
+                Points.Add(new EnvelopePoint(new Timecode(), Neutral));
+            }
+        }
+
+        public EnvelopeType Type { get; }
+        public string Name => Type.ToString();
+        public int Index => _owner == null ? -1 : _owner.IndexOf(this);
+        public EnvelopePoints Points { get; } = new EnvelopePoints();
+
+        public double Min => Type switch
+        {
+            EnvelopeType.Volume => 0.0,
+            EnvelopeType.Pan => -1.0,
+            EnvelopeType.FadeToColor => -1.0,
+            _ => 0.0
+        };
+
+        public double Max => Type switch
+        {
+            EnvelopeType.Volume => 4.0,
+            _ => 1.0
+        };
+
+        public double Neutral => Type switch
+        {
+            EnvelopeType.Volume => 1.0,
+            EnvelopeType.Composite => 1.0,
+            _ => 0.0
+        };
+
+        public bool IsValid() => _owner != null;
+
+        // Valor no tempo: linear entre pontos (None segura o valor); antes do
+        // primeiro ponto, o valor dele.
+        public double ValueAt(Timecode position)
+        {
+            if (Points.Count == 0)
+            {
+                return Neutral;
+            }
+            long t = position == null ? 0 : position._ticks;
+            var pts = new List<EnvelopePoint>(Points);
+            pts.Sort((a, c) => (a.X?._ticks ?? 0).CompareTo(c.X?._ticks ?? 0));
+            if (t <= (pts[0].X?._ticks ?? 0))
+            {
+                return pts[0].Y;
+            }
+            for (int i = 0; i + 1 < pts.Count; i++)
+            {
+                long a = pts[i].X?._ticks ?? 0, c = pts[i + 1].X?._ticks ?? 0;
+                if (t < c)
+                {
+                    if (pts[i].Curve == CurveType.None || c <= a)
+                    {
+                        return pts[i].Y;
+                    }
+                    double k = (double)(t - a) / (c - a);
+                    return pts[i].Y + (pts[i + 1].Y - pts[i].Y) * k;
+                }
+            }
+            return pts[pts.Count - 1].Y;
+        }
+    }
+
+    public sealed class Envelopes : Collection<Envelope>
+    {
+        internal Envelopes() { }
+
+        public bool HasEnvelope(EnvelopeType type) => FindByType(type) != null;
+
+        public Envelope FindByType(EnvelopeType type)
+        {
+            foreach (var e in this)
+            {
+                if (e.Type == type)
+                {
+                    return e;
+                }
+            }
+            return null;
+        }
+
+        protected override void InsertItem(int index, Envelope item)
+        {
+            if (item is null)
+            {
+                throw new ArgumentNullException(nameof(item));
+            }
+            if (HasEnvelope(item.Type))
+            {
+                throw new InvalidOperationException("a trilha já tem um envelope " + item.Type);
+            }
+            item._owner = this;
+            base.InsertItem(index, item);
+        }
+
+        protected override void RemoveItem(int index)
+        {
+            this[index]._owner = null;
+            base.RemoveItem(index);
+        }
+    }
+
+    internal sealed class FxSnap
+    {
+        public ulong id { get; set; }
+        public string unique_id { get; set; }
+        public string name { get; set; }
+        public bool bypass { get; set; }
+    }
+
+    internal sealed class EnvPointSnap
+    {
+        public long x { get; set; }
+        public double y { get; set; }
+        public string curve { get; set; }
+    }
+
+    internal sealed class EnvSnap
+    {
+        public string kind { get; set; }
+        public List<EnvPointSnap> points { get; set; }
+    }
+
+    internal sealed class PluginSnap
+    {
+        public string unique_id { get; set; }
+        public string name { get; set; }
+        public bool is_audio { get; set; }
+    }
+
+    internal sealed class FxOut
+    {
+        public ulong id { get; set; }
+        public string unique_id { get; set; }
+        public bool bypass { get; set; }
+    }
+
+    internal sealed class EnvPointOut
+    {
+        public long x { get; set; }
+        public double y { get; set; }
+        public string curve { get; set; }
+    }
+
+    internal sealed class EnvOut
+    {
+        public string kind { get; set; }
+        public List<EnvPointOut> points { get; set; } = new List<EnvPointOut>();
     }
 
     // TransportControl (Scripting API Summary): cursor e seleção de tempo.
@@ -995,6 +1540,35 @@ namespace ScriptPortal.Vegas
         public Project Project { get; } = new Project();
         public TransportControl Transport { get; } = new TransportControl();
 
+        // Vegas.VideoFX / Vegas.AudioFX / Vegas.PlugIns (Scripting API Summary).
+        public PlugInNode VideoFX { get; } = new PlugInNode { Name = "Video FX", IsVideo = true };
+        public PlugInNode AudioFX { get; } = new PlugInNode { Name = "Audio FX", IsAudio = true };
+        public PlugInNode PlugIns { get; } = new PlugInNode { Name = "Plug-Ins" };
+
+        // plug-in de um efeito que já está no projeto (inclusive OFX/VST3,
+        // que não estão nas árvores)
+        private PlugInNode NodeFor(FxSnap f, bool video)
+        {
+            var root = video ? VideoFX : AudioFX;
+            return root.FindChildByUniqueID(f.unique_id)
+                ?? new PlugInNode
+                {
+                    Name = f.name ?? f.unique_id ?? "",
+                    UniqueID = f.unique_id ?? "",
+                    IsVideo = video,
+                    IsAudio = !video,
+                    IsOFX = f.unique_id == "Ofx"
+                };
+        }
+
+        private void LoadEffects(Effects into, List<FxSnap> list, bool video)
+        {
+            foreach (var f in list ?? new List<FxSnap>())
+            {
+                into.Add(new Effect(NodeFor(f, video)) { _id = f.id, Bypass = f.bypass });
+            }
+        }
+
         // Vegas.Cursor (Scripting API Summary: Vegas).
         public Timecode Cursor
         {
@@ -1024,6 +1598,20 @@ namespace ScriptPortal.Vegas
             {
                 Project.MediaPool.AddInternal(new Media(ms));
             }
+            foreach (var p in snap.plugins ?? new List<PluginSnap>())
+            {
+                var node = new PlugInNode
+                {
+                    Name = p.name ?? p.unique_id ?? "",
+                    UniqueID = p.unique_id ?? "",
+                    IsAudio = p.is_audio,
+                    IsVideo = !p.is_audio,
+                    Group = "Neoveg"
+                };
+                (p.is_audio ? AudioFX : VideoFX)._children.Add(node);
+            }
+            PlugIns._children.Add(VideoFX);
+            PlugIns._children.Add(AudioFX);
             if (snap.tracks != null)
             {
                 foreach (var t in snap.tracks)
@@ -1036,6 +1624,21 @@ namespace ScriptPortal.Vegas
                     tr.Mute = t.mute;
                     tr.Solo = t.solo;
                     tr.Selected = snap.selected_track == t.index;
+                    LoadEffects(tr.Effects, t.effects, t.is_video);
+                    foreach (var es in t.envelopes ?? new List<EnvSnap>())
+                    {
+                        if (!Enum.TryParse<EnvelopeType>(es.kind, out var et))
+                        {
+                            continue;
+                        }
+                        var env = new Envelope(et, false);
+                        foreach (var ps in es.points ?? new List<EnvPointSnap>())
+                        {
+                            var curve = Enum.TryParse<CurveType>(ps.curve, out var c) ? c : CurveType.Linear;
+                            env.Points.Add(new EnvelopePoint(Timecode.FromTicks(ps.x), ps.y, curve));
+                        }
+                        tr.Envelopes.Add(env);
+                    }
                     foreach (var e in t.events ?? new List<EventSnap>())
                     {
                         TrackEvent ev = t.is_video ? new VideoEvent() : new AudioEvent();
@@ -1062,6 +1665,7 @@ namespace ScriptPortal.Vegas
                         {
                             ev._active = ev.Takes[e.active_take];
                         }
+                        LoadEffects(ev.Effects, e.effects, t.is_video);
                         tr.Events.Add(ev);
                     }
                     Project.Tracks.Add(tr);
@@ -1129,6 +1733,75 @@ namespace ScriptPortal.Vegas
                 });
             }
             return list;
+        }
+
+        private static List<FxOut> FxOutList(Effects fx)
+        {
+            var list = new List<FxOut>();
+            foreach (var e in fx)
+            {
+                list.Add(new FxOut { id = e._id, unique_id = e.PlugIn.UniqueID ?? "", bypass = e.Bypass });
+            }
+            return list;
+        }
+
+        private static bool SameFx(List<FxOut> now, List<FxSnap> old)
+        {
+            old ??= new List<FxSnap>();
+            if (now.Count != old.Count)
+            {
+                return false;
+            }
+            for (int i = 0; i < now.Count; i++)
+            {
+                if (now[i].id == 0 || now[i].id != old[i].id || now[i].bypass != old[i].bypass)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static List<EnvOut> EnvOutList(Envelopes envs)
+        {
+            var list = new List<EnvOut>();
+            foreach (var e in envs)
+            {
+                var o = new EnvOut { kind = e.Type.ToString() };
+                foreach (var p in e.Points)
+                {
+                    o.points.Add(new EnvPointOut { x = Ticks(p.X), y = p.Y, curve = p.Curve.ToString() });
+                }
+                list.Add(o);
+            }
+            return list;
+        }
+
+        private static bool SameEnv(List<EnvOut> now, List<EnvSnap> old)
+        {
+            old ??= new List<EnvSnap>();
+            if (now.Count != old.Count)
+            {
+                return false;
+            }
+            for (int i = 0; i < now.Count; i++)
+            {
+                var a = now[i];
+                var o = old[i];
+                var op = o.points ?? new List<EnvPointSnap>();
+                if (a.kind != o.kind || a.points.Count != op.Count)
+                {
+                    return false;
+                }
+                for (int j = 0; j < op.Count; j++)
+                {
+                    if (a.points[j].x != op[j].x || a.points[j].y != op[j].y || a.points[j].curve != op[j].curve)
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
 
         private static bool SameTakes(List<TakeOut> now, List<TakeSnap> old)
@@ -1209,7 +1882,8 @@ namespace ScriptPortal.Vegas
                             fade_in = fi != 0 ? fi : (long?)null,
                             fade_out = fo != 0 ? fo : (long?)null,
                             takes = takesNow,
-                            active_take = activeNow
+                            active_take = activeNow,
+                            effects = ev.Effects.Count > 0 ? FxOutList(ev.Effects) : null
                         });
                         continue;
                     }
@@ -1227,6 +1901,7 @@ namespace ScriptPortal.Vegas
                         selectedEvents.Add(ev._id);
                     }
                     bool takesChanged = !SameTakes(takesNow, oe.takes) || activeNow != oe.active_take;
+                    var fxNow = FxOutList(ev.Effects);
                     evOut.Add(new EventOut
                     {
                         id = ev._id,
@@ -1238,7 +1913,8 @@ namespace ScriptPortal.Vegas
                         fade_in = fi != oe.fade_in ? fi : (long?)null,
                         fade_out = fo != oe.fade_out ? fo : (long?)null,
                         takes = takesChanged ? takesNow : null,
-                        active_take = takesChanged ? activeNow : (int?)null
+                        active_take = takesChanged ? activeNow : (int?)null,
+                        effects = SameFx(fxNow, oe.effects) ? null : fxNow
                     });
                 }
                 if (cur._origIndex >= 0)
@@ -1261,6 +1937,8 @@ namespace ScriptPortal.Vegas
                     {
                         throw new InvalidOperationException("trilha original desconhecida");
                     }
+                    var trFx = FxOutList(cur.Effects);
+                    var trEnv = EnvOutList(cur.Envelopes);
                     tracksOut.Add(new TrackOut
                     {
                         orig = cur._origIndex,
@@ -1269,7 +1947,9 @@ namespace ScriptPortal.Vegas
                         mute = cur.Mute != old.mute ? cur.Mute : (bool?)null,
                         solo = cur.Solo != old.solo ? cur.Solo : (bool?)null,
                         selected = cur.Selected,
-                        events = evOut
+                        events = evOut,
+                        effects = SameFx(trFx, old.effects) ? null : trFx,
+                        envelopes = SameEnv(trEnv, old.envelopes) ? null : trEnv
                     });
                 }
                 else
@@ -1282,7 +1962,9 @@ namespace ScriptPortal.Vegas
                         mute = cur.Mute ? true : (bool?)null,
                         solo = cur.Solo ? true : (bool?)null,
                         selected = cur.Selected,
-                        events = evOut
+                        events = evOut,
+                        effects = cur.Effects.Count > 0 ? FxOutList(cur.Effects) : null,
+                        envelopes = cur.Envelopes.Count > 0 ? EnvOutList(cur.Envelopes) : null
                     });
                 }
             }
@@ -1334,7 +2016,7 @@ namespace ScriptPortal.Vegas
             return new OutputSnap
             {
                 ok = true,
-                protocol = 4,
+                protocol = 5,
                 messages = _messages,
                 commands = _commands,
                 tracks = tracksOut,
@@ -1395,6 +2077,7 @@ namespace ScriptPortal.Vegas
         public long fade_out { get; set; }
         public List<TakeSnap> takes { get; set; }
         public int active_take { get; set; }
+        public List<FxSnap> effects { get; set; }
     }
 
     internal sealed class TrackSnap
@@ -1405,6 +2088,8 @@ namespace ScriptPortal.Vegas
         public bool mute { get; set; }
         public bool solo { get; set; }
         public List<EventSnap> events { get; set; }
+        public List<FxSnap> effects { get; set; }
+        public List<EnvSnap> envelopes { get; set; }
     }
 
     internal sealed class MarkerSnap
@@ -1428,6 +2113,7 @@ namespace ScriptPortal.Vegas
         public List<MarkerSnap> markers { get; set; }
         public List<string> audio_buses { get; set; }
         public List<MediaSnap> media { get; set; }
+        public List<PluginSnap> plugins { get; set; }
         public ulong probe_fn { get; set; }
         public ulong ui_fn { get; set; }
         public ulong probe_token { get; set; }
@@ -1447,6 +2133,7 @@ namespace ScriptPortal.Vegas
         public bool selected { get; set; }
         public List<TakeOut> takes { get; set; }
         public int? active_take { get; set; }
+        public List<FxOut> effects { get; set; }
     }
 
     internal sealed class TrackOut
@@ -1458,6 +2145,8 @@ namespace ScriptPortal.Vegas
         public bool? solo { get; set; }
         public bool selected { get; set; }
         public List<EventOut> events { get; set; } = new List<EventOut>();
+        public List<FxOut> effects { get; set; }
+        public List<EnvOut> envelopes { get; set; }
     }
 
     internal sealed class MarkerOut
@@ -1737,7 +2426,7 @@ namespace ScriptPortal.Vegas
 
 fn media_snap(m: &MediaItem) -> ScriptMediaSnap {
     let (path, generated) = match &m.source {
-        MediaSource::File { path } => (path.clone(), false),
+        MediaSource::File { path } | MediaSource::NestedProject { path } => (path.clone(), false),
         MediaSource::ImageSequence { paths, .. } => {
             (paths.first().cloned().unwrap_or_default(), false)
         }
@@ -1914,6 +2603,7 @@ fn build_snapshot(
     target_assembly: Option<&Path>,
     probe_token: u64,
 ) -> Result<Vec<u8>, NeovegError> {
+    let lang = session.lang;
     let tracks = session
         .project
         .tracks
@@ -1946,8 +2636,11 @@ fn build_snapshot(
                         })
                         .collect(),
                     active_take: takes::active_index(e),
+                    effects: fx_snaps(&e.fx, lang),
                 })
                 .collect(),
+            effects: fx_snaps(&t.fx, lang),
+            envelopes: t.envelopes.iter().map(env_snap).collect(),
         })
         .collect();
     let media = session.project.media.iter().map(media_snap).collect();
@@ -1989,12 +2682,203 @@ fn build_snapshot(
         markers,
         audio_buses,
         media,
+        plugins: FxKind::VIDEO
+            .into_iter()
+            .chain(FxKind::AUDIO)
+            .map(|k| ScriptPluginSnap {
+                unique_id: k.id(),
+                name: k.name_in(lang).to_string(),
+                is_audio: k.is_audio(),
+            })
+            .collect(),
         probe_fn: dotnet_host::media_probe_fn_addr(),
         probe_token,
         ui_fn: dotnet_host::ui_request_fn_addr(),
     };
     serde_json::to_vec(&payload)
         .map_err(|e| NeovegError::Json(format!("erro ao serializar contexto do script: {e}")))
+}
+
+/// Efeitos por trilha ou evento que um script pode deixar (§0.4).
+const MAX_SCRIPT_FX: usize = 64;
+/// Pontos por envelope que um script pode deixar (§0.4).
+const MAX_SCRIPT_ENV_POINTS: usize = 100_000;
+
+fn fx_snaps(list: &[FxInstance], lang: neoveg_common::Language) -> Vec<ScriptFxSnap> {
+    list.iter()
+        .map(|f| ScriptFxSnap {
+            id: f.id,
+            unique_id: f.kind.id().to_string(),
+            name: f.kind.name_in(lang).to_string(),
+            bypass: !f.enabled,
+        })
+        .collect()
+}
+
+/// Nome de `EnvelopeType` (Scripting API Summary) de cada envelope do Neoveg.
+fn env_type_name(k: EnvKind) -> &'static str {
+    match k {
+        EnvKind::Volume => "Volume",
+        EnvKind::Pan => "Pan",
+        EnvKind::Opacity => "Composite",
+        EnvKind::FadeToColor => "FadeToColor",
+    }
+}
+
+/// Nome de `CurveType` (Scripting API Summary) de cada curva do Neoveg.
+fn curve_name(c: Curve) -> &'static str {
+    match c {
+        Curve::Linear => "Linear",
+        Curve::Fast => "Fast",
+        Curve::Slow => "Slow",
+        Curve::Smooth => "Smooth",
+        Curve::Sharp => "Sharp",
+        Curve::Hold => "None",
+    }
+}
+
+fn curve_from_name(name: &str) -> Result<Curve, NeovegError> {
+    Ok(match name.trim() {
+        "Linear" => Curve::Linear,
+        "Fast" => Curve::Fast,
+        "Slow" => Curve::Slow,
+        "Smooth" => Curve::Smooth,
+        "Sharp" => Curve::Sharp,
+        "None" => Curve::Hold,
+        other => {
+            return Err(bad(format!(
+                "curva de envelope inválida: '{}'",
+                truncate_str(other, 32)
+            )))
+        }
+    })
+}
+
+fn env_snap(e: &Envelope) -> ScriptEnvSnap {
+    ScriptEnvSnap {
+        kind: env_type_name(e.kind),
+        points: e
+            .points
+            .iter()
+            .map(|p| ScriptEnvPointSnap {
+                x: p.t.0,
+                y: f64::from(p.v),
+                curve: curve_name(p.curve),
+            })
+            .collect(),
+    }
+}
+
+/// Lista final de efeitos de uma trilha ou de um evento (`Effects`): os que
+/// já existiam mantêm id e parâmetros (só `Bypass` muda), os novos vêm de
+/// `Vegas.VideoFX` / `Vegas.AudioFX` pelo `UniqueID`. Efeito de áudio em
+/// vídeo (ou o contrário), id repetido ou desconhecido recusam o script.
+fn script_effects(
+    list: &[ScriptFxOut],
+    old: &[FxInstance],
+    video: bool,
+    what: &str,
+) -> Result<Vec<FxInstance>, NeovegError> {
+    if list.len() > MAX_SCRIPT_FX {
+        return Err(bad(format!(
+            "mais de {MAX_SCRIPT_FX} efeitos num(a) {what}"
+        )));
+    }
+    let mut used = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for f in list {
+        let mut fx = if f.id != 0 {
+            let Some(src) = old.iter().find(|o| o.id == f.id) else {
+                return Err(bad(format!("efeito desconhecido na {what}: {}", f.id)));
+            };
+            if !used.insert(f.id) {
+                return Err(bad(format!("o efeito {} aparece mais de uma vez", f.id)));
+            }
+            src.clone()
+        } else {
+            let Some(kind) = FxKind::from_id(&f.unique_id) else {
+                return Err(bad(format!(
+                    "plug-in de efeito desconhecido: '{}' (use Vegas.VideoFX ou Vegas.AudioFX)",
+                    truncate_str(&f.unique_id, 64)
+                )));
+            };
+            if kind.is_audio() == video {
+                return Err(bad(format!(
+                    "efeito de {} numa {what} de {}",
+                    if video { "áudio" } else { "vídeo" },
+                    if video { "vídeo" } else { "áudio" }
+                )));
+            }
+            FxInstance::new(kind)
+        };
+        fx.enabled = !f.bypass;
+        out.push(fx);
+    }
+    Ok(out)
+}
+
+/// Lista final de envelopes de uma trilha (`Envelopes`). Só os tipos que o
+/// Neoveg tem: Volume e Pan (áudio), Composite e FadeToColor (vídeo); os
+/// outros `EnvelopeType` recusam o script com o nome do tipo. Pontos em
+/// ordem de tempo, valores finitos limitados à faixa do envelope.
+fn script_envelopes(
+    list: &[ScriptEnvOut],
+    old: &[Envelope],
+    kind: TrackKind,
+) -> Result<Vec<Envelope>, NeovegError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for e in list {
+        let env_kind = match (e.kind.trim(), kind) {
+            ("Volume", TrackKind::Audio) => EnvKind::Volume,
+            ("Pan", TrackKind::Audio) => EnvKind::Pan,
+            ("Composite", TrackKind::Video) => EnvKind::Opacity,
+            ("FadeToColor", TrackKind::Video) => EnvKind::FadeToColor,
+            (other, _) => {
+                return Err(bad(format!(
+                    "envelope '{}' não existe numa trilha de {} do Neoveg",
+                    truncate_str(other, 32),
+                    if kind == TrackKind::Video {
+                        "vídeo"
+                    } else {
+                        "áudio"
+                    }
+                )))
+            }
+        };
+        if !seen.insert(env_kind) {
+            return Err(bad(format!("envelope '{}' repetido", e.kind.trim())));
+        }
+        if e.points.is_empty() {
+            return Err(bad("envelope sem pontos"));
+        }
+        if e.points.len() > MAX_SCRIPT_ENV_POINTS {
+            return Err(bad(format!(
+                "mais de {MAX_SCRIPT_ENV_POINTS} pontos num envelope"
+            )));
+        }
+        let (lo, hi) = env_kind.range();
+        let mut points = Vec::with_capacity(e.points.len());
+        for p in &e.points {
+            if !p.y.is_finite() {
+                return Err(bad("valor de ponto de envelope não finito"));
+            }
+            points.push(EnvPoint {
+                t: script_ticks(p.x, "tempo do ponto de envelope")?,
+                v: (p.y as f32).clamp(lo, hi),
+                curve: curve_from_name(&p.curve)?,
+            });
+        }
+        points.sort_by_key(|p| p.t);
+        let mut env = old
+            .iter()
+            .find(|o| o.kind == env_kind)
+            .cloned()
+            .unwrap_or_else(|| Envelope::new(env_kind));
+        env.points = points;
+        out.push(env);
+    }
+    Ok(out)
 }
 
 fn validate_managed_dll_header(path: &Path) -> Result<(), NeovegError> {
@@ -2221,6 +3105,8 @@ fn tracks_unchanged(out: &[ScriptTrackOut], old: &[Track]) -> bool {
                 && t.name.is_none()
                 && t.mute.is_none()
                 && t.solo.is_none()
+                && t.effects.is_none()
+                && t.envelopes.is_none()
                 && t.events.len() == o.events.len()
                 && t.events
                     .iter()
@@ -2446,10 +3332,20 @@ fn rebuild_tracks(
         if let Some(s) = t.solo {
             tr.solo = s;
         }
+        let video = tr.kind == TrackKind::Video;
+        if let Some(list) = &t.effects {
+            tr.fx = script_effects(list, &tr.fx, video, "trilha")?;
+        }
+        if let Some(list) = &t.envelopes {
+            tr.envelopes = script_envelopes(list, &tr.envelopes, tr.kind)?;
+        }
         let mut events = Vec::with_capacity(t.events.len());
         for eo in &t.events {
             if eo.is_new {
-                let ev = new_script_event(eo, tr.kind, media)?;
+                let mut ev = new_script_event(eo, tr.kind, media)?;
+                if let Some(list) = &eo.effects {
+                    ev.fx = script_effects(list, &[], video, "evento")?;
+                }
                 if eo.selected {
                     new_selected.push(ev.id);
                 }
@@ -2467,6 +3363,9 @@ fn rebuild_tracks(
             }
             let mut ev = (*src).clone();
             apply_event_changes(&mut ev, eo)?;
+            if let Some(list) = &eo.effects {
+                ev.fx = script_effects(list, &ev.fx, video, "evento")?;
+            }
             if let Some(list) = &eo.takes {
                 let list = script_takes(list, tr.kind, media)?;
                 let a = script_active(eo.active_take, list.len())?;
@@ -2524,6 +3423,7 @@ fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Mark
                 id: neoveg_engine::model::new_id(),
                 t: marker_ticks(m.ticks.unwrap_or(0))?,
                 label: marker_label(m.label.as_deref().unwrap_or("")),
+                ..Default::default()
             }),
         }
     }
@@ -2844,4 +3744,144 @@ pub fn run_cs_script_impl(
         .map_err(|e| NeovegError::Json(format!("resposta JSON inválida do script C#: {e}")))?;
 
     apply_script_output(parsed, probe.take(), session, host, messages_out)
+}
+
+#[cfg(test)]
+mod efeitos_envelopes_tests {
+    use super::*;
+
+    fn fx_out(id: u64, unique_id: &str, bypass: bool) -> ScriptFxOut {
+        ScriptFxOut {
+            id,
+            unique_id: unique_id.into(),
+            bypass,
+        }
+    }
+
+    #[test]
+    fn efeitos_mantem_os_existentes_criam_novos_e_recusam_o_resto() {
+        let blur = FxInstance::new(FxKind::GaussianBlur);
+        let old = vec![blur.clone()];
+        // reordenar, ligar bypass e criar um novo
+        let out = script_effects(
+            &[fx_out(0, "Sepia", false), fx_out(blur.id, "", true)],
+            &old,
+            true,
+            "trilha",
+        )
+        .expect("válido");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, FxKind::Sepia);
+        assert_eq!(out[1].id, blur.id);
+        assert!(!out[1].enabled);
+        // id desconhecido, repetido, plug-in inexistente, tipo trocado
+        assert!(script_effects(&[fx_out(12345, "", false)], &old, true, "trilha").is_err());
+        assert!(script_effects(
+            &[fx_out(blur.id, "", false), fx_out(blur.id, "", false)],
+            &old,
+            true,
+            "trilha"
+        )
+        .is_err());
+        assert!(script_effects(&[fx_out(0, "NaoExiste", false)], &[], true, "trilha").is_err());
+        assert!(script_effects(&[fx_out(0, "Reverb", false)], &[], true, "trilha").is_err());
+        assert!(script_effects(&[fx_out(0, "Sepia", false)], &[], false, "trilha").is_err());
+        // OFX/VST3 não se criam por script
+        assert!(script_effects(&[fx_out(0, "Ofx", false)], &[], true, "trilha").is_err());
+        // limite
+        let muitos: Vec<_> = (0..=MAX_SCRIPT_FX)
+            .map(|_| fx_out(0, "Sepia", false))
+            .collect();
+        assert!(script_effects(&muitos, &[], true, "trilha").is_err());
+    }
+
+    fn env_out(kind: &str, pts: &[(i64, f64, &str)]) -> ScriptEnvOut {
+        ScriptEnvOut {
+            kind: kind.into(),
+            points: pts
+                .iter()
+                .map(|&(x, y, c)| ScriptEnvPointOut {
+                    x,
+                    y,
+                    curve: c.into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn envelopes_validam_tipo_pontos_valores_e_curvas() {
+        let t2 = Ticks::from_secs_i64(2).0;
+        let out = script_envelopes(
+            &[env_out("Volume", &[(t2, 9.0, "Smooth"), (0, 0.5, "None")])],
+            &[],
+            TrackKind::Audio,
+        )
+        .expect("válido");
+        let e = &out[0];
+        assert_eq!(e.kind, EnvKind::Volume);
+        assert_eq!(e.points[0].t, Ticks::ZERO, "ordenado por tempo");
+        assert_eq!(e.points[0].curve, Curve::Hold);
+        assert_eq!(e.points[1].v, 4.0, "limitado à faixa do volume");
+        assert_eq!(e.points[1].curve, Curve::Smooth);
+        // nomes do Neoveg para vídeo
+        assert!(script_envelopes(
+            &[env_out("Composite", &[(0, 1.0, "Linear")])],
+            &[],
+            TrackKind::Video
+        )
+        .is_ok());
+        // tipo de outra trilha, tipo que não existe, repetido, vazio
+        for (kind, tk) in [
+            ("Volume", TrackKind::Video),
+            ("Composite", TrackKind::Audio),
+            ("BusA", TrackKind::Audio),
+            ("Lixo", TrackKind::Audio),
+        ] {
+            assert!(
+                script_envelopes(&[env_out(kind, &[(0, 0.0, "Linear")])], &[], tk).is_err(),
+                "{kind}"
+            );
+        }
+        assert!(script_envelopes(
+            &[
+                env_out("Pan", &[(0, 0.0, "Linear")]),
+                env_out("Pan", &[(0, 0.0, "Linear")])
+            ],
+            &[],
+            TrackKind::Audio
+        )
+        .is_err());
+        assert!(script_envelopes(&[env_out("Pan", &[])], &[], TrackKind::Audio).is_err());
+        // valores e tempos hostis
+        for pts in [
+            [(0, f64::NAN, "Linear")],
+            [(0, f64::INFINITY, "Linear")],
+            [(-1, 0.0, "Linear")],
+            [(0, 0.0, "Invalid")],
+        ] {
+            assert!(
+                script_envelopes(&[env_out("Pan", &pts)], &[], TrackKind::Audio).is_err(),
+                "{pts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nomes_da_api_vao_e_voltam() {
+        for c in [
+            Curve::Linear,
+            Curve::Fast,
+            Curve::Slow,
+            Curve::Smooth,
+            Curve::Sharp,
+            Curve::Hold,
+        ] {
+            assert_eq!(curve_from_name(curve_name(c)).ok(), Some(c));
+        }
+        let e = Envelope::new(EnvKind::Opacity);
+        let s = env_snap(&e);
+        assert_eq!(s.kind, "Composite");
+        assert_eq!(s.points.len(), 1);
+    }
 }

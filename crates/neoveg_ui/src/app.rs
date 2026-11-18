@@ -10,9 +10,10 @@ pub use neoveg_common::prefs::{
     EditLayoutPrefs, LayoutType, PlaybackScrollMode, Preferences, PreviewQuality,
     TimelineMouseScroll,
 };
+use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::commands::{
-    self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
-    ShortcutKey, UiAction, COMMANDS,
+    self, is_command_enabled, menu_label_in, resolved_shortcut, run_command, CommandHost,
+    DockPanel, ShortcutKey, UiAction, COMMANDS,
 };
 use neoveg_engine::engine::loudness::{LoudnessReport, LoudnessSnapshot, LoudnessTarget};
 use neoveg_engine::media::{self, MediaCache};
@@ -26,7 +27,7 @@ use neoveg_engine::util;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,9 +69,17 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
     ],
     &[
         "insert.empty_event",
+        "insert.track_folder",
+        "track.toggle_folder",
+        "track.make_child",
+        "tools.multicam_mode",
+        "view.stereo_3d",
         "track.record_arm",
         "transport.record",
         "media.select_events",
+        "preview.copy_frame",
+        "preview.ram_build",
+        "preview.external_monitor",
         "insert.marker",
         "insert.region",
         "transport.jump_prev_marker",
@@ -106,6 +115,7 @@ mod more_tools_tests {
 pub enum DndPayload {
     Media(Id),
     Fx(FxKind),
+    FxPreset(FxInstance),
     Transition(TransitionKind),
     Generator(GenSpec),
 }
@@ -130,6 +140,14 @@ pub enum LoadMsg {
     Reloaded(Id, Result<media::Imported, String>),
     Replaced(Id, Result<media::Imported, String>),
     ProxyBuilt(Id, Result<PathBuf, String>),
+    RamPreviewFrame {
+        gen: u64,
+        frame_idx: i64,
+        image: image::RgbaImage,
+    },
+    RamPreviewDone {
+        gen: u64,
+    },
     PrerenderDone {
         start: Ticks,
         end: Ticks,
@@ -209,6 +227,13 @@ impl ScriptJob {
     }
 }
 
+pub struct RamPreviewJob {
+    pub cancel: Arc<AtomicBool>,
+    pub done: Arc<AtomicU64>,
+    pub total: Arc<AtomicU64>,
+    pub gen: u64,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct PreviewReqKey {
     t: Ticks,
@@ -217,7 +242,11 @@ pub(crate) struct PreviewReqKey {
     h: usize,
     scopes: bool,
     prefer_proxy: bool,
+    split_mode: neoveg_engine::playback::PreviewSplitMode,
+    mute_video: bool,
     expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
+    /// Isolamento de canal em vigor (muda a imagem enviada à textura).
+    channel: (crate::preview_overlays::ChannelIsolation, bool),
 }
 
 pub struct App {
@@ -227,7 +256,23 @@ pub struct App {
     pub audio: AudioOut,
     pub(crate) preview: Preview,
     pub(crate) preview_tex: Option<TextureHandle>,
+    pub(crate) preview_split_tex: Option<TextureHandle>,
+    pub(crate) preview_clipboard: Option<(TextureHandle, image::RgbaImage)>,
+    pub(crate) ram_preview: neoveg_engine::playback::RamPreviewCache,
+    pub(crate) ram_preview_job: Option<RamPreviewJob>,
+    pub(crate) preview_zoom: f32,
+    /// Zoom guardado por *Ignorar zoom* (volta ao alternar de novo).
+    pub(crate) preview_zoom_bypass: Option<(f32, egui::Vec2)>,
+    /// Isolamento de canal da prévia (Sobreposições) e se é em cinza.
+    pub(crate) preview_channel: crate::preview_overlays::ChannelIsolation,
+    pub(crate) preview_channel_gray: bool,
+    /// Fps exibido na prévia durante a reprodução.
+    pub(crate) display_fps: crate::preview_overlays::FpsMeter,
+    pub(crate) preview_pan: egui::Vec2,
+    pub external_monitor: bool,
+    pub(crate) external_monitor_fullscreen: bool,
     pub(crate) expanded_ab_tex: Option<(TextureHandle, TextureHandle)>,
+    pub(crate) multicam_thumbs: HashMap<(Id, usize, i64), TextureHandle>,
     pub(crate) preview_inflight: bool,
     pub(crate) preview_inflight_since: Instant,
     pub(crate) last_req: PreviewReqKey,
@@ -236,6 +281,20 @@ pub struct App {
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
+    /// Painéis fechados (fora da área de janelas); voltam pelo menu Exibir.
+    pub closed_tabs: HashSet<DockTab>,
+    /// Última posição e tamanho de cada janela destacada (`.neoveglayout`).
+    pub(crate) floating_geom: std::collections::BTreeMap<String, crate::layout::FloatingGeom>,
+    /// Geometria com que cada janela aberta abriu (fixa enquanto aberta).
+    pub(crate) floating_open: HashMap<String, Option<crate::layout::FloatingGeom>>,
+    /// Janelas destacadas desenhadas no último quadro.
+    pub(crate) floating_shown: HashSet<String>,
+    /// Acoplar arrastando: movimento de cada janela destacada.
+    pub(crate) float_dock: crate::float_dock::FloatDockTracker,
+    /// Contorno da área de janelas neste quadro (uma janela vai acoplar).
+    pub(crate) float_dock_hint: bool,
+    /// Área de janelas no último quadro em que foi desenhada (pontos).
+    pub(crate) dock_rect: Option<egui::Rect>,
     pub preview_detached: bool,
     pub preview_visible: bool,
     pub master_bus_visible: bool,
@@ -246,6 +305,10 @@ pub struct App {
     pub dock_height: f32,
     pub preview_ratio: f32,
     pub dock_tree: egui_tiles::Tree<crate::dock::DockPane>,
+    /// Painel que preenche a área de janelas (botão Maximizar do VEGAS).
+    pub dock_maximized: Option<crate::dock::DockPane>,
+    /// Estado de antes do `Ctrl+F11` (timeline maximizada).
+    pub(crate) timeline_restore: Option<crate::dock::TimelineRestore>,
     pub(crate) pending_dock_focus: Option<DockTab>,
     pub saved_layouts: Vec<(String, PathBuf)>,
     pub theme_id: ThemeId,
@@ -285,6 +348,8 @@ pub struct App {
     /// Sessões anteriores que não fecharam normalmente (janela de relatório).
     pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     pub(crate) splash: crate::splash::SplashState,
+    /// A janela ainda está no modo tela de abertura (sem bordas, tamanho da abertura).
+    pub(crate) startup_window: bool,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
@@ -327,7 +392,26 @@ impl App {
     }
 
     pub fn with_context(egui_ctx: &egui::Context, open: Option<PathBuf>) -> Self {
+        Self::with_context_in(egui_ctx, open, None)
+    }
+
+    pub fn with_context_in(
+        egui_ctx: &egui::Context,
+        open: Option<PathBuf>,
+        lang_override: Option<Language>,
+    ) -> Self {
         let mut prefs = Preferences::load_or_default();
+        if let Some(ov) = lang_override {
+            prefs.set_lang(ov);
+        }
+        let lang = prefs.lang();
+        neoveg_common::set_active_language(lang);
+        // Ctrl+= / Ctrl+- / Ctrl+0 são atalhos do VEGAS (tom em oitavas);
+        // o zoom da interface do egui não pode tomar essas teclas.
+        egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        // nos testes fica a fonte embutida, para as medidas de layout serem
+        // as mesmas em qualquer máquina
+        crate::fonts::configure_fonts(egui_ctx, prefs.system_ui_font && !cfg!(test));
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
         let loaded_layout = prefs
@@ -353,7 +437,7 @@ impl App {
         let saved_layouts = layout::list_saved_layouts();
         let mut initial_project = Project::new_default();
         initial_project.settings.sample_rate = prefs.default_sample_rate;
-        let mut session = EditorSession::new(initial_project);
+        let mut session = EditorSession::new_in(initial_project, lang);
         apply_pref_defaults(&mut session.opts, &prefs);
         let media = Arc::new(MediaCache::default());
         media.configure_limits(prefs.frame_cache_cap, prefs.ram_preview_mb);
@@ -378,7 +462,20 @@ impl App {
             audio,
             preview,
             preview_tex: None,
+            preview_split_tex: None,
+            preview_clipboard: None,
+            ram_preview: neoveg_engine::playback::RamPreviewCache::default(),
+            ram_preview_job: None,
+            preview_zoom: 1.0,
+            preview_zoom_bypass: None,
+            preview_channel: Default::default(),
+            preview_channel_gray: false,
+            display_fps: Default::default(),
+            preview_pan: egui::Vec2::ZERO,
+            external_monitor: false,
+            external_monitor_fullscreen: false,
             expanded_ab_tex: None,
+            multicam_thumbs: HashMap::new(),
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
             last_req: PreviewReqKey {
@@ -386,6 +483,13 @@ impl App {
                 ..Default::default()
             },
             detached_tabs: initial_layout.detached_panels(),
+            closed_tabs: initial_layout.closed_panels(),
+            floating_geom: initial_layout.floating_windows.clone(),
+            floating_open: HashMap::new(),
+            floating_shown: HashSet::new(),
+            float_dock: Default::default(),
+            float_dock_hint: false,
+            dock_rect: None,
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
             master_bus_visible,
@@ -393,6 +497,8 @@ impl App {
             master_dim: false,
             master_mono: false,
             dock_visible: initial_layout.dock_visible,
+            dock_maximized: None,
+            timeline_restore: None,
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
             dock_tree: initial_tree.unwrap_or_else(|| {
@@ -442,6 +548,7 @@ impl App {
             recovery_offer,
             crash_reports: Vec::new(),
             splash,
+            startup_window: false,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
@@ -452,11 +559,18 @@ impl App {
             recording_peaks: HashMap::new(),
             project_media: crate::project_media::ProjectMediaState::default(),
         };
+        app.ram_preview =
+            neoveg_engine::playback::RamPreviewCache::new(app.prefs.ram_preview_mb as usize);
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
         }
         if let Some(e) = &app.audio.error {
-            app.set_status(format!("Áudio: {e} (reprodução sem som)"));
+            let err_s = e.to_string();
+            app.set_status(tr_args(
+                lang,
+                "Áudio: {err} (reprodução sem som)",
+                &[("err", &err_s)],
+            ));
         }
         if let Some(p) = open {
             if is_project_file(&p) {
@@ -466,6 +580,36 @@ impl App {
             }
         }
         app
+    }
+
+    /// Idioma ativo na interface e na sessão de edição.
+    pub fn lang(&self) -> Language {
+        self.prefs.lang()
+    }
+
+    /// Altera o idioma da interface em tempo real e opcionalmente grava nas preferências.
+    pub(crate) fn apply_language(
+        &mut self,
+        ctx: Option<&egui::Context>,
+        lang: Language,
+        save_prefs: bool,
+    ) {
+        self.prefs.set_lang(lang);
+        self.session.lang = lang;
+        neoveg_common::set_active_language(lang);
+        if save_prefs {
+            if let Err(e) = self.prefs.save() {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Aviso ao salvar preferência: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
+        }
+        if let Some(c) = ctx {
+            c.request_repaint();
+        }
     }
 
     // -----------------------------------------------------------------
@@ -491,7 +635,16 @@ impl App {
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.session.set_status(s);
         self.status_at = Instant::now();
-        if self.session.status.starts_with("Erro") || self.session.status.contains("falh") {
+        let st = &self.session.status;
+        let is_err = st.starts_with("Erro")
+            || st.starts_with("Error")
+            || st.starts_with("Erreur")
+            || st.starts_with("Fehler")
+            || st.starts_with("エラー")
+            || st.contains("falh")
+            || st.contains("fail")
+            || st.contains("失敗");
+        if is_err {
             util::log_error(&self.session.status);
         }
     }
@@ -502,6 +655,7 @@ impl App {
 
     pub fn sync_after_session(&mut self) {
         self.sync_status_from_session();
+        self.sync_master_monitor_audio();
         let removed = std::mem::take(&mut self.session.removed_media_ids);
         for id in removed {
             self.thumbs.remove(&id);
@@ -522,6 +676,56 @@ impl App {
         }
     }
 
+    pub fn open_motion_track_dialog(&mut self) {
+        let candidate = self
+            .sel_events
+            .iter()
+            .copied()
+            .find(|&eid| {
+                self.project.find_event(eid).is_some_and(|(ti, ei)| {
+                    self.project.tracks[ti].kind == TrackKind::Video
+                        && self
+                            .project
+                            .media(self.project.tracks[ti].events[ei].media_id)
+                            .is_some_and(|m| m.has_video)
+                })
+            })
+            .or_else(|| {
+                self.sel_track
+                    .and_then(|ti| self.project.tracks.get(ti))
+                    .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+                    .and_then(|t| {
+                        t.events.iter().find(|e| {
+                            e.contains(self.cursor)
+                                && self.project.media(e.media_id).is_some_and(|m| m.has_video)
+                        })
+                    })
+                    .map(|e| e.id)
+            });
+        let Some(ev_id) = candidate else {
+            self.set_status("Selecione um evento de vídeo para rastrear o movimento.");
+            return;
+        };
+        let track_id = self
+            .project
+            .find_event(ev_id)
+            .map(|(ti, _)| self.project.tracks[ti].id);
+        self.dlg.motion_track_src = Some(ev_id);
+        self.dlg.motion_track_target_event = Some(ev_id);
+        if self.dlg.motion_track_target_track.is_none() {
+            self.dlg.motion_track_target_track = track_id;
+        }
+        self.dlg.motion_track_step = self.dlg.motion_track_step.max(1);
+    }
+
+    pub fn apply_audio_fx_non_realtime(&mut self) {
+        let dir = std::env::temp_dir().join("neoveg_audio_fx_bounce");
+        match self.session.apply_audio_fx_non_realtime(&self.media, &dir) {
+            Ok(_) => self.sync_after_session(),
+            Err(e) => self.set_status(format!("Aplicar efeitos de áudio: {e}")),
+        }
+    }
+
     /// Salvamento automático para recuperação após falha (§0.7).
     fn autosave(&mut self) {
         if self.recovery_offer
@@ -533,7 +737,12 @@ impl App {
         }
         self.last_autosave = Instant::now();
         if let Err(e) = recovery::write_recovery(&self.project) {
-            self.set_status(format!("Falha no salvamento automático: {e}"));
+            let err_s = e.to_string();
+            self.set_status(tr_args(
+                self.lang(),
+                "Falha no salvamento automático: {err}",
+                &[("err", &err_s)],
+            ));
         }
     }
 
@@ -542,18 +751,23 @@ impl App {
         if !self.recovery_offer || !self.crash_reports.is_empty() {
             return;
         }
+        let lang = self.lang();
         let mut choice = None;
-        egui::Window::new("Recuperar projeto")
+        egui::Window::new(tr(lang, "Recuperar projeto"))
+            .id(egui::Id::new("recovery_offer_win"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Foi encontrado um projeto salvo automaticamente de uma sessão anterior que não terminou normalmente.");
+                ui.label(tr(
+                    lang,
+                    "Foi encontrado um projeto salvo automaticamente de uma sessão anterior que não terminou normalmente.",
+                ));
                 ui.horizontal(|ui| {
-                    if ui.button("Recuperar").clicked() {
+                    if ui.button(tr(lang, "Recuperar")).clicked() {
                         choice = Some(true);
                     }
-                    if ui.button("Descartar").clicked() {
+                    if ui.button(tr(lang, "Descartar")).clicked() {
                         choice = Some(false);
                     }
                 });
@@ -566,13 +780,14 @@ impl App {
     /// Recupera (`true`) ou descarta (`false`) a cópia automática da sessão
     /// anterior.
     pub(crate) fn resolve_recovery(&mut self, recover: bool) {
+        let lang = self.lang();
         self.recovery_offer = false;
         if recover {
             if let Some(p) = recovery::find_existing_recovery() {
                 self.open_project_path(p);
                 self.path = None;
                 self.dirty = true;
-                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
+                self.set_status(tr(lang, "Projeto recuperado. Salve-o com Salvar como..."));
             }
         } else {
             recovery::clear_recovery();
@@ -710,6 +925,29 @@ impl App {
         }
     }
 
+    /// `Ctrl+F11`: maximiza a timeline escondendo a área de janelas e a lista
+    /// de trilhas; de novo, volta ao que estava antes (manual do VEGAS Pro 21).
+    pub fn toggle_maximize_timeline(&mut self) {
+        match self.timeline_restore.take() {
+            Some(r) => {
+                self.dock_visible = r.dock_visible;
+                if r.header_expanded && self.tl.header_collapsed() {
+                    self.tl.toggle_header_collapse();
+                }
+            }
+            None => {
+                self.timeline_restore = Some(crate::dock::TimelineRestore {
+                    dock_visible: self.dock_visible,
+                    header_expanded: !self.tl.header_collapsed(),
+                });
+                self.dock_visible = false;
+                if !self.tl.header_collapsed() {
+                    self.tl.toggle_header_collapse();
+                }
+            }
+        }
+    }
+
     pub fn toggle_play(&mut self) {
         if self.is_playing() {
             self.stop(false);
@@ -725,6 +963,35 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ticks::from_samples(s.pos.max(0), self.audio.sr)
+    }
+
+    /// Destino do cursor para uma seta (`dir` < 0: esquerda). Anda um pixel
+    /// da régua; com Quantizar para quadros ligado, para na grade de quadros e
+    /// anda pelo menos um quadro, para que a agulha nunca fique parada no
+    /// mesmo quadro com o zoom aberto.
+    pub(crate) fn arrow_step_target(&self, dir: i64) -> Ticks {
+        let px = Ticks::from_secs_f64_clamped(
+            1.0 / f64::from(
+                self.tl
+                    .px_per_sec
+                    .max(crate::timeline::TimelineState::MIN_PX_PER_SEC),
+            ),
+        )
+        .max(Ticks::from_raw(1));
+        let cur = self.cursor;
+        let raw = if dir < 0 { cur - px } else { cur + px };
+        if !self.opts.quantize {
+            return raw.max(Ticks::ZERO);
+        }
+        let fps = self.project.settings.fps;
+        let cur_f = fps.ticks_to_frame_round(cur);
+        let raw_f = fps.ticks_to_frame_round(raw);
+        let f = if dir < 0 {
+            raw_f.min(cur_f.saturating_sub(1))
+        } else {
+            raw_f.max(cur_f.saturating_add(1))
+        };
+        fps.frame_to_ticks(f.max(0)).max(Ticks::ZERO)
     }
 
     pub fn set_cursor(&mut self, t: Ticks) {
@@ -770,12 +1037,13 @@ impl App {
         apply_pref_defaults(&mut self.session.opts, &self.prefs);
         self.thumbs.clear();
         self.project_media.clear_thumbs();
-        self.set_status("Novo projeto");
+        self.set_status(tr(self.lang(), "Novo projeto"));
     }
 
     pub fn open_project_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Projeto Neoveg", &["neoveg", "nvp"])
+            .add_filter(tr(lang, "Projeto Neoveg"), &["neoveg", "nvp"])
             .pick_file()
         {
             self.open_project_path(p);
@@ -838,6 +1106,7 @@ impl App {
             }
         }
         // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
+        let lang = self.lang();
         let res = Project::load_file(&path);
         match res {
             Ok((p, fixes)) => {
@@ -847,17 +1116,34 @@ impl App {
                 }
                 self.session.reset_project(p, Some(path.clone()));
                 self.reload_all_media();
+                let path_s = path.display().to_string();
                 if fixes.is_empty() {
-                    self.set_status(format!("Projeto aberto: {}", path.display()));
+                    self.set_status(tr_args(
+                        lang,
+                        "Projeto aberto: {path}",
+                        &[("path", &path_s)],
+                    ));
                 } else {
-                    self.set_status(format!("Projeto aberto com {} correção(ões) de dados inválidos (veja logs/neoveg.log)", fixes.len()));
+                    let fixes_s = fixes.len().to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "Projeto aberto com {n} correção(ões) de dados inválidos (veja logs/neoveg.log)",
+                        &[("n", &fixes_s)],
+                    ));
                 }
                 if path != recovery::recovery_path() && path != recovery::legacy_recovery_path() {
                     self.prefs.record_recent_project(&path);
                     let _ = self.prefs.save();
                 }
             }
-            Err(e) => self.set_status(format!("Erro ao abrir projeto: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao abrir projeto: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -867,6 +1153,8 @@ impl App {
         path: &std::path::Path,
         res: Result<(Project, Vec<String>), neoveg_common::error::NeovegError>,
     ) {
+        let lang = self.lang();
+        let path_s = path.display().to_string();
         match res {
             Ok((p, warnings)) => {
                 self.stop(false);
@@ -876,16 +1164,28 @@ impl App {
                 self.session.reset_project(p, None);
                 self.reload_all_media();
                 if warnings.is_empty() {
-                    self.set_status(format!("{label} importado: {}", path.display()));
+                    self.set_status(tr_args(
+                        lang,
+                        "{label} importado: {path}",
+                        &[("label", &label), ("path", &path_s)],
+                    ));
                 } else {
-                    self.set_status(format!(
-                        "{label} importado com {} aviso(s): {}",
-                        warnings.len(),
-                        path.display()
+                    let n_s = warnings.len().to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "{label} importado com {n} aviso(s): {path}",
+                        &[("label", &label), ("n", &n_s), ("path", &path_s)],
                     ));
                 }
             }
-            Err(e) => self.set_status(format!("Erro ao importar {label}: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao importar {label}: {err}",
+                    &[("label", &label), ("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -913,6 +1213,7 @@ impl App {
     }
 
     pub fn export_otio_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("otio");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("OpenTimelineIO", &["otio"])
@@ -923,14 +1224,25 @@ impl App {
         };
         self.session.project.sort_events();
         match otio::export_otio_file(&self.session.project, &p) {
-            Ok(()) => self.set_status(format!("OTIO exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar OTIO: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(lang, "OTIO exportado: {path}", &[("path", &p_s)]));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar OTIO: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn import_subtitles_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Legendas", &["srt", "vtt"])
+            .add_filter(tr(lang, "Legendas"), &["srt", "vtt"])
             .pick_file()
         {
             self.import_subtitles_path(&p);
@@ -938,19 +1250,25 @@ impl App {
     }
 
     pub fn import_subtitles_path(&mut self, path: &std::path::Path) {
+        let lang = self.lang();
+        let path_s = path.display().to_string();
         match neoveg_engine::subtitles::import_subtitles_file(path) {
             Ok((fmt, cues, warnings)) => {
                 for w in &warnings {
                     util::log_warn(&format!("Legendas: {w}"));
                 }
                 if cues.is_empty() {
-                    self.set_status(format!("Nenhuma legenda encontrada em {}", path.display()));
+                    self.set_status(tr_args(
+                        lang,
+                        "Nenhuma legenda encontrada em {path}",
+                        &[("path", &path_s)],
+                    ));
                     return;
                 }
                 self.checkpoint();
                 let label = match fmt {
-                    neoveg_engine::subtitles::SubtitleFormat::Srt => "Legendas (SRT)",
-                    neoveg_engine::subtitles::SubtitleFormat::Vtt => "Legendas (WebVTT)",
+                    neoveg_engine::subtitles::SubtitleFormat::Srt => tr(lang, "Legendas (SRT)"),
+                    neoveg_engine::subtitles::SubtitleFormat::Vtt => tr(lang, "Legendas (WebVTT)"),
                 };
                 let added = neoveg_engine::subtitles::import_subtitles_into_project(
                     &mut self.session.project,
@@ -958,20 +1276,31 @@ impl App {
                     label,
                 );
                 self.changed();
-                self.set_status(format!(
-                    "{added} legenda(s) importada(s) de {}",
-                    path.display()
+                let added_s = added.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "{added} legenda(s) importada(s) de {path}",
+                    &[("added", &added_s), ("path", &path_s)],
                 ));
             }
-            Err(e) => self.set_status(format!("Erro ao importar legendas: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao importar legendas: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn export_subtitles_dialog(&mut self, fmt: neoveg_engine::subtitles::SubtitleFormat) {
-        let (label, ext) = match fmt {
+        let lang = self.lang();
+        let (label_key, ext) = match fmt {
             neoveg_engine::subtitles::SubtitleFormat::Srt => ("Legendas SubRip", "srt"),
             neoveg_engine::subtitles::SubtitleFormat::Vtt => ("Legendas WebVTT", "vtt"),
         };
+        let label = tr(lang, label_key);
         let default_name = self.export_interchange_path(ext);
         let Some(p) = rfd::FileDialog::new()
             .add_filter(label, &[ext])
@@ -990,11 +1319,23 @@ impl App {
             }
         };
         match res {
-            Ok(n) => self.set_status(format!(
-                "{label} exportado ({n} legenda(s)): {}",
-                p.display()
-            )),
-            Err(e) => self.set_status(format!("Erro ao exportar {label}: {e}")),
+            Ok(n) => {
+                let n_s = n.to_string();
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "{label} exportado ({n} legenda(s)): {path}",
+                    &[("label", &label), ("n", &n_s), ("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar {label}: {err}",
+                    &[("label", &label), ("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -1014,6 +1355,7 @@ impl App {
     }
 
     pub fn export_edl_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("edl");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("CMX 3600 EDL", &["edl"])
@@ -1024,8 +1366,22 @@ impl App {
         };
         self.session.project.sort_events();
         match neoveg_engine::edl::export_edl_file(&self.session.project, &p, None) {
-            Ok(()) => self.set_status(format!("EDL CMX 3600 exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar EDL: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "EDL CMX 3600 exportado: {path}",
+                    &[("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar EDL: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -1106,6 +1462,7 @@ impl App {
     }
 
     pub fn export_fcp7_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("xml");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro 7 XML", &["xml"])
@@ -1116,12 +1473,27 @@ impl App {
         };
         self.session.project.sort_events();
         match neoveg_engine::fcp7xml::export_fcp7_file(&self.session.project, &p, None) {
-            Ok(()) => self.set_status(format!("FCP7 XML exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar FCP7 XML: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "FCP7 XML exportado: {path}",
+                    &[("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar FCP7 XML: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn export_fcpxml_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("fcpxml");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro XML", &["fcpxml"])
@@ -1132,16 +1504,27 @@ impl App {
         };
         self.session.project.sort_events();
         match neoveg_engine::fcpxml::export_fcpxml_file(&self.session.project, &p, None) {
-            Ok(()) => self.set_status(format!("FCPXML exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar FCPXML: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(lang, "FCPXML exportado: {path}", &[("path", &p_s)]));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar FCPXML: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn save_project(&mut self, save_as: bool) -> bool {
+        let lang = self.lang();
         let path = if save_as || self.path.is_none() {
             match rfd::FileDialog::new()
-                .add_filter("Projeto Neoveg", &["neoveg"])
-                .add_filter("Projeto legado (NVP)", &["nvp"])
+                .add_filter(tr(lang, "Projeto Neoveg"), &["neoveg"])
+                .add_filter(tr(lang, "Projeto legado (NVP)"), &["nvp"])
                 .set_file_name("projeto.neoveg")
                 .save_file()
             {
@@ -1158,6 +1541,7 @@ impl App {
     }
 
     pub(crate) fn write_project(&mut self, path: &std::path::Path) -> bool {
+        let lang = self.lang();
         self.session.project.sort_events();
         match self.session.project.save_file(path) {
             Ok(()) => {
@@ -1166,11 +1550,13 @@ impl App {
                 recovery::clear_recovery();
                 self.prefs.record_recent_project(path);
                 let _ = self.prefs.save();
-                self.set_status(format!("Projeto salvo: {}", path.display()));
+                let p_s = path.display().to_string();
+                self.set_status(tr_args(lang, "Projeto salvo: {path}", &[("path", &p_s)]));
                 true
             }
             Err(e) => {
-                self.set_status(format!("Erro ao salvar: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(lang, "Erro ao salvar: {err}", &[("err", &err_s)]));
                 false
             }
         }
@@ -1202,16 +1588,17 @@ impl App {
     }
 
     pub fn import_dialog(&mut self) {
+        let lang = self.lang();
         let mut all: Vec<&str> = Vec::new();
         all.extend_from_slice(media::IMAGE_EXTS);
         all.extend_from_slice(media::VIDEO_EXTS);
         all.extend_from_slice(media::AUDIO_EXTS);
         all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter("Mídia suportada", &all)
-            .add_filter("Imagens", media::IMAGE_EXTS)
-            .add_filter("Áudio", media::AUDIO_EXTS)
-            .add_filter("Todos os arquivos", &["*"])
+            .add_filter(tr(lang, "Mídia suportada"), &all)
+            .add_filter(tr(lang, "Imagens"), media::IMAGE_EXTS)
+            .add_filter(tr(lang, "Áudio"), media::AUDIO_EXTS)
+            .add_filter(tr(lang, "Todos os arquivos"), &["*"])
             .pick_files()
         {
             self.import_paths(files, None);
@@ -1219,8 +1606,9 @@ impl App {
     }
 
     pub fn import_sequence_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter("Imagens", media::IMAGE_EXTS)
+            .add_filter(tr(lang, "Imagens"), media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -1245,15 +1633,18 @@ impl App {
 
     /// Importa arquivos em segundo plano. `place_at` = adiciona à timeline.
     pub fn import_paths(&mut self, paths: Vec<PathBuf>, place_at: Option<Ticks>) {
+        let lang = self.lang();
         let mut t = place_at.map(PlaceTarget::At);
         for p in paths {
             if !media::is_supported(&p) {
                 // o formato não é aberto diretamente: oferece converter
-                self.set_status(format!(
-                    "Formato não suportado diretamente: {}",
-                    p.display()
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Formato não suportado diretamente: {name}",
+                    &[("name", &p_s)],
                 ));
-                self.offer_conversion(p, t, "formato não suportado diretamente");
+                self.offer_conversion(p, t, tr(lang, "formato não suportado diretamente"));
                 continue;
             }
             self.spawn_import(p, t);
@@ -1298,11 +1689,16 @@ impl App {
             self.loading = self.loading.saturating_sub(1);
             match msg {
                 LoadMsg::Imported(imp, place) => {
+                    let lang = self.lang();
                     let id = imp.item.id;
                     if let Some(w) = &imp.warning {
                         self.set_status(w.clone());
                     } else {
-                        self.set_status(format!("Importado: {}", imp.item.name));
+                        self.set_status(tr_args(
+                            lang,
+                            "Importado: {name}",
+                            &[("name", &imp.item.name)],
+                        ));
                     }
                     let sr = imp.entry.audio.as_ref().map(|a| a.sample_rate);
                     self.media.insert(id, imp.entry);
@@ -1333,61 +1729,133 @@ impl App {
                         self.project_media.invalidate_media(id);
                         self.generation += 1;
                     }
-                    Err(e) => self.set_status(format!("Mídia offline: {e}")),
+                    Err(e) => {
+                        let lang = self.lang();
+                        self.set_status(tr_args(lang, "Mídia offline: {err}", &[("err", &e)]));
+                    }
                 },
                 LoadMsg::Replaced(id, r) => match r {
                     Ok(imp) => self.replace_media_with_imported(id, imp),
-                    Err(e) => self.set_status(format!("Erro ao substituir mídia: {e}")),
-                },
-                LoadMsg::ProxyBuilt(id, res) => match res {
-                    Ok(p) => {
-                        if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
-                            m.proxy_path = Some(p.to_string_lossy().to_string());
-                        }
-                        self.dirty = true;
-                        self.generation += 1;
-                        self.set_status(format!("Proxy pronto: {}", p.display()));
+                    Err(e) => {
+                        let lang = self.lang();
+                        self.set_status(tr_args(
+                            lang,
+                            "Erro ao substituir mídia: {err}",
+                            &[("err", &e)],
+                        ));
                     }
-                    Err(e) => self.set_status(format!("Erro ao gerar proxy: {e}")),
                 },
+                LoadMsg::ProxyBuilt(id, res) => {
+                    let lang = self.lang();
+                    match res {
+                        Ok(p) => {
+                            if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
+                                m.proxy_path = Some(p.to_string_lossy().to_string());
+                            }
+                            self.dirty = true;
+                            self.generation += 1;
+                            let p_s = p.display().to_string();
+                            self.set_status(tr_args(
+                                lang,
+                                "Proxy pronto: {path}",
+                                &[("path", &p_s)],
+                            ));
+                        }
+                        Err(e) => self.set_status(tr_args(
+                            lang,
+                            "Erro ao gerar proxy: {err}",
+                            &[("err", &e)],
+                        )),
+                    }
+                }
+                LoadMsg::RamPreviewFrame {
+                    gen,
+                    frame_idx,
+                    image,
+                } => {
+                    if gen == self.generation {
+                        let _ = self.ram_preview.insert_frame(frame_idx, image);
+                    }
+                }
+                LoadMsg::RamPreviewDone { gen } => {
+                    if self.ram_preview_job.as_ref().is_some_and(|j| j.gen == gen) {
+                        self.ram_preview_job = None;
+                        if gen == self.generation {
+                            let n = self.ram_preview.frames.len();
+                            let mb = format!("{:.1}", self.ram_preview.mb_used());
+                            self.set_status(tr_args(
+                                self.lang(),
+                                "Prévia em RAM pronta: {n} quadros ({mb} MB).",
+                                &[("n", &n), ("mb", &mb)],
+                            ));
+                        }
+                    }
+                }
                 LoadMsg::PrerenderDone { start, end, result } => {
+                    let lang = self.lang();
                     self.prerender_job = None;
                     match result {
                         Ok(p) => {
                             self.session.record_prerendered_range(start, end);
-                            self.set_status(format!("Pré-renderização concluída: {}", p.display()));
+                            let p_s = p.display().to_string();
+                            self.set_status(tr_args(
+                                lang,
+                                "Pré-renderização concluída: {path}",
+                                &[("path", &p_s)],
+                            ));
                         }
-                        Err(e) => self.set_status(format!("Erro na pré-renderização: {e}")),
+                        Err(e) => self.set_status(tr_args(
+                            lang,
+                            "Erro na pré-renderização: {err}",
+                            &[("err", &e)],
+                        )),
                     }
                 }
                 LoadMsg::LoudnessAnalyzed(result) => {
+                    let lang = self.lang();
                     self.loudness_job = None;
                     match result {
                         Ok(rep) => {
-                            let summary = format!(
-                                "Loudness analisado: {} (LRA {:.1} LU)",
-                                neoveg_engine::engine::loudness::format_lufs(
-                                    rep.snapshot.integrated_lufs
-                                ),
-                                rep.snapshot.loudness_range_lu
+                            let lufs_s = neoveg_engine::engine::loudness::format_lufs(
+                                rep.snapshot.integrated_lufs,
+                            );
+                            let lra_s = format!("{:.1}", rep.snapshot.loudness_range_lu);
+                            let summary = tr_args(
+                                lang,
+                                "Loudness analisado: {lufs} (LRA {lra} LU)",
+                                &[("lufs", &lufs_s), ("lra", &lra_s)],
                             );
                             self.loudness_report = Some(rep);
                             self.set_status(summary);
                         }
-                        Err(e) => self.set_status(format!("Análise de loudness: {e}")),
+                        Err(e) => self.set_status(tr_args(
+                            lang,
+                            "Análise de loudness: {err}",
+                            &[("err", &e)],
+                        )),
                     }
                 }
                 LoadMsg::ImportFailed { path, error, place } => {
-                    self.set_status(format!("Erro de importação: {}: {error}", path.display()));
+                    let lang = self.lang();
+                    let p_s = path.display().to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "Erro de importação: {name}: {err}",
+                        &[("name", &p_s), ("err", &error)],
+                    ));
                     // um arquivo que existe mas não abriu pode ter um decodificador no sistema
                     if path.is_file() {
-                        self.offer_conversion(path, place, format!("não abriu: {error}"));
+                        let reason = tr_args(lang, "não abriu: {err}", &[("err", &error)]);
+                        self.offer_conversion(path, place, reason);
                     }
                 }
                 LoadMsg::Converted { src, result, place } => {
                     self.on_converted(&src, result, place);
                 }
-                LoadMsg::Error(e) => self.set_status(format!("Erro de importação: {e}")),
+                LoadMsg::Error(e) => {
+                    let lang = self.lang();
+                    self.set_status(tr_args(lang, "Erro de importação: {err}", &[("err", &e)]));
+                }
             }
         }
     }
@@ -1474,13 +1942,35 @@ impl App {
             if let Some(e) = res.error {
                 self.set_status(format!("Prévia: {e}"));
             }
-            let image = rgba_to_color_image(&res.image);
+            let image = self.preview_color_image(&res.image);
+            if self.is_playing() {
+                self.display_fps.push(Instant::now());
+            } else {
+                self.display_fps.clear();
+            }
             match &mut self.preview_tex {
                 Some(t) => t.set(image, egui::TextureOptions::LINEAR),
                 None => {
                     self.preview_tex =
                         Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR))
                 }
+            }
+            if let Some(alt_img) = res.split_alt {
+                let alt_ci = rgba_to_color_image(&alt_img);
+                match &mut self.preview_split_tex {
+                    Some(t) => t.set(alt_ci, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.preview_split_tex = Some(ctx.load_texture(
+                            "preview_split_alt",
+                            alt_ci,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            } else if self.opts.preview_split_mode
+                != neoveg_engine::playback::PreviewSplitMode::FxBypass
+            {
+                self.preview_split_tex = None;
             }
             if let Some((la, rb)) = res.expanded_ab {
                 let ia = rgba_to_color_image(&la);
@@ -1537,6 +2027,17 @@ impl App {
         let scopes =
             self.is_panel_open(DockTab::Scopes) || self.is_panel_open(DockTab::ColorGrading);
         let prefer_proxy = self.opts.preview_quality.prefer_proxy();
+        let split_mode = self.opts.preview_split_mode;
+        let mute_video = self.opts.preview_mute_video;
+        if let Some(job) = &self.ram_preview_job {
+            if job.gen != self.generation {
+                job.cancel.store(true, Ordering::Relaxed);
+                self.ram_preview_job = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        self.sync_master_monitor_audio();
         let expanded_ab = self.session.expanded_edit.as_ref().map(|exp| {
             let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
             let (lid, lt) = match exp.left_event_id.and_then(|id| {
@@ -1556,6 +2057,7 @@ impl App {
             };
             (lid, lt, rid, rt)
         });
+        let channel = self.effective_preview_channel();
         let key = PreviewReqKey {
             t,
             gen: self.generation,
@@ -1563,9 +2065,35 @@ impl App {
             h,
             scopes,
             prefer_proxy,
+            split_mode,
+            mute_video,
             expanded_ab,
+            channel,
         };
         if key != self.last_req {
+            if !scopes
+                && !mute_video
+                && split_mode == neoveg_engine::playback::PreviewSplitMode::Off
+                && expanded_ab.is_none()
+            {
+                let frame_idx = self.project.settings.fps.ticks_to_frame_round(t);
+                if let Some(cached) = self.ram_preview.get(self.generation, frame_idx, w, h) {
+                    let ci = isolated_color_image(cached, channel);
+                    if self.is_playing() {
+                        self.display_fps.push(Instant::now());
+                    }
+                    match &mut self.preview_tex {
+                        Some(tex) => tex.set(ci, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.preview_tex =
+                                Some(ctx.load_texture("preview", ci, egui::TextureOptions::LINEAR));
+                        }
+                    }
+                    self.last_req = key;
+                    self.preview_inflight = false;
+                    return;
+                }
+            }
             self.sync_snapshot();
             self.preview.request(PreviewRequest {
                 project: self.snapshot.clone(),
@@ -1574,11 +2102,186 @@ impl App {
                 h,
                 scopes,
                 prefer_proxy,
+                split_mode,
+                mute_video,
                 expanded_ab,
             });
             self.last_req = key;
             self.preview_inflight = true;
             self.preview_inflight_since = Instant::now();
+        }
+    }
+
+    pub fn copy_preview_frame_to_clipboard(&mut self, ctx: Option<&egui::Context>) {
+        let t = self.project.settings.quantize(self.view_time());
+        let w = (self.project.settings.width as usize).clamp(16, 4096);
+        let h = (self.project.settings.height as usize).clamp(16, 4096);
+        let frame = neoveg_engine::engine::video::render_frame_preview(
+            &self.project,
+            &self.media,
+            t,
+            w,
+            h,
+            self.opts.preview_quality.prefer_proxy(),
+        );
+        let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, frame.to_rgba8()) else {
+            return;
+        };
+        let ci = rgba_to_color_image(&rgba);
+        if let Some(c) = ctx {
+            c.copy_image(ci.clone());
+            let tex = c.load_texture("preview_clipboard", ci, egui::TextureOptions::LINEAR);
+            self.preview_clipboard = Some((tex, rgba));
+        } else if let Some((tex, buf)) = &mut self.preview_clipboard {
+            tex.set(ci, egui::TextureOptions::LINEAR);
+            *buf = rgba;
+        }
+        self.set_status(format!(
+            "Quadro ({w}x{h}) copiado para a área de transferência."
+        ));
+    }
+
+    pub fn start_ram_preview(&mut self) {
+        if let Some(prev) = self.ram_preview_job.take() {
+            prev.cancel.store(true, Ordering::Relaxed);
+        }
+        let fps = self.project.settings.fps;
+        let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+        let (start, end) = match self.time_sel.filter(|(a, b)| b > a) {
+            Some((a, b)) => (a, b),
+            None => {
+                let a = self.cursor.max(Ticks::ZERO);
+                let proj_end = self.project.duration().max(a + Ticks::from_secs_i64(3));
+                let b = (a + Ticks::from_secs_i64(4)).min(proj_end);
+                (a, b)
+            }
+        };
+        let s = self.opts.preview_quality.scale();
+        let w = ((self.project.settings.width as f32 * s) as usize).max(16);
+        let h = ((self.project.settings.height as f32 * s) as usize).max(16);
+        let max_mb = self.prefs.ram_preview_mb as usize;
+        let gen = self.generation;
+        self.ram_preview
+            .reset(gen, (w, h), (start, end), fps, max_mb);
+
+        let bytes_per_frame = w.saturating_mul(h).saturating_mul(4).max(1);
+        let budget_frames = (self.ram_preview.max_bytes / bytes_per_frame).max(1) as i64;
+        let start_idx = fps.ticks_to_frame_round(start);
+        let raw_end_idx = fps.ticks_to_frame_round(end).max(start_idx);
+        let end_idx = raw_end_idx.min(start_idx.saturating_add(budget_frames - 1));
+        let total = (end_idx - start_idx + 1).max(1) as u64;
+
+        self.sync_snapshot();
+        let project = self.snapshot.clone();
+        let media = self.media.clone();
+        let prefer_proxy = self.opts.preview_quality.prefer_proxy();
+        let tx = self.loader_tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicU64::new(0));
+        let job = RamPreviewJob {
+            cancel: cancel.clone(),
+            done: done.clone(),
+            total: Arc::new(AtomicU64::new(total)),
+            gen,
+        };
+        self.ram_preview_job = Some(job);
+        let spawned = util::spawn("ram-preview", move || {
+            for idx in start_idx..=end_idx {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let ft = Ticks::from_raw(fd.0.saturating_mul(idx));
+                let fr = neoveg_engine::engine::video::render_frame_preview(
+                    &project,
+                    &media,
+                    ft,
+                    w,
+                    h,
+                    prefer_proxy,
+                );
+                if let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, fr.to_rgba8()) {
+                    if tx
+                        .send(LoadMsg::RamPreviewFrame {
+                            gen,
+                            frame_idx: idx,
+                            image: rgba,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                done.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = tx.send(LoadMsg::RamPreviewDone { gen });
+        });
+        if let Err(e) = spawned {
+            self.ram_preview_job = None;
+            self.set_status(e);
+        } else {
+            self.set_status(format!(
+                "Gerando prévia dinâmica em RAM ({total} quadros)..."
+            ));
+        }
+    }
+
+    pub fn clear_ram_preview(&mut self) {
+        if let Some(job) = self.ram_preview_job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.ram_preview.clear();
+        self.set_status("Cache da prévia dinâmica em RAM limpo.");
+    }
+
+    /// Isolamento de canal em vigor: só com as Sobreposições ligadas, como o
+    /// botão Overlays do VEGAS Pro.
+    pub(crate) fn effective_preview_channel(
+        &self,
+    ) -> (crate::preview_overlays::ChannelIsolation, bool) {
+        if self.opts.safe_areas {
+            (self.preview_channel, self.preview_channel_gray)
+        } else {
+            (crate::preview_overlays::ChannelIsolation::Off, false)
+        }
+    }
+
+    fn preview_color_image(&self, img: &image::RgbaImage) -> egui::ColorImage {
+        isolated_color_image(img, self.effective_preview_channel())
+    }
+
+    /// Zoom da prévia em passos de 5% (*+* / *-* do botão Zoom).
+    pub fn step_preview_zoom(&mut self, steps: i32) {
+        let z = self.preview_zoom + 0.05 * steps.clamp(-200, 200) as f32;
+        self.preview_zoom_bypass = None;
+        self.apply_preview_zoom(z.clamp(0.25, 8.0));
+    }
+
+    /// *Ignorar zoom*: alterna entre o zoom atual e o de ajuste à janela.
+    pub fn toggle_preview_zoom_bypass(&mut self) {
+        match self.preview_zoom_bypass.take() {
+            Some((z, pan)) => {
+                self.apply_preview_zoom(z);
+                self.preview_pan = pan;
+            }
+            None if (self.preview_zoom - 1.0).abs() > 0.01 => {
+                self.preview_zoom_bypass = Some((self.preview_zoom, self.preview_pan));
+                self.apply_preview_zoom(0.0);
+            }
+            None => {}
+        }
+    }
+
+    pub fn apply_preview_zoom(&mut self, val: f32) {
+        if val == 0.0 {
+            self.preview_zoom = 1.0;
+            self.preview_pan = egui::Vec2::ZERO;
+        } else if val < 0.0 {
+            self.preview_zoom = (self.preview_zoom * (-val)).clamp(0.25, 8.0);
+        } else {
+            self.preview_zoom = val.clamp(0.25, 8.0);
+        }
+        if (self.preview_zoom - 1.0).abs() < 0.01 {
+            self.preview_pan = egui::Vec2::ZERO;
         }
     }
 
@@ -1632,12 +2335,15 @@ impl App {
             return;
         }
         let target_ids: Vec<Id> = armed.iter().map(|(_, id)| *id).collect();
-        let dir = self
-            .path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("Neoveg Recordings"))
-            .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"));
+        let dir = if !self.prefs.audio_device.default_record_dir.trim().is_empty() {
+            PathBuf::from(self.prefs.audio_device.default_record_dir.trim())
+        } else {
+            self.path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("Neoveg Recordings"))
+                .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"))
+        };
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -1697,6 +2403,12 @@ impl App {
         for spec in pending_generated {
             self.insert_generated(spec);
         }
+        if res.is_ok() && matches!(id, "insert.track_video" | "insert.track_audio") {
+            if let Some(ti) = self.session.sel_track {
+                self.session
+                    .apply_default_track_props(ti, &self.prefs.default_track);
+            }
+        }
         self.sync_after_session();
         match res {
             Ok(_) => {
@@ -1741,8 +2453,9 @@ impl App {
                 .open_render(&self.session.project, self.session.path.as_deref()),
             UiAction::SendToEncoder => self.send_timeline_to_encoder(),
             UiAction::EncoderStartQueue => {
+                let lang = self.lang();
                 self.encoder.start_queue(&self.media);
-                self.set_status("Fila do Neoveg Encoder iniciada");
+                self.set_status(tr(lang, "Fila do Neoveg Encoder iniciada"));
             }
             UiAction::EncoderPauseQueue => {
                 self.encoder.runtime.toggle_pause();
@@ -1785,6 +2498,19 @@ impl App {
             }
             UiAction::OpenFxMasterAudio => self.dlg.fx_target = Some(FxTarget::MasterAudio),
             UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
+            UiAction::OpenMotionTrackDialog => self.open_motion_track_dialog(),
+            UiAction::ApplyAudioFxNonRealtime => self.apply_audio_fx_non_realtime(),
+            UiAction::OpenCustomizeToolbar => self.open_customize_toolbar(),
+            UiAction::OpenCommandMarkerDialog => {
+                self.dlg.cmd_marker_open = true;
+                if self.dlg.cmd_marker_type.trim().is_empty() {
+                    self.dlg.cmd_marker_type = "TEXT".into();
+                }
+            }
+            UiAction::SetRulerGrid(g) => {
+                self.opts.ruler_grid = g;
+                self.set_status(format!("Grade da régua: {}", g.label()));
+            }
             UiAction::OpenGoto => self.dlg.goto_open = true,
             UiAction::OpenEditLayoutProps => {
                 self.dlg
@@ -1809,8 +2535,12 @@ impl App {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+            UiAction::SelectDock(panel) if crate::layout::window_only(panel) => {
+                self.open_window_panel(ctx, panel);
+            }
             UiAction::SelectDock(panel) => {
                 self.dock_visible = true;
+                self.closed_tabs.remove(&panel);
                 self.detached_tabs.remove(&panel);
                 self.dock_tab = panel;
                 self.pending_dock_focus = Some(panel);
@@ -1837,6 +2567,15 @@ impl App {
                     self.dock_visible = true;
                 }
             }
+            UiAction::ToggleDockArea => {
+                if self.timeline_restore.is_some() {
+                    self.toggle_maximize_timeline();
+                } else {
+                    self.dock_visible = !self.dock_visible;
+                }
+            }
+            UiAction::ToggleTrackList => self.tl.toggle_header_collapse(),
+            UiAction::ToggleMaximizeTimeline => self.toggle_maximize_timeline(),
             UiAction::TogglePlay => self.toggle_play(),
             UiAction::ToggleRecord => self.toggle_record(),
             UiAction::PlayFromStart => {
@@ -1921,6 +2660,104 @@ impl App {
                     self.sync_after_session();
                 }
             }
+            UiAction::PreviewToggleSplit => {
+                self.opts.preview_split_mode = match self.opts.preview_split_mode {
+                    neoveg_engine::playback::PreviewSplitMode::Off => {
+                        neoveg_engine::playback::PreviewSplitMode::FxBypass
+                    }
+                    _ => neoveg_engine::playback::PreviewSplitMode::Off,
+                };
+            }
+            UiAction::PreviewSplitMode(mode) => {
+                self.opts.preview_split_mode = mode;
+            }
+            UiAction::PreviewCopyFrame => {
+                self.copy_preview_frame_to_clipboard(ctx);
+            }
+            UiAction::PreviewRamBuild => {
+                self.start_ram_preview();
+            }
+            UiAction::PreviewRamClear => {
+                self.clear_ram_preview();
+            }
+            UiAction::PreviewZoom(z) => {
+                self.preview_zoom_bypass = None;
+                self.apply_preview_zoom(z);
+            }
+            UiAction::PreviewZoomStep(n) => self.step_preview_zoom(n),
+            UiAction::PreviewZoomBypass => self.toggle_preview_zoom_bypass(),
+            UiAction::UiScale(steps) => {
+                let pct = self.prefs.step_ui_scale(steps).to_string();
+                // aplicada no próximo quadro (`frame_ui`)
+                if let Err(e) = self.prefs.save() {
+                    self.set_status(e);
+                } else {
+                    let lang = self.lang();
+                    self.set_status(tr_args(
+                        lang,
+                        "Escala da interface: {pct}%",
+                        &[("pct", &pct)],
+                    ));
+                }
+            }
+            UiAction::PreviewToggleExternalMonitor => {
+                self.external_monitor = !self.external_monitor;
+                self.set_status(if self.external_monitor {
+                    "Monitor externo ativado."
+                } else {
+                    "Monitor externo fechado."
+                });
+            }
+            UiAction::InsertNestedTimelineDialog => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Projetos Neoveg", &["neoveg", "nvp"])
+                    .pick_file()
+                {
+                    match media::import_nested_project(&p) {
+                        Ok(imp) => {
+                            if let Some(w) = &imp.warning {
+                                self.set_status(w.clone());
+                            }
+                            self.session
+                                .insert_nested_project_event(imp, &self.media, self.cursor);
+                            self.sync_after_session();
+                        }
+                        Err(e) => self.set_status(format!("Projeto aninhado: {e:#}")),
+                    }
+                }
+            }
+            UiAction::RenderToNewTrack => {
+                let dir = std::env::temp_dir().join("neoveg_track_renders");
+                match self.session.render_to_new_track(&self.media, None, &dir) {
+                    Ok(_) => self.sync_after_session(),
+                    Err(e) => self.set_status(format!("Renderizar para nova trilha: {e}")),
+                }
+            }
+            UiAction::SetTrackDefaultProps => {
+                if let Some(ti) = self.session.sel_track {
+                    if let Some(defs) = self
+                        .session
+                        .capture_default_track_props(ti, &self.prefs.default_track)
+                    {
+                        self.prefs.default_track = defs;
+                        let _ = self.prefs.save();
+                        self.set_status("Propriedades padrão da trilha salvas nas Preferências.");
+                    }
+                }
+            }
+            UiAction::CycleStereo3dMode => {
+                let modes = Stereo3dMode::ALL;
+                let cur = self.project.settings.stereo_3d;
+                let next_i = modes
+                    .iter()
+                    .position(|m| *m == cur)
+                    .map(|p| (p + 1) % modes.len())
+                    .unwrap_or(0);
+                self.checkpoint();
+                self.project.settings.stereo_3d = modes[next_i];
+                self.changed();
+                self.set_status(format!("Modo 3D: {}", modes[next_i].label()));
+            }
         }
     }
 
@@ -1928,7 +2765,7 @@ impl App {
     // Atalhos de teclado (despachados via Tabela Única de Comandos)
     // -----------------------------------------------------------------
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // com um script rodando, a sessão é dele até o fim
         if self.splash.active
             || self.welcome_open
@@ -1967,32 +2804,17 @@ impl App {
             return;
         }
 
-        // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
+        // Esquerda/Direita sem modificadores (lista de atalhos do VEGAS Pro):
+        // um pixel da régua; com Quantizar para quadros, no mínimo um quadro
         if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                let dt = Ticks::from_secs_f64_clamped(
-                    1.0 / self
-                        .tl
-                        .px_per_sec
-                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
-                        as f64,
-                )
-                .max(Ticks::from_raw(1));
-                let c = self.cursor;
-                self.set_cursor(c - dt);
+                let t = self.arrow_step_target(-1);
+                self.set_cursor(t);
                 return;
             }
             if pressed(Key::ArrowRight) {
-                let dt = Ticks::from_secs_f64_clamped(
-                    1.0 / self
-                        .tl
-                        .px_per_sec
-                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
-                        as f64,
-                )
-                .max(Ticks::from_raw(1));
-                let c = self.cursor;
-                self.set_cursor(c + dt);
+                let t = self.arrow_step_target(1);
+                self.set_cursor(t);
                 return;
             }
         }
@@ -2016,8 +2838,30 @@ impl App {
             return;
         }
 
-        // Teclas numéricas 0-9: ir para o marcador correspondente
-        if !ctrl && !alt {
+        // Atalhos alternativos da lista do VEGAS Pro: Alt+` (= F11), Ctrl+Alt+`
+        // (= Ctrl+F11) e Shift+Alt+` (= Shift+F11). Atalhos gravados pelo
+        // usuário vêm antes (acima). A crase é tecla morta no ABNT2: vale
+        // também a tecla física à esquerda do 1.
+        if let Some(id) = backtick_window_alias(ctrl, shift, alt) {
+            let hit = ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { key, physical_key, pressed: true, .. }
+                            if *key == Key::Backtick || *physical_key == Some(Key::Backtick)
+                    )
+                })
+            });
+            if hit {
+                if self.cmd_enabled(id) {
+                    self.exec_cmd(Some(ctx), id);
+                }
+                return;
+            }
+        }
+
+        // Teclas numéricas 0-9: ângulo multicâmera (1..9 quando ativo) ou marcador
+        if !ctrl && !alt && !shift {
             let nums = [
                 Key::Num0,
                 Key::Num1,
@@ -2032,6 +2876,13 @@ impl App {
             ];
             for (i, k) in nums.iter().enumerate() {
                 if pressed(*k) {
+                    if self.opts.multicam_mode
+                        && i > 0
+                        && self.session.switch_multicam_angle(self.cursor, i - 1)
+                    {
+                        self.sync_after_session();
+                        return;
+                    }
                     let idx = if i == 0 { 9 } else { i - 1 };
                     if let Some(t) = self.session.jump_to_marker_index(idx) {
                         self.set_cursor(t);
@@ -2052,7 +2903,7 @@ impl App {
     // -----------------------------------------------------------------
 
     pub(crate) fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
-        let label = menu_label(id, &self.prefs.shortcuts);
+        let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
         if ui
             .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
             .clicked()
@@ -2070,11 +2921,16 @@ impl App {
         (sel_start, sel_end, sel_len): (Ticks, Ticks, Ticks),
         avail_w: f32,
     ) {
+        let lang = self.lang();
         if avail_w < 430.0 {
-            let label = if self.time_sel.is_some() { "In" } else { "Pos" };
-            ui.label(format!("{label}: {}", self.fmt_time(sel_start)));
-            ui.label(format!("Fim: {}", self.fmt_time(sel_end)));
-            ui.label(format!("Tam: {}", self.fmt_time(sel_len)));
+            let label = if self.time_sel.is_some() {
+                tr(lang, "In:")
+            } else {
+                tr(lang, "Pos:")
+            };
+            ui.label(format!("{label} {}", self.fmt_time(sel_start)));
+            ui.label(format!("{} {}", tr(lang, "Fim:"), self.fmt_time(sel_end)));
+            ui.label(format!("{} {}", tr(lang, "Tam:"), self.fmt_time(sel_len)));
             ui.separator();
         }
         for group in MORE_TOOLS_COMMANDS {
@@ -2086,15 +2942,17 @@ impl App {
     }
 
     pub(crate) fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
-        let label = menu_label(id, &self.prefs.shortcuts);
+        let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
         if ui.checkbox(&mut value, label).changed() {
             self.exec_cmd(Some(ui.ctx()), id);
         }
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
+        let mut pick_lang: Option<Language> = None;
         egui::menu::bar(ui, |ui| {
-            ui.menu_button("Arquivo", |ui| {
+            ui.menu_button(tr(lang, "Arquivo"), |ui| {
                 self.cmd_menu_btn(ui, "file.new");
                 self.cmd_menu_btn(ui, "file.open");
                 self.cmd_menu_btn(ui, "file.save");
@@ -2106,7 +2964,7 @@ impl App {
                 self.cmd_menu_btn(ui, "file.convert_media");
                 self.cmd_menu_btn(ui, "file.import_otio");
                 self.cmd_menu_btn(ui, "file.export_otio");
-                ui.menu_button("Intercâmbio & Legendas", |ui| {
+                ui.menu_button(tr(lang, "Intercâmbio & Legendas"), |ui| {
                     self.cmd_menu_btn(ui, "file.import_fcpxml");
                     self.cmd_menu_btn(ui, "file.export_fcpxml");
                     self.cmd_menu_btn(ui, "file.import_fcp7");
@@ -2130,12 +2988,13 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.exit");
             });
-            ui.menu_button("Editar", |ui| {
+            ui.menu_button(tr(lang, "Editar"), |ui| {
                 self.cmd_menu_btn(ui, "edit.undo");
                 self.cmd_menu_btn(ui, "edit.redo");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.cut");
                 self.cmd_menu_btn(ui, "edit.copy");
+                self.cmd_menu_btn(ui, "preview.copy_frame");
                 self.cmd_menu_btn(ui, "edit.paste");
                 self.cmd_menu_btn(ui, "edit.paste_insert");
                 self.cmd_menu_btn(ui, "edit.paste_attributes");
@@ -2151,7 +3010,7 @@ impl App {
                     self.cmd_menu_btn(ui, "edit.expanded_nudge_left");
                     self.cmd_menu_btn(ui, "edit.expanded_nudge_right");
                 }
-                ui.menu_button("Take", |ui| {
+                ui.menu_button(tr(lang, "Take"), |ui| {
                     self.cmd_menu_btn(ui, "event.take_chooser");
                     ui.separator();
                     self.cmd_menu_btn(ui, "event.next_take");
@@ -2209,11 +3068,15 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.goto");
                 ui.separator();
-                ui.menu_button("Propriedades", |ui| {
-                    ui.menu_button("Layout", |ui| {
+                ui.menu_button(tr(lang, "Propriedades"), |ui| {
+                    ui.menu_button(tr(lang, "Layout"), |ui| {
                         self.cmd_menu_btn(ui, "edit.properties.layout");
                         ui.separator();
-                        ui.label(egui::RichText::new("Tipos de layout").small().weak());
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Tipos de layout"))
+                                .small()
+                                .weak(),
+                        );
                         for (cmd_id, lt) in [
                             (
                                 "edit.properties.layout.sonic_foundry",
@@ -2223,7 +3086,7 @@ impl App {
                             ("edit.properties.layout.magix", LayoutType::Magix),
                         ] {
                             let selected = self.prefs.edit_layout.layout_type == lt;
-                            let label = menu_label(cmd_id, &self.prefs.shortcuts);
+                            let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
                             if ui.selectable_label(selected, label).clicked() {
                                 self.exec_cmd(Some(ui.ctx()), cmd_id);
                                 ui.close_menu();
@@ -2232,13 +3095,17 @@ impl App {
                     });
                 });
             });
-            ui.menu_button("Exibir", |ui| {
+            ui.menu_button(tr(lang, "Exibir"), |ui| {
                 for tab in DockPanel::ALL {
                     let open = self.is_panel_open(tab);
                     let suffix = if self.detached_tabs.contains(&tab) {
-                        format!("{} (flutuante)", tab.name())
+                        tr_args(
+                            lang,
+                            "{panel} (flutuante)",
+                            &[("panel", &tab.name_in(lang))],
+                        )
                     } else {
-                        tab.name().to_string()
+                        tab.name_in(lang).to_string()
                     };
                     if ui.selectable_label(open, suffix).clicked() {
                         self.exec_cmd(Some(ui.ctx()), tab.command_id());
@@ -2249,9 +3116,9 @@ impl App {
                 let pv_open = (self.dock_visible && self.preview_visible && !self.preview_detached)
                     || self.preview_detached;
                 let pv_label = if self.preview_detached {
-                    "Prévia de Vídeo (flutuante)"
+                    tr(lang, "Prévia de Vídeo (flutuante)")
                 } else {
-                    "Prévia de Vídeo"
+                    tr(lang, "Prévia de Vídeo")
                 };
                 if ui.selectable_label(pv_open, pv_label).clicked() {
                     self.exec_cmd(Some(ui.ctx()), "view.preview");
@@ -2261,16 +3128,19 @@ impl App {
                     (self.dock_visible && self.master_bus_visible && !self.master_bus_detached)
                         || self.master_bus_detached;
                 let mb_label = if self.master_bus_detached {
-                    "Master Bus (flutuante)"
+                    tr(lang, "Master Bus (flutuante)")
                 } else {
-                    "Master Bus"
+                    tr(lang, "Master Bus")
                 };
                 if ui.selectable_label(mb_open, mb_label).clicked() {
                     self.exec_cmd(Some(ui.ctx()), "view.master_bus");
                     ui.close_menu();
                 }
                 if ui
-                    .selectable_label(self.preview_detached, "Prévia de Vídeo em janela separada")
+                    .selectable_label(
+                        self.preview_detached,
+                        tr(lang, "Prévia de Vídeo em janela separada"),
+                    )
                     .clicked()
                 {
                     self.preview_detached = !self.preview_detached;
@@ -2280,7 +3150,10 @@ impl App {
                     ui.close_menu();
                 }
                 if ui
-                    .selectable_label(self.master_bus_detached, "Master Bus em janela separada")
+                    .selectable_label(
+                        self.master_bus_detached,
+                        tr(lang, "Master Bus em janela separada"),
+                    )
                     .clicked()
                 {
                     self.master_bus_detached = !self.master_bus_detached;
@@ -2289,16 +3162,23 @@ impl App {
                     }
                     ui.close_menu();
                 }
-                if ui
-                    .selectable_label(self.dock_visible, "Área de janelas acopláveis")
-                    .clicked()
-                {
-                    self.dock_visible = !self.dock_visible;
-                    ui.close_menu();
+                // F11, Shift+F11 e Ctrl+F11 do VEGAS Pro, pela Tabela de Comandos.
+                for (cmd_id, on) in [
+                    ("view.toggle_dock_area", self.dock_visible),
+                    ("view.toggle_track_list", !self.tl.header_collapsed()),
+                    ("view.maximize_timeline", self.timeline_restore.is_some()),
+                ] {
+                    let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), cmd_id);
+                        ui.close_menu();
+                    }
                 }
                 if self.dock_visible
                     && !self.detached_tabs.contains(&self.dock_tab)
-                    && ui.button("Destacar janela da aba atual").clicked()
+                    && ui
+                        .button(tr(lang, "Destacar janela da aba atual"))
+                        .clicked()
                 {
                     self.detach_dock_tab(self.dock_tab);
                     ui.close_menu();
@@ -2306,7 +3186,9 @@ impl App {
                 if (!self.detached_tabs.is_empty()
                     || self.preview_detached
                     || self.master_bus_detached)
-                    && ui.button("Acoplar todas as janelas flutuantes").clicked()
+                    && ui
+                        .button(tr(lang, "Acoplar todas as janelas flutuantes"))
+                        .clicked()
                 {
                     if self.preview_detached {
                         self.preview_visible = true;
@@ -2320,9 +3202,9 @@ impl App {
                     self.dock_visible = true;
                     ui.close_menu();
                 }
-                ui.menu_button("Layouts de janela", |ui| {
+                ui.menu_button(tr(lang, "Layouts de janela"), |ui| {
                     for preset in layout::builtin_presets() {
-                        let label = preset.name.clone();
+                        let label = layout::localized_preset_name(&preset.name, lang);
                         if ui.button(label).clicked() {
                             self.apply_window_layout(preset);
                             ui.close_menu();
@@ -2340,7 +3222,14 @@ impl App {
                                             Some(path.to_string_lossy().to_string());
                                         let _ = self.prefs.save();
                                     }
-                                    Err(e) => self.set_status(format!("Erro no layout: {e}")),
+                                    Err(e) => {
+                                        let err_s = e.to_string();
+                                        self.set_status(tr_args(
+                                            lang,
+                                            "Erro no layout: {err}",
+                                            &[("err", &err_s)],
+                                        ));
+                                    }
                                 }
                                 ui.close_menu();
                             }
@@ -2348,16 +3237,19 @@ impl App {
                     }
                     ui.separator();
                     if ui
-                        .button("Salvar layout atual (.neoveglayout)...")
+                        .button(tr(lang, "Salvar layout atual (.neoveglayout)..."))
                         .clicked()
                     {
-                        self.dlg.save_layout_name = "Meu Layout".into();
+                        self.dlg.save_layout_name = tr(lang, "Meu Layout").into();
                         self.dlg.save_layout_open = true;
                         ui.close_menu();
                     }
-                    if ui.button("Carregar arquivo .neoveglayout...").clicked() {
+                    if ui
+                        .button(tr(lang, "Carregar arquivo .neoveglayout..."))
+                        .clicked()
+                    {
                         if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("Layout Neoveg", &["neoveglayout", "json"])
+                            .add_filter(tr(lang, "Layout Neoveg"), &["neoveglayout", "json"])
                             .pick_file()
                         {
                             match layout::load_layout_file(&p) {
@@ -2367,15 +3259,25 @@ impl App {
                                         Some(p.to_string_lossy().to_string());
                                     let _ = self.prefs.save();
                                 }
-                                Err(e) => self.set_status(format!("Erro no layout: {e}")),
+                                Err(e) => {
+                                    let err_s = e.to_string();
+                                    self.set_status(tr_args(
+                                        lang,
+                                        "Erro no layout: {err}",
+                                        &[("err", &err_s)],
+                                    ));
+                                }
                             }
                         }
                         ui.close_menu();
                     }
                 });
-                ui.menu_button("Tema", |ui| {
+                ui.menu_button(tr(lang, "Tema"), |ui| {
                     for t in ThemeId::ALL {
-                        if ui.selectable_label(self.theme_id == t, t.label()).clicked() {
+                        if ui
+                            .selectable_label(self.theme_id == t, t.label_in(lang))
+                            .clicked()
+                        {
                             self.set_theme(ui.ctx(), t, true);
                             ui.close_menu();
                         }
@@ -2395,31 +3297,50 @@ impl App {
                     self.cmd_menu_btn(ui, "media.view.details");
                     self.cmd_menu_btn(ui, "media.view.storyboard");
                 });
+                ui.menu_button("Prévia de Vídeo", |ui| {
+                    self.cmd_menu_btn(ui, "preview.split_toggle");
+                    self.cmd_menu_btn(ui, "preview.split_bypass");
+                    self.cmd_menu_btn(ui, "preview.split_clipboard");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "preview.zoom_fit");
+                    self.cmd_menu_btn(ui, "preview.zoom_100");
+                    self.cmd_menu_btn(ui, "preview.zoom_in");
+                    self.cmd_menu_btn(ui, "preview.zoom_out");
+                    ui.separator();
+                    self.cmd_menu_chk(ui, self.external_monitor, "preview.external_monitor");
+                });
                 ui.separator();
-                ui.label("Formato de tempo:");
+                ui.label(tr(lang, "Formato de tempo:"));
                 for fmt in TimeFormat::ALL {
-                    ui.radio_value(&mut self.opts.time_format, fmt, fmt.name());
+                    ui.radio_value(&mut self.opts.time_format, fmt, fmt.name_in(lang));
                 }
             });
-            ui.menu_button("Inserir", |ui| {
+            ui.menu_button(tr(lang, "Inserir"), |ui| {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
                 self.cmd_menu_btn(ui, "insert.track_adjustment");
+                self.cmd_menu_btn(ui, "insert.track_folder");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
                 ui.separator();
+                self.cmd_menu_btn(ui, "insert.nested_timeline");
+                ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
+                self.cmd_menu_btn(ui, "insert.marker_cd_track");
+                self.cmd_menu_btn(ui, "insert.marker_cd_index");
+                self.cmd_menu_btn(ui, "insert.marker_command");
                 self.cmd_menu_btn(ui, "insert.region");
+                self.cmd_menu_btn(ui, "insert.subtitles_from_regions");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.gen_text");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
                 self.cmd_menu_btn(ui, "insert.empty_event");
                 self.cmd_menu_btn(ui, "media.insert_storyboard");
                 ui.separator();
-                ui.label("Envelopes da trilha selecionada:");
+                ui.label(tr(lang, "Envelopes da trilha selecionada:"));
                 self.cmd_menu_btn(ui, "insert.env_volume");
                 self.cmd_menu_btn(ui, "insert.env_pan");
             });
-            ui.menu_button("Ferramentas", |ui| {
+            ui.menu_button(tr(lang, "Ferramentas"), |ui| {
                 self.cmd_menu_btn(ui, "tools.fx_master_audio");
                 self.cmd_menu_btn(ui, "tools.fx_master_video");
                 ui.menu_button("Mídia do Projeto", |ui| {
@@ -2435,12 +3356,33 @@ impl App {
                 self.cmd_menu_btn(ui, "tools.event_props");
                 self.cmd_menu_btn(ui, "tools.pan_crop");
                 self.cmd_menu_btn(ui, "tools.fx_event");
+                self.cmd_menu_btn(ui, "tools.motion_track");
+                self.cmd_menu_btn(ui, "tools.apply_audio_fx");
                 self.cmd_menu_btn(ui, "tools.reverse");
                 self.cmd_menu_btn(ui, "tools.freeze_frame");
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
-                ui.menu_button("Neoveg Encoder", |ui| {
+                self.cmd_menu_btn(ui, "track.render_to_new_track");
+                self.cmd_menu_btn(ui, "track.set_defaults");
+                ui.menu_button(tr(lang, "Multicâmera"), |ui| {
+                    self.cmd_menu_btn(ui, "tools.multicam_create");
+                    self.cmd_menu_chk(ui, self.opts.multicam_mode, "tools.multicam_mode");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_1");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_2");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_3");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_4");
+                });
+                ui.menu_button(tr(lang, "Composição de trilhas (Pai/Filho)"), |ui| {
+                    self.cmd_menu_btn(ui, "track.toggle_folder");
+                    self.cmd_menu_btn(ui, "track.make_child");
+                    self.cmd_menu_btn(ui, "track.unmake_child");
+                    self.cmd_menu_btn(ui, "track.mask_cycle");
+                });
+                self.cmd_menu_btn(ui, "preview.ram_build");
+                self.cmd_menu_btn(ui, "preview.ram_clear");
+                ui.menu_button(tr(lang, "Neoveg Encoder"), |ui| {
                     self.cmd_menu_btn(ui, "view.tab.encoder");
                     self.cmd_menu_btn(ui, "file.send_to_encoder");
                     ui.separator();
@@ -2466,35 +3408,76 @@ impl App {
                     self.cmd_menu_btn(ui, "tools.blender_import_camera");
                 });
             });
-            ui.menu_button("Opções", |ui| {
+            ui.menu_button(tr(lang, "Opções"), |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
+                self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
+                ui.menu_button("Grade da régua", |ui| {
+                    for g in neoveg_engine::session::RulerGridSpacing::ALL {
+                        if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
+                            self.opts.ruler_grid = g;
+                            self.set_status(format!("Grade da régua: {}", g.label()));
+                            ui.close_menu();
+                        }
+                    }
+                });
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
+                self.cmd_menu_chk(ui, self.opts.lock_envelopes, "options.lock_envelopes");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
                 self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
+                self.cmd_menu_chk(ui, self.opts.preview_mute_audio, "preview.mute_audio");
+                self.cmd_menu_chk(ui, self.opts.preview_mute_video, "preview.mute_video");
+                self.cmd_menu_chk(
+                    ui,
+                    self.opts.bypass_all_audio_fx,
+                    "options.bypass_all_audio_fx",
+                );
                 ui.separator();
-                ui.label(format!(
-                    "Dispositivo de áudio: {} ({} Hz)",
-                    self.audio.device_name, self.audio.sr
+                self.cmd_menu_btn(ui, "options.customize_toolbar");
+                ui.separator();
+                let sr_s = self.audio.sr.to_string();
+                ui.label(tr_args(
+                    lang,
+                    "Dispositivo de áudio: {dev} ({sr} Hz)",
+                    &[("dev", &self.audio.device_name), ("sr", &sr_s)],
                 ));
+                ui.separator();
+                ui.menu_button(tr(lang, "Idioma"), |ui| {
+                    for candidate in Language::ALL {
+                        if ui
+                            .selectable_label(lang == candidate, candidate.display_option(lang))
+                            .clicked()
+                        {
+                            pick_lang = Some(candidate);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "options.prefs");
             });
-            ui.menu_button("Ajuda", |ui| {
+            ui.menu_button(tr(lang, "Ajuda"), |ui| {
                 self.cmd_menu_btn(ui, "help.welcome");
                 self.cmd_menu_btn(ui, "help.splash");
                 self.cmd_menu_btn(ui, "help.shortcuts");
                 self.cmd_menu_btn(ui, "help.about");
             });
         });
+        if let Some(new_lang) = pick_lang {
+            self.apply_language(Some(ui.ctx()), new_lang, true);
+        }
     }
 
     fn cmd_hover_text(&self, id: &str, fallback: Option<&str>) -> String {
+        let lang = self.lang();
         commands::find_command(id)
-            .map(|c| match resolved_shortcut(c, &self.prefs.shortcuts) {
-                Some(sc) => format!("{} ({})", c.label, sc.format()),
-                None => c.label.to_string(),
+            .map(|c| {
+                let lbl = c.label_in(lang);
+                match resolved_shortcut(c, &self.prefs.shortcuts) {
+                    Some(sc) => format!("{lbl} ({})", sc.format_in(lang)),
+                    None => lbl.to_string(),
+                }
             })
             .unwrap_or_else(|| fallback.unwrap_or(id).to_string())
     }
@@ -2534,59 +3517,102 @@ impl App {
         }
     }
 
+    pub(crate) fn open_customize_toolbar(&mut self) {
+        self.dlg.customize_toolbar_open = true;
+        self.dlg.customize_toolbar_draft = Some(self.prefs.toolbar_buttons.clone());
+    }
+
+    fn toolbar_button_visual(&self, id: &str) -> (Icon, Option<&'static str>, Option<bool>) {
+        match id {
+            "file.new" => (Icon::NewFile, None, None),
+            "file.open" => (Icon::OpenFolder, None, None),
+            "file.save" => (Icon::SaveDisk, None, None),
+            "file.render" => (Icon::RenderClapper, None, None),
+            "view.tab.encoder" => (Icon::EncoderQueue, Some("Encoder"), None),
+            "file.project_props" => (Icon::GearProps, None, None),
+            "file.import_media" => (Icon::ImportMedia, None, None),
+            "edit.cut" => (Icon::Cut, None, None),
+            "edit.copy" => (Icon::Copy, None, None),
+            "edit.paste" => (Icon::Paste, None, None),
+            "edit.undo" => (Icon::Undo, None, None),
+            "edit.redo" => (Icon::Redo, None, None),
+            "options.snapping" => (Icon::MagnetSnap, None, Some(self.opts.snapping)),
+            "options.snap_to_grid" => (Icon::TimelineGrid, None, Some(self.opts.snap_to_grid)),
+            "options.auto_ripple" => (Icon::AutoRipple, None, Some(self.opts.auto_ripple)),
+            "view.envelopes" => (Icon::Envelopes, None, Some(self.opts.show_envelopes)),
+            "options.ignore_grouping" => {
+                (Icon::IgnoreGrouping, None, Some(self.opts.ignore_grouping))
+            }
+            "options.loop_playback" => (Icon::LoopPlayback, None, Some(self.opts.loop_playback)),
+            "options.bypass_all_audio_fx" => (
+                Icon::FxAudio,
+                Some("Bypass"),
+                Some(self.opts.bypass_all_audio_fx),
+            ),
+            "preview.mute_audio" => (Icon::MuteAudio, None, Some(self.opts.preview_mute_audio)),
+            "preview.mute_video" => (Icon::MuteVideo, None, Some(self.opts.preview_mute_video)),
+            "preview.split_toggle" => (
+                Icon::SplitPreview,
+                None,
+                Some(!matches!(
+                    self.opts.preview_split_mode,
+                    neoveg_engine::playback::PreviewSplitMode::Off
+                )),
+            ),
+            "edit.properties.layout" => (Icon::LayoutWindow, None, None),
+            "tools.integrations" => (Icon::ExternalApps, None, None),
+            "insert.marker" => (Icon::InsertMarker, Some("M"), None),
+            "insert.marker_cd_track" => (Icon::AudioTrack, Some("CD"), None),
+            "insert.marker_command" => (Icon::FxSparkle, Some("CMD"), None),
+            "track.cycle_automation" => (Icon::Envelopes, Some("Auto"), None),
+            other => {
+                let lbl = commands::find_command(other).map(|c| c.label);
+                (Icon::GearProps, lbl, None)
+            }
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            self.cmd_tool_btn(ui, Icon::NewFile, None, "file.new");
-            self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
-            self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
-            self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
-            self.cmd_tool_btn(ui, Icon::EncoderQueue, Some("Encoder"), "view.tab.encoder");
-            self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::Cut, None, "edit.cut");
-            self.cmd_tool_btn(ui, Icon::Copy, None, "edit.copy");
-            self.cmd_tool_btn(ui, Icon::Paste, None, "edit.paste");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::Undo, None, "edit.undo");
-            self.cmd_tool_btn(ui, Icon::Redo, None, "edit.redo");
-            ui.separator();
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.snapping,
-                Icon::MagnetSnap,
-                None,
-                "options.snapping",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.auto_ripple,
-                Icon::AutoRipple,
-                None,
-                "options.auto_ripple",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.show_envelopes,
-                Icon::Envelopes,
-                None,
-                "view.envelopes",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.ignore_grouping,
-                Icon::IgnoreGrouping,
-                None,
-                "options.ignore_grouping",
-            );
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
-            self.cmd_tool_btn(ui, Icon::ExternalApps, None, "tools.integrations");
+        let lang = self.lang();
+        let items = self.prefs.toolbar_buttons.clone();
+        let resp = ui.horizontal_wrapped(|ui| {
+            for id in &items {
+                if id == "|" {
+                    ui.separator();
+                    continue;
+                }
+                let (icon, text, toggle) = self.toolbar_button_visual(id);
+                if let Some(active) = toggle {
+                    self.cmd_tool_toggle(ui, active, icon, text, id);
+                } else {
+                    self.cmd_tool_btn(ui, icon, text, id);
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("⋮")
+                    .on_hover_text(tr(lang, "Personalizar barra de ferramentas..."))
+                    .clicked()
+                {
+                    self.open_customize_toolbar();
+                }
+            });
             if self.loading > 0 {
+                let n_s = self.loading.to_string();
                 ui.separator();
                 crate::splash::spinner_inline(ui, 15.0, ui.ctx().input(|i| i.time), &self.theme);
-                ui.label(format!("carregando {}...", self.loading));
+                ui.label(tr_args(lang, "carregando {n}...", &[("n", &n_s)]));
+            }
+        });
+        resp.response.context_menu(|ui| {
+            if ui.button("Personalizar barra de ferramentas...").clicked() {
+                self.open_customize_toolbar();
+                ui.close_menu();
+            }
+            if ui.button("Restaurar barra padrão").clicked() {
+                self.prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
+                let _ = self.prefs.save();
+                ui.close_menu();
             }
         });
     }
@@ -2604,19 +3630,25 @@ impl App {
                     let name = egui::RichText::new(label)
                         .small()
                         .color(self.theme.text_muted);
-                    let value = egui::RichText::new(txt)
-                        .monospace()
-                        .small()
-                        .color(self.theme.text_primary);
                     // a barra é desenhada da direita para a esquerda e o
                     // `horizontal` herda isso: aí o valor entra primeiro, para
                     // o nome ficar à esquerda dele na tela
                     if ui.layout().prefer_right_to_left() {
-                        ui.label(value);
+                        crate::fonts::tabular_label(
+                            ui,
+                            &txt,
+                            crate::fonts::visor_font(10.5),
+                            self.theme.text_primary,
+                        );
                         ui.label(name);
                     } else {
                         ui.label(name);
-                        ui.label(value);
+                        crate::fonts::tabular_label(
+                            ui,
+                            &txt,
+                            crate::fonts::visor_font(10.5),
+                            self.theme.text_primary,
+                        );
                     }
                 });
             })
@@ -2678,7 +3710,7 @@ impl App {
                     let id = mode.command_id();
                     let on =
                         tool == neoveg_engine::session::EditTool::Normal && active_mode == mode;
-                    let label = menu_label(id, &self.prefs.shortcuts);
+                    let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
                     if ui.selectable_label(on, label).clicked() {
                         self.exec_cmd(Some(ui.ctx()), id);
                         ui.close_menu();
@@ -2822,8 +3854,12 @@ impl App {
             );
             self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
 
+            let lang = self.lang();
             if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
-                ui.label(egui::RichText::new(format!("Shuttle {:+.2}x", self.shuttle)).small());
+                let x_s = format!("{:+.2}", self.shuttle);
+                ui.label(
+                    egui::RichText::new(tr_args(lang, "Shuttle {x}x", &[("x", &x_s)])).small(),
+                );
             }
 
             // Bloco 3 (direita): Zoom horizontal + Selection Start/End/Length boxes (Manual p. 73)
@@ -2840,44 +3876,50 @@ impl App {
                         self.more_tools_menu(ui, (sel_start, sel_end, sel_len), avail_w);
                     })
                     .response
-                    .on_hover_text("Mais ferramentas de edição (More)");
+                    .on_hover_text(tr(lang, "Mais ferramentas de edição (More)"));
+                    let tam_lbl = tr(lang, "Tam:");
+                    let fim_lbl = tr(lang, "Fim:");
+                    let pos_lbl = if self.time_sel.is_some() {
+                        tr(lang, "In:")
+                    } else {
+                        tr(lang, "Pos:")
+                    };
                     if avail_w >= 430.0 {
                         self.time_readout_chip(
                             ui,
-                            "Tam:",
+                            tam_lbl,
                             sel_len,
-                            "Duração da seleção (Selection Length)",
+                            tr(lang, "Duração da seleção (Selection Length)"),
                         );
                         self.time_readout_chip(
                             ui,
-                            "Fim:",
+                            fim_lbl,
                             sel_end,
-                            "Fim da seleção (Selection End)",
+                            tr(lang, "Fim da seleção (Selection End)"),
                         );
                         self.time_readout_chip(
                             ui,
-                            if self.time_sel.is_some() {
-                                "In:"
-                            } else {
-                                "Pos:"
-                            },
+                            pos_lbl,
                             sel_start,
-                            "Início da seleção / posição do cursor",
+                            tr(lang, "Início da seleção / posição do cursor"),
                         );
                         ui.separator();
                     } else if avail_w >= 260.0 {
                         self.time_readout_chip(
                             ui,
-                            "Tam:",
+                            tam_lbl,
                             sel_len,
-                            "Duração da seleção (Selection Length)",
+                            tr(lang, "Duração da seleção (Selection Length)"),
                         );
                         ui.separator();
                     }
                     if ui
                         .small_button("+")
                         .on_hover_text(
-                            self.cmd_hover_text("timeline.zoom_in", Some("Aproximar zoom")),
+                            self.cmd_hover_text(
+                                "timeline.zoom_in",
+                                Some(tr(lang, "Aproximar zoom")),
+                            ),
                         )
                         .clicked()
                     {
@@ -2894,7 +3936,7 @@ impl App {
                             )
                             .show_value(false),
                         )
-                        .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
+                        .on_hover_text(tr(lang, "Zoom horizontal (↑/↓, roda do mouse)"))
                         .changed()
                     {
                         self.tl.px_per_sec = crate::timeline::TimelineState::clamp_pps(z.exp());
@@ -2902,7 +3944,10 @@ impl App {
                     if ui
                         .small_button("-")
                         .on_hover_text(
-                            self.cmd_hover_text("timeline.zoom_out", Some("Afastar zoom")),
+                            self.cmd_hover_text(
+                                "timeline.zoom_out",
+                                Some(tr(lang, "Afastar zoom")),
+                            ),
                         )
                         .clicked()
                     {
@@ -2917,20 +3962,24 @@ impl App {
     /// Controle compartilhado de velocidade de reprodução (Playback Rate) usado na barra de transporte
     /// e no rodapé da lista de trilhas.
     pub(crate) fn playback_rate_control(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let lang = self.lang();
         let mut rate_changed = false;
         let playing = self.is_playing();
         if compact {
             ui.label(
-                egui::RichText::new("Taxa:")
+                egui::RichText::new(tr(lang, "Taxa:"))
                     .small()
                     .color(self.theme.text_muted),
             );
         } else {
-            icons::icon_label(ui, Icon::SpeedGauge, 14.0, "Taxa:", &self.theme);
+            icons::icon_label(ui, Icon::SpeedGauge, 14.0, tr(lang, "Taxa:"), &self.theme);
         }
         if ui
             .small_button(format!("{:.2}×", self.playback_rate))
-            .on_hover_text("Taxa de reprodução contínua — clique para restaurar 1,00×")
+            .on_hover_text(tr(
+                lang,
+                "Taxa de reprodução contínua — clique para restaurar 1,00×",
+            ))
             .clicked()
         {
             self.playback_rate = 1.0;
@@ -2948,7 +3997,7 @@ impl App {
                     .logarithmic(true)
                     .show_value(false),
             )
-            .on_hover_text("Taxa de reprodução contínua (Playback Rate)")
+            .on_hover_text(tr(lang, "Taxa de reprodução contínua (Playback Rate)"))
             .changed();
         if rate_changed && playing {
             self.shuttle = self.playback_rate;
@@ -2960,16 +4009,22 @@ impl App {
             s.speed = self.playback_rate;
         }
         if !compact && self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
-            ui.label(format!("Shuttle {:+.2}x", self.shuttle));
+            let x_s = format!("{:+.2}", self.shuttle);
+            ui.label(tr_args(lang, "Shuttle {x}x", &[("x", &x_s)]));
         }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         ui.horizontal(|ui| {
             if self.status_at.elapsed().as_secs() < 20 && !self.status.is_empty() {
                 ui.label(&self.status);
             } else {
-                ui.label(egui::RichText::new("Pronto").small().color(self.theme.text_muted));
+                ui.label(
+                    egui::RichText::new(tr(lang, "Pronto"))
+                        .small()
+                        .color(self.theme.text_muted),
+                );
             }
             let dur_str = self.fmt_time(self.project.duration());
             let wide = ui.available_width() >= 680.0;
@@ -2980,24 +4035,51 @@ impl App {
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "(sem título)".into());
+                    .unwrap_or_else(|| tr(lang, "(sem título)").into());
                 let ch_label = if self.master_mono {
-                    "Mono (1 ch)"
+                    tr(lang, "Mono (1 ch)")
                 } else {
-                    "Estéreo (2 ch)"
+                    tr(lang, "Estéreo (2 ch)")
                 };
+                let sr_s = s.sample_rate.to_string();
+                let w_s = s.width.to_string();
+                let h_s = s.height.to_string();
+                let fps_s = s.fps.label_in(lang);
+                let ms_s = format!("{:.0}", self.preview_ms);
                 let info_text = if wide {
-                    format!(
-                        "{ch_label} | {} Hz | {}x{} {} qps | prévia {:.0} ms | Duração: {dur_str} | {file_name}",
-                        s.sample_rate, s.width, s.height, s.fps.label(), self.preview_ms,
+                    tr_args(
+                        lang,
+                        "{ch} | {sr} Hz | {w}x{h} {fps} | prévia {ms} ms | Duração: {dur} | {file}",
+                        &[
+                            ("ch", &ch_label),
+                            ("sr", &sr_s),
+                            ("w", &w_s),
+                            ("h", &h_s),
+                            ("fps", &fps_s),
+                            ("ms", &ms_s),
+                            ("dur", &dur_str),
+                            ("file", &file_name),
+                        ],
                     )
                 } else {
-                    format!(
-                        "{ch_label} | {}x{} {} qps | {} Hz | {file_name}",
-                        s.width, s.height, s.fps.label(), s.sample_rate
+                    tr_args(
+                        lang,
+                        "{ch} | {w}x{h} {fps} | {sr} Hz | {file}",
+                        &[
+                            ("ch", &ch_label),
+                            ("sr", &sr_s),
+                            ("w", &w_s),
+                            ("h", &h_s),
+                            ("fps", &fps_s),
+                            ("file", &file_name),
+                        ],
                     )
                 };
-                ui.label(egui::RichText::new(info_text).small().color(self.theme.text_muted));
+                ui.label(
+                    egui::RichText::new(info_text)
+                        .small()
+                        .color(self.theme.text_muted),
+                );
                 if let Some(job) = &self.render_job {
                     crate::splash::spinner_inline(
                         ui,
@@ -3010,7 +4092,7 @@ impl App {
                             .desired_width(140.0)
                             .show_percentage(),
                     );
-                    ui.label("Renderizando:");
+                    ui.label(tr(lang, "Renderizando:"));
                 } else if let Some((_, _, prog)) = &self.prerender_job {
                     crate::splash::spinner_inline(
                         ui,
@@ -3023,7 +4105,7 @@ impl App {
                             .desired_width(130.0)
                             .show_percentage(),
                     );
-                    ui.label("Pré-renderizando:");
+                    ui.label(tr(lang, "Pré-renderizando:"));
                 } else if self.loading > 0 {
                     crate::splash::spinner_inline(
                         ui,
@@ -3031,14 +4113,17 @@ impl App {
                         ui.ctx().input(|i| i.time),
                         &self.theme,
                     );
-                    ui.label(format!("Carregando ({})...", self.loading));
+                    let n_s = self.loading.to_string();
+                    ui.label(tr_args(lang, "Carregando ({n})...", &[("n", &n_s)]));
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(40));
                 } else if !self.session.prerendered_ranges.is_empty() {
+                    let n_s = self.session.prerendered_ranges.len().to_string();
                     ui.label(
-                        egui::RichText::new(format!(
-                            "Pré-render: {} trecho(s)",
-                            self.session.prerendered_ranges.len()
+                        egui::RichText::new(tr_args(
+                            lang,
+                            "Pré-render: {n} trecho(s)",
+                            &[("n", &n_s)],
                         ))
                         .small()
                         .color(self.theme.tl_marker),
@@ -3049,9 +4134,10 @@ impl App {
     }
 
     pub(crate) fn snapshot_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
             .add_filter(
-                "Imagem",
+                tr(lang, "Imagem"),
                 &[
                     "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
                     "wbmp", "xbm", "xpm", "ico",
@@ -3061,19 +4147,26 @@ impl App {
             .save_file()
         {
             match crate::render::save_snapshot(&self.project, &self.media, self.cursor, &p) {
-                Ok(_) => self.set_status(format!("Quadro salvo em {}", p.display())),
-                Err(e) => self.set_status(format!("Erro: {e:#}")),
+                Ok(_) => {
+                    let p_s = p.display().to_string();
+                    self.set_status(tr_args(lang, "Quadro salvo em {path}", &[("path", &p_s)]));
+                }
+                Err(e) => {
+                    let err_s = format!("{e:#}");
+                    self.set_status(tr_args(lang, "Erro: {err}", &[("err", &err_s)]));
+                }
             }
         }
     }
 
     pub(crate) fn run_script_dialog(&mut self) {
+        let lang = self.lang();
         if self.script_job.is_some() {
-            self.set_status("Já há um script em execução.");
+            self.set_status(tr(lang, "Já há um script em execução."));
             return;
         }
         let Some(p) = rfd::FileDialog::new()
-            .add_filter("Scripts VEGAS / .NET", &["cs", "dll"])
+            .add_filter(tr(lang, "Scripts VEGAS / .NET"), &["cs", "dll"])
             .pick_file()
         else {
             return;
@@ -3107,7 +4200,12 @@ impl App {
         });
         match spawned {
             Ok(()) => {
-                self.set_status(format!("Executando script: {}", p.display()));
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Executando script: {name}",
+                    &[("name", &p_s)],
+                ));
                 self.script_job = Some(ScriptJob {
                     path: p,
                     started: std::time::Instant::now(),
@@ -3117,13 +4215,21 @@ impl App {
                     active: None,
                 });
             }
-            Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao iniciar o script: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
     /// modal; ao terminar, aplica a sessão do script (ou só o erro).
     fn poll_script_job(&mut self, ctx: &egui::Context) {
+        let lang = self.lang();
         let theme = self.theme.clone();
         let Some(job) = &mut self.script_job else {
             return;
@@ -3149,14 +4255,15 @@ impl App {
                 egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         crate::splash::spinner_inline(ui, 20.0, el, &theme);
-                        ui.strong("Executando script...");
+                        ui.strong(tr(lang, "Executando script..."));
                     });
                     ui.label(path);
                     ui.label(
-                        egui::RichText::new(
+                        egui::RichText::new(tr(
+                            lang,
                             "A edição volta quando o script terminar. Se o script abriu uma \
                              janela, ela pode estar atrás do Neoveg.",
-                        )
+                        ))
                         .small()
                         .weak(),
                     );
@@ -3166,7 +4273,7 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.script_job = None;
-                self.set_status("Erro interno: o script terminou sem resposta.");
+                self.set_status(tr(lang, "Erro interno: o script terminou sem resposta."));
                 return;
             }
         };
@@ -3192,15 +4299,18 @@ impl App {
                     self.spawn_media_load(m);
                 }
                 if let Some(last) = msgs.last() {
-                    self.set_status(format!("Script executado: {last}"));
+                    self.set_status(tr_args(lang, "Script executado: {val}", &[("val", last)]));
                 } else {
-                    self.set_status(format!("Script executado: {}", job.path.display()));
+                    let p_s = job.path.display().to_string();
+                    self.set_status(tr_args(lang, "Script executado: {val}", &[("val", &p_s)]));
                 }
             }
             // a sessão da interface não foi tocada: nada a desfazer
-            ScriptOutcome::Done(Err(e)) => self.set_status(format!("Erro no script: {e}")),
+            ScriptOutcome::Done(Err(e)) => {
+                self.set_status(tr_args(lang, "Erro no script: {err}", &[("err", &e)]))
+            }
             ScriptOutcome::Panicked => {
-                self.set_status("Erro interno isolado ao executar script .NET/C#.")
+                self.set_status(tr(lang, "Erro interno isolado ao executar script .NET/C#."));
             }
         }
     }
@@ -3257,12 +4367,13 @@ impl App {
     }
 
     fn update_title(&self, ctx: &egui::Context) {
+        let lang = self.lang();
         let name = self
             .path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Sem título".into());
+            .unwrap_or_else(|| tr(lang, "Sem título").into());
         let title = format!("{}{} - Neoveg", name, if self.dirty { "*" } else { "" });
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
@@ -3306,12 +4417,17 @@ impl App {
                     .elapsed
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let lang = self.lang();
+                let p_s = job.settings.path.display().to_string();
+                let secs_s = format!("{secs:.1}");
                 match err {
-                    Some(e) => self.set_status(format!("Renderização falhou: {e}")),
-                    None => self.set_status(format!(
-                        "Renderização concluída em {:.1} s: {}",
-                        secs,
-                        job.settings.path.display()
+                    Some(e) => {
+                        self.set_status(tr_args(lang, "Renderização falhou: {err}", &[("err", &e)]))
+                    }
+                    None => self.set_status(tr_args(
+                        lang,
+                        "Renderização concluída em {secs} s: {path}",
+                        &[("secs", &secs_s), ("path", &p_s)],
                     )),
                 }
                 self.dlg.render_done = Some(self.status.clone());
@@ -3339,7 +4455,47 @@ impl eframe::App for App {
 
 impl App {
     /// Um quadro completo da interface (separado de `eframe::App` para testes).
+    /// A janela abriu do tamanho da tela de abertura (ver `native_options`):
+    /// enquanto a abertura estiver ativa, só ela é desenhada. Vale mesmo com a
+    /// abertura inativa (ex.: oferta de recuperação): aí o primeiro quadro já
+    /// devolve as bordas e o tamanho normal, e a janela nunca fica presa pequena.
+    pub fn set_startup_splash_window(&mut self, on: bool) {
+        self.startup_window = on;
+    }
+
+    /// Fim da tela de abertura na inicialização: a janela ganha bordas e o
+    /// tamanho normal, centralizada no monitor.
+    fn leave_startup_window(&mut self, ctx: &egui::Context) {
+        self.startup_window = false;
+        let [w, h] = crate::MAIN_WINDOW_SIZE;
+        let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
+        let monitor = ctx
+            .input(|i| i.viewport().monitor_size)
+            .filter(|m| m.x.is_finite() && m.y.is_finite() && m.x > 0.0 && m.y > 0.0);
+        let size = match monitor {
+            Some(m) => egui::vec2(w.min(m.x - 40.0).max(min_w), h.min(m.y - 80.0).max(min_h)),
+            None => egui::vec2(w, h),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            min_w, min_h,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if let Some(m) = monitor {
+            let x = ((m.x - size.x) * 0.5).max(0.0);
+            let y = ((m.y - size.y) * 0.5).max(0.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
+        // escala da interface (Exibir > Escala da interface, Preferências)
+        let want_zoom = self.prefs.ui_scale_factor();
+        if (ctx.zoom_factor() - want_zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(want_zoom);
+        }
         let want_delay = if self.prefs.show_tooltips {
             0.5
         } else {
@@ -3355,8 +4511,17 @@ impl App {
         self.poll_integrations();
         self.poll_script_job(ctx);
         self.poll_render();
-        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media) {
+        let lang = self.lang();
+        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media, lang) {
             self.set_status(msg);
+        }
+        if self.startup_window {
+            // tela de abertura na própria janela: a interface só aparece depois
+            self.show_splash_overlay(ctx);
+            if self.splash.active {
+                return;
+            }
+            self.leave_startup_window(ctx);
         }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
@@ -3421,6 +4586,8 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| self.timeline_ui(ui));
 
         self.floating_panel_windows(ctx);
+        // a área de janelas deste quadro volta a ser medida ao desenhá-la
+        self.dock_rect = None;
         self.show_dialogs(ctx);
         self.show_integrations_window(ctx);
         self.show_encoder_dialogs(ctx);
@@ -3438,27 +4605,32 @@ impl App {
         self.update_title(ctx);
 
         // confirmação ao fechar com alterações não salvas
+        let lang = self.lang();
         if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_close = true;
         }
         if self.confirm_close {
-            egui::Window::new("Alterações não salvas")
+            egui::Window::new(tr(lang, "Alterações não salvas"))
+                .id(egui::Id::new("confirm_close_win"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("O projeto tem alterações não salvas. Deseja salvar antes de sair?");
+                    ui.label(tr(
+                        lang,
+                        "O projeto tem alterações não salvas. Deseja salvar antes de sair?",
+                    ));
                     ui.horizontal(|ui| {
-                        if ui.button("Salvar").clicked() && self.save_project(false) {
+                        if ui.button(tr(lang, "Salvar")).clicked() && self.save_project(false) {
                             self.allow_close = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui.button("Descartar").clicked() {
+                        if ui.button(tr(lang, "Descartar")).clicked() {
                             self.allow_close = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr(lang, "Cancelar")).clicked() {
                             self.confirm_close = false;
                         }
                     });
@@ -3477,6 +4649,7 @@ impl App {
             }
             return;
         }
+        let lang = self.lang();
         let workers = self.prefs.effective_worker_threads();
         let notice = self
             .preview
@@ -3484,6 +4657,7 @@ impl App {
             .as_deref()
             .or(self.audio.error.as_deref());
         let snap = crate::splash::SplashSnapshot {
+            lang,
             theme_id: self.theme_id,
             theme: &self.theme,
             layout_type: self.prefs.edit_layout.layout_type,
@@ -3495,6 +4669,7 @@ impl App {
             loading: self.loading,
             commands_count: COMMANDS.len(),
             fallback_notice: notice,
+            own_window: self.startup_window,
         };
         let out = crate::splash::show_splash_screen(
             ctx,
@@ -3504,8 +4679,11 @@ impl App {
         );
         if out.pref_changed {
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!(
-                    "Aviso ao salvar preferência da tela de abertura: {e}"
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Aviso ao salvar preferência da tela de abertura: {err}",
+                    &[("err", &err_s)],
                 ));
             }
         }
@@ -3520,6 +4698,8 @@ impl App {
 
     fn show_dock_panel(&mut self, ctx: &egui::Context, at_top: bool) {
         if !self.dock_visible {
+            // Um arraste de aba não sobrevive à área de janelas escondida.
+            crate::dock_drop::end(ctx);
             return;
         }
         let panel = if at_top {
@@ -3578,7 +4758,12 @@ impl App {
         }
         if save_prefs {
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!("Aviso ao salvar layout: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    self.lang(),
+                    "Aviso ao salvar layout: {err}",
+                    &[("err", &err_s)],
+                ));
             }
         }
     }
@@ -3589,10 +4774,15 @@ impl App {
         lt: LayoutType,
         save_prefs: bool,
     ) {
+        let lang = self.lang();
         let mut next = self.prefs.edit_layout.clone();
         next.apply_type(lt);
         self.apply_edit_layout(ctx, next, true, save_prefs);
-        self.set_status(format!("Layout {} aplicado ({})", lt.label(), lt.era()));
+        self.set_status(tr_args(
+            lang,
+            "Layout {name} aplicado ({era})",
+            &[("name", &lt.label_in(lang)), ("era", &lt.era_in(lang))],
+        ));
     }
 
     pub fn set_theme(&mut self, ctx: &egui::Context, id: ThemeId, save_prefs: bool) {
@@ -3601,13 +4791,21 @@ impl App {
         self.prefs.theme = id.id().to_string();
         if save_prefs {
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!("Aviso ao salvar tema: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    self.lang(),
+                    "Aviso ao salvar tema: {err}",
+                    &[("err", &err_s)],
+                ));
             }
         }
     }
 
     pub fn is_panel_open(&self, tab: DockTab) -> bool {
-        (self.dock_visible && self.dock_tab == tab && !self.detached_tabs.contains(&tab))
+        (self.dock_visible
+            && self.dock_tab == tab
+            && !self.detached_tabs.contains(&tab)
+            && !self.closed_tabs.contains(&tab))
             || self.detached_tabs.contains(&tab)
     }
 
@@ -3618,6 +4816,12 @@ impl App {
             .map(|t| layout::panel_key(*t).to_string())
             .collect();
         detached.sort();
+        let mut closed: Vec<String> = self
+            .closed_tabs
+            .iter()
+            .map(|t| layout::panel_key(*t).to_string())
+            .collect();
+        closed.sort();
         let mut l = WindowLayout {
             name: name.to_string(),
             dock_height: self.dock_height,
@@ -3632,6 +4836,8 @@ impl App {
             px_per_sec: Some(self.tl.px_per_sec),
             edit_layout: Some(self.prefs.edit_layout.clone()),
             tile_tree: Some(self.dock_tree.clone()),
+            closed_tabs: Some(closed),
+            floating_windows: self.floating_geom.clone(),
         };
         l.sanitize();
         l
@@ -3639,11 +4845,17 @@ impl App {
 
     pub fn apply_window_layout(&mut self, mut l: WindowLayout) {
         l.sanitize();
+        self.dock_maximized = None;
+        self.timeline_restore = None;
         self.dock_height = l.dock_height;
         self.preview_ratio = l.preview_ratio;
         self.dock_visible = l.dock_visible;
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
+        self.closed_tabs = l.closed_panels();
+        self.floating_geom = l.floating_windows.clone();
+        // janelas abertas reabrem no lugar do layout novo
+        self.floating_open.clear();
         self.preview_detached = l.preview_detached;
         self.preview_visible = l.preview_visible;
         self.master_bus_visible = l.master_bus_visible;
@@ -3669,11 +4881,18 @@ impl App {
                 self.prefs.edit_layout.preview_on_left,
             )
         });
+        let lang = self.lang();
         self.pending_dock_focus = Some(self.dock_tab);
-        self.set_status(format!("Layout aplicado: {}", l.name));
+        let lname = layout::localized_preset_name(&l.name, lang);
+        self.set_status(tr_args(
+            lang,
+            "Layout aplicado: {name}",
+            &[("name", &lname)],
+        ));
     }
 
     pub fn save_named_layout(&mut self, name: &str) {
+        let lang = self.lang();
         let layout = self.current_window_layout(name);
         let fname = format!("{}.neoveglayout", layout::sanitize_layout_filename(name));
         let path = Preferences::layouts_dir().join(fname);
@@ -3682,23 +4901,32 @@ impl App {
                 self.prefs.window_layout = Some(path.to_string_lossy().to_string());
                 let _ = self.prefs.save();
                 self.saved_layouts = layout::list_saved_layouts();
-                self.set_status(format!("Layout salvo em {}", path.display()));
+                let p_s = path.display().to_string();
+                self.set_status(tr_args(lang, "Layout salvo em {path}", &[("path", &p_s)]));
             }
-            Err(e) => self.set_status(format!("Erro ao salvar layout: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao salvar layout: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn build_proxy_for_media(&mut self, media_id: Id) {
+        let lang = self.lang();
         let Some(item) = self.project.media(media_id).cloned() else {
-            self.set_status("Mídia não encontrada no projeto.");
+            self.set_status(tr(lang, "Mídia não encontrada no projeto."));
             return;
         };
         if !item.has_video {
-            self.set_status("Proxies aplicam-se apenas a clipes de vídeo.");
+            self.set_status(tr(lang, "Proxies aplicam-se apenas a clipes de vídeo."));
             return;
         }
         if !self.media.contains(media_id) {
-            self.set_status("Mídia offline: não foi possível gerar proxy.");
+            self.set_status(tr(lang, "Mídia offline: não foi possível gerar proxy."));
             return;
         }
         let dir = neoveg_common::util::base_dir().join("proxies");
@@ -3706,7 +4934,11 @@ impl App {
         let media = self.media.clone();
         let tx = self.loader_tx.clone();
         self.loading += 1;
-        self.set_status(format!("Gerando proxy de '{}'...", item.name));
+        self.set_status(tr_args(
+            lang,
+            "Gerando proxy de '{name}'...",
+            &[("name", &item.name)],
+        ));
         if let Err(e) = util::spawn("gerar-proxy", move || {
             let res = media
                 .create_proxy_avi(&item, &out)
@@ -3720,6 +4952,7 @@ impl App {
     }
 
     pub fn build_proxy_selected(&mut self) {
+        let lang = self.lang();
         let mut media_ids: Vec<Id> = Vec::new();
         for eid in &self.sel_events {
             if let Some(ev) = self.project.event(*eid) {
@@ -3735,7 +4968,10 @@ impl App {
             }
         }
         if media_ids.is_empty() {
-            self.set_status("Selecione pelo menos um evento de vídeo para gerar proxy.");
+            self.set_status(tr(
+                lang,
+                "Selecione pelo menos um evento de vídeo para gerar proxy.",
+            ));
             return;
         }
         for mid in media_ids {
@@ -3744,6 +4980,7 @@ impl App {
     }
 
     pub fn prerender_region(&mut self) {
+        let lang = self.lang();
         let (start, end) = if let Some((a, b)) = self.time_sel.filter(|(a, b)| b > a) {
             (a, b)
         } else if let Some((a, b)) = self.project.loop_region.filter(|(a, b)| b > a) {
@@ -3759,7 +4996,7 @@ impl App {
             (a, b)
         };
         if end <= start {
-            self.set_status("Região vazia para pré-renderizar.");
+            self.set_status(tr(lang, "Região vazia para pré-renderizar."));
             return;
         }
         self.sync_snapshot();
@@ -3788,7 +5025,7 @@ impl App {
         let prog_bg = prog.clone();
         self.loading += 1;
         self.prerender_job = Some((start, end, prog));
-        self.set_status("Pré-renderizando região selecionada...");
+        self.set_status(tr(lang, "Pré-renderizando região selecionada..."));
         if let Err(e) = util::spawn("prerender-regiao", move || {
             let result = crate::render::run(&proj, &media, &settings, &prog_bg)
                 .map(|()| out)
@@ -3799,6 +5036,30 @@ impl App {
             self.prerender_job = None;
             self.set_status(e);
         }
+    }
+}
+
+/// Imagem da prévia com o isolamento de canal das Sobreposições aplicado.
+pub(crate) fn isolated_color_image(
+    img: &image::RgbaImage,
+    (mode, gray): (crate::preview_overlays::ChannelIsolation, bool),
+) -> egui::ColorImage {
+    if mode == crate::preview_overlays::ChannelIsolation::Off {
+        return rgba_to_color_image(img);
+    }
+    let mut raw = img.as_raw().clone();
+    crate::preview_overlays::isolate_channel(&mut raw, mode, gray);
+    egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &raw)
+}
+
+/// Comando do atalho alternativo com a crase (lista de atalhos do VEGAS Pro):
+/// só com Alt, e no máximo mais um de Ctrl ou Shift.
+pub(crate) fn backtick_window_alias(ctrl: bool, shift: bool, alt: bool) -> Option<&'static str> {
+    match (ctrl, shift, alt) {
+        (false, false, true) => Some("view.toggle_dock_area"),
+        (true, false, true) => Some("view.maximize_timeline"),
+        (false, true, true) => Some("view.toggle_track_list"),
+        _ => None,
     }
 }
 
@@ -3915,6 +5176,8 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::Delete => Key::Delete,
         ShortcutKey::F2 => Key::F2,
         ShortcutKey::F8 => Key::F8,
+        ShortcutKey::F11 => Key::F11,
+        ShortcutKey::Backtick => Key::Backtick,
         ShortcutKey::ArrowLeft => Key::ArrowLeft,
         ShortcutKey::ArrowRight => Key::ArrowRight,
         ShortcutKey::ArrowUp => Key::ArrowUp,

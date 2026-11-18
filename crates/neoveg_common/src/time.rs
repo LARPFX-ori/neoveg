@@ -498,14 +498,22 @@ impl FrameRate {
         self.frame_to_ticks(self.ticks_to_frame_round(t))
     }
 
-    pub fn label(self) -> String {
+    pub fn label_in(self, lang: crate::i18n::Language) -> String {
+        use crate::i18n::{tr, tr_args};
         match (self.num, self.den) {
-            (24_000, 1001) => "23,976 qps (IVTC NTSC)".into(),
-            (30_000, 1001) => "29,970 qps (NTSC)".into(),
-            (60_000, 1001) => "59,940 qps (NTSC)".into(),
-            (n, 1) => format!("{n} qps"),
-            _ => format!("{:.3} qps", self.as_f64()),
+            (24_000, 1001) => tr(lang, "23,976 qps (IVTC NTSC)").into(),
+            (30_000, 1001) => tr(lang, "29,970 qps (NTSC)").into(),
+            (60_000, 1001) => tr(lang, "59,940 qps (NTSC)").into(),
+            (n, 1) => tr_args(lang, "{n} qps", &[("n", &n)]),
+            _ => {
+                let fps = format!("{:.3}", self.as_f64());
+                tr_args(lang, "{fps} qps", &[("fps", &fps)])
+            }
         }
+    }
+
+    pub fn label(self) -> String {
+        self.label_in(crate::i18n::Language::PtBr)
     }
 }
 
@@ -760,8 +768,8 @@ impl TimeFormat {
         TimeFormat::Samples,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: crate::i18n::Language) -> &'static str {
+        let pt = match self {
             TimeFormat::SmpteDrop => "SMPTE Drop-Frame",
             TimeFormat::SmpteNonDrop => "SMPTE Non-Drop",
             TimeFormat::TimeAndFrames => "Tempo e quadros",
@@ -769,7 +777,12 @@ impl TimeFormat {
             TimeFormat::DecimalSeconds => "Segundos",
             TimeFormat::Frames => "Quadros absolutos",
             TimeFormat::Samples => "Amostras",
-        }
+        };
+        crate::i18n::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(crate::i18n::Language::PtBr)
     }
 }
 

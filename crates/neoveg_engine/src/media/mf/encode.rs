@@ -7,18 +7,24 @@
 #![allow(unsafe_code)]
 
 use super::{ticks_to_hns, MfGuard, HNS_PER_SEC};
-use crate::model::FrameRate;
-use anyhow::{anyhow, bail, Result};
+use crate::media::demux::{demux_file, TrackKind};
+use crate::media::mkv::{MkvAudioCodec, MkvVideoCodec, MkvWriter};
+use crate::model::{FrameRate, TICKS_PER_SEC};
+use anyhow::{anyhow, bail, Context, Result};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use windows::core::{Interface, GUID, HSTRING, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_Main, IMFMediaType, IMFSinkWriter, MFAudioFormat_AAC, MFAudioFormat_MP3,
-    MFAudioFormat_PCM, MFAudioFormat_WMAudioV8, MFCreateAttributes, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
-    MFMediaType_Video, MFTranscodeContainerType_3GP, MFTranscodeContainerType_ADTS,
-    MFTranscodeContainerType_ASF, MFTranscodeContainerType_MP3, MFTranscodeContainerType_MPEG4,
-    MFTranscodeGetAudioOutputAvailableTypes, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoFormat_NV12, MFVideoFormat_WMV3, MFT_ENUM_FLAG_ALL, MF_MT_ALL_SAMPLES_INDEPENDENT,
+    eAVEncH264VProfile_Main, CODECAPI_AVEncCommonLowLatency, CODECAPI_AVEncMPVDefaultBPictureCount,
+    IMFMediaType, IMFSinkWriter, MFAudioFormat_AAC, MFAudioFormat_MP3, MFAudioFormat_PCM,
+    MFAudioFormat_WMAudioV8, MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video,
+    MFTranscodeContainerType_3GP, MFTranscodeContainerType_ADTS, MFTranscodeContainerType_ASF,
+    MFTranscodeContainerType_MP3, MFTranscodeContainerType_MPEG4,
+    MFTranscodeGetAudioOutputAvailableTypes, MFVideoFormat_AV1, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFVideoFormat_MP4V, MFVideoFormat_NV12, MFVideoFormat_VP90,
+    MFVideoFormat_WMV3, MFT_ENUM_FLAG_ALL, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
     MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
     MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
     MF_MT_DEFAULT_STRIDE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
@@ -30,7 +36,15 @@ use windows::Win32::Media::MediaFoundation::{
 pub enum MfOutputFormat {
     Mp4H264,
     Mp4Hevc,
+    Mp4Av1,
     MovH264,
+    MovHevc,
+    MovAv1,
+    MovMpeg4,
+    MkvH264,
+    MkvHevc,
+    MkvAv1,
+    MkvVp9,
     ThreeGp,
     Wmv,
     M4aAac,
@@ -42,9 +56,18 @@ pub enum MfOutputFormat {
 impl MfOutputFormat {
     fn container_guid(self) -> GUID {
         match self {
-            Self::Mp4H264 | Self::Mp4Hevc | Self::MovH264 | Self::M4aAac => {
-                MFTranscodeContainerType_MPEG4
-            }
+            Self::Mp4H264
+            | Self::Mp4Hevc
+            | Self::Mp4Av1
+            | Self::MovH264
+            | Self::MovHevc
+            | Self::MovAv1
+            | Self::MovMpeg4
+            | Self::MkvH264
+            | Self::MkvHevc
+            | Self::MkvAv1
+            | Self::MkvVp9
+            | Self::M4aAac => MFTranscodeContainerType_MPEG4,
             Self::ThreeGp => MFTranscodeContainerType_3GP,
             Self::Wmv | Self::Wma => MFTranscodeContainerType_ASF,
             Self::AdtsAac => MFTranscodeContainerType_ADTS,
@@ -54,8 +77,13 @@ impl MfOutputFormat {
 
     fn video_subtype(self) -> Option<GUID> {
         match self {
-            Self::Mp4H264 | Self::MovH264 | Self::ThreeGp => Some(MFVideoFormat_H264),
-            Self::Mp4Hevc => Some(MFVideoFormat_HEVC),
+            Self::Mp4H264 | Self::MovH264 | Self::MkvH264 | Self::ThreeGp => {
+                Some(MFVideoFormat_H264)
+            }
+            Self::Mp4Hevc | Self::MovHevc | Self::MkvHevc => Some(MFVideoFormat_HEVC),
+            Self::Mp4Av1 | Self::MovAv1 | Self::MkvAv1 => Some(MFVideoFormat_AV1),
+            Self::MovMpeg4 => Some(MFVideoFormat_MP4V),
+            Self::MkvVp9 => Some(MFVideoFormat_VP90),
             Self::Wmv => Some(MFVideoFormat_WMV3),
             Self::M4aAac | Self::AdtsAac | Self::Wma | Self::Mp3 => None,
         }
@@ -65,7 +93,15 @@ impl MfOutputFormat {
         match self {
             Self::Mp4H264
             | Self::Mp4Hevc
+            | Self::Mp4Av1
             | Self::MovH264
+            | Self::MovHevc
+            | Self::MovAv1
+            | Self::MovMpeg4
+            | Self::MkvH264
+            | Self::MkvHevc
+            | Self::MkvAv1
+            | Self::MkvVp9
             | Self::ThreeGp
             | Self::M4aAac
             | Self::AdtsAac => MFAudioFormat_AAC,
@@ -74,10 +110,23 @@ impl MfOutputFormat {
         }
     }
 
-    fn ext(self) -> &'static str {
+    fn needs_mkv_remux(self) -> bool {
+        matches!(
+            self,
+            Self::MkvH264 | Self::MkvHevc | Self::MkvAv1 | Self::MkvVp9
+        )
+    }
+
+    fn temp_ext(self) -> &'static str {
         match self {
-            Self::Mp4H264 | Self::Mp4Hevc => "mp4",
-            Self::MovH264 => "mov",
+            Self::Mp4H264
+            | Self::Mp4Hevc
+            | Self::Mp4Av1
+            | Self::MkvH264
+            | Self::MkvHevc
+            | Self::MkvAv1
+            | Self::MkvVp9 => "mp4",
+            Self::MovH264 | Self::MovHevc | Self::MovAv1 | Self::MovMpeg4 => "mov",
             Self::ThreeGp => "3gp",
             Self::Wmv => "wmv",
             Self::M4aAac => "m4a",
@@ -103,6 +152,9 @@ pub struct MfSinkEncoder {
     // `writer` deve ser descartado antes de `_guard` (que encerra MF/COM).
     writer: Option<IMFSinkWriter>,
     _guard: MfGuard,
+    format: MfOutputFormat,
+    width: u32,
+    height: u32,
     final_path: PathBuf,
     temp_path: PathBuf,
     video_stream: Option<u32>,
@@ -193,7 +245,7 @@ impl MfSinkEncoder {
         if let Some(parent) = cfg.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let temp_path = temp_output_path(&cfg.path, cfg.format.ext());
+        let temp_path = temp_output_path(&cfg.path, cfg.format.temp_ext());
         let _ = std::fs::remove_file(&temp_path);
         let mut cleanup = TempCleanup {
             path: temp_path.clone(),
@@ -202,11 +254,13 @@ impl MfSinkEncoder {
 
         let mut attrs = None;
         // SAFETY: ponteiro válido para receber `IMFAttributes`.
-        unsafe { MFCreateAttributes(&mut attrs, 2) }
+        unsafe { MFCreateAttributes(&mut attrs, 3) }
             .map_err(|e| anyhow!("MFCreateAttributes (encoder) falhou: {e}"))?;
         if let Some(a) = &attrs {
             // SAFETY: interface COM válida; habilita aceleração por hardware quando disponível.
             let _ = unsafe { a.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1) };
+            // SAFETY: reduz atraso/B-frames fora de ordem em codificadores HEVC/H.264 do SO.
+            let _ = unsafe { a.SetUINT32(&MF_LOW_LATENCY, 1) };
             // SAFETY: define explicitamente o contêiner de saída no atributo de abertura.
             unsafe { a.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &cfg.format.container_guid()) }
                 .map_err(|e| anyhow!("MF_TRANSCODE_CONTAINERTYPE falhou: {e}"))?;
@@ -256,8 +310,17 @@ impl MfSinkEncoder {
                 in_v.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, packed_par)?;
                 in_v.SetUINT32(&MF_MT_DEFAULT_STRIDE, w)?;
             }
+            let mut enc_attrs = None;
+            if unsafe { MFCreateAttributes(&mut enc_attrs, 2) }.is_ok() {
+                if let Some(ea) = &enc_attrs {
+                    // SAFETY: configura codificador sem B-frames/baixa latência para DTS monotônico.
+                    let _ = unsafe { ea.SetUINT32(&CODECAPI_AVEncCommonLowLatency, 1) };
+                    // SAFETY: solicita 0 B-frames padrão quando suportado pelo MFT (p. ex. HEVC).
+                    let _ = unsafe { ea.SetUINT32(&CODECAPI_AVEncMPVDefaultBPictureCount, 0) };
+                }
+            }
             // SAFETY: configura formato de entrada NV12 na stream `idx`.
-            unsafe { writer.SetInputMediaType(idx, &in_v, None) }.map_err(|e| {
+            unsafe { writer.SetInputMediaType(idx, &in_v, enc_attrs.as_ref()) }.map_err(|e| {
                 anyhow!("formato de entrada NV12 recusado pelo Media Foundation: {e}")
             })?;
             video_stream = Some(idx);
@@ -310,6 +373,9 @@ impl MfSinkEncoder {
         Ok(Self {
             writer: Some(writer),
             _guard: guard,
+            format: cfg.format,
+            width: w,
+            height: h,
             final_path: cfg.path,
             temp_path,
             video_stream,
@@ -419,15 +485,143 @@ impl MfSinkEncoder {
         // SAFETY: finaliza escrita do arquivo e grava átomos finais (ex.: `moov` no MP4).
         unsafe { writer.Finalize() }
             .map_err(|e| anyhow!("Finalize do Media Foundation falhou: {e}"))?;
-        // Libera o handle COM do arquivo antes do rename no Windows.
+        // Libera o handle COM do arquivo antes do remux/rename no Windows.
         drop(writer);
-        if self.final_path.exists() {
-            let _ = std::fs::remove_file(&self.final_path);
+        if self.format.needs_mkv_remux() {
+            remux_mp4_to_mkv(
+                &self.temp_path,
+                &self.final_path,
+                self.width,
+                self.height,
+                self.fps,
+            )?;
+            let _ = std::fs::remove_file(&self.temp_path);
+        } else {
+            if self.final_path.exists() {
+                let _ = std::fs::remove_file(&self.final_path);
+            }
+            std::fs::rename(&self.temp_path, &self.final_path)?;
         }
-        std::fs::rename(&self.temp_path, &self.final_path)?;
         self.finalized = true;
         Ok(())
     }
+}
+
+fn remux_mp4_to_mkv(
+    mp4_path: &Path,
+    mkv_out_path: &Path,
+    fallback_w: u32,
+    fallback_h: u32,
+    fps: FrameRate,
+) -> Result<()> {
+    let idx = demux_file(mp4_path).with_context(|| {
+        format!(
+            "lendo MP4 temporário para remux MKV ({})",
+            mp4_path.display()
+        )
+    })?;
+    let (v_idx, v_trk) = idx
+        .tracks
+        .iter()
+        .enumerate()
+        .find(|(_, t)| t.kind == TrackKind::Video)
+        .ok_or_else(|| anyhow!("fluxo de vídeo ausente após codificação do Media Foundation"))?;
+
+    let vcodec = match v_trk.codec.to_ascii_lowercase().as_str() {
+        "avc1" | "avc3" => {
+            if v_trk.extra.is_empty() {
+                bail!("registro avcC ausente ao remuxar H.264 para MKV");
+            }
+            MkvVideoCodec::H264 {
+                avcc: v_trk.extra.clone(),
+            }
+        }
+        "hvc1" | "hev1" => {
+            if v_trk.extra.is_empty() {
+                bail!("registro hvcC ausente ao remuxar HEVC para MKV");
+            }
+            MkvVideoCodec::Hevc {
+                hvcc: v_trk.extra.clone(),
+            }
+        }
+        "av01" => MkvVideoCodec::Av1 {
+            av1c: v_trk.extra.clone(),
+        },
+        "vp09" => MkvVideoCodec::Vp9 {
+            codec_private: Vec::new(),
+        },
+        other => bail!("codec de vídeo MP4 não suportado para remux MKV: {other}"),
+    };
+
+    let audio_pair = idx
+        .tracks
+        .iter()
+        .enumerate()
+        .find(|(_, t)| t.kind == TrackKind::Audio);
+    let (a_idx, acodec) = match audio_pair {
+        Some((ai, atrk)) => {
+            let sr = atrk.sample_rate.max(1);
+            let ch = atrk.channels.max(1);
+            (
+                Some(ai),
+                Some(MkvAudioCodec::Aac {
+                    sample_rate: sr,
+                    channels: ch,
+                    asc: atrk.extra.clone(),
+                }),
+            )
+        }
+        None => (None, None),
+    };
+
+    let mkv_part = temp_output_path(mkv_out_path, "mkv");
+    let _ = std::fs::remove_file(&mkv_part);
+    let mut part_guard = TempCleanup {
+        path: mkv_part.clone(),
+        armed: true,
+    };
+
+    let w = v_trk.width.max(fallback_w).max(2);
+    let h = v_trk.height.max(fallback_h).max(2);
+    let mut mkv = MkvWriter::create(&mkv_part, w, h, fps, vcodec, acodec)?;
+
+    let mut order: Vec<usize> = (0..idx.samples.len()).collect();
+    order.sort_by_key(|&i| {
+        let s = &idx.samples[i];
+        (s.dts.0, s.pts.0, s.track_index)
+    });
+
+    let mut src = File::open(mp4_path)?;
+    let mut buf = Vec::new();
+    for i in order {
+        let s = &idx.samples[i];
+        if s.track_index != v_idx && Some(s.track_index) != a_idx {
+            continue;
+        }
+        if s.size == 0 {
+            continue;
+        }
+        if s.size > (128 << 20) {
+            bail!("pacote MP4 excede 128 MiB durante remux para MKV");
+        }
+        src.seek(SeekFrom::Start(s.offset))?;
+        buf.resize(s.size as usize, 0);
+        src.read_exact(&mut buf)?;
+        let pts_ms = (i128::from(s.pts.0.max(0)) * 1000 / i128::from(TICKS_PER_SEC)) as i64;
+        if s.track_index == v_idx {
+            mkv.write_video_packet(pts_ms, s.is_keyframe, std::mem::take(&mut buf))?;
+        } else {
+            mkv.write_audio_packet(pts_ms, std::mem::take(&mut buf))?;
+        }
+    }
+    mkv.finish()?;
+
+    if mkv_out_path.exists() {
+        let _ = std::fs::remove_file(mkv_out_path);
+    }
+    std::fs::rename(&mkv_part, mkv_out_path)?;
+    part_guard.armed = false;
+    Ok(())
 }
 
 impl Drop for MfSinkEncoder {
@@ -564,6 +758,57 @@ mod tests {
                 let s = String::from_utf8_lossy(&out.stdout);
                 assert!(s.contains("h264"), "{s}");
                 assert!(s.contains("aac"), "{s}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encodes_mkv_h264_remux_and_cleans_temp_files() {
+        let dir = std::env::temp_dir().join(format!("neoveg_mf_mkv_remux_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mkv = dir.join("out.mkv");
+        let fps = FrameRate::FPS_25;
+        let mut enc = MfSinkEncoder::create(MfEncodeConfig {
+            format: MfOutputFormat::MkvH264,
+            path: mkv.clone(),
+            width: 128,
+            height: 72,
+            fps,
+            video_bitrate_bps: 1_500_000,
+            audio_sr: Some(48_000),
+            audio_bitrate_bps: 128_000,
+        })
+        .expect("SinkWriter MKV H.264/AAC deve inicializar no Windows");
+        let rgba = vec![160u8; 128 * 72 * 4];
+        let nv12 = rgba_to_nv12(&rgba, 128, 72);
+        for f in 0..8u64 {
+            enc.write_video_nv12(f, &nv12).unwrap();
+        }
+        enc.write_audio_f32(&vec![0.05f32; 48_000 / 4 * 2]).unwrap();
+        enc.finish().unwrap();
+        assert!(mkv.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".neoveg_part_"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporários órfãos: {leftovers:?}");
+
+        let idx = demux_file(&mkv).unwrap();
+        assert!(idx.tracks.iter().any(|t| t.kind == TrackKind::Video));
+        if let Ok(out) = Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-v", "error", "-i"])
+            .arg(&mkv)
+            .args(["-f", "null", "-"])
+            .output()
+        {
+            if out.status.success() {
+                assert!(
+                    out.stderr.is_empty(),
+                    "ffmpeg erro MKV H264: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
