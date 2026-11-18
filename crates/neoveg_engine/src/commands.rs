@@ -521,6 +521,10 @@ pub enum UiAction {
     PreviewRamBuild,
     PreviewRamClear,
     PreviewZoom(f32),
+    /// Zoom da prévia em passos de 5% (`n` passos; negativo diminui).
+    PreviewZoomStep(i32),
+    /// Alterna entre o zoom atual e o zoom de ajuste (*Bypass Zoom*).
+    PreviewZoomBypass,
     /// Escala da interface: `Some(n)` muda `n` passos, `None` volta a 100%.
     UiScale(Option<i32>),
     PreviewToggleExternalMonitor,
@@ -2269,6 +2273,33 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PreviewZoom(-0.8), h),
+    },
+    CommandDef {
+        id: "preview.zoom_step_in",
+        label: "Zoom da prévia: +5%",
+        menu_path: "Exibir/Prévia/Zoom +5%",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoomStep(1), h),
+    },
+    CommandDef {
+        id: "preview.zoom_step_out",
+        label: "Zoom da prévia: -5%",
+        menu_path: "Exibir/Prévia/Zoom -5%",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoomStep(-1), h),
+    },
+    CommandDef {
+        id: "preview.zoom_bypass",
+        label: "Zoom da prévia: ignorar zoom",
+        menu_path: "Exibir/Prévia/Ignorar zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoomBypass, h),
     },
     CommandDef {
         id: "preview.copy_frame",

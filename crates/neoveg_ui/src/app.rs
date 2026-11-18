@@ -245,6 +245,8 @@ pub(crate) struct PreviewReqKey {
     split_mode: neoveg_engine::playback::PreviewSplitMode,
     mute_video: bool,
     expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
+    /// Isolamento de canal em vigor (muda a imagem enviada à textura).
+    channel: (crate::preview_overlays::ChannelIsolation, bool),
 }
 
 pub struct App {
@@ -259,6 +261,13 @@ pub struct App {
     pub(crate) ram_preview: neoveg_engine::playback::RamPreviewCache,
     pub(crate) ram_preview_job: Option<RamPreviewJob>,
     pub(crate) preview_zoom: f32,
+    /// Zoom guardado por *Ignorar zoom* (volta ao alternar de novo).
+    pub(crate) preview_zoom_bypass: Option<(f32, egui::Vec2)>,
+    /// Isolamento de canal da prévia (Sobreposições) e se é em cinza.
+    pub(crate) preview_channel: crate::preview_overlays::ChannelIsolation,
+    pub(crate) preview_channel_gray: bool,
+    /// Fps exibido na prévia durante a reprodução.
+    pub(crate) display_fps: crate::preview_overlays::FpsMeter,
     pub(crate) preview_pan: egui::Vec2,
     pub external_monitor: bool,
     pub(crate) external_monitor_fullscreen: bool,
@@ -446,6 +455,10 @@ impl App {
             ram_preview: neoveg_engine::playback::RamPreviewCache::default(),
             ram_preview_job: None,
             preview_zoom: 1.0,
+            preview_zoom_bypass: None,
+            preview_channel: Default::default(),
+            preview_channel_gray: false,
+            display_fps: Default::default(),
             preview_pan: egui::Vec2::ZERO,
             external_monitor: false,
             external_monitor_fullscreen: false,
@@ -1911,7 +1924,12 @@ impl App {
             if let Some(e) = res.error {
                 self.set_status(format!("Prévia: {e}"));
             }
-            let image = rgba_to_color_image(&res.image);
+            let image = self.preview_color_image(&res.image);
+            if self.is_playing() {
+                self.display_fps.push(Instant::now());
+            } else {
+                self.display_fps.clear();
+            }
             match &mut self.preview_tex {
                 Some(t) => t.set(image, egui::TextureOptions::LINEAR),
                 None => {
@@ -2021,6 +2039,7 @@ impl App {
             };
             (lid, lt, rid, rt)
         });
+        let channel = self.effective_preview_channel();
         let key = PreviewReqKey {
             t,
             gen: self.generation,
@@ -2031,6 +2050,7 @@ impl App {
             split_mode,
             mute_video,
             expanded_ab,
+            channel,
         };
         if key != self.last_req {
             if !scopes
@@ -2040,7 +2060,10 @@ impl App {
             {
                 let frame_idx = self.project.settings.fps.ticks_to_frame_round(t);
                 if let Some(cached) = self.ram_preview.get(self.generation, frame_idx, w, h) {
-                    let ci = rgba_to_color_image(cached);
+                    let ci = isolated_color_image(cached, channel);
+                    if self.is_playing() {
+                        self.display_fps.push(Instant::now());
+                    }
                     match &mut self.preview_tex {
                         Some(tex) => tex.set(ci, egui::TextureOptions::LINEAR),
                         None => {
@@ -2190,6 +2213,44 @@ impl App {
         }
         self.ram_preview.clear();
         self.set_status("Cache da prévia dinâmica em RAM limpo.");
+    }
+
+    /// Isolamento de canal em vigor: só com as Sobreposições ligadas, como o
+    /// botão Overlays do VEGAS Pro.
+    pub(crate) fn effective_preview_channel(
+        &self,
+    ) -> (crate::preview_overlays::ChannelIsolation, bool) {
+        if self.opts.safe_areas {
+            (self.preview_channel, self.preview_channel_gray)
+        } else {
+            (crate::preview_overlays::ChannelIsolation::Off, false)
+        }
+    }
+
+    fn preview_color_image(&self, img: &image::RgbaImage) -> egui::ColorImage {
+        isolated_color_image(img, self.effective_preview_channel())
+    }
+
+    /// Zoom da prévia em passos de 5% (*+* / *-* do botão Zoom).
+    pub fn step_preview_zoom(&mut self, steps: i32) {
+        let z = self.preview_zoom + 0.05 * steps.clamp(-200, 200) as f32;
+        self.preview_zoom_bypass = None;
+        self.apply_preview_zoom(z.clamp(0.25, 8.0));
+    }
+
+    /// *Ignorar zoom*: alterna entre o zoom atual e o de ajuste à janela.
+    pub fn toggle_preview_zoom_bypass(&mut self) {
+        match self.preview_zoom_bypass.take() {
+            Some((z, pan)) => {
+                self.apply_preview_zoom(z);
+                self.preview_pan = pan;
+            }
+            None if (self.preview_zoom - 1.0).abs() > 0.01 => {
+                self.preview_zoom_bypass = Some((self.preview_zoom, self.preview_pan));
+                self.apply_preview_zoom(0.0);
+            }
+            None => {}
+        }
     }
 
     pub fn apply_preview_zoom(&mut self, val: f32) {
@@ -2602,8 +2663,11 @@ impl App {
                 self.clear_ram_preview();
             }
             UiAction::PreviewZoom(z) => {
+                self.preview_zoom_bypass = None;
                 self.apply_preview_zoom(z);
             }
+            UiAction::PreviewZoomStep(n) => self.step_preview_zoom(n),
+            UiAction::PreviewZoomBypass => self.toggle_preview_zoom_bypass(),
             UiAction::UiScale(steps) => {
                 let pct = self.prefs.step_ui_scale(steps).to_string();
                 // aplicada no próximo quadro (`frame_ui`)
@@ -4920,6 +4984,19 @@ impl App {
             self.set_status(e);
         }
     }
+}
+
+/// Imagem da prévia com o isolamento de canal das Sobreposições aplicado.
+pub(crate) fn isolated_color_image(
+    img: &image::RgbaImage,
+    (mode, gray): (crate::preview_overlays::ChannelIsolation, bool),
+) -> egui::ColorImage {
+    if mode == crate::preview_overlays::ChannelIsolation::Off {
+        return rgba_to_color_image(img);
+    }
+    let mut raw = img.as_raw().clone();
+    crate::preview_overlays::isolate_channel(&mut raw, mode, gray);
+    egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &raw)
 }
 
 pub(crate) fn rgba_to_color_image(img: &image::RgbaImage) -> egui::ColorImage {

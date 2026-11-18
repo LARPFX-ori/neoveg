@@ -611,6 +611,15 @@ pub struct SafeGuidesPrefs {
     pub cut_4x3: bool,
     pub cut_9x16: bool,
     pub cut_1x1: bool,
+    /// Retângulos das áreas de ação e de título.
+    pub action_title: bool,
+    /// Grade (*Grid*) com as divisões abaixo (manual do VEGAS Pro 21, p. 198:
+    /// divisões horizontais e verticais da grade nas Preferências).
+    pub grid: bool,
+    pub grid_h: u8,
+    pub grid_v: u8,
+    /// Réguas em pixels do projeto nas bordas da imagem.
+    pub rulers: bool,
 }
 
 impl Default for SafeGuidesPrefs {
@@ -621,6 +630,11 @@ impl Default for SafeGuidesPrefs {
             cut_4x3: false,
             cut_9x16: false,
             cut_1x1: false,
+            action_title: true,
+            grid: false,
+            grid_h: 8,
+            grid_v: 8,
+            rulers: false,
         }
     }
 }

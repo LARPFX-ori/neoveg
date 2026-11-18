@@ -1546,3 +1546,57 @@ fn encoder_abre_em_janela_propria_fora_do_dock() {
     assert!(!app.detached_tabs.contains(&DockTab::Encoder));
     assert!(app.closed_tabs.contains(&DockTab::Encoder));
 }
+
+/// Prévia de Vídeo (manual do VEGAS Pro 21, p. 197-209): zoom em passos de
+/// 5%, Ignorar zoom alterna e volta, e o isolamento de canal só vale com as
+/// Sobreposições ligadas (e muda a imagem enviada à textura).
+#[test]
+fn previa_zoom_5_por_cento_ignorar_zoom_e_isolamento_de_canal() {
+    use crate::preview_overlays::ChannelIsolation;
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.apply_preview_zoom(0.0);
+    app.exec_cmd(Some(&ctx), "preview.zoom_step_in");
+    assert!((app.preview_zoom - 1.05).abs() < 1e-4);
+    app.exec_cmd(Some(&ctx), "preview.zoom_step_out");
+    app.exec_cmd(Some(&ctx), "preview.zoom_step_out");
+    assert!((app.preview_zoom - 0.95).abs() < 1e-4);
+    for _ in 0..500 {
+        app.exec_cmd(Some(&ctx), "preview.zoom_step_out");
+    }
+    assert!(app.preview_zoom >= 0.25);
+
+    app.apply_preview_zoom(2.0);
+    app.preview_pan = vec2(30.0, -10.0);
+    app.exec_cmd(Some(&ctx), "preview.zoom_bypass");
+    assert!((app.preview_zoom - 1.0).abs() < 1e-4);
+    assert!(app.preview_zoom_bypass.is_some());
+    app.exec_cmd(Some(&ctx), "preview.zoom_bypass");
+    assert!((app.preview_zoom - 2.0).abs() < 1e-4);
+    assert_eq!(app.preview_pan, vec2(30.0, -10.0));
+    assert!(app.preview_zoom_bypass.is_none());
+    // no zoom de ajuste, Ignorar zoom não tem o que guardar
+    app.apply_preview_zoom(0.0);
+    app.exec_cmd(Some(&ctx), "preview.zoom_bypass");
+    assert!(app.preview_zoom_bypass.is_none());
+
+    app.preview_channel = ChannelIsolation::Red;
+    app.opts.safe_areas = false;
+    assert_eq!(app.effective_preview_channel().0, ChannelIsolation::Off);
+    app.opts.safe_areas = true;
+    assert_eq!(
+        app.effective_preview_channel(),
+        (ChannelIsolation::Red, false)
+    );
+    let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 100, 50, 255]));
+    let ci = crate::app::isolated_color_image(&img, app.effective_preview_channel());
+    assert_eq!(ci.pixels[0], egui::Color32::from_rgb(200, 0, 0));
+    let ci = crate::app::isolated_color_image(&img, (ChannelIsolation::Off, false));
+    assert_eq!(ci.pixels[0], egui::Color32::from_rgb(200, 100, 50));
+}
