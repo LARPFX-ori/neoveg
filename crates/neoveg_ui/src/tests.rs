@@ -1450,3 +1450,99 @@ fn escala_da_interface_pelo_menu_aplica_no_proximo_quadro() {
     let _ = ctx.run(raw(0.15), |c| app.frame_ui(c));
     assert!((ctx.zoom_factor() - 1.0).abs() < 0.001);
 }
+
+/// Setas Esquerda/Direita (lista de atalhos do VEGAS Pro): com Quantizar
+/// para quadros, cada toque anda pelo menos um quadro na grade, mesmo com o
+/// zoom aberto (um pixel menor que um quadro); sem quantizar, um pixel.
+#[test]
+fn setas_andam_um_quadro_na_agulha_com_quantizar() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let fps = app.project.settings.fps;
+    let fd = app.project.settings.frame_dur();
+    app.opts.quantize = true;
+    // zoom aberto: 1 px bem menor que um quadro
+    app.tl.px_per_sec = 4000.0;
+    app.cursor = Ticks::ZERO;
+    let t = app.arrow_step_target(1);
+    assert_eq!(t, fps.frame_to_ticks(1));
+    app.cursor = t;
+    assert_eq!(app.arrow_step_target(1), fps.frame_to_ticks(2));
+    assert_eq!(app.arrow_step_target(-1), Ticks::ZERO);
+    // no início não passa de zero
+    app.cursor = Ticks::ZERO;
+    assert_eq!(app.arrow_step_target(-1), Ticks::ZERO);
+    // cursor fora da grade volta para a grade
+    app.cursor = fd + Ticks::from_raw(7);
+    assert_eq!(app.arrow_step_target(1), fps.frame_to_ticks(2));
+    // zoom fechado: um pixel vale vários quadros
+    app.tl.px_per_sec = 2.0;
+    app.cursor = Ticks::ZERO;
+    assert!(app.arrow_step_target(1) > fps.frame_to_ticks(1));
+    // sem quantizar: um pixel
+    app.opts.quantize = false;
+    app.tl.px_per_sec = 4000.0;
+    app.cursor = Ticks::ZERO;
+    let t = app.arrow_step_target(1);
+    assert!(t > Ticks::ZERO && t < fd);
+
+    // pelo teclado, sem foco em campo de texto
+    app.opts.quantize = true;
+    app.cursor = Ticks::ZERO;
+    app.welcome_open = false;
+    app.splash = crate::splash::SplashState::startup(false);
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![egui::Event::Key {
+            key: egui::Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+        ..Default::default()
+    };
+    let _ = ctx.run(raw, |c| app.handle_shortcuts(c));
+    assert_eq!(app.cursor, fps.frame_to_ticks(1));
+}
+
+/// O Neoveg Encoder abre em janela própria, fora da área de janelas: não
+/// entra na árvore do dock, o menu Exibir abre a janela, um layout salvo com
+/// ele como aba ativa cai na Mídia do Projeto e fechar a janela fecha o painel.
+#[test]
+fn encoder_abre_em_janela_propria_fora_do_dock() {
+    use crate::dock::{build_dock_tree, find_pane_tile, DockPane};
+    use crate::layout::WindowLayout;
+
+    let tree = build_dock_tree(0.40, DockTab::Encoder, false);
+    assert!(find_pane_tile(&tree, DockPane::Tab(DockTab::Encoder)).is_none());
+
+    let l = WindowLayout {
+        active_tab: crate::layout::panel_key(DockTab::Encoder).to_string(),
+        ..WindowLayout::default()
+    };
+    assert_eq!(l.active_panel(), DockTab::ProjectMedia);
+
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let antes = app.dock_tab;
+    app.exec_cmd(Some(&ctx), "view.tab.encoder");
+    assert!(app.detached_tabs.contains(&DockTab::Encoder));
+    assert!(!app.closed_tabs.contains(&DockTab::Encoder));
+    assert_eq!(app.dock_tab, antes, "a aba ativa do dock não muda");
+    app.close_dock_tab(DockTab::Encoder);
+    assert!(!app.detached_tabs.contains(&DockTab::Encoder));
+    assert!(app.closed_tabs.contains(&DockTab::Encoder));
+}

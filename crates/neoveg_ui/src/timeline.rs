@@ -1298,7 +1298,7 @@ impl App {
             pos2(box_r.right() - 8.0, box_r.bottom() - 3.0),
             Align2::RIGHT_BOTTOM,
             self.fmt_time(self.view_time()),
-            FontId::monospace(20.0),
+            crate::fonts::time_font(ui.ctx(), 20.0),
             self.theme.timecode_fg,
         );
 

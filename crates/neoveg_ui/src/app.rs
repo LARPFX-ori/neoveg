@@ -934,6 +934,35 @@ impl App {
         Ticks::from_samples(s.pos.max(0), self.audio.sr)
     }
 
+    /// Destino do cursor para uma seta (`dir` < 0: esquerda). Anda um pixel
+    /// da régua; com Quantizar para quadros ligado, para na grade de quadros e
+    /// anda pelo menos um quadro, para que a agulha nunca fique parada no
+    /// mesmo quadro com o zoom aberto.
+    pub(crate) fn arrow_step_target(&self, dir: i64) -> Ticks {
+        let px = Ticks::from_secs_f64_clamped(
+            1.0 / f64::from(
+                self.tl
+                    .px_per_sec
+                    .max(crate::timeline::TimelineState::MIN_PX_PER_SEC),
+            ),
+        )
+        .max(Ticks::from_raw(1));
+        let cur = self.cursor;
+        let raw = if dir < 0 { cur - px } else { cur + px };
+        if !self.opts.quantize {
+            return raw.max(Ticks::ZERO);
+        }
+        let fps = self.project.settings.fps;
+        let cur_f = fps.ticks_to_frame_round(cur);
+        let raw_f = fps.ticks_to_frame_round(raw);
+        let f = if dir < 0 {
+            raw_f.min(cur_f.saturating_sub(1))
+        } else {
+            raw_f.max(cur_f.saturating_add(1))
+        };
+        fps.frame_to_ticks(f.max(0)).max(Ticks::ZERO)
+    }
+
     pub fn set_cursor(&mut self, t: Ticks) {
         let t = t.max(Ticks::ZERO);
         self.cursor = t;
@@ -2427,6 +2456,9 @@ impl App {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+            UiAction::SelectDock(panel) if crate::layout::window_only(panel) => {
+                self.open_window_panel(ctx, panel);
+            }
             UiAction::SelectDock(panel) => {
                 self.dock_visible = true;
                 self.closed_tabs.remove(&panel);
@@ -2651,7 +2683,7 @@ impl App {
     // Atalhos de teclado (despachados via Tabela Única de Comandos)
     // -----------------------------------------------------------------
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // com um script rodando, a sessão é dele até o fim
         if self.splash.active
             || self.welcome_open
@@ -2690,32 +2722,17 @@ impl App {
             return;
         }
 
-        // Passo fino de 1 pixel quando ArrowLeft/Right são usadas sem modificadores
+        // Esquerda/Direita sem modificadores (lista de atalhos do VEGAS Pro):
+        // um pixel da régua; com Quantizar para quadros, no mínimo um quadro
         if !ctrl && !shift && !alt {
             if pressed(Key::ArrowLeft) {
-                let dt = Ticks::from_secs_f64_clamped(
-                    1.0 / self
-                        .tl
-                        .px_per_sec
-                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
-                        as f64,
-                )
-                .max(Ticks::from_raw(1));
-                let c = self.cursor;
-                self.set_cursor(c - dt);
+                let t = self.arrow_step_target(-1);
+                self.set_cursor(t);
                 return;
             }
             if pressed(Key::ArrowRight) {
-                let dt = Ticks::from_secs_f64_clamped(
-                    1.0 / self
-                        .tl
-                        .px_per_sec
-                        .max(crate::timeline::TimelineState::MIN_PX_PER_SEC)
-                        as f64,
-                )
-                .max(Ticks::from_raw(1));
-                let c = self.cursor;
-                self.set_cursor(c + dt);
+                let t = self.arrow_step_target(1);
+                self.set_cursor(t);
                 return;
             }
         }

@@ -398,10 +398,8 @@ impl App {
             self.session.project.clone(),
             in_out,
         );
-        self.dock_visible = true;
-        self.detached_tabs.remove(&DockTab::Encoder);
-        self.dock_tab = DockTab::Encoder;
-        self.pending_dock_focus = Some(DockTab::Encoder);
+        // o Encoder abre na janela própria, fora da área de janelas
+        self.open_window_panel(None, DockTab::Encoder);
         self.set_status(tr(lang, "Timeline enviada para a fila do Neoveg Encoder"));
     }
 

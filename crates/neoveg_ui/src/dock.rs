@@ -49,8 +49,14 @@ impl DockPane {
         }
     }
 
+    /// Painéis que a árvore do dock tem de ter; os só de janela (Encoder)
+    /// ficam de fora.
     fn all_canonical() -> Vec<DockPane> {
-        let mut out: Vec<DockPane> = DockTab::ALL.into_iter().map(DockPane::Tab).collect();
+        let mut out: Vec<DockPane> = DockTab::ALL
+            .into_iter()
+            .filter(|t| !crate::layout::window_only(*t))
+            .map(DockPane::Tab)
+            .collect();
         out.push(DockPane::Preview);
         out.push(DockPane::MasterBus);
         out
@@ -138,13 +144,14 @@ pub fn build_dock_tree(
     let mut tiles = Tiles::default();
     // Grupo à esquerda: os painéis padrão primeiro, depois os outros (que
     // começam fechados e aparecem aqui quando abertos pelo menu Exibir).
-    let left_order: Vec<DockTab> =
-        crate::layout::DEFAULT_DOCK_TABS
-            .into_iter()
-            .chain(DockTab::ALL.into_iter().filter(|t| {
-                !crate::layout::DEFAULT_DOCK_TABS.contains(t) && *t != DockTab::Trimmer
-            }))
-            .collect();
+    let left_order: Vec<DockTab> = crate::layout::DEFAULT_DOCK_TABS
+        .into_iter()
+        .chain(DockTab::ALL.into_iter().filter(|t| {
+            !crate::layout::DEFAULT_DOCK_TABS.contains(t)
+                && *t != DockTab::Trimmer
+                && !crate::layout::window_only(*t)
+        }))
+        .collect();
     let mut tab_ids = Vec::with_capacity(left_order.len());
     let mut active_id = None;
     for tab in left_order {
@@ -213,6 +220,9 @@ pub fn sanitize_tile_tree(
         return;
     }
 
+    // árvore salva antes do Encoder virar só janela: o painel dele fica na
+    // árvore, sempre escondido, e não conta
+    found_panes.retain(|p| !matches!(p, DockPane::Tab(t) if crate::layout::window_only(*t)));
     let expected = DockPane::all_canonical();
     if found_panes.len() != expected.len() || expected.iter().any(|p| !found_panes.contains(p)) {
         *tree = build_dock_tree(preview_ratio, active_tab, preview_on_left);
@@ -1381,5 +1391,24 @@ mod tests {
             &mut found
         ));
         assert_eq!(found.len(), DockPane::all_canonical().len());
+    }
+
+    /// Layout salvo quando o Encoder ainda era aba do dock: a árvore continua
+    /// válida (não é refeita) e a árvore nova não tem o Encoder.
+    #[test]
+    fn arvore_antiga_com_encoder_continua_valida_e_a_nova_nao_tem_encoder() {
+        let mut tree = build_dock_tree(0.40, DockTab::ProjectMedia, false);
+        assert!(find_pane_tile(&tree, DockPane::Tab(DockTab::Encoder)).is_none());
+        let media = find_pane_tile(&tree, DockPane::Tab(DockTab::ProjectMedia)).expect("mídia");
+        let grupo = tree.tiles.parent_of(media).expect("grupo");
+        let enc = tree.tiles.insert_pane(DockPane::Tab(DockTab::Encoder));
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(grupo) {
+            tabs.add_child(enc);
+        }
+        let antes: Vec<TileId> = tree.tiles.tile_ids().collect();
+        sanitize_tile_tree(&mut tree, 0.40, DockTab::ProjectMedia, false);
+        let depois: Vec<TileId> = tree.tiles.tile_ids().collect();
+        assert_eq!(antes.len(), depois.len(), "a árvore antiga foi refeita");
+        assert!(find_pane_tile(&tree, DockPane::Tab(DockTab::Encoder)).is_some());
     }
 }

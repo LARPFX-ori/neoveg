@@ -18,6 +18,10 @@ const MAX_SYSTEM_FONT_BYTES: u64 = 64 * 1024 * 1024;
 const CJK_FONT_KEY: &str = "neoveg_sys_jp";
 const UI_FONT_KEY: &str = "neoveg_sys_ui";
 const MONO_FONT_KEY: &str = "neoveg_sys_mono";
+const TIME_FONT_KEY: &str = "neoveg_sys_time";
+/// Família do Visor de tempo: números grandes em negrito, como no VEGAS Pro.
+/// Sempre existe na cadeia (cai na monoespaçada sem a fonte do sistema).
+pub const TIME_FAMILY: &str = "neoveg_time";
 
 #[derive(Clone)]
 struct LoadedSystemFont {
@@ -28,6 +32,7 @@ struct LoadedSystemFont {
 static CJK_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
 static UI_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
 static MONO_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
+static TIME_FONT_CACHE: OnceLock<Option<LoadedSystemFont>> = OnceLock::new();
 
 /// Pasta de fontes do Windows (`%WINDIR%\Fonts`, ou `C:\Windows\Fonts`).
 fn windows_font_dir() -> PathBuf {
@@ -79,6 +84,72 @@ fn candidate_mono_font_paths() -> Vec<PathBuf> {
         out.push(PathBuf::from(p));
     }
     out
+}
+
+/// Fonte do Visor de tempo: a sem serifa do sistema em negrito (Segoe UI Bold
+/// no Windows), com números de largura fixa.
+fn candidate_time_font_paths() -> Vec<PathBuf> {
+    let win = windows_font_dir();
+    let mut out = vec![win.join("segoeuib.ttf"), win.join("tahomabd.ttf")];
+    for p in [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ] {
+        out.push(PathBuf::from(p));
+    }
+    out
+}
+
+/// Para o Visor de tempo: precisa dos números e dos separadores dos formatos
+/// de tempo, com todos os dígitos da mesma largura (o visor não "dança").
+fn validate_time_font(bytes: &[u8]) -> Option<u32> {
+    use ab_glyph::ScaleFont as _;
+    for idx in 0..4u32 {
+        let Ok(font) = FontVec::try_from_vec_and_index(bytes.to_vec(), idx) else {
+            continue;
+        };
+        let valid_units = font
+            .units_per_em()
+            .is_some_and(|u| (16.0..=16384.0).contains(&u));
+        if !valid_units || !"0123456789:;.,-".chars().all(|c| font.glyph_id(c).0 != 0) {
+            continue;
+        }
+        let scaled = font.as_scaled(100.0);
+        let w0 = scaled.h_advance(font.glyph_id('0'));
+        let tabular = w0.is_finite()
+            && w0 > 0.0
+            && "123456789"
+                .chars()
+                .all(|c| (scaled.h_advance(font.glyph_id(c)) - w0).abs() < 0.5);
+        if tabular {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn cached_time_font() -> Option<&'static LoadedSystemFont> {
+    TIME_FONT_CACHE
+        .get_or_init(|| first_valid_font(candidate_time_font_paths(), validate_time_font))
+        .as_ref()
+}
+
+/// Fonte do Visor de tempo no tamanho pedido. Se a família não estiver
+/// registrada no contexto (fontes trocadas por fora), usa a monoespaçada em
+/// vez de travar o egui.
+pub fn time_font(ctx: &egui::Context, size: f32) -> egui::FontId {
+    let fam = egui::FontFamily::Name(TIME_FAMILY.into());
+    if ctx.fonts(|f| f.families().contains(&fam)) {
+        egui::FontId::new(size, fam)
+    } else {
+        egui::FontId::monospace(size)
+    }
 }
 
 /// Aceita a fonte só se ela abrir e cobrir os idiomas latinos do programa
@@ -259,6 +330,21 @@ fn font_definitions(system_ui: bool) -> egui::FontDefinitions {
             }
         }
     }
+    // Visor de tempo: a negrito do sistema na frente da cadeia monoespaçada
+    let mut time_chain = defs
+        .families
+        .get(&egui::FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+    if system_ui {
+        if let Some(font) = cached_time_font() {
+            defs.font_data
+                .insert(TIME_FONT_KEY.to_owned(), font_data(font));
+            time_chain.insert(0, TIME_FONT_KEY.to_owned());
+        }
+    }
+    defs.families
+        .insert(egui::FontFamily::Name(TIME_FAMILY.into()), time_chain);
     defs
 }
 
@@ -273,12 +359,39 @@ mod tests {
         assert_eq!(validate_japanese_font(&[]), None);
         assert_eq!(validate_japanese_font(b"not a valid font"), None);
         assert_eq!(validate_japanese_font(&vec![0xFF; 4096]), None);
+        assert_eq!(validate_time_font(&[]), None);
+        assert_eq!(validate_time_font(&vec![0xFF; 4096]), None);
         assert_eq!(validate_latin_font(&[]), None);
         assert_eq!(validate_latin_font(b"not a valid font"), None);
         assert_eq!(validate_latin_font(&vec![0xFF; 4096]), None);
         // arquivo inexistente ou pasta: sem fonte, sem pânico
         assert!(read_bounded_font(Path::new("nao/existe.ttf"), validate_latin_font).is_none());
         assert!(read_bounded_font(Path::new("."), validate_latin_font).is_none());
+    }
+
+    #[test]
+    fn familia_do_visor_de_tempo_sempre_existe_e_cai_na_monoespacada() {
+        let fam = egui::FontFamily::Name(TIME_FAMILY.into());
+        for system_ui in [false, true] {
+            let defs = font_definitions(system_ui);
+            let chain = defs.families.get(&fam).expect("família do visor");
+            let mono = defs
+                .families
+                .get(&egui::FontFamily::Monospace)
+                .expect("monoespaçada");
+            // a reserva é a cadeia monoespaçada inteira
+            assert!(chain.ends_with(mono), "{chain:?} / {mono:?}");
+            if !system_ui {
+                assert_eq!(chain, mono);
+            }
+        }
+        // contexto sem as fontes do programa: cai na monoespaçada
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(time_font(&ctx, 20.0), egui::FontId::monospace(20.0));
+        ctx.set_fonts(font_definitions(false));
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(time_font(&ctx, 20.0).family, fam);
     }
 
     #[test]
