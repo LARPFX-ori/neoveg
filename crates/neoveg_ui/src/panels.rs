@@ -138,7 +138,7 @@ impl App {
         }
     }
 
-    /// Menu das Sobreposições (seta ▾ e botão direito do botão Sobreposições,
+    /// Menu das Sobreposições (seta ⏷ ao lado e botão direito do botão Sobreposições,
     /// manual do VEGAS Pro 21, p. 197): o que aparece quando elas estão
     /// ligadas. As guias ficam salvas nas Preferências; o isolamento de canal
     /// vale só para a sessão.
@@ -555,13 +555,13 @@ impl App {
             )
             .on_hover_text(tr(
                 lang,
-                "Sobreposições: áreas de segurança, grade e canais (▾ ou botão direito: escolher)",
+                "Sobreposições: áreas de segurança, grade e canais (seta ao lado ou botão direito: escolher)",
             ));
             if safe_resp.clicked() {
                 self.opts.safe_areas = !self.opts.safe_areas;
             }
             safe_resp.context_menu(|ui| self.safe_guides_menu(ui));
-            ui.menu_button("▾", |ui| self.safe_guides_menu(ui))
+            ui.menu_button("⏷", |ui| self.safe_guides_menu(ui))
                 .response
                 .on_hover_text(tr(lang, "Escolher as sobreposições"));
             let copy_resp = icons::icon_button(ui, Icon::CopyFrame, None, false, true, &self.theme);
