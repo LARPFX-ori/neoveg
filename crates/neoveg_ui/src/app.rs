@@ -283,6 +283,12 @@ pub struct App {
     pub detached_tabs: HashSet<DockTab>,
     /// Painéis fechados (fora da área de janelas); voltam pelo menu Exibir.
     pub closed_tabs: HashSet<DockTab>,
+    /// Última posição e tamanho de cada janela destacada (`.neoveglayout`).
+    pub(crate) floating_geom: std::collections::BTreeMap<String, crate::layout::FloatingGeom>,
+    /// Geometria com que cada janela aberta abriu (fixa enquanto aberta).
+    pub(crate) floating_open: HashMap<String, Option<crate::layout::FloatingGeom>>,
+    /// Janelas destacadas desenhadas no último quadro.
+    pub(crate) floating_shown: HashSet<String>,
     pub preview_detached: bool,
     pub preview_visible: bool,
     pub master_bus_visible: bool,
@@ -472,6 +478,9 @@ impl App {
             },
             detached_tabs: initial_layout.detached_panels(),
             closed_tabs: initial_layout.closed_panels(),
+            floating_geom: initial_layout.floating_windows.clone(),
+            floating_open: HashMap::new(),
+            floating_shown: HashSet::new(),
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
             master_bus_visible,
@@ -4789,6 +4798,7 @@ impl App {
             edit_layout: Some(self.prefs.edit_layout.clone()),
             tile_tree: Some(self.dock_tree.clone()),
             closed_tabs: Some(closed),
+            floating_windows: self.floating_geom.clone(),
         };
         l.sanitize();
         l
@@ -4804,6 +4814,9 @@ impl App {
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
         self.closed_tabs = l.closed_panels();
+        self.floating_geom = l.floating_windows.clone();
+        // janelas abertas reabrem no lugar do layout novo
+        self.floating_open.clear();
         self.preview_detached = l.preview_detached;
         self.preview_visible = l.preview_visible;
         self.master_bus_visible = l.master_bus_visible;

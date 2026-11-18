@@ -1644,3 +1644,54 @@ fn minimizar_maximizar_altura_da_trilha_e_voltar() {
     assert_eq!(app.project.tracks[0].height, 400.0);
     app.toggle_track_height(usize::MAX, true);
 }
+
+/// Janelas destacadas lembram posição e tamanho (`.neoveglayout`): a
+/// geometria de abertura fica fixa enquanto a janela está aberta (o egui não
+/// briga com o usuário ao mover), a janela reaberta parte do último lugar e
+/// o layout salvo leva e traz as posições.
+#[test]
+fn janelas_destacadas_lembram_posicao_e_tamanho() {
+    use crate::layout::FLOATING_PREVIEW_KEY as PV;
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.floating_geom.clear();
+    app.floating_open.clear();
+    // primeira abertura: sem geometria guardada
+    assert_eq!(app.floating_open_geom(PV), None);
+    app.remember_floating_geom(PV, Some([100.0, 80.0, 640.0, 360.0]));
+    // ainda aberta: continua a de abertura
+    assert_eq!(app.floating_open_geom(PV), None);
+    // fechou (não desenhada num quadro) e reabriu: parte do último lugar
+    app.floating_open.clear();
+    assert_eq!(
+        app.floating_open_geom(PV),
+        Some([100.0, 80.0, 640.0, 360.0])
+    );
+    app.remember_floating_geom(PV, None);
+    assert_eq!(
+        app.floating_geom.get(PV),
+        Some(&[100.0, 80.0, 640.0, 360.0])
+    );
+
+    let salvo = app.current_window_layout("teste");
+    assert_eq!(
+        salvo.floating_windows.get(PV),
+        Some(&[100.0, 80.0, 640.0, 360.0])
+    );
+    app.floating_geom.clear();
+    app.apply_window_layout(salvo);
+    assert_eq!(
+        app.floating_geom.get(PV),
+        Some(&[100.0, 80.0, 640.0, 360.0])
+    );
+    assert!(
+        app.floating_open.is_empty(),
+        "layout novo reabre as janelas no lugar dele"
+    );
+}
