@@ -1260,7 +1260,7 @@ impl App {
             pos2(box_r.left() + 6.0, box_r.top() + 3.0),
             Align2::LEFT_TOP,
             "Visor de tempo",
-            FontId::proportional(9.5),
+            crate::fonts::semibold_font(9.5),
             self.theme.text_muted,
         );
         painter.text(
@@ -1270,11 +1270,12 @@ impl App {
             FontId::proportional(9.5),
             self.theme.text_muted,
         );
-        painter.text(
+        crate::fonts::paint_tabular_text(
+            &painter,
             pos2(box_r.right() - 8.0, box_r.bottom() - 3.0),
             Align2::RIGHT_BOTTOM,
-            self.fmt_time(self.view_time()),
-            FontId::monospace(20.0),
+            &self.fmt_time(self.view_time()),
+            crate::fonts::visor_font(20.0),
             self.theme.timecode_fg,
         );
 
@@ -1564,11 +1565,12 @@ impl App {
                 Stroke::new(1.0_f32, self.theme.text_muted),
             );
             if is_major {
-                painter.text(
+                crate::fonts::paint_tabular_text(
+                    &painter,
                     pos2(x + 3.0, ruler_r.top() + 1.0),
                     Align2::LEFT_TOP,
-                    self.fmt_time(t),
-                    FontId::monospace(10.0),
+                    &self.fmt_time(t),
+                    crate::fonts::ruler_font(10.0),
                     self.theme.text_primary,
                 );
             }
@@ -4968,12 +4970,14 @@ impl App {
                 let mut text_right = (r.right() - btns_w).min(lanes.right());
                 if r.width() >= 150.0 {
                     let dur_str = self.fmt_time(e.length);
-                    let dur_galley = painter.layout_no_wrap(
-                        dur_str,
-                        FontId::monospace(9.5),
-                        hdr_fg.gamma_multiply(0.85),
-                    );
-                    let dur_w = dur_galley.size().x;
+                    let (dur_galley, dur_w) = painter.fonts(|f| {
+                        crate::fonts::tabular_galley(
+                            f,
+                            &dur_str,
+                            crate::fonts::visor_font(9.5),
+                            hdr_fg.gamma_multiply(0.85),
+                        )
+                    });
                     if text_right - dur_w - 8.0 > r.left().max(lanes.left()) + 36.0 {
                         let dx = text_right - dur_w - 4.0;
                         painter.with_clip_rect(hdr.intersect(lanes)).galley(

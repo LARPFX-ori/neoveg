@@ -1758,3 +1758,310 @@ fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
         );
     }
 }
+
+#[test]
+fn kittest_visor_e_chips_sem_oscilacao_tabular() {
+    fn collect_text_shapes_with_seps(
+        shape: &egui::epaint::Shape,
+        out: &mut Vec<(String, egui::Rect, Vec<f32>)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(ts) => {
+                let rect = egui::Rect::from_min_size(ts.pos, ts.galley.size());
+                let seps = ts
+                    .galley
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.glyphs.iter())
+                    .filter(|g| g.chr == ':' || g.chr == ';')
+                    .map(|g| ts.pos.x + g.pos.x)
+                    .collect();
+                out.push((ts.galley.text().to_owned(), rect, seps));
+            }
+            egui::epaint::Shape::Vec(items) => {
+                for item in items {
+                    collect_text_shapes_with_seps(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+
+    let settings = harness.state().project.settings.clone();
+    let fmt = settings.effective_time_format(harness.state().opts.time_format);
+    let smpte_samples = [
+        "00:00:00;00",
+        "11:11:11;11",
+        "07:47:57;27",
+        "17:41:51;11",
+        "08:08:08;08",
+    ];
+
+    let mut pos_lbl_xs = Vec::new();
+    let mut tam_lbl_xs = Vec::new();
+    let mut pos_chip_rects = Vec::new();
+    let mut tam_chip_rects = Vec::new();
+    let mut visor_rects = Vec::new();
+    let mut visor_seps: Vec<Vec<f32>> = Vec::new();
+    let mut chip_seps: Vec<Vec<f32>> = Vec::new();
+
+    for tc in smpte_samples {
+        let t = neoveg_common::parse_time(tc, settings.fps, settings.sample_rate, fmt)
+            .expect("timecode SMPTE válido deve ser interpretado");
+        let rendered = harness.state().fmt_time(t);
+        assert_eq!(rendered, tc);
+
+        // 1) Sem seleção: mede `Pos:` e `Visor de tempo` com `cursor = t`.
+        harness.state_mut().session.time_sel = None;
+        harness.state_mut().session.cursor = t;
+        harness.run_steps(2);
+
+        let pos_lbl_bounds = harness
+            .get_by_label("Pos:")
+            .raw_bounds()
+            .expect("Pos: deve ter bounds");
+        let pos_chip_bounds = harness
+            .get_all_by_label(tc)
+            .filter_map(|n| n.raw_bounds())
+            .min_by(|a, b| a.x0.total_cmp(&b.x0))
+            .expect("chip de Pos: deve ter bounds");
+        let tam_lbl_bounds = harness
+            .get_by_label("Tam:")
+            .raw_bounds()
+            .expect("Tam: deve ter bounds");
+
+        pos_lbl_xs.push(pos_lbl_bounds.x0 as f32);
+        pos_chip_rects.push(pos_chip_bounds);
+        tam_lbl_xs.push(tam_lbl_bounds.x0 as f32);
+
+        let ctx = harness.ctx.clone();
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1480.0, 900.0),
+                )),
+                time: Some(1.0),
+                ..Default::default()
+            },
+            |c| harness.state_mut().frame_ui(c),
+        );
+        let mut text_shapes = Vec::new();
+        for clipped in &out.shapes {
+            collect_text_shapes_with_seps(&clipped.shape, &mut text_shapes);
+        }
+        let visor_lbl_rect = text_shapes
+            .iter()
+            .find(|(s, _, _)| s == "Visor de tempo")
+            .map(|(_, r, _)| *r)
+            .expect("Visor de tempo deve existir");
+        let (visor_tc_rect, visor_tc_seps) = text_shapes
+            .iter()
+            .find(|(s, r, _)| {
+                s == tc
+                    && r.left() < 260.0
+                    && r.top() > visor_lbl_rect.top()
+                    && r.top() < visor_lbl_rect.top() + 60.0
+            })
+            .map(|(_, r, seps)| (*r, seps.clone()))
+            .expect("timecode do Visor de tempo deve existir");
+        assert_eq!(visor_tc_seps.len(), 3);
+        visor_rects.push(visor_tc_rect);
+        visor_seps.push(visor_tc_seps);
+
+        let (_, _, pos_chip_seps) = text_shapes
+            .iter()
+            .filter(|(s, r, _)| s == tc && r.top() > visor_lbl_rect.bottom())
+            .min_by(|(_, a, _), (_, b, _)| a.left().total_cmp(&b.left()))
+            .cloned()
+            .expect("TextShape do chip Pos: deve existir na barra de transporte");
+        assert_eq!(pos_chip_seps.len(), 3);
+        chip_seps.push(pos_chip_seps);
+
+        // 2) Com seleção de duração `t`: mede `Tam:` com `sel_len = t` (cursor = 0).
+        harness.state_mut().session.cursor = neoveg_common::Ticks::ZERO;
+        harness.state_mut().session.time_sel = Some((neoveg_common::Ticks::ZERO, t));
+        harness.run_steps(2);
+        let tam_chip_bounds = harness
+            .get_all_by_label(tc)
+            .filter_map(|n| n.raw_bounds())
+            .max_by(|a, b| a.x0.total_cmp(&b.x0))
+            .expect("chip de Tam: deve ter bounds");
+        tam_chip_rects.push(tam_chip_bounds);
+    }
+
+    let assert_f32_spread = |name: &str, vals: &[f32]| {
+        let min = vals.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (max - min) < 0.05,
+            "{name} oscilou: min={min}, max={max}, diff={}",
+            max - min
+        );
+    };
+    let assert_f64_spread = |name: &str, vals: &[f64]| {
+        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (max - min) < 0.05,
+            "{name} oscilou: min={min}, max={max}, diff={}",
+            max - min
+        );
+    };
+
+    assert_f32_spread("Pos: label x0", &pos_lbl_xs);
+    assert_f32_spread("Tam: label x0", &tam_lbl_xs);
+    assert_f64_spread(
+        "Pos: chip x0",
+        &pos_chip_rects.iter().map(|r| r.x0).collect::<Vec<_>>(),
+    );
+    assert_f64_spread(
+        "Pos: chip width",
+        &pos_chip_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    assert_f64_spread(
+        "Tam: chip x0",
+        &tam_chip_rects.iter().map(|r| r.x0).collect::<Vec<_>>(),
+    );
+    assert_f64_spread(
+        "Tam: chip width",
+        &tam_chip_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Visor de tempo rect.left",
+        &visor_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    for col in 0..3 {
+        let v_col = visor_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
+        assert_f32_spread(&format!("Visor de tempo sep[{col}]"), &v_col);
+        let c_col = chip_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
+        assert_f32_spread(&format!("Chip Pos: sep[{col}]"), &c_col);
+    }
+
+    // 3) Valida também sequências literais com todos os dígitos críticos ('0','1','7','8'),
+    // incluindo "77:77:77;77" e "88:88:88;88", no mesmo padrão de Visor + chips `Pos:`/`Tam:`.
+    let literal_samples = [
+        "00:00:00;00",
+        "11:11:11;11",
+        "77:77:77;77",
+        "17:41:51;11",
+        "88:88:88;88",
+    ];
+    let probe_ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&probe_ctx);
+    let mut lit_visor_rects = Vec::new();
+    let mut lit_pos_rects = Vec::new();
+    let mut lit_tam_rects = Vec::new();
+    let mut lit_visor_seps: Vec<Vec<f32>> = Vec::new();
+
+    for tc in literal_samples {
+        let mut v_rect = egui::Rect::NOTHING;
+        let mut p_rect = egui::Rect::NOTHING;
+        let mut t_rect = egui::Rect::NOTHING;
+        let out = probe_ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::TopBottomPanel::top("lit_transport").show(ctx, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let chip = |ui: &mut egui::Ui, label: &str| {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin::symmetric(5, 1))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 3.0;
+                                        let name = egui::RichText::new(label).small();
+                                        if ui.layout().prefer_right_to_left() {
+                                            crate::fonts::tabular_label(
+                                                ui,
+                                                tc,
+                                                crate::fonts::visor_font(10.5),
+                                                egui::Color32::WHITE,
+                                            );
+                                            ui.label(name);
+                                        } else {
+                                            ui.label(name);
+                                            crate::fonts::tabular_label(
+                                                ui,
+                                                tc,
+                                                crate::fonts::visor_font(10.5),
+                                                egui::Color32::WHITE,
+                                            );
+                                        }
+                                    });
+                                })
+                                .response
+                                .rect
+                        };
+                        t_rect = chip(ui, "Tam:");
+                        p_rect = chip(ui, "Pos:");
+                    });
+                });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    v_rect = crate::fonts::paint_tabular_text(
+                        ui.painter(),
+                        egui::pos2(240.0, 80.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        tc,
+                        crate::fonts::visor_font(20.0),
+                        egui::Color32::WHITE,
+                    );
+                });
+            },
+        );
+        let mut shapes = Vec::new();
+        for clipped in &out.shapes {
+            collect_text_shapes_with_seps(&clipped.shape, &mut shapes);
+        }
+        let (_, _, seps) = shapes
+            .into_iter()
+            .find(|(s, r, _)| s == tc && r.top() > 40.0)
+            .expect("Visor literal deve existir");
+        assert_eq!(seps.len(), 3);
+        lit_visor_rects.push(v_rect);
+        lit_pos_rects.push(p_rect);
+        lit_tam_rects.push(t_rect);
+        lit_visor_seps.push(seps);
+    }
+
+    assert_f32_spread(
+        "Literal Visor left",
+        &lit_visor_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Visor width",
+        &lit_visor_rects
+            .iter()
+            .map(|r| r.width())
+            .collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Pos chip x0",
+        &lit_pos_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Pos chip width",
+        &lit_pos_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Tam chip x0",
+        &lit_tam_rects.iter().map(|r| r.left()).collect::<Vec<_>>(),
+    );
+    assert_f32_spread(
+        "Literal Tam chip width",
+        &lit_tam_rects.iter().map(|r| r.width()).collect::<Vec<_>>(),
+    );
+    for col in 0..3 {
+        let v_col = lit_visor_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
+        assert_f32_spread(&format!("Literal Visor sep[{col}]"), &v_col);
+    }
+}

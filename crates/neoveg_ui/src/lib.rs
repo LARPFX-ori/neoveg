@@ -20,6 +20,7 @@ mod dock;
 mod edit;
 mod edit_details;
 mod encoder_panel;
+pub mod fonts;
 mod fx_browser;
 mod gen_browser;
 mod icons;

@@ -278,25 +278,41 @@ impl App {
             // Coluna direita: leitores SMPTE, In/Out e inserção na timeline
             let right = &mut cols[1];
             let sel_len = (self.trimmer.sel_out - self.trimmer.sel_in).max(Ticks::ZERO);
-            right.label(
-                egui::RichText::new(format!(
-                    "Cursor: {}  |  Duração: {}",
-                    format_ticks(self.trimmer.cursor, fps, sr, fmt),
-                    format_ticks(dur, fps, sr, fmt),
-                ))
-                .monospace()
-                .small(),
+            let line1 = format!(
+                "Cursor: {}  |  Duração: {}",
+                format_ticks(self.trimmer.cursor, fps, sr, fmt),
+                format_ticks(dur, fps, sr, fmt),
             );
-            right.label(
-                egui::RichText::new(format!(
-                    "In: {}   Out: {}   Trecho: {}",
-                    format_ticks(self.trimmer.sel_in, fps, sr, fmt),
-                    format_ticks(self.trimmer.sel_out, fps, sr, fmt),
-                    format_ticks(sel_len, fps, sr, fmt),
-                ))
-                .monospace()
-                .small(),
+            crate::fonts::tabular_label(
+                right,
+                &line1,
+                crate::fonts::visor_font(10.5),
+                self.theme.text_primary,
             );
+            let in_txt = format!("In: {}", format_ticks(self.trimmer.sel_in, fps, sr, fmt));
+            let out_txt = format!("Out: {}", format_ticks(self.trimmer.sel_out, fps, sr, fmt));
+            let trecho_txt = format!("Trecho: {}", format_ticks(sel_len, fps, sr, fmt));
+            right.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                crate::fonts::tabular_label(
+                    ui,
+                    &in_txt,
+                    crate::fonts::visor_font(10.5),
+                    self.theme.text_primary,
+                );
+                crate::fonts::tabular_label(
+                    ui,
+                    &out_txt,
+                    crate::fonts::visor_font(10.5),
+                    self.theme.text_primary,
+                );
+                crate::fonts::tabular_label(
+                    ui,
+                    &trecho_txt,
+                    crate::fonts::visor_font(10.5),
+                    self.theme.text_primary,
+                );
+            });
             right.horizontal_wrapped(|ui| {
                 if ui.small_button("◀ 1q").clicked() {
                     self.trimmer.cursor = (self.trimmer.cursor - frame_dur).max(Ticks::ZERO);

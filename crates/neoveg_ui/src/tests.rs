@@ -97,6 +97,7 @@ fn ui_smoke() {
     };
 
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>, mods: Modifiers| {
@@ -407,7 +408,7 @@ fn ui_smoke() {
     }
 }
 
-fn collect_galley_shapes(
+pub(super) fn collect_galley_shapes(
     shape: &egui::epaint::Shape,
     clip: egui::Rect,
     out: &mut Vec<(String, usize, egui::Rect, egui::Rect)>,
@@ -451,6 +452,7 @@ fn assert_narrow_layout_fixes(app: &mut App, media_idx: usize) {
     app.loading = 1;
 
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     let narrow_raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(840.0, 800.0))),
         time: Some(2.5),
@@ -563,6 +565,7 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     let prev_prerendered = app.session.prerendered_ranges.clone();
 
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     app.apply_window_layout(crate::layout::WindowLayout::default());
     app.exec_cmd(Some(&ctx), "edit.properties.layout.magix");
     let small_raw = |t: f64| egui::RawInput {
@@ -806,6 +809,7 @@ fn assert_welcome_ui_layout(app: &mut App) {
     let prev_open = app.is_welcome_open();
     let prev_welcome = app.welcome.clone();
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     app.open_welcome();
     app.welcome.section = crate::welcome::WelcomeSection::NewProject;
 
@@ -883,6 +887,7 @@ fn assert_welcome_ui_layout(app: &mut App) {
 #[test]
 fn ferramentas_de_edicao_na_timeline() {
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>| {
@@ -990,6 +995,7 @@ fn ferramentas_de_edicao_na_timeline() {
 #[test]
 fn modos_shuffle_slide_stretch_split_trim_na_timeline() {
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0;
     let mut frame = |app: &mut App, ev: Vec<Event>| {
@@ -1095,6 +1101,7 @@ fn ui_sync_links_arraste_unidirecional_e_eixos_selecao() {
     use neoveg_engine::session::BoxAxisMode;
 
     let ctx = egui::Context::default();
+    crate::fonts::configure_fonts(&ctx);
     let mut app = App::with_context(&ctx, None);
     let mut t = 0.0f64;
     let mut frame = |app: &mut App, ev: Vec<Event>| {
