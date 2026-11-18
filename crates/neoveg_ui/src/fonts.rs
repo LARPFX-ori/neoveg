@@ -715,8 +715,10 @@ pub fn font_definitions(system_ui: bool) -> egui::FontDefinitions {
         ],
         &prop_tail,
     );
-    defs.families
-        .insert(egui::FontFamily::Name(FAMILY_VISOR.into()), visor_chain.clone());
+    defs.families.insert(
+        egui::FontFamily::Name(FAMILY_VISOR.into()),
+        visor_chain.clone(),
+    );
 
     let mut ruler_chain = Vec::new();
     push_unique_chain(
@@ -754,21 +756,26 @@ pub fn font_definitions(system_ui: bool) -> egui::FontDefinitions {
     // 8. Se system_ui estiver ativo, insere fontes do SO na frente das cadeias
     if system_ui {
         if let Some(font) = cached_ui_font() {
-            defs.font_data.insert(UI_FONT_KEY.to_owned(), font_data(font));
+            defs.font_data
+                .insert(UI_FONT_KEY.to_owned(), font_data(font));
             prop_chain.insert(0, UI_FONT_KEY.to_owned());
         }
         if let Some(font) = cached_mono_font() {
-            defs.font_data.insert(MONO_FONT_KEY.to_owned(), font_data(font));
+            defs.font_data
+                .insert(MONO_FONT_KEY.to_owned(), font_data(font));
             mono_chain.insert(0, MONO_FONT_KEY.to_owned());
         }
         if let Some(font) = cached_time_font() {
-            defs.font_data.insert(TIME_FONT_KEY.to_owned(), font_data(font));
+            defs.font_data
+                .insert(TIME_FONT_KEY.to_owned(), font_data(font));
             time_chain.insert(0, TIME_FONT_KEY.to_owned());
         }
     }
 
-    defs.families.insert(egui::FontFamily::Proportional, prop_chain);
-    defs.families.insert(egui::FontFamily::Monospace, mono_chain);
+    defs.families
+        .insert(egui::FontFamily::Proportional, prop_chain);
+    defs.families
+        .insert(egui::FontFamily::Monospace, mono_chain);
     defs.families
         .insert(egui::FontFamily::Name(TIME_FAMILY.into()), time_chain);
 
