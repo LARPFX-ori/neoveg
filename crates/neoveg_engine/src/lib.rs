@@ -34,6 +34,8 @@ pub mod fcp7xml;
 pub mod fcpxml;
 #[forbid(unsafe_code)]
 pub mod integrations;
+#[forbid(unsafe_code)]
+pub mod mask;
 pub mod media;
 #[forbid(unsafe_code)]
 pub mod model;

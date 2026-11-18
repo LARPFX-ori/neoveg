@@ -2680,6 +2680,7 @@ pub enum FxKind {
     Posterize,
     Colorize,
     Stabilization,
+    BezierMasking,
     // áudio
     Gain,
     ParametricEq,
@@ -2997,7 +2998,7 @@ impl FxKind {
                 Some(FxCategory::Stylize)
             }
             FxKind::Stabilization => Some(FxCategory::Transform),
-            FxKind::ChromaKeyer => Some(FxCategory::Key),
+            FxKind::ChromaKeyer | FxKind::BezierMasking => Some(FxCategory::Key),
             FxKind::Gain
             | FxKind::ParametricEq
             | FxKind::HighPass
@@ -3014,7 +3015,7 @@ impl FxKind {
         }
     }
 
-    pub const VIDEO: [FxKind; 19] = [
+    pub const VIDEO: [FxKind; 20] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
         FxKind::ColorCorrector,
@@ -3034,6 +3035,7 @@ impl FxKind {
         FxKind::Posterize,
         FxKind::Colorize,
         FxKind::Stabilization,
+        FxKind::BezierMasking,
     ];
     pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
@@ -3074,6 +3076,7 @@ impl FxKind {
             FxKind::Posterize => "Posterize",
             FxKind::Colorize => "Colorize",
             FxKind::Stabilization => "Stabilization",
+            FxKind::BezierMasking => "BezierMasking",
             FxKind::Gain => "Gain",
             FxKind::ParametricEq => "ParametricEq",
             FxKind::HighPass => "HighPass",
@@ -3119,6 +3122,7 @@ impl FxKind {
             FxKind::Posterize => "Posterizar",
             FxKind::Colorize => "Colorir (Tint)",
             FxKind::Stabilization => "Estabilizador de Vídeo",
+            FxKind::BezierMasking => "Máscara Bézier",
             FxKind::Gain => "Ganho",
             FxKind::ParametricEq => "EQ Paramétrico",
             FxKind::HighPass => "Passa-Altas",
@@ -3245,6 +3249,17 @@ impl FxKind {
                         p("Suavização (%)", 0.0, 100.0, 65.0),
                         p("Zoom de borda", 1.0, 1.5, 1.12),
                         p("Compensar rotação", 0.0, 1.0, 0.35),
+                    ]
+                }
+            }
+            FxKind::BezierMasking => {
+                const {
+                    &[
+                        p("Modo (0:Add, 1:Sub, 2:Mul, 3:Inv)", 0.0, 3.0, 0.0),
+                        p("Suavização (Feather)", 0.0, 100.0, 0.0),
+                        p("Opacidade", 0.0, 1.0, 1.0),
+                        p("Expansão", -100.0, 100.0, 0.0),
+                        p("Inverter (0:Não, 1:Sim)", 0.0, 1.0, 0.0),
                     ]
                 }
             }
@@ -3514,10 +3529,18 @@ pub struct FxInstance {
     /// Curvas RGB/HSL e LUT (.cube) para `FxKind::ColorCorrector`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_grade: Option<Box<ColorGradeCurves>>,
+    /// Dados e quadros-chave para `FxKind::BezierMasking`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bezier_mask: Option<Box<crate::mask::BezierMaskData>>,
 }
 
 impl FxInstance {
     pub fn new(kind: FxKind) -> Self {
+        let bezier_mask = if kind == FxKind::BezierMasking {
+            Some(Box::new(crate::mask::BezierMaskData::default()))
+        } else {
+            None
+        };
         FxInstance {
             id: new_id(),
             kind,
@@ -3533,6 +3556,7 @@ impl FxInstance {
             ofx: None,
             vst3: None,
             color_grade: None,
+            bezier_mask,
         }
     }
 
