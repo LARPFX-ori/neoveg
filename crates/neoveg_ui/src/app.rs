@@ -2572,6 +2572,20 @@ impl App {
             UiAction::PreviewZoom(z) => {
                 self.apply_preview_zoom(z);
             }
+            UiAction::UiScale(steps) => {
+                let pct = self.prefs.step_ui_scale(steps).to_string();
+                // aplicada no próximo quadro (`frame_ui`)
+                if let Err(e) = self.prefs.save() {
+                    self.set_status(e);
+                } else {
+                    let lang = self.lang();
+                    self.set_status(tr_args(
+                        lang,
+                        "Escala da interface: {pct}%",
+                        &[("pct", &pct)],
+                    ));
+                }
+            }
             UiAction::PreviewToggleExternalMonitor => {
                 self.external_monitor = !self.external_monitor;
                 self.set_status(if self.external_monitor {
@@ -4349,6 +4363,11 @@ impl App {
     }
 
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
+        // escala da interface (Exibir > Escala da interface, Preferências)
+        let want_zoom = self.prefs.ui_scale_factor();
+        if (ctx.zoom_factor() - want_zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(want_zoom);
+        }
         let want_delay = if self.prefs.show_tooltips {
             0.5
         } else {
