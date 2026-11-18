@@ -14,7 +14,7 @@ use neoveg_engine::plugin_host::{
     probe_ofx_isolated, probe_vst3_isolated, OfxParamInfo, OfxPluginInfo, Vst3ClassInfo,
     Vst3ParamInfo,
 };
-use neoveg_engine::plugins::{self, ExternalKind, ExternalPlugin};
+use neoveg_engine::plugins::{self, ExternalKind, ExternalPlugin, FolderScan, FolderStatus};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -30,6 +30,55 @@ enum ProbeState<T> {
 }
 
 type ProbeMap<T> = Arc<Mutex<HashMap<PathBuf, ProbeState<T>>>>;
+
+/// Plug-ins encontrados e o estado de cada pasta mapeada.
+type ScanResult = (Vec<ExternalPlugin>, Vec<FolderScan>);
+
+/// Varredura das pastas de plug-ins, feita numa thread de fundo: pastas do
+/// Google Drive ou de rede podem levar segundos para listar (`AGENTS.md` §3.6).
+#[derive(Clone, Default)]
+struct ScanState {
+    /// Pastas mapeadas usadas na última varredura (ou na que está rodando).
+    folders: Vec<PathBuf>,
+    running: bool,
+    result: Option<Result<Arc<ScanResult>, String>>,
+}
+
+type ScanSlot = Arc<Mutex<ScanState>>;
+
+fn start_scan(slot: &ScanSlot, folders: Vec<PathBuf>, ctx: egui::Context, lang: Language) {
+    {
+        let mut st = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        st.folders = folders.clone();
+        st.running = true;
+    }
+    let worker = slot.clone();
+    let failed = tr(lang, "a varredura de plug-ins falhou").to_string();
+    let spawned = std::thread::Builder::new()
+        .name("plugin-scan".into())
+        .spawn(move || {
+            // §0.6: uma pasta estranha não pode derrubar a interface
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugins::scan_with_folders(&folders)
+            }))
+            .map(Arc::new)
+            .map_err(|_| failed);
+            let mut st = worker.lock().unwrap_or_else(PoisonError::into_inner);
+            st.running = false;
+            st.result = Some(res);
+            drop(st);
+            ctx.request_repaint();
+        });
+    if spawned.is_err() {
+        let mut st = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        st.running = false;
+        st.result = Some(Err(tr(
+            lang,
+            "não foi possível iniciar a varredura de plug-ins",
+        )
+        .into()));
+    }
+}
 
 /// Plug-ins OFX já consultados no Plug-In Manager (binário e plug-in), para
 /// a categoria Terceiros da janela Efeitos de Vídeo. Não consulta nada novo.
@@ -663,19 +712,49 @@ impl App {
     /// carregados sob pedido e sempre no subprocesso isolado.
     fn external_plugins_list(&mut self, ui: &mut egui::Ui, filter: &str) {
         let lang = self.lang();
-        let key = egui::Id::new("plugin_manager_external");
-        let cached: Option<Arc<Vec<ExternalPlugin>>> = ui.data(|d| d.get_temp(key));
-        let refresh = ui.small_button(tr(lang, "Atualizar")).clicked();
-        let list = match (cached, refresh) {
-            (Some(l), false) => l,
-            _ => {
-                let l = Arc::new(plugins::scan_default());
-                ui.data_mut(|d| d.insert_temp(key, l.clone()));
-                l
+        let key = egui::Id::new("plugin_manager_external_scan");
+        let slot: ScanSlot = ui.data_mut(|d| d.get_temp_mut_or_default::<ScanSlot>(key).clone());
+        let folders: Vec<PathBuf> = self
+            .prefs
+            .plugin_folders
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let state = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let refresh = ui
+            .small_button(tr(lang, "Atualizar"))
+            .on_hover_text(tr(
+                lang,
+                "Varre de novo as pastas padrão e as pastas mapeadas",
+            ))
+            .clicked();
+        // varre ao abrir o painel, ao pedir e quando as pastas mapeadas mudam
+        if !state.running && (refresh || state.result.is_none() || state.folders != folders) {
+            start_scan(&slot, folders.clone(), ui.ctx().clone(), lang);
+        }
+        let statuses: Vec<FolderScan> = match &state.result {
+            Some(Ok(r)) if state.folders == folders => r.1.clone(),
+            _ => Vec::new(),
+        };
+        self.plugin_folders_ui(ui, &statuses, state.running);
+        ui.separator();
+        let list: Arc<ScanResult> = match &state.result {
+            Some(Ok(r)) => r.clone(),
+            Some(Err(e)) => {
+                ui.colored_label(self.theme.offline_fg, e.as_str());
+                return;
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(tr(lang, "Procurando plug-ins..."));
+                });
+                return;
             }
         };
         let f = filter.trim().to_lowercase();
         let shown: Vec<&ExternalPlugin> = list
+            .0
             .iter()
             .filter(|p| f.is_empty() || p.name.to_lowercase().contains(&f))
             .collect();
@@ -683,7 +762,7 @@ impl App {
             ui.label(
                 egui::RichText::new(tr(
                     lang,
-                    "Nenhum plug-in externo encontrado nas pastas padrão.",
+                    "Nenhum plug-in externo encontrado nas pastas padrão nem nas pastas mapeadas.",
                 ))
                 .small()
                 .color(self.theme.text_muted),
@@ -722,6 +801,125 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Pastas de plug-ins mapeadas pelo usuário (ex.: uma pasta do Google
+    /// Drive), salvas nas Preferências: ao reabrir o Neoveg elas são varridas
+    /// de novo e os plug-ins delas voltam a aparecer aqui.
+    fn plugin_folders_ui(&mut self, ui: &mut egui::Ui, statuses: &[FolderScan], running: bool) {
+        let lang = self.lang();
+        ui.label(egui::RichText::new(tr(lang, "Pastas de plug-ins")).strong());
+        let mut remove: Option<usize> = None;
+        let mut relocate: Option<usize> = None;
+        for (i, folder) in self.prefs.plugin_folders.iter().enumerate() {
+            let status = statuses
+                .iter()
+                .find(|s| s.path == Path::new(folder))
+                .map(|s| s.status.clone());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(folder).monospace().small());
+                match status {
+                    Some(FolderStatus::Found(n)) => {
+                        let n_s = n.to_string();
+                        ui.label(
+                            egui::RichText::new(tr_args(lang, "{n} plug-in(s)", &[("n", &n_s)]))
+                                .small()
+                                .color(self.theme.text_muted),
+                        );
+                    }
+                    Some(FolderStatus::Missing) | Some(FolderStatus::NotDir) => {
+                        let why = if matches!(status, Some(FolderStatus::Missing)) {
+                            tr(
+                                lang,
+                                "pasta não encontrada (unidade ou Google Drive desconectado?)",
+                            )
+                        } else {
+                            tr(lang, "o caminho não é uma pasta")
+                        };
+                        ui.colored_label(self.theme.offline_fg, egui::RichText::new(why).small());
+                        if ui
+                            .small_button(tr(lang, "Localizar..."))
+                            .on_hover_text(tr(lang, "Escolher o novo lugar desta pasta"))
+                            .clicked()
+                        {
+                            relocate = Some(i);
+                        }
+                    }
+                    None if running => {
+                        ui.spinner();
+                    }
+                    None => {}
+                }
+                if ui
+                    .small_button(tr(lang, "Remover"))
+                    .on_hover_text(tr(lang, "Deixa de procurar plug-ins nesta pasta"))
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
+        }
+        if self.prefs.plugin_folders.is_empty() {
+            ui.label(
+                egui::RichText::new(tr(
+                    lang,
+                    "Nenhuma pasta mapeada. As pastas padrão do sistema são sempre varridas.",
+                ))
+                .small()
+                .color(self.theme.text_muted),
+            );
+        }
+        let mut changed = false;
+        if ui
+            .small_button(tr(lang, "Adicionar pasta..."))
+            .on_hover_text(tr(
+                lang,
+                "Procura plug-ins VST3 (áudio) e OFX (vídeo) nesta pasta e nas subpastas dela",
+            ))
+            .clicked()
+        {
+            if let Some(dir) = rfd::FileDialog::new()
+                .set_title(tr(lang, "Pasta de plug-ins VST3/OFX"))
+                .pick_folder()
+            {
+                if self.prefs.add_plugin_folder(&dir) {
+                    changed = true;
+                } else {
+                    self.set_status(tr(
+                        lang,
+                        "Essa pasta já está mapeada ou a lista está cheia.",
+                    ));
+                }
+            }
+        }
+        if let Some(i) = relocate {
+            if let Some(dir) = rfd::FileDialog::new()
+                .set_title(tr(lang, "Pasta de plug-ins VST3/OFX"))
+                .pick_folder()
+            {
+                changed |= self.prefs.replace_plugin_folder(i, &dir);
+            }
+        }
+        if let Some(i) = remove {
+            if i < self.prefs.plugin_folders.len() {
+                self.prefs.plugin_folders.remove(i);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(e) = self.prefs.save() {
+                self.set_status(e);
+            }
+        }
+        ui.label(
+            egui::RichText::new(tr(
+                lang,
+                "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": \
+                 assim o plug-in abre sem esperar o download.",
+            ))
+            .small()
+            .color(self.theme.text_muted),
+        );
     }
 
     /// Lista os plug-ins de um binário OFX, sondado no subprocesso isolado
