@@ -749,11 +749,7 @@ pub fn font_definitions(system_ui: bool) -> egui::FontDefinitions {
     mono_tail.extend(prop_tail);
     push_unique_chain(&mut mono_chain, &[], &mono_tail);
 
-    // 7. TIME_FAMILY base (Visor de tempo)
-    let mut time_chain = default_mono;
-    time_chain.insert(0, KEY_INTER_REGULAR.to_owned());
-
-    // 8. Se system_ui estiver ativo, insere fontes do SO na frente das cadeias
+    // 7. Se system_ui estiver ativo, insere fontes do SO na frente das cadeias
     if system_ui {
         if let Some(font) = cached_ui_font() {
             defs.font_data
@@ -765,6 +761,11 @@ pub fn font_definitions(system_ui: bool) -> egui::FontDefinitions {
                 .insert(MONO_FONT_KEY.to_owned(), font_data(font));
             mono_chain.insert(0, MONO_FONT_KEY.to_owned());
         }
+    }
+
+    // 8. TIME_FAMILY (Visor de tempo): a negrito do sistema na frente da cadeia monoespaçada
+    let mut time_chain = mono_chain.clone();
+    if system_ui {
         if let Some(font) = cached_time_font() {
             defs.font_data
                 .insert(TIME_FONT_KEY.to_owned(), font_data(font));
