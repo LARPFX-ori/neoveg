@@ -37,6 +37,7 @@ mod splash;
 mod surround_panel;
 pub mod theme;
 mod timeline;
+mod transcript_panel;
 mod trimmer_panel;
 mod welcome;
 

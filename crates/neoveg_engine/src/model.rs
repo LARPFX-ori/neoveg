@@ -316,6 +316,9 @@ pub struct Project {
     /// ID da sequência ativa no momento.
     #[serde(default)]
     pub active_sequence_id: Option<Id>,
+    /// Transcrição de fala por IA (AI Speech to Text / VEGAS Pro manual p. 674).
+    #[serde(default)]
+    pub transcript: Option<crate::speech::Transcript>,
 }
 
 /// Sequência em aba na timeline (item 13 do backlog / VEGAS Pro).
@@ -336,6 +339,8 @@ pub struct Sequence {
     pub loop_region: Option<(Ticks, Ticks)>,
     #[serde(default)]
     pub cursor: Ticks,
+    #[serde(default)]
+    pub transcript: Option<crate::speech::Transcript>,
 }
 
 impl Sequence {
@@ -348,6 +353,7 @@ impl Sequence {
             regions: Vec::new(),
             loop_region: None,
             cursor: Ticks::ZERO,
+            transcript: None,
         }
     }
 }
@@ -373,6 +379,7 @@ impl Project {
                 regions: self.regions.clone(),
                 loop_region: self.loop_region,
                 cursor: Ticks::ZERO,
+                transcript: self.transcript.clone(),
             };
             self.sequences.push(seq);
             self.active_sequence_id = Some(seq_id);
@@ -390,6 +397,7 @@ impl Project {
                 seq.markers = self.markers.clone();
                 seq.regions = self.regions.clone();
                 seq.loop_region = self.loop_region;
+                seq.transcript = self.transcript.clone();
             }
         }
     }
@@ -402,6 +410,7 @@ impl Project {
             self.markers = target.markers;
             self.regions = target.regions;
             self.loop_region = target.loop_region;
+            self.transcript = target.transcript;
             self.active_sequence_id = Some(target_id);
             true
         } else {
@@ -427,11 +436,13 @@ impl Project {
             regions: Vec::new(),
             loop_region: None,
             cursor: Ticks::ZERO,
+            transcript: None,
         };
         self.tracks = seq.tracks.clone();
         self.markers.clear();
         self.regions.clear();
         self.loop_region = None;
+        self.transcript = None;
         self.sequences.push(seq);
         self.active_sequence_id = Some(new_id);
         new_id
@@ -450,6 +461,7 @@ impl Project {
             regions: source.regions,
             loop_region: source.loop_region,
             cursor: source.cursor,
+            transcript: source.transcript,
         };
         self.sequences.push(dup);
         Some(new_id)
@@ -469,6 +481,7 @@ impl Project {
                 self.markers = first.markers;
                 self.regions = first.regions;
                 self.loop_region = first.loop_region;
+                self.transcript = first.transcript;
                 self.active_sequence_id = Some(first.id);
             }
         }

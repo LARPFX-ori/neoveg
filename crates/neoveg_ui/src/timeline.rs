@@ -1409,7 +1409,7 @@ impl App {
             let max_text_w = tab_w - 12.0 - close_w;
             let text_pos = pos2(tab_rect.left() + 8.0, tab_rect.center().y);
             let label_clipped = if text_w > max_text_w {
-                format!("{}…", &seq.name.chars().take(8).collect::<String>())
+                format!("{}…", seq.name.chars().take(8).collect::<String>())
             } else {
                 seq.name.clone()
             };
@@ -1457,11 +1457,9 @@ impl App {
                     action_duplicate = Some(seq.id);
                     ui.close_menu();
                 }
-                if seq_count > 1 {
-                    if ui.button(tr(self.lang(), "Excluir sequência")).clicked() {
-                        action_delete = Some(seq.id);
-                        ui.close_menu();
-                    }
+                if seq_count > 1 && ui.button(tr(self.lang(), "Excluir sequência")).clicked() {
+                    action_delete = Some(seq.id);
+                    ui.close_menu();
                 }
             });
 

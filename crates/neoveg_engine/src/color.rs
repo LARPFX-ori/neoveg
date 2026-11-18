@@ -6,6 +6,8 @@
 //! - Curvas Log de câmeras: Sony S-Log3, ARRI LogC3/LogC4, Canon Log 2/3, Panasonic V-Log, RED Log3G10 e ACEScc/ACEScct.
 //! - Transformações de visualização (View Transforms) com ACES RRT + ODT para sRGB e Rec.709.
 
+#![allow(clippy::excessive_precision)]
+
 use serde::{Deserialize, Serialize};
 
 /// Formato de pixel do projeto (VEGAS Pro manual p. 288).

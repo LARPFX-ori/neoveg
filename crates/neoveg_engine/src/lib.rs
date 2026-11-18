@@ -58,6 +58,8 @@ pub mod scopes;
 #[forbid(unsafe_code)]
 pub mod session;
 #[forbid(unsafe_code)]
+pub mod speech;
+#[forbid(unsafe_code)]
 pub mod subtitles;
 #[forbid(unsafe_code)]
 pub mod takes;

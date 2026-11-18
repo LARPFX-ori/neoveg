@@ -356,10 +356,11 @@ pub enum DockPanel {
     Scopes,
     Notes,
     Encoder,
+    Transcript,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 17] = [
+    pub const ALL: [DockPanel; 18] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -377,6 +378,7 @@ impl DockPanel {
         DockPanel::Scopes,
         DockPanel::Notes,
         DockPanel::Encoder,
+        DockPanel::Transcript,
     ];
 
     pub fn name_in(self, lang: Language) -> &'static str {
@@ -398,6 +400,7 @@ impl DockPanel {
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
             DockPanel::Encoder => "Neoveg Encoder",
+            DockPanel::Transcript => "Transcrição de fala",
         };
         tr(lang, pt)
     }
@@ -425,6 +428,7 @@ impl DockPanel {
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
             DockPanel::Encoder => "view.tab.encoder",
+            DockPanel::Transcript => "view.tab.transcript",
         }
     }
 }
@@ -2034,6 +2038,54 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
+    },
+    CommandDef {
+        id: "view.tab.transcript",
+        label: "Transcrição de fala",
+        menu_path: "Exibir/Transcrição de fala",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Transcript), h),
+    },
+    CommandDef {
+        id: "speech.remove_silences",
+        label: "Remover silêncios e pausas",
+        menu_path: "Editar/Fala/Remover silêncios e pausas",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.project
+                .transcript
+                .as_ref()
+                .map(|t| !t.segments.is_empty())
+                .unwrap_or(false)
+        },
+        run: |s, h| {
+            crate::speech::remove_transcript_silences(
+                s,
+                crate::time::Ticks::from_millis_i64(1200),
+            )?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "speech.generate_subtitles",
+        label: "Legendas a partir da fala",
+        menu_path: "Inserir/Legendas a partir da fala",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.project
+                .transcript
+                .as_ref()
+                .map(|t| !t.segments.is_empty())
+                .unwrap_or(false)
+        },
+        run: |s, h| {
+            crate::speech::generate_regions_from_transcript(s);
+            ok_mutated(s, h)
+        },
     },
     CommandDef {
         id: "view.envelopes",
@@ -4023,6 +4075,11 @@ mod tests {
                     cmd.id,
                     cmd.menu_path
                 );
+            }
+        }
+        for panel in DockPanel::ALL {
+            for lang in Language::ALL {
+                assert!(!panel.name_in(lang).is_empty());
             }
         }
         for panel in DockPanel::ALL {

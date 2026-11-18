@@ -244,8 +244,7 @@ pub fn layout_text_lines(
     let measure_str = |s: &str| -> f32 {
         let mut x = 0.0f32;
         let mut prev = None;
-        let mut count = 0usize;
-        for c in s.chars() {
+        for (count, c) in s.chars().enumerate() {
             let g = font.glyph_id(c);
             if let Some(p) = prev {
                 x += sf.kern(p, g);
@@ -255,7 +254,6 @@ pub fn layout_text_lines(
                 x += tracking_px;
             }
             prev = Some(g);
-            count += 1;
         }
         x
     };
@@ -357,8 +355,7 @@ fn layout_mask(
         }
         let mut x = x0;
         let mut prev = None;
-        let mut count = 0usize;
-        for c in line.chars() {
+        for (count, c) in line.chars().enumerate() {
             let gid = font.glyph_id(c);
             if let Some(p) = prev {
                 x += sf.kern(p, gid);
@@ -369,7 +366,6 @@ fn layout_mask(
             let glyph = gid.with_scale_and_position(scale, point(x, baseline));
             x += sf.h_advance(gid);
             prev = Some(gid);
-            count += 1;
             if let Some(og) = font.outline_glyph(glyph) {
                 let b = og.px_bounds();
                 og.draw(|gx, gy, cov| {

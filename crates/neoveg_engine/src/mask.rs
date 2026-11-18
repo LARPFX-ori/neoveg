@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Constante matemática para aproximação de quarto de círculo por curva Bézier cúbica:
 /// `4 * (sqrt(2) - 1) / 3 ~= 0.55228475`.
-pub const KAPPA_BEZIER: f32 = 0.552_284_75;
+pub const KAPPA_BEZIER: f32 = 0.552_284_8;
 
 /// Vértice de uma curva Bézier com alças de controle tangentes de entrada e saída.
 ///
@@ -695,9 +695,7 @@ mod tests {
 
         // Teste em Frame
         let mut frame = Frame::new(w, h);
-        for p in &mut frame.px {
-            *p = [1.0, 1.0, 1.0, 1.0];
-        }
+        frame.px.fill([1.0, 1.0, 1.0, 1.0]);
 
         apply_mask_to_frame(&mut frame, &mask, MaskBlendMode::Add, 1.0, false);
         // Centro mantém cor/alfa quase intacto

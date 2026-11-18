@@ -490,6 +490,7 @@ impl App {
                 }
             }
             DockTab::Encoder => self.encoder_tab(ui),
+            DockTab::Transcript => self.transcript_tab(ui),
         }
     }
 

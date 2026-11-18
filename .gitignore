@@ -8,6 +8,7 @@
 # logs e recupera??o gerados em tempo de execu??o
 /logs/
 /autosave/
+/models/
 # configura??o local de build (pode conter caminhos desta m?quina)
 /.cargo/config.toml
 /.obsidian
