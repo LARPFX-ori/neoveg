@@ -619,13 +619,29 @@ impl App {
             self.draw_preview_canvas(ui, rect, true)
         });
         if let Some(payload) = drop_out.1 {
-            if let DndPayload::Fx(kind) = *payload {
-                if self.session.apply_video_fx_to_output(kind) {
-                    self.dlg.fx_target = Some(FxTarget::MasterVideo);
-                    self.sync_after_session();
-                } else {
-                    self.sync_status_from_session();
+            match (*payload).clone() {
+                DndPayload::Fx(kind) => {
+                    if self.session.apply_video_fx_to_output(kind) {
+                        self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                        self.sync_after_session();
+                    } else {
+                        self.sync_status_from_session();
+                    }
                 }
+                DndPayload::FxPreset(mut fx) => {
+                    if fx.kind.is_audio() {
+                        self.set_status(
+                            "Efeitos de áudio não podem ser aplicados na saída de vídeo",
+                        );
+                    } else {
+                        self.checkpoint();
+                        fx.id = new_id();
+                        self.project.master.video_fx.push(fx);
+                        self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                        self.changed();
+                    }
+                }
+                _ => {}
             }
         }
         let img_rect = drop_out.0.inner;
@@ -712,10 +728,14 @@ impl App {
     }
 
     pub(crate) fn sync_master_monitor_audio(&self) {
-        let mut s = crate::util::lock(&self.audio.shared);
-        s.dim = self.master_dim;
-        s.mono_downmix = self.master_mono;
-        s.preview_muted = self.opts.preview_mute_audio;
+        {
+            let mut s = crate::util::lock(&self.audio.shared);
+            s.dim = self.master_dim;
+            s.mono_downmix = self.master_mono;
+            s.preview_muted = self.opts.preview_mute_audio;
+        }
+        self.audio
+            .set_bypass_audio_fx(self.opts.bypass_all_audio_fx);
     }
 
     fn draw_preview_canvas(&mut self, ui: &mut egui::Ui, rect: Rect, interactive: bool) -> Rect {
@@ -1433,6 +1453,15 @@ impl App {
     /// janela Efeitos de Vídeo): aplicam à seleção do tipo certo, à trilha
     /// selecionada ou ao Master, com um passo de Desfazer.
     pub(crate) fn fx_apply_buttons(&mut self, ui: &mut egui::Ui, k: FxKind, audio: bool) {
+        self.fx_apply_instance_buttons(ui, FxInstance::new(k), audio);
+    }
+
+    pub(crate) fn fx_apply_instance_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        fx: FxInstance,
+        audio: bool,
+    ) {
         let want_kind = if audio {
             TrackKind::Audio
         } else {
@@ -1454,9 +1483,13 @@ impl App {
             .clicked()
         {
             self.checkpoint();
-            for id in &sel_ev {
+            for (idx, id) in sel_ev.iter().enumerate() {
                 if let Some(ev) = self.project.event_mut(*id) {
-                    ev.fx.push(FxInstance::new(k));
+                    let mut inst = fx.clone();
+                    if idx > 0 {
+                        inst.id = new_id();
+                    }
+                    ev.fx.push(inst);
                 }
             }
             self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
@@ -1471,17 +1504,17 @@ impl App {
             tr,
         ) {
             self.checkpoint();
-            self.project.tracks[t].fx.push(FxInstance::new(k));
+            self.project.tracks[t].fx.push(fx.clone());
             self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
             self.changed();
         }
         if ui.button("Master").clicked() {
             self.checkpoint();
             if audio {
-                self.project.master.fx.push(FxInstance::new(k));
+                self.project.master.fx.push(fx);
                 self.dlg.fx_target = Some(FxTarget::MasterAudio);
             } else {
-                self.project.master.video_fx.push(FxInstance::new(k));
+                self.project.master.video_fx.push(fx);
                 self.dlg.fx_target = Some(FxTarget::MasterVideo);
             }
             self.changed();
@@ -1512,6 +1545,16 @@ impl App {
                 .small()
                 .color(self.theme.text_muted),
             );
+            ui.separator();
+            let mut bypass = self.opts.bypass_all_audio_fx;
+            if ui
+                .toggle_value(&mut bypass, "Bypass FX")
+                .on_hover_text("Ignorar todos os plug-ins de efeito de áudio (Opções > Ignorar todos os FX de áudio)")
+                .changed()
+            {
+                let ctx = ui.ctx().clone();
+                self.exec_cmd(Some(&ctx), "options.bypass_all_audio_fx");
+            }
         });
         ui.separator();
 

@@ -530,6 +530,84 @@ pub struct Preferences {
     /// Propriedades padrão de novas trilhas (`Definir propriedades padrão da trilha`, p. 414).
     #[serde(default)]
     pub default_track: DefaultTrackPrefs,
+    /// Presets personalizados criados pelo usuário por tipo de efeito (pp. 54–56).
+    #[serde(default)]
+    pub user_fx_presets: Vec<UserFxPresetPref>,
+    /// Cadeias/pacotes de efeitos salvos (Filter Packages / FX Chains, p. 514).
+    #[serde(default)]
+    pub fx_chains: Vec<SavedFxChainPref>,
+}
+
+pub const MAX_USER_FX_PRESETS: usize = 256;
+pub const MAX_SAVED_FX_CHAINS: usize = 128;
+pub const MAX_FX_CHAIN_ITEMS: usize = 32;
+
+/// Preset de efeito salvo pelo usuário (`FxKind` serializado em string).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserFxPresetPref {
+    pub fx_kind: String,
+    pub name: String,
+    pub values: Vec<f32>,
+}
+
+impl UserFxPresetPref {
+    pub fn sanitize(&mut self) -> bool {
+        self.fx_kind = self.fx_kind.trim().chars().take(64).collect();
+        self.name = self.name.trim().chars().take(80).collect();
+        if self.fx_kind.is_empty() || self.name.is_empty() {
+            return false;
+        }
+        self.values.truncate(32);
+        for v in &mut self.values {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
+        true
+    }
+}
+
+/// Um item dentro de uma cadeia/pacote de efeitos salvo.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedFxChainItemPref {
+    pub fx_kind: String,
+    pub enabled: bool,
+    pub values: Vec<f32>,
+}
+
+/// Cadeia/pacote reutilizável de efeitos de vídeo ou áudio.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedFxChainPref {
+    pub name: String,
+    pub audio: bool,
+    pub items: Vec<SavedFxChainItemPref>,
+}
+
+impl SavedFxChainPref {
+    pub fn sanitize(&mut self) -> bool {
+        self.name = self.name.trim().chars().take(80).collect();
+        if self.name.is_empty() {
+            return false;
+        }
+        self.items.truncate(MAX_FX_CHAIN_ITEMS);
+        self.items.retain_mut(|it| {
+            it.fx_kind = it.fx_kind.trim().chars().take(64).collect();
+            if it.fx_kind.is_empty() {
+                return false;
+            }
+            it.values.truncate(32);
+            for v in &mut it.values {
+                if !v.is_finite() {
+                    *v = 0.0;
+                }
+            }
+            true
+        });
+        !self.items.is_empty()
+    }
 }
 
 /// Propriedades padrão herdadas por novas trilhas de vídeo ou áudio.
@@ -715,6 +793,8 @@ impl Default for Preferences {
             title_safe_pct: default_title_safe_pct(),
             external_apps: ExternalAppsPrefs::default(),
             default_track: DefaultTrackPrefs::default(),
+            user_fx_presets: Vec::new(),
+            fx_chains: Vec::new(),
         }
     }
 }
@@ -799,6 +879,10 @@ impl Preferences {
         sanitize_string_list(&mut self.gen_favorites, MAX_RENDER_FAVORITES, 80, false);
         self.external_apps.sanitize();
         self.default_track.sanitize();
+        self.user_fx_presets.truncate(MAX_USER_FX_PRESETS);
+        self.user_fx_presets.retain_mut(|p| p.sanitize());
+        self.fx_chains.truncate(MAX_SAVED_FX_CHAINS);
+        self.fx_chains.retain_mut(|c| c.sanitize());
     }
 
     pub fn load_or_default() -> Self {

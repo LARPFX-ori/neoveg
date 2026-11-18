@@ -45,12 +45,29 @@ pub fn sample_frame(w: usize, h: usize) -> Frame {
 
 /// O efeito aplicado ao quadro de amostra, no instante zero.
 pub fn render_preview(fx: &FxInstance, w: usize, h: usize) -> Frame {
+    render_preview_at(fx, Ticks::ZERO, FrameRate::FPS_30, w, h)
+}
+
+/// O efeito aplicado ao quadro de amostra em movimento no tempo `t` (miniatura animada ao passar o mouse).
+pub fn render_preview_at(fx: &FxInstance, t: Ticks, fps: FrameRate, w: usize, h: usize) -> Frame {
     let mut f = sample_frame(w, h);
-    // quadro vazio: nada a aplicar (os filtros dividem pela largura/altura)
     if w == 0 || h == 0 {
         return f;
     }
-    vfx::apply(fx, &mut f, Ticks::ZERO, FrameRate::FPS_30);
+    if t > Ticks::ZERO {
+        let secs = t.as_secs_f64();
+        let shift = ((secs * (w as f64) * 0.35).round() as usize) % w.max(1);
+        if shift > 0 {
+            let orig = f.px.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let sx = (x + shift) % w;
+                    f.px[y * w + x] = orig[y * w + sx];
+                }
+            }
+        }
+    }
+    vfx::apply(fx, &mut f, t, fps);
     f
 }
 
@@ -105,5 +122,22 @@ mod tests {
     fn quadro_de_tamanho_zero_nao_entra_em_panico() {
         let f = render_preview(&FxInstance::new(FxKind::GaussianBlur), 0, 0);
         assert!(f.px.is_empty());
+    }
+
+    #[test]
+    fn miniatura_animada_no_tempo_varia_sem_panico() {
+        let fx = FxInstance::new(FxKind::ColorCorrector);
+        let a = render_preview_at(&fx, Ticks::ZERO, FrameRate::FPS_30, THUMB_W, THUMB_H);
+        let b = render_preview_at(
+            &fx,
+            Ticks::from_secs_i64(1),
+            FrameRate::FPS_30,
+            THUMB_W,
+            THUMB_H,
+        );
+        assert_eq!(a.px.len(), THUMB_W * THUMB_H);
+        assert_eq!(b.px.len(), THUMB_W * THUMB_H);
+        assert_ne!(a.px, b.px);
+        assert!(b.px.iter().all(|p| p.iter().all(|c| c.is_finite())));
     }
 }

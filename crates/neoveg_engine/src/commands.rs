@@ -456,6 +456,8 @@ pub enum UiAction {
     RenderToNewTrack,
     SetTrackDefaultProps,
     CycleStereo3dMode,
+    OpenMotionTrackDialog,
+    ApplyAudioFxNonRealtime,
 }
 
 /// Resultado de execução de um comando.
@@ -2873,6 +2875,53 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::CycleStereo3dMode, h),
+    },
+    CommandDef {
+        id: "insert.subtitles_from_regions",
+        label: "Legendas a partir das regiões",
+        menu_path: "Inserir/Legendas a partir das regiões",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.regions.iter().any(|r| r.end > r.start),
+        run: |s, h| {
+            s.insert_subtitles_from_regions();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.motion_track",
+        label: "Rastrear movimento (Motion Tracking)...",
+        menu_path: "Ferramentas/Rastrear movimento...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_video_events_ui,
+        run: |_s, h| ui_action(UiAction::OpenMotionTrackDialog, h),
+    },
+    CommandDef {
+        id: "tools.apply_audio_fx",
+        label: "Aplicar efeitos de áudio fora de tempo real",
+        menu_path: "Ferramentas/Aplicar efeitos de áudio fora de tempo real",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ApplyAudioFxNonRealtime, h),
+    },
+    CommandDef {
+        id: "options.bypass_all_audio_fx",
+        label: "Ignorar todos os efeitos de áudio",
+        menu_path: "Opções/Ignorar todos os efeitos de áudio",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.bypass_all_audio_fx = !s.opts.bypass_all_audio_fx;
+            s.set_status(if s.opts.bypass_all_audio_fx {
+                "Todos os efeitos de áudio ignorados globalmente (Bypass)."
+            } else {
+                "Efeitos de áudio reativados."
+            });
+            ok_mutated(s, h)
+        },
     },
     CommandDef {
         id: "media.view.thumbnails",

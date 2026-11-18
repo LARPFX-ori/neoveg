@@ -113,16 +113,12 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Efeitos, cor e legendas
 
-- **Pacotes e cadeias de efeitos salvos** para reutilizar (p. 514).
-- **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56). Hoje há um preset *Padrão* por efeito.
-- **Rastreamento de movimento** (p. 713).
-- ***Color Grading* (pp. 769–781):**
-  - presets de LUT de câmera e de *look*;
-  - curvas de cor e curvas HSL.
-
-  As rodas tonais já existem.
-- **Inserir legendas a partir das regiões** do projeto (p. 722).
-- **Efeitos de áudio fora de tempo real** (p. 940) e **ignorar todos os efeitos de áudio** de uma vez (p. 946).
+- **Pacotes e cadeias de efeitos salvos** para reutilizar (salvar/carregar/exportar `.neovegfxchain`, p. 514) implementado.
+- **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56) implementados.
+- **Rastreamento de movimento** planar quadro a quadro para *Pan/Crop* ou *Track Motion* (`tools.motion_track`, p. 713) implementado.
+- ***Color Grading* (pp. 769–781):** LUTs integradas e arquivos `.cube` externos com controle de intensidade, **curvas RGB** interativas (*Master/R/G/B*) e **curvas HSL** em 6 setores de matiz, além das rodas tonais, implementados.
+- **Inserir legendas a partir das regiões** do projeto (`insert.subtitles_from_regions`, p. 722) implementado.
+- **Efeitos de áudio fora de tempo real** (`tools.apply_audio_fx`, p. 940) e **ignorar todos os efeitos de áudio** de uma vez (`options.bypass_all_audio_fx` + botão no Mixer, p. 946) implementados.
 
 ### Automação e Preferências
 

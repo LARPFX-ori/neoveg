@@ -1488,3 +1488,114 @@ fn kittest_trilhas_pastas_comp_pai_filho_multicam_e_3d() {
         crate::model::Stereo3dMode::AnaglyphRedCyan
     );
 }
+
+#[test]
+fn kittest_efeitos_cadeias_lut_curvas_legendas_e_bypass_audio() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // Prepara mídia gerada animada, evento selecionado e uma região na timeline.
+    let ev_id = {
+        let st = harness.state_mut();
+        let imp = neoveg_engine::media::import_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec {
+                text: "Cena teste".into(),
+                anim: crate::model::TextAnim::CrawlLeft,
+                anim_duration: 2.0,
+                ..crate::model::TextSpec::default()
+            },
+        ));
+        let ev = crate::model::Event::new(
+            &imp.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(2),
+        );
+        let ev_id = ev.id;
+        st.media.insert(imp.item.id, imp.entry);
+        st.project.media.push(imp.item);
+        st.project.tracks[0].events.push(ev);
+        st.project.regions.push(crate::model::Region {
+            id: crate::model::new_id(),
+            start: crate::model::Ticks::ZERO,
+            end: crate::model::Ticks::from_secs_i64(2),
+            label: "Fala inicial".into(),
+        });
+        st.session.sel_events.insert(ev_id);
+        st.changed();
+        ev_id
+    };
+    harness.run_steps(2);
+
+    // 1. Janela de FX do evento: adiciona Sépia, salva cadeia e salva preset próprio.
+    harness.state_mut().exec_cmd(Some(&ctx), "tools.fx_event");
+    harness.run_steps(2);
+    {
+        let st = harness.state_mut();
+        if let Some(ev) = st.project.event_mut(ev_id) {
+            ev.fx
+                .push(crate::model::FxInstance::new(crate::model::FxKind::Sepia));
+            ev.fx.push(crate::model::FxInstance::new(
+                crate::model::FxKind::ColorCorrector,
+            ));
+        }
+        st.changed();
+    }
+    harness.run_steps(2);
+    harness.get_by_label("Salvar cadeia...").click();
+    harness.run_steps(2);
+    harness.get_by_label("Salvar").click();
+    harness.run_steps(2);
+    assert!(!harness.state().prefs.fx_chains.is_empty());
+
+    // 2. Painel Color Grading mostra LUT, Curvas RGB e Curvas HSL.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.color_grading");
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("LUT de Câmera / Look (.cube)")
+        .is_some());
+    assert!(harness.query_by_label("Curvas RGB").is_some());
+    assert!(harness.query_by_label("Curvas HSL (6 setores)").is_some());
+
+    // 3. Legendas a partir das regiões via Tabela Única.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.subtitles_from_regions");
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .tracks
+        .iter()
+        .any(|t| t.name.starts_with("Legendas") && !t.events.is_empty()));
+
+    // 4. Bypass global de FX de áudio no Mixer e Opções.
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.mixer");
+    harness.run_steps(2);
+    harness.get_by_label("Bypass FX").click();
+    harness.run_steps(2);
+    assert!(harness.state().opts.bypass_all_audio_fx);
+
+    // 5. Rastreamento de movimento grava keyframes no Pan/Crop.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "tools.motion_track");
+    harness.run_steps(2);
+    harness.get_by_label("Rastrear e aplicar keyframes").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .project
+            .event(ev_id)
+            .expect("ev")
+            .pan_crop
+            .keys
+            .len()
+            >= 2
+    );
+}

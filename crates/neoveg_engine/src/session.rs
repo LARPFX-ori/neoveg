@@ -287,6 +287,8 @@ pub struct EditorOptions {
     pub preview_mute_video: bool,
     /// Modo de edição multicâmera (grade de ângulos na Prévia + corte por tecla 1..9, p. 416).
     pub multicam_mode: bool,
+    /// Ignora globalmente todos os efeitos de áudio (eventos, trilhas, barramentos e Master, p. 946).
+    pub bypass_all_audio_fx: bool,
 }
 
 /// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
@@ -323,6 +325,7 @@ impl Default for EditorOptions {
             preview_mute_audio: false,
             preview_mute_video: false,
             multicam_mode: false,
+            bypass_all_audio_fx: false,
         }
     }
 }
@@ -4831,6 +4834,306 @@ impl EditorSession {
         self.set_status(format!("Multicâmera: Câmera {}", angle_idx + 1));
         true
     }
+
+    // -----------------------------------------------------------------
+    // Efeitos, cadeias salvas, rastreamento, legendas por região e
+    // áudio fora de tempo real (pp. 54–56, 514, 713, 722, 940, 946)
+    // -----------------------------------------------------------------
+
+    /// Cria uma instância de `FxInstance` preenchida com os valores salvos de um preset.
+    pub fn instantiate_fx_with_preset(kind: FxKind, values: &[f32]) -> FxInstance {
+        let mut fx = FxInstance::new(kind);
+        let specs = kind.params();
+        for (p, (spec, &val)) in fx.params.iter_mut().zip(specs.iter().zip(values.iter())) {
+            if val.is_finite() {
+                p.value = val.clamp(spec.min, spec.max);
+            }
+        }
+        fx
+    }
+
+    /// Converte uma lista de efeitos de uma cadeia para formato serializável salvo em Preferências.
+    pub fn capture_saved_fx_chain(
+        name: &str,
+        audio: bool,
+        fxs: &[FxInstance],
+    ) -> Option<crate::prefs::SavedFxChainPref> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() || fxs.is_empty() {
+            return None;
+        }
+        let mut items = Vec::new();
+        for fx in fxs.iter().take(crate::prefs::MAX_FX_CHAIN_ITEMS) {
+            if matches!(fx.kind, FxKind::Ofx | FxKind::Vst3) {
+                continue;
+            }
+            items.push(crate::prefs::SavedFxChainItemPref {
+                fx_kind: fx.kind.id().to_string(),
+                enabled: fx.enabled,
+                values: fx.params.iter().map(|p| p.value).collect(),
+            });
+        }
+        let mut chain = crate::prefs::SavedFxChainPref {
+            name: trimmed.to_string(),
+            audio,
+            items,
+        };
+        chain.sanitize().then_some(chain)
+    }
+
+    /// Constrói novas instâncias independentes a partir de uma cadeia salva.
+    pub fn instantiate_saved_fx_chain(chain: &crate::prefs::SavedFxChainPref) -> Vec<FxInstance> {
+        chain
+            .items
+            .iter()
+            .filter_map(|it| {
+                let kind = FxKind::from_id(&it.fx_kind)?;
+                if kind.is_audio() != chain.audio {
+                    return None;
+                }
+                let mut fx = Self::instantiate_fx_with_preset(kind, &it.values);
+                fx.enabled = it.enabled;
+                Some(fx)
+            })
+            .collect()
+    }
+
+    /// Converte todas as regiões do projeto em legendas de texto na timeline (p. 722).
+    pub fn insert_subtitles_from_regions(&mut self) -> usize {
+        if !self.project.regions.iter().any(|r| r.end > r.start) {
+            self.set_status("Não há regiões válidas para gerar legendas.");
+            return 0;
+        }
+        self.checkpoint();
+        let count = crate::subtitles::regions_to_subtitles(&mut self.project, "Legendas");
+        self.changed();
+        self.set_status(format!(
+            "{count} legenda(s) gerada(s) a partir das regiões."
+        ));
+        count
+    }
+
+    /// Rastreia o deslocamento planar quadro a quadro de `src_ev_id` e grava quadros-chave
+    /// de movimento em um evento (`PanCrop`) ou trilha (`TrackMotion`, p. 713).
+    pub fn track_event_motion(
+        &mut self,
+        media: &MediaCache,
+        src_ev_id: Id,
+        target_event_id: Option<Id>,
+        target_track_id: Option<Id>,
+        invert_motion: bool,
+        step_frames: usize,
+    ) -> Result<usize> {
+        let Some((src_ti, src_ei)) = self.project.find_event(src_ev_id) else {
+            return Err(NeovegError::InvalidInput(
+                "evento de origem inválido para rastreamento".into(),
+            ));
+        };
+        let src_ev = self.project.tracks[src_ti].events[src_ei].clone();
+        let Some(src_media) = self.project.media(src_ev.media_id).cloned() else {
+            return Err(NeovegError::InvalidInput(
+                "mídia de origem indisponível".into(),
+            ));
+        };
+        if !src_media.has_video {
+            return Err(NeovegError::InvalidInput(
+                "rastreamento de movimento requer evento com vídeo".into(),
+            ));
+        }
+
+        let fd = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let total_frames = ((src_ev.length.0 / fd.0).max(1)) as usize;
+        let auto_step = total_frames.div_ceil(180).max(1);
+        let step = step_frames.max(auto_step).min(total_frames.max(1));
+
+        let mut samples: Vec<(Ticks, f32, f32)> = Vec::new();
+        let mut prev_img = src_ev
+            .media_time(src_ev.start, src_media.duration)
+            .and_then(|mt| media.video_frame_for_quality(&src_media, mt, 96, 54, true));
+        let mut acc_dx = 0.0f32;
+        let mut acc_dy = 0.0f32;
+        let sign = if invert_motion { -1.0 } else { 1.0 };
+        samples.push((Ticks::ZERO, 0.0, 0.0));
+
+        let mut frame_i = step;
+        while frame_i <= total_frames && samples.len() < 240 {
+            let local_t = Ticks::from_raw((frame_i as i64).saturating_mul(fd.0))
+                .min(Ticks::from_raw(src_ev.length.0.saturating_sub(1)).max(Ticks::ZERO));
+            let abs_t = src_ev.start + local_t;
+            if let Some(mt) = src_ev.media_time(abs_t, src_media.duration) {
+                if let Some(cur_img) = media.video_frame_for_quality(&src_media, mt, 96, 54, true) {
+                    if let Some(ref prev) = prev_img {
+                        let (dx, dy, _) =
+                            crate::engine::vfx::estimate_global_motion(prev, &cur_img);
+                        acc_dx = (acc_dx + dx * sign).clamp(-0.45, 0.45);
+                        acc_dy = (acc_dy + dy * sign).clamp(-0.45, 0.45);
+                    }
+                    samples.push((local_t, acc_dx, acc_dy));
+                    prev_img = Some(cur_img);
+                }
+            }
+            frame_i += step;
+        }
+        if samples.len() < 2 {
+            samples.push((src_ev.length, acc_dx, acc_dy));
+        }
+
+        let tol = fd.div_i64(2);
+        self.checkpoint();
+        if let Some(tr_id) = target_track_id {
+            let Some(ti) = self.project.track_index(tr_id) else {
+                return Err(NeovegError::InvalidInput(
+                    "trilha de destino inexistente".into(),
+                ));
+            };
+            let base = self.project.tracks[ti].motion.eval(src_ev.start);
+            self.project.tracks[ti].motion.keys.clear();
+            for &(lt, dx, dy) in &samples {
+                self.project.tracks[ti].motion.set(
+                    src_ev.start + lt,
+                    MotionKey {
+                        x: (base.x + dx).clamp(-1.5, 1.5),
+                        y: (base.y + dy).clamp(-1.5, 1.5),
+                        scale_x: base.scale_x,
+                        scale_y: base.scale_y,
+                        rot: base.rot,
+                    },
+                    tol,
+                );
+            }
+        } else {
+            let dst_id = target_event_id.unwrap_or(src_ev_id);
+            let Some(dst_ev) = self.project.event_mut(dst_id) else {
+                return Err(NeovegError::InvalidInput(
+                    "evento de destino inexistente".into(),
+                ));
+            };
+            let base = dst_ev.pan_crop.eval(Ticks::ZERO);
+            dst_ev.pan_crop.keys.clear();
+            for &(lt, dx, dy) in &samples {
+                dst_ev.pan_crop.set(
+                    lt,
+                    PanCropKey {
+                        cx: (base.cx + dx).clamp(-1.0, 2.0),
+                        cy: (base.cy + dy).clamp(-1.0, 2.0),
+                        size: base.size,
+                        rot: base.rot,
+                    },
+                    tol,
+                );
+            }
+        }
+        let n_keys = samples.len();
+        self.changed();
+        self.set_status(format!(
+            "Rastreamento de movimento aplicado ({n_keys} quadros-chave)."
+        ));
+        Ok(n_keys)
+    }
+
+    /// Aplica os efeitos de áudio de eventos selecionados fora de tempo real (WAV),
+    /// adicionando o resultado como *take* ativo e desativando os plug-ins em tempo real (p. 940).
+    pub fn apply_audio_fx_non_realtime(
+        &mut self,
+        media: &MediaCache,
+        out_dir: &std::path::Path,
+    ) -> Result<usize> {
+        let mut targets: Vec<(usize, usize, Event)> = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            if tr.kind != TrackKind::Audio || tr.is_folder {
+                continue;
+            }
+            for (ei, ev) in tr.events.iter().enumerate() {
+                if self.sel_events.contains(&ev.id) && ev.fx.iter().any(|f| f.enabled) {
+                    targets.push((ti, ei, ev.clone()));
+                }
+            }
+        }
+        if targets.is_empty() {
+            if let Some(ti) = self.sel_track {
+                if let Some(tr) = self
+                    .project
+                    .tracks
+                    .get(ti)
+                    .filter(|t| t.kind == TrackKind::Audio)
+                {
+                    if let Some((ei, ev)) =
+                        tr.events.iter().enumerate().find(|(_, e)| {
+                            e.contains(self.cursor) && e.fx.iter().any(|f| f.enabled)
+                        })
+                    {
+                        targets.push((ti, ei, ev.clone()));
+                    }
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Err(NeovegError::InvalidInput(
+                "selecione evento(s) de áudio com efeitos ativos para aplicar fora de tempo real"
+                    .into(),
+            ));
+        }
+
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| NeovegError::InvalidInput(format!("erro criando pasta de bounce: {e}")))?;
+        let sr = self.project.settings.sample_rate.clamp(8000, 192_000);
+        let mut rendered: Vec<(Id, crate::media::Imported)> = Vec::new();
+        for (_, _, ev) in &targets {
+            let Some(pcm) = crate::engine::audio::render_event_fx_stereo(&self.project, media, ev)
+            else {
+                return Err(NeovegError::InvalidInput(format!(
+                    "áudio do evento \"{}\" indisponível",
+                    ev.name
+                )));
+            };
+            let wav_path = out_dir.join(format!("fx_aplicado_{}.wav", new_id()));
+            let mut wr =
+                crate::render::WavWriter::create(&wav_path, sr, crate::render::WavBits::Pcm24)
+                    .map_err(|e| NeovegError::InvalidInput(format!("erro criando WAV: {e}")))?;
+            wr.write(&pcm)
+                .map_err(|e| NeovegError::InvalidInput(format!("erro gravando WAV: {e}")))?;
+            wr.finish()
+                .map_err(|e| NeovegError::InvalidInput(format!("erro finalizando WAV: {e}")))?;
+            let imp = crate::media::import_file(&wav_path)
+                .map_err(|e| NeovegError::InvalidInput(format!("erro reimportando WAV: {e}")))?;
+            rendered.push((ev.id, imp));
+        }
+
+        self.checkpoint();
+        let count = rendered.len();
+        for (ev_id, imp) in rendered {
+            let mid = imp.item.id;
+            media.insert(mid, imp.entry);
+            let reg_id = self.register_imported_media(imp.item, None);
+            if let Some(ev) = self.project.event_mut(ev_id) {
+                let take_name = format!("FX aplicado — {}", ev.name);
+                let _ = crate::takes::add_take(
+                    ev,
+                    Take {
+                        media_id: reg_id,
+                        offset: Ticks::ZERO,
+                        name: take_name.clone(),
+                    },
+                    true,
+                );
+                ev.rate = Rate::NORMAL;
+                ev.pitch_semitones = 0.0;
+                ev.take_name = take_name;
+                for fx in &mut ev.fx {
+                    fx.enabled = false;
+                }
+            }
+        }
+        self.changed();
+        self.set_status(format!(
+            "Efeitos de áudio aplicados fora de tempo real em {count} evento(s)."
+        ));
+        Ok(count)
+    }
 }
 
 fn split_event_in_track(
@@ -5840,5 +6143,112 @@ mod tests {
         assert!(sess.undo());
         assert_eq!(sess.project.tracks.len(), before_tracks);
         let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn efeitos_cadeias_rastreamento_legendas_e_audio_nao_realtime() {
+        // 1. Cadeia de efeitos salva e instanciada com segurança.
+        let mut fx_sepia = FxInstance::new(FxKind::Sepia);
+        fx_sepia.params[0].value = 0.75;
+        let chain_pref = EditorSession::capture_saved_fx_chain(
+            "Look Quente",
+            false,
+            &[fx_sepia, FxInstance::new(FxKind::Vignette)],
+        )
+        .expect("cadeia válida");
+        let built = EditorSession::instantiate_saved_fx_chain(&chain_pref);
+        assert_eq!(built.len(), 2);
+        assert!((built[0].params[0].value - 0.75).abs() < 1e-4);
+        assert!(EditorSession::capture_saved_fx_chain("", false, &built).is_none());
+
+        // 2. Legendas a partir de regiões + Undo em passo único.
+        let mut p = Project::new_default();
+        p.regions.push(Region {
+            id: 1,
+            start: Ticks::ZERO,
+            end: Ticks::from_secs_i64(2),
+            label: "Título Inicial".into(),
+        });
+        let imp_vid = crate::media::import_generated(GenSpec::Text(TextSpec {
+            text: "Alvo".into(),
+            anim: TextAnim::CrawlLeft,
+            anim_duration: 2.0,
+            ..TextSpec::default()
+        }));
+        let ev_vid = Event::new(&imp_vid.item, Ticks::ZERO, Ticks::from_secs_i64(2));
+        let ev_vid_id = ev_vid.id;
+        p.media.push(imp_vid.item);
+        p.tracks[0].events.push(ev_vid);
+
+        let mut sess = EditorSession::new(p);
+        let cache = MediaCache::default();
+        cache.insert(p_media_id(&sess.project), imp_vid.entry);
+
+        assert_eq!(sess.insert_subtitles_from_regions(), 1);
+        assert!(sess
+            .project
+            .tracks
+            .iter()
+            .any(|t| t.name.starts_with("Legendas") && !t.events.is_empty()));
+        assert!(sess.undo());
+
+        // 3. Rastreamento planar de movimento para Pan/Crop + Undo.
+        let keys_n = sess
+            .track_event_motion(&cache, ev_vid_id, Some(ev_vid_id), None, true, 6)
+            .expect("rastreamento");
+        assert!(keys_n >= 2);
+        assert!(sess.project.event(ev_vid_id).unwrap().pan_crop.keys.len() >= 2);
+        assert!(sess.undo());
+
+        // 4. Bypass global no Mixer e aplicar efeitos de áudio fora de tempo real.
+        let dir = std::env::temp_dir().join(format!("neoveg_afxbounce_{}", new_id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let wav_path = dir.join("tone.wav");
+        let sr = sess.project.settings.sample_rate;
+        let samples = vec![0.25f32; (sr as usize / 2) * 2];
+        let mut wr = crate::render::WavWriter::create(&wav_path, sr, crate::render::WavBits::Pcm16)
+            .expect("wav create");
+        wr.write(&samples).expect("wav write");
+        wr.finish().expect("wav finish");
+        let imp_aud = crate::media::import_file(&wav_path).expect("import wav");
+        let mid_aud = imp_aud.item.id;
+        let mut ev_aud = Event::new(&imp_aud.item, Ticks::ZERO, Ticks::from_millis_i64(500));
+        let ev_aud_id = ev_aud.id;
+        let mut gain = FxInstance::new(FxKind::Gain);
+        gain.params[0].value = 6.0;
+        ev_aud.fx.push(gain);
+        cache.insert(mid_aud, imp_aud.entry);
+        sess.project.media.push(imp_aud.item);
+        sess.project.tracks[1].events.push(ev_aud);
+        sess.sel_events.insert(ev_aud_id);
+
+        // Verifica bypass global no Mixer.
+        let audio_map = cache.audio_map();
+        let mut mixer = crate::engine::audio::Mixer::new_offline(sr);
+        let mut wet = vec![0.0f32; 512 * 2];
+        let mut bypassed = vec![0.0f32; 512 * 2];
+        mixer.bypass_fx = false;
+        mixer.process(&sess.project, &audio_map, 0, &mut wet);
+        mixer.reset();
+        mixer.bypass_fx = true;
+        mixer.process(&sess.project, &audio_map, 0, &mut bypassed);
+        let max_wet = wet.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        let max_byp = bypassed.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(max_wet > max_byp * 1.4, "wet={max_wet} bypassed={max_byp}");
+
+        // Aplica fora de tempo real (adiciona take e desativa o FX em tempo real).
+        let applied = sess
+            .apply_audio_fx_non_realtime(&cache, &dir)
+            .expect("bounce");
+        assert_eq!(applied, 1);
+        let ev_after = sess.project.event(ev_aud_id).unwrap();
+        assert!(!ev_after.alt_takes.is_empty());
+        assert!(!ev_after.fx[0].enabled);
+        assert!(sess.undo());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn p_media_id(p: &Project) -> Id {
+        p.media[0].id
     }
 }

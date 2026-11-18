@@ -114,6 +114,7 @@ mod more_tools_tests {
 pub enum DndPayload {
     Media(Id),
     Fx(FxKind),
+    FxPreset(FxInstance),
     Transition(TransitionKind),
     Generator(GenSpec),
 }
@@ -565,6 +566,56 @@ impl App {
                     );
                 }
             }
+        }
+    }
+
+    pub fn open_motion_track_dialog(&mut self) {
+        let candidate = self
+            .sel_events
+            .iter()
+            .copied()
+            .find(|&eid| {
+                self.project.find_event(eid).is_some_and(|(ti, ei)| {
+                    self.project.tracks[ti].kind == TrackKind::Video
+                        && self
+                            .project
+                            .media(self.project.tracks[ti].events[ei].media_id)
+                            .is_some_and(|m| m.has_video)
+                })
+            })
+            .or_else(|| {
+                self.sel_track
+                    .and_then(|ti| self.project.tracks.get(ti))
+                    .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+                    .and_then(|t| {
+                        t.events.iter().find(|e| {
+                            e.contains(self.cursor)
+                                && self.project.media(e.media_id).is_some_and(|m| m.has_video)
+                        })
+                    })
+                    .map(|e| e.id)
+            });
+        let Some(ev_id) = candidate else {
+            self.set_status("Selecione um evento de vídeo para rastrear o movimento.");
+            return;
+        };
+        let track_id = self
+            .project
+            .find_event(ev_id)
+            .map(|(ti, _)| self.project.tracks[ti].id);
+        self.dlg.motion_track_src = Some(ev_id);
+        self.dlg.motion_track_target_event = Some(ev_id);
+        if self.dlg.motion_track_target_track.is_none() {
+            self.dlg.motion_track_target_track = track_id;
+        }
+        self.dlg.motion_track_step = self.dlg.motion_track_step.max(1);
+    }
+
+    pub fn apply_audio_fx_non_realtime(&mut self) {
+        let dir = std::env::temp_dir().join("neoveg_audio_fx_bounce");
+        match self.session.apply_audio_fx_non_realtime(&self.media, &dir) {
+            Ok(_) => self.sync_after_session(),
+            Err(e) => self.set_status(format!("Aplicar efeitos de áudio: {e}")),
         }
     }
 
@@ -2045,6 +2096,8 @@ impl App {
             }
             UiAction::OpenFxMasterAudio => self.dlg.fx_target = Some(FxTarget::MasterAudio),
             UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
+            UiAction::OpenMotionTrackDialog => self.open_motion_track_dialog(),
+            UiAction::ApplyAudioFxNonRealtime => self.apply_audio_fx_non_realtime(),
             UiAction::OpenGoto => self.dlg.goto_open = true,
             UiAction::OpenEditLayoutProps => {
                 self.dlg
@@ -2773,6 +2826,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
                 self.cmd_menu_btn(ui, "insert.region");
+                self.cmd_menu_btn(ui, "insert.subtitles_from_regions");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.gen_text");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
@@ -2799,6 +2853,8 @@ impl App {
                 self.cmd_menu_btn(ui, "tools.event_props");
                 self.cmd_menu_btn(ui, "tools.pan_crop");
                 self.cmd_menu_btn(ui, "tools.fx_event");
+                self.cmd_menu_btn(ui, "tools.motion_track");
+                self.cmd_menu_btn(ui, "tools.apply_audio_fx");
                 self.cmd_menu_btn(ui, "tools.reverse");
                 self.cmd_menu_btn(ui, "tools.freeze_frame");
                 ui.separator();
@@ -2858,6 +2914,11 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
                 self.cmd_menu_chk(ui, self.opts.preview_mute_audio, "preview.mute_audio");
                 self.cmd_menu_chk(ui, self.opts.preview_mute_video, "preview.mute_video");
+                self.cmd_menu_chk(
+                    ui,
+                    self.opts.bypass_all_audio_fx,
+                    "options.bypass_all_audio_fx",
+                );
                 ui.separator();
                 ui.label(format!(
                     "Dispositivo de áudio: {} ({} Hz)",
