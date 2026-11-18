@@ -1291,16 +1291,6 @@ fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         App::with_context(&ctx, None)
     };
-    app.splash = crate::splash::SplashState::startup(false);
-    app.set_startup_splash_window(true);
-    assert!(
-        !app.startup_window,
-        "sem abertura ativa a janela abre normal"
-    );
-
-    app.splash = crate::splash::SplashState::startup(true);
-    app.set_startup_splash_window(true);
-    assert!(app.startup_window);
     let small = |t: f64| egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             Pos2::ZERO,
@@ -1312,7 +1302,23 @@ fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
         time: Some(t),
         ..Default::default()
     };
+    // janela nasceu pequena, mas a abertura não está ativa (ex.: oferta de
+    // recuperação): o primeiro quadro já devolve bordas e tamanho
+    app.splash = crate::splash::SplashState::startup(false);
+    app.set_startup_splash_window(true);
     let out = ctx.run(small(0.0), |c| app.frame_ui(c));
+    assert!(
+        !app.startup_window,
+        "sem abertura ativa a janela não pode ficar presa no tamanho da abertura"
+    );
+    assert!(out.viewport_output.values().any(|v| v
+        .commands
+        .contains(&egui::ViewportCommand::Decorations(true))));
+
+    app.splash = crate::splash::SplashState::startup(true);
+    app.set_startup_splash_window(true);
+    assert!(app.startup_window);
+    let out = ctx.run(small(0.05), |c| app.frame_ui(c));
     assert!(app.startup_window);
     assert!(!out.viewport_output.values().any(|v| v
         .commands

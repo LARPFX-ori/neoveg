@@ -4305,9 +4305,11 @@ impl eframe::App for App {
 impl App {
     /// Um quadro completo da interface (separado de `eframe::App` para testes).
     /// A janela abriu do tamanho da tela de abertura (ver `native_options`):
-    /// enquanto a abertura estiver ativa, só ela é desenhada.
+    /// enquanto a abertura estiver ativa, só ela é desenhada. Vale mesmo com a
+    /// abertura inativa (ex.: oferta de recuperação): aí o primeiro quadro já
+    /// devolve as bordas e o tamanho normal, e a janela nunca fica presa pequena.
     pub fn set_startup_splash_window(&mut self, on: bool) {
-        self.startup_window = on && self.splash.active;
+        self.startup_window = on;
     }
 
     /// Fim da tela de abertura na inicialização: a janela ganha bordas e o
