@@ -25,11 +25,17 @@ struct FloatingViewportSpec<'a> {
     lang: Language,
     /// Mostra o botão Acoplar (falso nos painéis só de janela).
     can_dock: bool,
+    /// Posição e tamanho com que a janela abre (fixos enquanto ela está
+    /// aberta: o egui só reenvia o que muda no `ViewportBuilder`, então a
+    /// janela não briga com o usuário quando ele a move).
+    geom: Option<crate::layout::FloatingGeom>,
 }
 
 struct FloatingOutcome {
     open: bool,
     reattach: bool,
+    /// Posição e tamanho reais da janela neste quadro (só janela nativa).
+    geom: Option<crate::layout::FloatingGeom>,
 }
 
 fn show_floating_viewport(
@@ -42,15 +48,19 @@ fn show_floating_viewport(
     let mut out = FloatingOutcome {
         open: true,
         reattach: false,
+        geom: None,
     };
     let vid = egui::ViewportId::from_hash_of(&id_salt);
     let builder = egui::ViewportBuilder::default()
         .with_title(format!("{} - Neoveg", spec.title))
-        .with_inner_size(spec.inner_size)
         .with_min_inner_size(spec.min_size)
         .with_resizable(true)
         .with_decorations(true)
         .with_icon(spec.icon.clone());
+    let builder = match spec.geom {
+        Some([x, y, w, h]) => builder.with_position([x, y]).with_inner_size([w, h]),
+        None => builder.with_inner_size(spec.inner_size),
+    };
     ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
         if class == egui::ViewportClass::Embedded {
             egui::Window::new(spec.title)
@@ -80,6 +90,15 @@ fn show_floating_viewport(
         } else {
             if v_ctx.input(|i| i.viewport().close_requested()) {
                 out.open = false;
+            }
+            let (outer, inner) = v_ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+            if let (Some(o), Some(r)) = (outer, inner) {
+                out.geom = crate::layout::sanitize_floating_geom([
+                    o.min.x,
+                    o.min.y,
+                    r.width(),
+                    r.height(),
+                ]);
             }
             egui::CentralPanel::default().show(v_ctx, |ui| {
                 if spec.can_dock {
@@ -238,7 +257,41 @@ impl App {
         crate::dock::draw_dock_tree(self, ui);
     }
 
+    /// Geometria com que a janela destacada `key` abre: a última conhecida,
+    /// congelada enquanto a janela estiver aberta (ver `FloatingViewportSpec`).
+    pub(crate) fn floating_open_geom(&mut self, key: &str) -> Option<crate::layout::FloatingGeom> {
+        self.floating_shown.insert(key.to_string());
+        if let Some(g) = self.floating_open.get(key) {
+            return *g;
+        }
+        let g = self.floating_geom.get(key).copied();
+        self.floating_open.insert(key.to_string(), g);
+        g
+    }
+
+    /// Guarda onde a janela `key` está agora (vai para o `.neoveglayout`).
+    pub(crate) fn remember_floating_geom(
+        &mut self,
+        key: &str,
+        geom: Option<crate::layout::FloatingGeom>,
+    ) {
+        if let Some(g) = geom {
+            if self.floating_geom.len() < 64 || self.floating_geom.contains_key(key) {
+                self.floating_geom.insert(key.to_string(), g);
+            }
+        }
+    }
+
     pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
+        self.floating_shown.clear();
+        self.floating_panel_windows_inner(ctx);
+        // janela fechada: a próxima abertura parte da última posição
+        let shown = std::mem::take(&mut self.floating_shown);
+        self.floating_open.retain(|k, _| shown.contains(k));
+        self.floating_shown = shown;
+    }
+
+    fn floating_panel_windows_inner(&mut self, ctx: &egui::Context) {
         let lang = self.lang();
         let icon = self.window_icon.clone();
         let theme = self.theme.clone();
@@ -252,6 +305,7 @@ impl App {
                 theme: &theme,
                 lang,
                 can_dock: true,
+                geom: self.floating_open_geom(crate::layout::FLOATING_PREVIEW_KEY),
             };
             let out = show_floating_viewport(
                 ctx,
@@ -260,6 +314,7 @@ impl App {
                 &spec,
                 |ui| self.preview_panel(ui, true),
             );
+            self.remember_floating_geom(crate::layout::FLOATING_PREVIEW_KEY, out.geom);
             if !out.open || out.reattach {
                 self.preview_detached = false;
                 if out.reattach {
@@ -280,6 +335,7 @@ impl App {
                 theme: &theme,
                 lang,
                 can_dock: true,
+                geom: self.floating_open_geom(crate::layout::FLOATING_MASTER_KEY),
             };
             let out = show_floating_viewport(
                 ctx,
@@ -288,6 +344,7 @@ impl App {
                 &spec,
                 |ui| self.master_bus_panel(ui, true),
             );
+            self.remember_floating_geom(crate::layout::FLOATING_MASTER_KEY, out.geom);
             if !out.open || out.reattach {
                 self.master_bus_detached = false;
                 if out.reattach {
@@ -317,6 +374,7 @@ impl App {
                 theme: &theme,
                 lang,
                 can_dock: !crate::layout::window_only(tab),
+                geom: self.floating_open_geom(key),
             };
             let out = show_floating_viewport(
                 ctx,
@@ -330,6 +388,7 @@ impl App {
                         .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
                 },
             );
+            self.remember_floating_geom(key, out.geom);
             if out.reattach {
                 self.detached_tabs.remove(&tab);
                 self.dock_visible = true;

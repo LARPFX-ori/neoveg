@@ -49,6 +49,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 ## Fase 4 — Próximos Marcos *(Em andamento)*
 
 - **Concluído:**
+  - **Janelas destacadas lembram posição e tamanho** (Prévia, Master Bus e painéis): a janela reaberta volta ao último lugar na sessão e o `.neoveglayout` salvo leva e traz as posições, saneadas contra valores não finitos e fora de faixa (`layout.rs`, `panels.rs`);
   - *Surround Panner* 5.1 (`engine/surround.rs`, painel `surround_panel.rs`): modo do Master estéreo/5.1, posição 2D por trilha e barramento no anel ITU-R BS.775, LFE, downmix para monitoração e render WAV de 6 canais (`WAVE_FORMAT_EXTENSIBLE`);
   - **Takes múltiplos por evento** (`takes.rs`): adicionar como take, próximo/anterior (`T`/`Shift+T`), escolher/excluir o ativo e *Slip em todos os takes*, com divisão e aparo sincronizados;
   - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e **AAF** (`.aaf`, `aaf.rs`, `aaf_metadict.rs`, `file.import_aaf` / `file.export_aaf` em Sala Limpa);
@@ -62,7 +63,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - **Plug-ins externos restantes:** OFX com tiles e múltiplas entradas em contexto *General*; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros em tempo real e instrumentos (MIDI).
   - **API de scripts:** efeitos e envelopes pelo `ScriptPortal.Vegas` (projeto, trilhas, eventos, marcadores, mídia e takes já existem).
   - **Quadros-chave de trilha:** *Lock Envelopes to Events* e curva por quadro-chave nos parâmetros de efeito (manual do VEGAS Pro 21, p. 389).
-  - **Área de janelas:** docas flutuantes com várias abas na mesma janela, `Ctrl` + arrastar uma janela flutuante de volta para a área, a preferência *Permitir que janelas flutuantes acoplem*, lembrar posição e tamanho de cada janela destacada no `.neoveglayout` e os atalhos alternativos ``Alt+` ``, ``Shift+Alt+` `` e ``Ctrl+Alt+` `` (a crase é tecla morta no ABNT2).
+  - **Área de janelas:** docas flutuantes com várias abas na mesma janela, `Ctrl` + arrastar uma janela flutuante de volta para a área, a preferência *Permitir que janelas flutuantes acoplem* e os atalhos alternativos ``Alt+` ``, ``Shift+Alt+` `` e ``Ctrl+Alt+` `` (a crase é tecla morta no ABNT2).
 
 ## Paridade de UI/UX com o manual do VEGAS Pro 21
 
