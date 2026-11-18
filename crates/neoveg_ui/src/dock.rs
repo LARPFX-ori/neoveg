@@ -136,9 +136,18 @@ pub fn build_dock_tree(
     preview_on_left: bool,
 ) -> Tree<DockPane> {
     let mut tiles = Tiles::default();
-    let mut tab_ids = Vec::with_capacity(DockTab::ALL.len());
+    // Grupo à esquerda: os painéis padrão primeiro, depois os outros (que
+    // começam fechados e aparecem aqui quando abertos pelo menu Exibir).
+    let left_order: Vec<DockTab> =
+        crate::layout::DEFAULT_DOCK_TABS
+            .into_iter()
+            .chain(DockTab::ALL.into_iter().filter(|t| {
+                !crate::layout::DEFAULT_DOCK_TABS.contains(t) && *t != DockTab::Trimmer
+            }))
+            .collect();
+    let mut tab_ids = Vec::with_capacity(left_order.len());
     let mut active_id = None;
-    for tab in DockTab::ALL {
+    for tab in left_order {
         let id = tiles.insert_pane(DockPane::Tab(tab));
         if tab == active_tab {
             active_id = Some(id);
@@ -151,8 +160,16 @@ pub fn build_dock_tree(
     }
     let tabs_group = tiles.insert_container(Container::Tabs(tabs));
 
+    // O Trimmer fica no mesmo grupo da Prévia de Vídeo.
     let pv_pane = tiles.insert_pane(DockPane::Preview);
-    let pv_group = tiles.insert_tab_tile(vec![pv_pane]);
+    let trimmer_pane = tiles.insert_pane(DockPane::Tab(DockTab::Trimmer));
+    let mut pv_tabs = Tabs::new(vec![pv_pane, trimmer_pane]);
+    pv_tabs.set_active(if active_tab == DockTab::Trimmer {
+        trimmer_pane
+    } else {
+        pv_pane
+    });
+    let pv_group = tiles.insert_container(Container::Tabs(pv_tabs));
 
     let mb_pane = tiles.insert_pane(DockPane::MasterBus);
     let mb_group = tiles.insert_tab_tile(vec![mb_pane]);
@@ -276,7 +293,9 @@ fn sync_subtree_visibility(
         None => return false,
     };
     let visible = match kind {
-        NodeKind::Pane(DockPane::Tab(t)) => !app.detached_tabs.contains(&t),
+        NodeKind::Pane(DockPane::Tab(t)) => {
+            !app.detached_tabs.contains(&t) && !app.closed_tabs.contains(&t)
+        }
         NodeKind::Pane(DockPane::Preview) => show_preview,
         NodeKind::Pane(DockPane::MasterBus) => show_master,
         NodeKind::Container(children) => {
@@ -369,8 +388,11 @@ impl NeovegTileBehavior<'_> {
             ui.close_menu();
         }
         if ui
-            .button("Maximizar na área de janelas")
-            .on_hover_text("Preenche a área de janelas; duplo clique na aba também")
+            .button(neoveg_common::tr(lang, "Maximizar na área de janelas"))
+            .on_hover_text(neoveg_common::tr(
+                lang,
+                "Preenche a área de janelas; duplo clique na aba também",
+            ))
             .clicked()
         {
             self.pending_maximize = Some(pane);
@@ -378,6 +400,17 @@ impl NeovegTileBehavior<'_> {
         }
         match pane {
             DockPane::Tab(_) => {
+                if ui
+                    .button(neoveg_common::tr(lang, "Fechar painel"))
+                    .on_hover_text(neoveg_common::tr(
+                        lang,
+                        "Fecha o painel; ele volta pelo menu Exibir",
+                    ))
+                    .clicked()
+                {
+                    self.pending_close.push(pane);
+                    ui.close_menu();
+                }
                 if ui
                     .button(neoveg_common::tr(lang, "Destacar todas as abas"))
                     .clicked()
@@ -1119,7 +1152,7 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
     }
     for pane in pending_close {
         match pane {
-            DockPane::Tab(t) => app.detach_dock_tab(t),
+            DockPane::Tab(t) => app.close_dock_tab(t),
             DockPane::Preview => app.preview_visible = false,
             DockPane::MasterBus => app.master_bus_visible = false,
         }

@@ -17,6 +17,8 @@ fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
     app.pending_welcome_after_splash = false;
     app.dismiss_welcome();
     app.select_layout_type(Some(&cc.egui_ctx), LayoutType::Magix, false);
+    // os testes de dock clicam em todas as abas; o padrão novo fica no teste próprio
+    app.closed_tabs.clear();
     app
 }
 
@@ -1054,6 +1056,8 @@ fn build_ready_app_lang(cc: &eframe::CreationContext<'_>, lang: neoveg_common::L
     app.pending_welcome_after_splash = false;
     app.dismiss_welcome();
     app.select_layout_type(Some(&cc.egui_ctx), LayoutType::Magix, false);
+    // os testes de dock clicam em todas as abas; o padrão novo fica no teste próprio
+    app.closed_tabs.clear();
     app
 }
 

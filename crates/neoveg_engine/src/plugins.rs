@@ -317,20 +317,118 @@ pub fn scan_dir(kind: ExternalKind, dir: &Path) -> Vec<ExternalPlugin> {
 
 /// Varre todas as pastas padrão, sem duplicar o mesmo pacote.
 pub fn scan_default() -> Vec<ExternalPlugin> {
-    let mut out: Vec<ExternalPlugin> = vec![];
-    for (kind, dir) in default_search_dirs() {
-        for p in scan_dir(kind, &dir) {
-            if !out.iter().any(|o| o.path == p.path) {
-                out.push(p);
-            }
+    scan_with_folders(&[]).0
+}
+
+/// Estado de uma pasta de plug-ins mapeada pelo usuário após a varredura.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderStatus {
+    /// Pasta lida; quantos plug-ins novos ela trouxe.
+    Found(usize),
+    /// O caminho não existe (unidade desconectada, Google Drive fechado ou
+    /// pasta movida).
+    Missing,
+    /// O caminho existe mas não é uma pasta.
+    NotDir,
+}
+
+/// Resultado da varredura de uma pasta mapeada.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderScan {
+    pub path: PathBuf,
+    pub status: FolderStatus,
+}
+
+/// Junta os plug-ins de `found` em `out` sem repetir o mesmo pacote.
+fn push_unique(out: &mut Vec<ExternalPlugin>, found: Vec<ExternalPlugin>) -> usize {
+    let mut n = 0;
+    for p in found {
+        if !out.iter().any(|o| o.path == p.path) {
+            out.push(p);
+            n += 1;
         }
     }
-    out
+    n
+}
+
+/// Varre as pastas padrão e as pastas mapeadas pelo usuário (`extra`). Cada
+/// pasta mapeada é varrida nos dois formatos (VST3 e OFX), porque o usuário
+/// costuma guardar os dois juntos. Devolve os plug-ins, sem repetir pacote, e
+/// o estado de cada pasta mapeada, na mesma ordem de `extra`.
+///
+/// Pode demorar (pastas de rede ou do Google Drive em streaming): chame fora
+/// da thread da interface (`AGENTS.md` §3.6).
+pub fn scan_with_folders(extra: &[PathBuf]) -> (Vec<ExternalPlugin>, Vec<FolderScan>) {
+    let mut out: Vec<ExternalPlugin> = vec![];
+    for (kind, dir) in default_search_dirs() {
+        push_unique(&mut out, scan_dir(kind, &dir));
+    }
+    let mut folders = Vec::with_capacity(extra.len());
+    for dir in extra {
+        let status = match std::fs::metadata(dir) {
+            Err(_) => FolderStatus::Missing,
+            Ok(m) if !m.is_dir() => FolderStatus::NotDir,
+            Ok(_) => {
+                let mut n = push_unique(&mut out, scan_dir(ExternalKind::Vst3, dir));
+                n += push_unique(&mut out, scan_dir(ExternalKind::Ofx, dir));
+                FolderStatus::Found(n)
+            }
+        };
+        folders.push(FolderScan {
+            path: dir.clone(),
+            status,
+        });
+    }
+    out.sort_by_key(|a| a.name.to_lowercase());
+    (out, folders)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pasta mapeada com um VST3 e um OFX juntos (como numa pasta do Drive):
+    /// os dois aparecem; pasta ausente e arquivo no lugar de pasta não
+    /// entram em pânico e voltam com o estado certo.
+    #[test]
+    fn pasta_mapeada_traz_vst3_e_ofx_e_informa_pastas_ausentes() {
+        let d = tmp_dir("mapeada");
+        let vst3_bin = d
+            .join("Fabricante")
+            .join("Eco.vst3")
+            .join("Contents")
+            .join(vst3_arch_dir());
+        std::fs::create_dir_all(&vst3_bin).expect("pasta vst3");
+        std::fs::write(vst3_bin.join("Eco.vst3"), b"MZ").expect("binário vst3");
+        let ofx_bin = d
+            .join("Brilho.ofx.bundle")
+            .join("Contents")
+            .join(ofx_arch_dir());
+        std::fs::create_dir_all(&ofx_bin).expect("pasta ofx");
+        std::fs::write(ofx_bin.join("Brilho.ofx"), b"MZ").expect("binário ofx");
+        let arquivo = d.join("nao_e_pasta.txt");
+        std::fs::write(&arquivo, b"x").expect("arquivo");
+        let ausente = d.join("nao_existe");
+
+        let extra = vec![d.clone(), ausente.clone(), arquivo.clone(), d.clone()];
+        let (list, folders) = scan_with_folders(&extra);
+        let mine: Vec<&ExternalPlugin> = list.iter().filter(|p| p.path.starts_with(&d)).collect();
+        assert_eq!(mine.len(), 2, "{mine:?}");
+        assert!(mine
+            .iter()
+            .any(|p| p.kind == ExternalKind::Vst3 && p.name == "Eco"));
+        assert!(mine
+            .iter()
+            .any(|p| p.kind == ExternalKind::Ofx && p.name == "Brilho"));
+        assert!(mine.iter().all(|p| p.binary.is_some()));
+        assert_eq!(folders.len(), 4);
+        assert_eq!(folders[0].status, FolderStatus::Found(2));
+        assert_eq!(folders[1].status, FolderStatus::Missing);
+        assert_eq!(folders[2].status, FolderStatus::NotDir);
+        // a mesma pasta duas vezes não repete os plug-ins
+        assert_eq!(folders[3].status, FolderStatus::Found(0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("neoveg_plugins_{}_{tag}", std::process::id()));

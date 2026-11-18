@@ -272,6 +272,8 @@ pub struct App {
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
+    /// Painéis fechados (fora da área de janelas); voltam pelo menu Exibir.
+    pub closed_tabs: HashSet<DockTab>,
     pub preview_detached: bool,
     pub preview_visible: bool,
     pub master_bus_visible: bool,
@@ -383,6 +385,9 @@ impl App {
         }
         let lang = prefs.lang();
         neoveg_common::set_active_language(lang);
+        // Ctrl+= / Ctrl+- / Ctrl+0 são atalhos do VEGAS (tom em oitavas);
+        // o zoom da interface do egui não pode tomar essas teclas.
+        egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         crate::fonts::configure_fonts(egui_ctx);
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
@@ -451,6 +456,7 @@ impl App {
                 ..Default::default()
             },
             detached_tabs: initial_layout.detached_panels(),
+            closed_tabs: initial_layout.closed_panels(),
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
             master_bus_visible,
@@ -2421,6 +2427,7 @@ impl App {
             }
             UiAction::SelectDock(panel) => {
                 self.dock_visible = true;
+                self.closed_tabs.remove(&panel);
                 self.detached_tabs.remove(&panel);
                 self.dock_tab = panel;
                 self.pending_dock_focus = Some(panel);
@@ -4644,7 +4651,10 @@ impl App {
     }
 
     pub fn is_panel_open(&self, tab: DockTab) -> bool {
-        (self.dock_visible && self.dock_tab == tab && !self.detached_tabs.contains(&tab))
+        (self.dock_visible
+            && self.dock_tab == tab
+            && !self.detached_tabs.contains(&tab)
+            && !self.closed_tabs.contains(&tab))
             || self.detached_tabs.contains(&tab)
     }
 
@@ -4655,6 +4665,12 @@ impl App {
             .map(|t| layout::panel_key(*t).to_string())
             .collect();
         detached.sort();
+        let mut closed: Vec<String> = self
+            .closed_tabs
+            .iter()
+            .map(|t| layout::panel_key(*t).to_string())
+            .collect();
+        closed.sort();
         let mut l = WindowLayout {
             name: name.to_string(),
             dock_height: self.dock_height,
@@ -4669,6 +4685,7 @@ impl App {
             px_per_sec: Some(self.tl.px_per_sec),
             edit_layout: Some(self.prefs.edit_layout.clone()),
             tile_tree: Some(self.dock_tree.clone()),
+            closed_tabs: Some(closed),
         };
         l.sanitize();
         l
@@ -4683,6 +4700,7 @@ impl App {
         self.dock_visible = l.dock_visible;
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
+        self.closed_tabs = l.closed_panels();
         self.preview_detached = l.preview_detached;
         self.preview_visible = l.preview_visible;
         self.master_bus_visible = l.master_bus_visible;
