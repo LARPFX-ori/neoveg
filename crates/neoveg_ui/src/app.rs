@@ -27,7 +27,7 @@ use neoveg_engine::util;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,6 +40,12 @@ pub use neoveg_engine::commands::DockPanel as DockTab;
 /// por divisória. Só ids da Tabela Única (§3.3); o teste abaixo garante isso.
 pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
     &[
+        "edit.paste_attributes",
+        "edit.paste_attributes_selective",
+        "edit.smart_split",
+        "edit.heal_events",
+        "edit.detect_scenes",
+        "edit.expanded_edit_mode",
         "edit.trim_to_selection",
         "edit.trim_start",
         "edit.trim_end",
@@ -48,8 +54,32 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
         "edit.close_gaps",
     ],
     &["edit.group", "edit.ungroup", "edit.select_group"],
-    &["tools.reverse", "tools.freeze_frame", "tools.event_props"],
     &[
+        "event.sync_link_create",
+        "event.sync_link_select",
+        "event.sync_link_unlink",
+    ],
+    &[
+        "event.take_chooser",
+        "event.pitch_up",
+        "event.pitch_down",
+        "tools.reverse",
+        "tools.freeze_frame",
+        "tools.event_props",
+    ],
+    &[
+        "insert.empty_event",
+        "insert.track_folder",
+        "track.toggle_folder",
+        "track.make_child",
+        "tools.multicam_mode",
+        "view.stereo_3d",
+        "track.record_arm",
+        "transport.record",
+        "media.select_events",
+        "preview.copy_frame",
+        "preview.ram_build",
+        "preview.external_monitor",
         "insert.marker",
         "insert.region",
         "transport.jump_prev_marker",
@@ -85,6 +115,7 @@ mod more_tools_tests {
 pub enum DndPayload {
     Media(Id),
     Fx(FxKind),
+    FxPreset(FxInstance),
     Transition(TransitionKind),
     Generator(GenSpec),
 }
@@ -107,7 +138,16 @@ pub enum PlaceTarget {
 pub enum LoadMsg {
     Imported(media::Imported, Option<PlaceTarget>),
     Reloaded(Id, Result<media::Imported, String>),
+    Replaced(Id, Result<media::Imported, String>),
     ProxyBuilt(Id, Result<PathBuf, String>),
+    RamPreviewFrame {
+        gen: u64,
+        frame_idx: i64,
+        image: image::RgbaImage,
+    },
+    RamPreviewDone {
+        gen: u64,
+    },
     PrerenderDone {
         start: Ticks,
         end: Ticks,
@@ -156,6 +196,10 @@ pub(crate) struct ScriptJob {
     started: std::time::Instant,
     media_before: std::collections::HashSet<u64>,
     rx: std::sync::mpsc::Receiver<(ScriptOutcome, EditorSession)>,
+    /// Pedidos de janela da camada de Forms própria (Linux, macOS).
+    ui_rx: std::sync::mpsc::Receiver<crate::script_forms::UiCall>,
+    /// Janela do script aberta agora.
+    active: Option<crate::script_forms::Active>,
 }
 
 #[cfg(test)]
@@ -175,9 +219,32 @@ impl ScriptJob {
             started: std::time::Instant::now(),
             media_before: std::collections::HashSet::new(),
             rx,
+            // Sem remetente: o script de teste não abre janelas.
+            ui_rx: std::sync::mpsc::channel().1,
+            active: None,
         };
         (job, done_tx)
     }
+}
+
+pub struct RamPreviewJob {
+    pub cancel: Arc<AtomicBool>,
+    pub done: Arc<AtomicU64>,
+    pub total: Arc<AtomicU64>,
+    pub gen: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PreviewReqKey {
+    t: Ticks,
+    gen: u64,
+    w: usize,
+    h: usize,
+    scopes: bool,
+    prefer_proxy: bool,
+    split_mode: neoveg_engine::playback::PreviewSplitMode,
+    mute_video: bool,
+    expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
 }
 
 pub struct App {
@@ -187,9 +254,19 @@ pub struct App {
     pub audio: AudioOut,
     pub(crate) preview: Preview,
     pub(crate) preview_tex: Option<TextureHandle>,
+    pub(crate) preview_split_tex: Option<TextureHandle>,
+    pub(crate) preview_clipboard: Option<(TextureHandle, image::RgbaImage)>,
+    pub(crate) ram_preview: neoveg_engine::playback::RamPreviewCache,
+    pub(crate) ram_preview_job: Option<RamPreviewJob>,
+    pub(crate) preview_zoom: f32,
+    pub(crate) preview_pan: egui::Vec2,
+    pub external_monitor: bool,
+    pub(crate) external_monitor_fullscreen: bool,
+    pub(crate) expanded_ab_tex: Option<(TextureHandle, TextureHandle)>,
+    pub(crate) multicam_thumbs: HashMap<(Id, usize, i64), TextureHandle>,
     pub(crate) preview_inflight: bool,
     pub(crate) preview_inflight_since: Instant,
-    pub(crate) last_req: (Ticks, u64, usize, usize, bool, bool),
+    pub(crate) last_req: PreviewReqKey,
     pub(crate) preview_ms: f64,
     pub(crate) scopes_tex: Option<[TextureHandle; 4]>,
     pub tl: TimelineState,
@@ -205,6 +282,10 @@ pub struct App {
     pub dock_height: f32,
     pub preview_ratio: f32,
     pub dock_tree: egui_tiles::Tree<crate::dock::DockPane>,
+    /// Painel que preenche a área de janelas (botão Maximizar do VEGAS).
+    pub dock_maximized: Option<crate::dock::DockPane>,
+    /// Estado de antes do `Ctrl+F11` (timeline maximizada).
+    pub(crate) timeline_restore: Option<crate::dock::TimelineRestore>,
     pub(crate) pending_dock_focus: Option<DockTab>,
     pub saved_layouts: Vec<(String, PathBuf)>,
     pub theme_id: ThemeId,
@@ -247,7 +328,12 @@ pub struct App {
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
+    pub(crate) integrations: crate::integrations_ui::IntegrationsState,
     pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
+    pub(crate) recorder: Option<neoveg_engine::playback::AudioRecorder>,
+    pub(crate) recorder_tracks: Vec<Id>,
+    pub(crate) recording_peaks: HashMap<Id, [f32; 2]>,
+    pub project_media: crate::project_media::ProjectMediaState,
 }
 
 impl Deref for App {
@@ -346,9 +432,22 @@ impl App {
             audio,
             preview,
             preview_tex: None,
+            preview_split_tex: None,
+            preview_clipboard: None,
+            ram_preview: neoveg_engine::playback::RamPreviewCache::default(),
+            ram_preview_job: None,
+            preview_zoom: 1.0,
+            preview_pan: egui::Vec2::ZERO,
+            external_monitor: false,
+            external_monitor_fullscreen: false,
+            expanded_ab_tex: None,
+            multicam_thumbs: HashMap::new(),
             preview_inflight: false,
             preview_inflight_since: Instant::now(),
-            last_req: (Ticks::from_raw(-1), 0, 0, 0, false, false),
+            last_req: PreviewReqKey {
+                t: Ticks::from_raw(-1),
+                ..Default::default()
+            },
             detached_tabs: initial_layout.detached_panels(),
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
@@ -357,6 +456,8 @@ impl App {
             master_dim: false,
             master_mono: false,
             dock_visible: initial_layout.dock_visible,
+            dock_maximized: None,
+            timeline_restore: None,
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
             dock_tree: initial_tree.unwrap_or_else(|| {
@@ -409,8 +510,15 @@ impl App {
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
+            integrations: crate::integrations_ui::IntegrationsState::default(),
             encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
+            recorder: None,
+            recorder_tracks: Vec::new(),
+            recording_peaks: HashMap::new(),
+            project_media: crate::project_media::ProjectMediaState::default(),
         };
+        app.ram_preview =
+            neoveg_engine::playback::RamPreviewCache::new(app.prefs.ram_preview_mb as usize);
         if let Some(e) = app.preview.error.clone() {
             app.set_status(e);
         }
@@ -505,9 +613,11 @@ impl App {
 
     pub fn sync_after_session(&mut self) {
         self.sync_status_from_session();
+        self.sync_master_monitor_audio();
         let removed = std::mem::take(&mut self.session.removed_media_ids);
         for id in removed {
             self.thumbs.remove(&id);
+            self.project_media.invalidate_media(id);
         }
         for m in &self.session.project.media {
             if let MediaSource::Generated(_) = m.source {
@@ -521,6 +631,56 @@ impl App {
                     );
                 }
             }
+        }
+    }
+
+    pub fn open_motion_track_dialog(&mut self) {
+        let candidate = self
+            .sel_events
+            .iter()
+            .copied()
+            .find(|&eid| {
+                self.project.find_event(eid).is_some_and(|(ti, ei)| {
+                    self.project.tracks[ti].kind == TrackKind::Video
+                        && self
+                            .project
+                            .media(self.project.tracks[ti].events[ei].media_id)
+                            .is_some_and(|m| m.has_video)
+                })
+            })
+            .or_else(|| {
+                self.sel_track
+                    .and_then(|ti| self.project.tracks.get(ti))
+                    .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+                    .and_then(|t| {
+                        t.events.iter().find(|e| {
+                            e.contains(self.cursor)
+                                && self.project.media(e.media_id).is_some_and(|m| m.has_video)
+                        })
+                    })
+                    .map(|e| e.id)
+            });
+        let Some(ev_id) = candidate else {
+            self.set_status("Selecione um evento de vídeo para rastrear o movimento.");
+            return;
+        };
+        let track_id = self
+            .project
+            .find_event(ev_id)
+            .map(|(ti, _)| self.project.tracks[ti].id);
+        self.dlg.motion_track_src = Some(ev_id);
+        self.dlg.motion_track_target_event = Some(ev_id);
+        if self.dlg.motion_track_target_track.is_none() {
+            self.dlg.motion_track_target_track = track_id;
+        }
+        self.dlg.motion_track_step = self.dlg.motion_track_step.max(1);
+    }
+
+    pub fn apply_audio_fx_non_realtime(&mut self) {
+        let dir = std::env::temp_dir().join("neoveg_audio_fx_bounce");
+        match self.session.apply_audio_fx_non_realtime(&self.media, &dir) {
+            Ok(_) => self.sync_after_session(),
+            Err(e) => self.set_status(format!("Aplicar efeitos de áudio: {e}")),
         }
     }
 
@@ -723,6 +883,29 @@ impl App {
         }
     }
 
+    /// `Ctrl+F11`: maximiza a timeline escondendo a área de janelas e a lista
+    /// de trilhas; de novo, volta ao que estava antes (manual do VEGAS Pro 21).
+    pub fn toggle_maximize_timeline(&mut self) {
+        match self.timeline_restore.take() {
+            Some(r) => {
+                self.dock_visible = r.dock_visible;
+                if r.header_expanded && self.tl.header_collapsed() {
+                    self.tl.toggle_header_collapse();
+                }
+            }
+            None => {
+                self.timeline_restore = Some(crate::dock::TimelineRestore {
+                    dock_visible: self.dock_visible,
+                    header_expanded: !self.tl.header_collapsed(),
+                });
+                self.dock_visible = false;
+                if !self.tl.header_collapsed() {
+                    self.tl.toggle_header_collapse();
+                }
+            }
+        }
+    }
+
     pub fn toggle_play(&mut self) {
         if self.is_playing() {
             self.stop(false);
@@ -782,6 +965,7 @@ impl App {
         self.session.reset_project(proj, None);
         apply_pref_defaults(&mut self.session.opts, &self.prefs);
         self.thumbs.clear();
+        self.project_media.clear_thumbs();
         self.set_status(tr(self.lang(), "Novo projeto"));
     }
 
@@ -797,6 +981,7 @@ impl App {
 
     fn reload_all_media(&mut self) {
         self.thumbs.clear();
+        self.project_media.clear_thumbs();
         let items = self.project.media.clone();
         for m in items {
             self.media.remove(m.id);
@@ -1175,6 +1360,22 @@ impl App {
         self.apply_imported_project("AAF", path, res);
     }
 
+    pub fn export_aaf_dialog(&mut self) {
+        let default_name = self.export_interchange_path("aaf");
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Advanced Authoring Format", &["aaf"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::aaf::export_aaf_file(&self.session.project, &p) {
+            Ok(()) => self.set_status(format!("AAF exportado: {}", p.display())),
+            Err(e) => self.set_status(format!("Erro ao exportar AAF: {e}")),
+        }
+    }
+
     pub fn import_fcp7_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro 7 XML", &["xml"])
@@ -1453,11 +1654,24 @@ impl App {
                             m.has_video = imp.item.has_video;
                             m.info = imp.item.info.clone();
                         }
+                        self.thumbs.remove(&id);
+                        self.project_media.invalidate_media(id);
                         self.generation += 1;
                     }
                     Err(e) => {
                         let lang = self.lang();
                         self.set_status(tr_args(lang, "Mídia offline: {err}", &[("err", &e)]));
+                    }
+                },
+                LoadMsg::Replaced(id, r) => match r {
+                    Ok(imp) => self.replace_media_with_imported(id, imp),
+                    Err(e) => {
+                        let lang = self.lang();
+                        self.set_status(tr_args(
+                            lang,
+                            "Erro ao substituir mídia: {err}",
+                            &[("err", &e)],
+                        ));
                     }
                 },
                 LoadMsg::ProxyBuilt(id, res) => {
@@ -1481,6 +1695,29 @@ impl App {
                             "Erro ao gerar proxy: {err}",
                             &[("err", &e)],
                         )),
+                    }
+                }
+                LoadMsg::RamPreviewFrame {
+                    gen,
+                    frame_idx,
+                    image,
+                } => {
+                    if gen == self.generation {
+                        let _ = self.ram_preview.insert_frame(frame_idx, image);
+                    }
+                }
+                LoadMsg::RamPreviewDone { gen } => {
+                    if self.ram_preview_job.as_ref().is_some_and(|j| j.gen == gen) {
+                        self.ram_preview_job = None;
+                        if gen == self.generation {
+                            let n = self.ram_preview.frames.len();
+                            let mb = format!("{:.1}", self.ram_preview.mb_used());
+                            self.set_status(tr_args(
+                                self.lang(),
+                                "Prévia em RAM pronta: {n} quadros ({mb} MB).",
+                                &[("n", &n), ("mb", &mb)],
+                            ));
+                        }
                     }
                 }
                 LoadMsg::PrerenderDone { start, end, result } => {
@@ -1642,6 +1879,41 @@ impl App {
                         Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR))
                 }
             }
+            if let Some(alt_img) = res.split_alt {
+                let alt_ci = rgba_to_color_image(&alt_img);
+                match &mut self.preview_split_tex {
+                    Some(t) => t.set(alt_ci, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.preview_split_tex = Some(ctx.load_texture(
+                            "preview_split_alt",
+                            alt_ci,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            } else if self.opts.preview_split_mode
+                != neoveg_engine::playback::PreviewSplitMode::FxBypass
+            {
+                self.preview_split_tex = None;
+            }
+            if let Some((la, rb)) = res.expanded_ab {
+                let ia = rgba_to_color_image(&la);
+                let ib = rgba_to_color_image(&rb);
+                match &mut self.expanded_ab_tex {
+                    Some((ta, tb)) => {
+                        ta.set(ia, egui::TextureOptions::LINEAR);
+                        tb.set(ib, egui::TextureOptions::LINEAR);
+                    }
+                    None => {
+                        self.expanded_ab_tex = Some((
+                            ctx.load_texture("expanded_a", ia, egui::TextureOptions::LINEAR),
+                            ctx.load_texture("expanded_b", ib, egui::TextureOptions::LINEAR),
+                        ));
+                    }
+                }
+            } else if self.session.expanded_edit.is_none() {
+                self.expanded_ab_tex = None;
+            }
             if let Some(sc) = res.scopes {
                 let opts = egui::TextureOptions::NEAREST;
                 let hist = rgba_to_color_image(&sc.histogram);
@@ -1679,8 +1951,68 @@ impl App {
         let scopes =
             self.is_panel_open(DockTab::Scopes) || self.is_panel_open(DockTab::ColorGrading);
         let prefer_proxy = self.opts.preview_quality.prefer_proxy();
-        let key = (t, self.generation, w, h, scopes, prefer_proxy);
+        let split_mode = self.opts.preview_split_mode;
+        let mute_video = self.opts.preview_mute_video;
+        if let Some(job) = &self.ram_preview_job {
+            if job.gen != self.generation {
+                job.cancel.store(true, Ordering::Relaxed);
+                self.ram_preview_job = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        self.sync_master_monitor_audio();
+        let expanded_ab = self.session.expanded_edit.as_ref().map(|exp| {
+            let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+            let (lid, lt) = match exp.left_event_id.and_then(|id| {
+                self.project
+                    .event(id)
+                    .map(|e| (id, (e.end() - fd).max(e.start)))
+            }) {
+                Some((id, ts)) => (Some(id), ts),
+                None => (None, Ticks::ZERO),
+            };
+            let (rid, rt) = match exp
+                .right_event_id
+                .and_then(|id| self.project.event(id).map(|e| (id, e.start)))
+            {
+                Some((id, ts)) => (Some(id), ts),
+                None => (None, Ticks::ZERO),
+            };
+            (lid, lt, rid, rt)
+        });
+        let key = PreviewReqKey {
+            t,
+            gen: self.generation,
+            w,
+            h,
+            scopes,
+            prefer_proxy,
+            split_mode,
+            mute_video,
+            expanded_ab,
+        };
         if key != self.last_req {
+            if !scopes
+                && !mute_video
+                && split_mode == neoveg_engine::playback::PreviewSplitMode::Off
+                && expanded_ab.is_none()
+            {
+                let frame_idx = self.project.settings.fps.ticks_to_frame_round(t);
+                if let Some(cached) = self.ram_preview.get(self.generation, frame_idx, w, h) {
+                    let ci = rgba_to_color_image(cached);
+                    match &mut self.preview_tex {
+                        Some(tex) => tex.set(ci, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.preview_tex =
+                                Some(ctx.load_texture("preview", ci, egui::TextureOptions::LINEAR));
+                        }
+                    }
+                    self.last_req = key;
+                    self.preview_inflight = false;
+                    return;
+                }
+            }
             self.sync_snapshot();
             self.preview.request(PreviewRequest {
                 project: self.snapshot.clone(),
@@ -1689,10 +2021,231 @@ impl App {
                 h,
                 scopes,
                 prefer_proxy,
+                split_mode,
+                mute_video,
+                expanded_ab,
             });
             self.last_req = key;
             self.preview_inflight = true;
             self.preview_inflight_since = Instant::now();
+        }
+    }
+
+    pub fn copy_preview_frame_to_clipboard(&mut self, ctx: Option<&egui::Context>) {
+        let t = self.project.settings.quantize(self.view_time());
+        let w = (self.project.settings.width as usize).clamp(16, 4096);
+        let h = (self.project.settings.height as usize).clamp(16, 4096);
+        let frame = neoveg_engine::engine::video::render_frame_preview(
+            &self.project,
+            &self.media,
+            t,
+            w,
+            h,
+            self.opts.preview_quality.prefer_proxy(),
+        );
+        let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, frame.to_rgba8()) else {
+            return;
+        };
+        let ci = rgba_to_color_image(&rgba);
+        if let Some(c) = ctx {
+            c.copy_image(ci.clone());
+            let tex = c.load_texture("preview_clipboard", ci, egui::TextureOptions::LINEAR);
+            self.preview_clipboard = Some((tex, rgba));
+        } else if let Some((tex, buf)) = &mut self.preview_clipboard {
+            tex.set(ci, egui::TextureOptions::LINEAR);
+            *buf = rgba;
+        }
+        self.set_status(format!(
+            "Quadro ({w}x{h}) copiado para a área de transferência."
+        ));
+    }
+
+    pub fn start_ram_preview(&mut self) {
+        if let Some(prev) = self.ram_preview_job.take() {
+            prev.cancel.store(true, Ordering::Relaxed);
+        }
+        let fps = self.project.settings.fps;
+        let fd = self.project.settings.frame_dur().max(Ticks::from_raw(1));
+        let (start, end) = match self.time_sel.filter(|(a, b)| b > a) {
+            Some((a, b)) => (a, b),
+            None => {
+                let a = self.cursor.max(Ticks::ZERO);
+                let proj_end = self.project.duration().max(a + Ticks::from_secs_i64(3));
+                let b = (a + Ticks::from_secs_i64(4)).min(proj_end);
+                (a, b)
+            }
+        };
+        let s = self.opts.preview_quality.scale();
+        let w = ((self.project.settings.width as f32 * s) as usize).max(16);
+        let h = ((self.project.settings.height as f32 * s) as usize).max(16);
+        let max_mb = self.prefs.ram_preview_mb as usize;
+        let gen = self.generation;
+        self.ram_preview
+            .reset(gen, (w, h), (start, end), fps, max_mb);
+
+        let bytes_per_frame = w.saturating_mul(h).saturating_mul(4).max(1);
+        let budget_frames = (self.ram_preview.max_bytes / bytes_per_frame).max(1) as i64;
+        let start_idx = fps.ticks_to_frame_round(start);
+        let raw_end_idx = fps.ticks_to_frame_round(end).max(start_idx);
+        let end_idx = raw_end_idx.min(start_idx.saturating_add(budget_frames - 1));
+        let total = (end_idx - start_idx + 1).max(1) as u64;
+
+        self.sync_snapshot();
+        let project = self.snapshot.clone();
+        let media = self.media.clone();
+        let prefer_proxy = self.opts.preview_quality.prefer_proxy();
+        let tx = self.loader_tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicU64::new(0));
+        let job = RamPreviewJob {
+            cancel: cancel.clone(),
+            done: done.clone(),
+            total: Arc::new(AtomicU64::new(total)),
+            gen,
+        };
+        self.ram_preview_job = Some(job);
+        let spawned = util::spawn("ram-preview", move || {
+            for idx in start_idx..=end_idx {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let ft = Ticks::from_raw(fd.0.saturating_mul(idx));
+                let fr = neoveg_engine::engine::video::render_frame_preview(
+                    &project,
+                    &media,
+                    ft,
+                    w,
+                    h,
+                    prefer_proxy,
+                );
+                if let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, fr.to_rgba8()) {
+                    if tx
+                        .send(LoadMsg::RamPreviewFrame {
+                            gen,
+                            frame_idx: idx,
+                            image: rgba,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                done.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = tx.send(LoadMsg::RamPreviewDone { gen });
+        });
+        if let Err(e) = spawned {
+            self.ram_preview_job = None;
+            self.set_status(e);
+        } else {
+            self.set_status(format!(
+                "Gerando prévia dinâmica em RAM ({total} quadros)..."
+            ));
+        }
+    }
+
+    pub fn clear_ram_preview(&mut self) {
+        if let Some(job) = self.ram_preview_job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.ram_preview.clear();
+        self.set_status("Cache da prévia dinâmica em RAM limpo.");
+    }
+
+    pub fn apply_preview_zoom(&mut self, val: f32) {
+        if val == 0.0 {
+            self.preview_zoom = 1.0;
+            self.preview_pan = egui::Vec2::ZERO;
+        } else if val < 0.0 {
+            self.preview_zoom = (self.preview_zoom * (-val)).clamp(0.25, 8.0);
+        } else {
+            self.preview_zoom = val.clamp(0.25, 8.0);
+        }
+        if (self.preview_zoom - 1.0).abs() < 0.01 {
+            self.preview_pan = egui::Vec2::ZERO;
+        }
+    }
+
+    /// Inicia ou finaliza a gravação de áudio nas faixas armadas (manual p. 821).
+    pub fn toggle_record(&mut self) {
+        if let Some(rec) = self.recorder.take() {
+            self.recorder_tracks.clear();
+            self.recording_peaks.clear();
+            match rec.stop() {
+                Ok(clip) => {
+                    if clip.frames_written == 0 {
+                        let _ = std::fs::remove_file(&clip.path);
+                        self.set_status("Gravação encerrada sem quadros capturados.");
+                        return;
+                    }
+                    match media::import_file(&clip.path) {
+                        Ok(imp) => {
+                            let id = imp.item.id;
+                            self.media.insert(id, imp.entry);
+                            let dur = Ticks::from_secs_f64(
+                                clip.frames_written as f64 / f64::from(clip.sample_rate.max(1)),
+                            )
+                            .unwrap_or_else(|| self.project.settings.frame_dur());
+                            self.session.commit_recorded_clip(
+                                imp.item,
+                                &clip.target_tracks,
+                                clip.start_cursor,
+                                dur,
+                            );
+                            self.sync_after_session();
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Erro ao importar gravação WAV: {e}"));
+                        }
+                    }
+                }
+                Err(e) => self.set_status(e),
+            }
+            return;
+        }
+        let mut armed = self.session.armed_audio_tracks();
+        if armed.is_empty() {
+            if let Some(ti) = self.sel_track {
+                if self.session.toggle_record_arm(ti) {
+                    armed = self.session.armed_audio_tracks();
+                }
+            }
+        }
+        if armed.is_empty() {
+            self.set_status("Arme uma faixa de áudio (●) antes de iniciar a gravação.");
+            return;
+        }
+        let target_ids: Vec<Id> = armed.iter().map(|(_, id)| *id).collect();
+        let dir = if !self.prefs.audio_device.default_record_dir.trim().is_empty() {
+            PathBuf::from(self.prefs.audio_device.default_record_dir.trim())
+        } else {
+            self.path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("Neoveg Recordings"))
+                .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"))
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let out_wav = dir.join(format!("gravacao_{stamp}.wav"));
+        match neoveg_engine::playback::AudioRecorder::start(
+            target_ids.clone(),
+            self.cursor,
+            out_wav,
+        ) {
+            Ok(rec) => {
+                let msg = format!(
+                    "Gravando em {} faixa(s) via {}...",
+                    target_ids.len(),
+                    rec.device_name
+                );
+                self.recorder_tracks = target_ids;
+                self.recorder = Some(rec);
+                self.set_status(msg);
+            }
+            Err(e) => self.set_status(e),
         }
     }
 
@@ -1730,6 +2283,12 @@ impl App {
         }
         for spec in pending_generated {
             self.insert_generated(spec);
+        }
+        if res.is_ok() && matches!(id, "insert.track_video" | "insert.track_audio") {
+            if let Some(ti) = self.session.sel_track {
+                self.session
+                    .apply_default_track_props(ti, &self.prefs.default_track);
+            }
         }
         self.sync_after_session();
         match res {
@@ -1769,6 +2328,7 @@ impl App {
             UiAction::ImportFcp7Dialog => self.import_fcp7_dialog(),
             UiAction::ExportFcp7Dialog => self.export_fcp7_dialog(),
             UiAction::ImportAafDialog => self.import_aaf_dialog(),
+            UiAction::ExportAafDialog => self.export_aaf_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -1792,6 +2352,25 @@ impl App {
             UiAction::OpenEventProps => {
                 self.dlg.event_props = self.sel_events.iter().next().copied();
             }
+            UiAction::OpenPasteAttributesDialog => {
+                self.dlg.paste_attrs_open = true;
+            }
+            UiAction::OpenTakeChooser => {
+                self.dlg.take_chooser = self.sel_events.iter().next().copied();
+            }
+            UiAction::OpenSceneDetectDialog => {
+                if let Some(&id) = self.sel_events.iter().find(|&&eid| {
+                    self.project.find_event(eid).is_some_and(|(ti, ei)| {
+                        self.project.tracks[ti].kind == TrackKind::Video
+                            && self
+                                .project
+                                .media(self.project.tracks[ti].events[ei].media_id)
+                                .is_some_and(|m| m.has_video)
+                    })
+                }) {
+                    self.open_scene_detect_for(id);
+                }
+            }
             UiAction::OpenPanCrop => {
                 self.dlg.pan_crop = self.sel_events.iter().next().copied();
             }
@@ -1800,6 +2379,19 @@ impl App {
             }
             UiAction::OpenFxMasterAudio => self.dlg.fx_target = Some(FxTarget::MasterAudio),
             UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
+            UiAction::OpenMotionTrackDialog => self.open_motion_track_dialog(),
+            UiAction::ApplyAudioFxNonRealtime => self.apply_audio_fx_non_realtime(),
+            UiAction::OpenCustomizeToolbar => self.open_customize_toolbar(),
+            UiAction::OpenCommandMarkerDialog => {
+                self.dlg.cmd_marker_open = true;
+                if self.dlg.cmd_marker_type.trim().is_empty() {
+                    self.dlg.cmd_marker_type = "TEXT".into();
+                }
+            }
+            UiAction::SetRulerGrid(g) => {
+                self.opts.ruler_grid = g;
+                self.set_status(format!("Grade da régua: {}", g.label()));
+            }
             UiAction::OpenGoto => self.dlg.goto_open = true,
             UiAction::OpenEditLayoutProps => {
                 self.dlg
@@ -1814,6 +2406,11 @@ impl App {
             UiAction::BuildProxySelected => self.build_proxy_selected(),
             UiAction::PrerenderRegion => self.prerender_region(),
             UiAction::RunScriptDialog => self.run_script_dialog(),
+            UiAction::OpenIntegrationsDialog => self.open_integrations_dialog(),
+            UiAction::SendToExternalApp(ext_app) => self.send_to_external_app(ext_app, None, None),
+            UiAction::BlenderRenderSceneDialog => self.blender_render_scene_dialog(),
+            UiAction::BlenderExportScriptDialog => self.workflow_blender_export_script(None),
+            UiAction::BlenderImportCameraDialog => self.blender_import_camera_dialog(),
             UiAction::ExitApp => {
                 if let Some(c) = ctx {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1847,7 +2444,17 @@ impl App {
                     self.dock_visible = true;
                 }
             }
+            UiAction::ToggleDockArea => {
+                if self.timeline_restore.is_some() {
+                    self.toggle_maximize_timeline();
+                } else {
+                    self.dock_visible = !self.dock_visible;
+                }
+            }
+            UiAction::ToggleTrackList => self.tl.toggle_header_collapse(),
+            UiAction::ToggleMaximizeTimeline => self.toggle_maximize_timeline(),
             UiAction::TogglePlay => self.toggle_play(),
+            UiAction::ToggleRecord => self.toggle_record(),
             UiAction::PlayFromStart => {
                 self.set_cursor(Ticks::ZERO);
                 self.play();
@@ -1869,6 +2476,147 @@ impl App {
                 if let Some(t) = self.session.jump_to_marker_index(idx) {
                     self.set_cursor(t);
                 }
+            }
+            UiAction::ProjectMediaSetView(mode) => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                self.project_media.view_mode = match mode {
+                    1 => crate::project_media::MediaViewMode::List,
+                    2 => crate::project_media::MediaViewMode::Details,
+                    3 => {
+                        if self.project.storyboards.is_empty() {
+                            self.session.create_storyboard("Storyboard 1");
+                        }
+                        crate::project_media::MediaViewMode::Storyboard
+                    }
+                    _ => crate::project_media::MediaViewMode::Thumbnails,
+                };
+            }
+            UiAction::ProjectMediaNewBin => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                if let Some(bid) = self.session.create_media_bin("", None) {
+                    self.project_media.filter_target =
+                        crate::project_media::MediaFilterTarget::Bin(bid);
+                    self.sync_after_session();
+                }
+            }
+            UiAction::ProjectMediaNewSmartBin => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                self.project_media.editing_smart_id = None;
+                self.project_media.smart_dialog_open = true;
+            }
+            UiAction::ProjectMediaNewStoryboard => {
+                self.dock_visible = true;
+                self.dock_tab = DockTab::ProjectMedia;
+                self.pending_dock_focus = Some(DockTab::ProjectMedia);
+                if let Some(sb_id) = self.session.create_storyboard("") {
+                    self.project_media.view_mode = crate::project_media::MediaViewMode::Storyboard;
+                    self.project_media.filter_target =
+                        crate::project_media::MediaFilterTarget::Storyboard(sb_id);
+                    self.sync_after_session();
+                }
+            }
+            UiAction::ProjectMediaReplaceDialog => {
+                if let Some(mid) = self.session.active_media_id {
+                    self.replace_media_dialog(mid);
+                }
+            }
+            UiAction::ProjectMediaInsertStoryboard => {
+                if let Some(sb_id) = self.session.active_storyboard_id {
+                    let cur = self.cursor;
+                    self.session.insert_storyboard_at_cursor(
+                        sb_id,
+                        cur,
+                        self.prefs.still_image_secs,
+                    );
+                    self.sync_after_session();
+                }
+            }
+            UiAction::PreviewToggleSplit => {
+                self.opts.preview_split_mode = match self.opts.preview_split_mode {
+                    neoveg_engine::playback::PreviewSplitMode::Off => {
+                        neoveg_engine::playback::PreviewSplitMode::FxBypass
+                    }
+                    _ => neoveg_engine::playback::PreviewSplitMode::Off,
+                };
+            }
+            UiAction::PreviewSplitMode(mode) => {
+                self.opts.preview_split_mode = mode;
+            }
+            UiAction::PreviewCopyFrame => {
+                self.copy_preview_frame_to_clipboard(ctx);
+            }
+            UiAction::PreviewRamBuild => {
+                self.start_ram_preview();
+            }
+            UiAction::PreviewRamClear => {
+                self.clear_ram_preview();
+            }
+            UiAction::PreviewZoom(z) => {
+                self.apply_preview_zoom(z);
+            }
+            UiAction::PreviewToggleExternalMonitor => {
+                self.external_monitor = !self.external_monitor;
+                self.set_status(if self.external_monitor {
+                    "Monitor externo ativado."
+                } else {
+                    "Monitor externo fechado."
+                });
+            }
+            UiAction::InsertNestedTimelineDialog => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Projetos Neoveg", &["neoveg", "nvp"])
+                    .pick_file()
+                {
+                    match media::import_nested_project(&p) {
+                        Ok(imp) => {
+                            if let Some(w) = &imp.warning {
+                                self.set_status(w.clone());
+                            }
+                            self.session
+                                .insert_nested_project_event(imp, &self.media, self.cursor);
+                            self.sync_after_session();
+                        }
+                        Err(e) => self.set_status(format!("Projeto aninhado: {e:#}")),
+                    }
+                }
+            }
+            UiAction::RenderToNewTrack => {
+                let dir = std::env::temp_dir().join("neoveg_track_renders");
+                match self.session.render_to_new_track(&self.media, None, &dir) {
+                    Ok(_) => self.sync_after_session(),
+                    Err(e) => self.set_status(format!("Renderizar para nova trilha: {e}")),
+                }
+            }
+            UiAction::SetTrackDefaultProps => {
+                if let Some(ti) = self.session.sel_track {
+                    if let Some(defs) = self
+                        .session
+                        .capture_default_track_props(ti, &self.prefs.default_track)
+                    {
+                        self.prefs.default_track = defs;
+                        let _ = self.prefs.save();
+                        self.set_status("Propriedades padrão da trilha salvas nas Preferências.");
+                    }
+                }
+            }
+            UiAction::CycleStereo3dMode => {
+                let modes = Stereo3dMode::ALL;
+                let cur = self.project.settings.stereo_3d;
+                let next_i = modes
+                    .iter()
+                    .position(|m| *m == cur)
+                    .map(|p| (p + 1) % modes.len())
+                    .unwrap_or(0);
+                self.checkpoint();
+                self.project.settings.stereo_3d = modes[next_i];
+                self.changed();
+                self.set_status(format!("Modo 3D: {}", modes[next_i].label()));
             }
         }
     }
@@ -1965,8 +2713,8 @@ impl App {
             return;
         }
 
-        // Teclas numéricas 0-9: ir para o marcador correspondente
-        if !ctrl && !alt {
+        // Teclas numéricas 0-9: ângulo multicâmera (1..9 quando ativo) ou marcador
+        if !ctrl && !alt && !shift {
             let nums = [
                 Key::Num0,
                 Key::Num1,
@@ -1981,6 +2729,13 @@ impl App {
             ];
             for (i, k) in nums.iter().enumerate() {
                 if pressed(*k) {
+                    if self.opts.multicam_mode
+                        && i > 0
+                        && self.session.switch_multicam_angle(self.cursor, i - 1)
+                    {
+                        self.sync_after_session();
+                        return;
+                    }
                     let idx = if i == 0 { 9 } else { i - 1 };
                     if let Some(t) = self.session.jump_to_marker_index(idx) {
                         self.set_cursor(t);
@@ -2039,7 +2794,7 @@ impl App {
         }
     }
 
-    fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
+    pub(crate) fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
         let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
         if ui.checkbox(&mut value, label).changed() {
             self.exec_cmd(Some(ui.ctx()), id);
@@ -2068,6 +2823,7 @@ impl App {
                     self.cmd_menu_btn(ui, "file.import_fcp7");
                     self.cmd_menu_btn(ui, "file.export_fcp7");
                     self.cmd_menu_btn(ui, "file.import_aaf");
+                    self.cmd_menu_btn(ui, "file.export_aaf");
                     ui.separator();
                     self.cmd_menu_btn(ui, "file.import_edl");
                     self.cmd_menu_btn(ui, "file.export_edl");
@@ -2091,15 +2847,68 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.cut");
                 self.cmd_menu_btn(ui, "edit.copy");
+                self.cmd_menu_btn(ui, "preview.copy_frame");
                 self.cmd_menu_btn(ui, "edit.paste");
                 self.cmd_menu_btn(ui, "edit.paste_insert");
+                self.cmd_menu_btn(ui, "edit.paste_attributes");
+                self.cmd_menu_btn(ui, "edit.paste_attributes_selective");
                 self.cmd_menu_btn(ui, "edit.delete");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.split");
+                self.cmd_menu_btn(ui, "edit.smart_split");
+                self.cmd_menu_btn(ui, "edit.heal_events");
+                self.cmd_menu_btn(ui, "edit.detect_scenes");
+                self.cmd_menu_btn(ui, "edit.expanded_edit_mode");
+                if self.session.expanded_edit.is_some() {
+                    self.cmd_menu_btn(ui, "edit.expanded_nudge_left");
+                    self.cmd_menu_btn(ui, "edit.expanded_nudge_right");
+                }
                 ui.menu_button(tr(lang, "Take"), |ui| {
+                    self.cmd_menu_btn(ui, "event.take_chooser");
+                    ui.separator();
                     self.cmd_menu_btn(ui, "event.next_take");
                     self.cmd_menu_btn(ui, "event.prev_take");
                     self.cmd_menu_btn(ui, "event.delete_active_take");
+                });
+                ui.menu_button("Tom (Pitch)", |ui| {
+                    self.cmd_menu_btn(ui, "event.pitch_up");
+                    self.cmd_menu_btn(ui, "event.pitch_down");
+                    self.cmd_menu_btn(ui, "event.pitch_up_oct");
+                    self.cmd_menu_btn(ui, "event.pitch_down_oct");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "event.toggle_pitch_lock");
+                    self.cmd_menu_btn(ui, "event.pitch_reset");
+                });
+                ui.menu_button("Sync Link", |ui| {
+                    self.cmd_menu_btn(ui, "event.sync_link_create");
+                    self.cmd_menu_btn(ui, "event.sync_link_select");
+                    self.cmd_menu_btn(ui, "event.sync_link_unlink");
+                });
+                ui.menu_button("Ferramenta de edição", |ui| {
+                    for id in [
+                        "edit.tool.normal",
+                        "edit.tool.envelope",
+                        "edit.tool.selection",
+                        "edit.tool.zoom",
+                    ] {
+                        self.cmd_menu_btn(ui, id);
+                    }
+                    ui.separator();
+                    for mode in neoveg_engine::session::EditMode::NORMAL_MODES {
+                        self.cmd_menu_btn(ui, mode.command_id());
+                    }
+                    ui.separator();
+                    for id in [
+                        "edit.tool.axis.both",
+                        "edit.tool.axis.horizontal",
+                        "edit.tool.axis.vertical",
+                    ] {
+                        self.cmd_menu_btn(ui, id);
+                    }
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "edit.tool.next");
+                    self.cmd_menu_btn(ui, "edit.tool.prev");
+                    self.cmd_menu_btn(ui, "edit.tool.mode.next");
                 });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
@@ -2206,12 +3015,17 @@ impl App {
                     }
                     ui.close_menu();
                 }
-                if ui
-                    .selectable_label(self.dock_visible, tr(lang, "Área de janelas acopláveis"))
-                    .clicked()
-                {
-                    self.dock_visible = !self.dock_visible;
-                    ui.close_menu();
+                // F11, Shift+F11 e Ctrl+F11 do VEGAS Pro, pela Tabela de Comandos.
+                for (cmd_id, on) in [
+                    ("view.toggle_dock_area", self.dock_visible),
+                    ("view.toggle_track_list", !self.tl.header_collapsed()),
+                    ("view.maximize_timeline", self.timeline_restore.is_some()),
+                ] {
+                    let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), cmd_id);
+                        ui.close_menu();
+                    }
                 }
                 if self.dock_visible
                     && !self.detached_tabs.contains(&self.dock_tab)
@@ -2330,6 +3144,24 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
+                ui.menu_button("Modo de exibição (Mídia do Projeto)", |ui| {
+                    self.cmd_menu_btn(ui, "media.view.thumbnails");
+                    self.cmd_menu_btn(ui, "media.view.list");
+                    self.cmd_menu_btn(ui, "media.view.details");
+                    self.cmd_menu_btn(ui, "media.view.storyboard");
+                });
+                ui.menu_button("Prévia de Vídeo", |ui| {
+                    self.cmd_menu_btn(ui, "preview.split_toggle");
+                    self.cmd_menu_btn(ui, "preview.split_bypass");
+                    self.cmd_menu_btn(ui, "preview.split_clipboard");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "preview.zoom_fit");
+                    self.cmd_menu_btn(ui, "preview.zoom_100");
+                    self.cmd_menu_btn(ui, "preview.zoom_in");
+                    self.cmd_menu_btn(ui, "preview.zoom_out");
+                    ui.separator();
+                    self.cmd_menu_chk(ui, self.external_monitor, "preview.external_monitor");
+                });
                 ui.separator();
                 ui.label(tr(lang, "Formato de tempo:"));
                 for fmt in TimeFormat::ALL {
@@ -2340,13 +3172,22 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
                 self.cmd_menu_btn(ui, "insert.track_adjustment");
+                self.cmd_menu_btn(ui, "insert.track_folder");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
                 ui.separator();
+                self.cmd_menu_btn(ui, "insert.nested_timeline");
+                ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
+                self.cmd_menu_btn(ui, "insert.marker_cd_track");
+                self.cmd_menu_btn(ui, "insert.marker_cd_index");
+                self.cmd_menu_btn(ui, "insert.marker_command");
                 self.cmd_menu_btn(ui, "insert.region");
+                self.cmd_menu_btn(ui, "insert.subtitles_from_regions");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.gen_text");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
+                self.cmd_menu_btn(ui, "insert.empty_event");
+                self.cmd_menu_btn(ui, "media.insert_storyboard");
                 ui.separator();
                 ui.label(tr(lang, "Envelopes da trilha selecionada:"));
                 self.cmd_menu_btn(ui, "insert.env_volume");
@@ -2355,15 +3196,45 @@ impl App {
             ui.menu_button(tr(lang, "Ferramentas"), |ui| {
                 self.cmd_menu_btn(ui, "tools.fx_master_audio");
                 self.cmd_menu_btn(ui, "tools.fx_master_video");
+                ui.menu_button("Mídia do Projeto", |ui| {
+                    self.cmd_menu_btn(ui, "media.new_bin");
+                    self.cmd_menu_btn(ui, "media.new_smart_bin");
+                    self.cmd_menu_btn(ui, "media.new_storyboard");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "media.select_events");
+                    self.cmd_menu_btn(ui, "media.replace");
+                    self.cmd_menu_btn(ui, "tools.remove_unused_media");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.event_props");
                 self.cmd_menu_btn(ui, "tools.pan_crop");
                 self.cmd_menu_btn(ui, "tools.fx_event");
+                self.cmd_menu_btn(ui, "tools.motion_track");
+                self.cmd_menu_btn(ui, "tools.apply_audio_fx");
                 self.cmd_menu_btn(ui, "tools.reverse");
                 self.cmd_menu_btn(ui, "tools.freeze_frame");
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
+                self.cmd_menu_btn(ui, "track.render_to_new_track");
+                self.cmd_menu_btn(ui, "track.set_defaults");
+                ui.menu_button(tr(lang, "Multicâmera"), |ui| {
+                    self.cmd_menu_btn(ui, "tools.multicam_create");
+                    self.cmd_menu_chk(ui, self.opts.multicam_mode, "tools.multicam_mode");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_1");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_2");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_3");
+                    self.cmd_menu_btn(ui, "tools.multicam_cut_4");
+                });
+                ui.menu_button(tr(lang, "Composição de trilhas (Pai/Filho)"), |ui| {
+                    self.cmd_menu_btn(ui, "track.toggle_folder");
+                    self.cmd_menu_btn(ui, "track.make_child");
+                    self.cmd_menu_btn(ui, "track.unmake_child");
+                    self.cmd_menu_btn(ui, "track.mask_cycle");
+                });
+                self.cmd_menu_btn(ui, "preview.ram_build");
+                self.cmd_menu_btn(ui, "preview.ram_clear");
                 ui.menu_button(tr(lang, "Neoveg Encoder"), |ui| {
                     self.cmd_menu_btn(ui, "view.tab.encoder");
                     self.cmd_menu_btn(ui, "file.send_to_encoder");
@@ -2375,14 +3246,47 @@ impl App {
                 });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.run_script");
+                ui.separator();
+                self.cmd_menu_btn(ui, "tools.integrations");
+                ui.menu_button("Aplicativos externos (ArtCraft & Blender)", |ui| {
+                    self.cmd_menu_btn(ui, "tools.send_photocraft");
+                    self.cmd_menu_btn(ui, "tools.send_vectorcraft");
+                    self.cmd_menu_btn(ui, "tools.send_soundcraft");
+                    self.cmd_menu_btn(ui, "tools.send_effectcraft");
+                    self.cmd_menu_btn(ui, "tools.send_anicraft");
+                    self.cmd_menu_btn(ui, "tools.send_filmcraft");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.blender_render");
+                    self.cmd_menu_btn(ui, "tools.blender_export_script");
+                    self.cmd_menu_btn(ui, "tools.blender_import_camera");
+                });
             });
             ui.menu_button(tr(lang, "Opções"), |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
+                self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
+                ui.menu_button("Grade da régua", |ui| {
+                    for g in neoveg_engine::session::RulerGridSpacing::ALL {
+                        if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
+                            self.opts.ruler_grid = g;
+                            self.set_status(format!("Grade da régua: {}", g.label()));
+                            ui.close_menu();
+                        }
+                    }
+                });
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
                 self.cmd_menu_chk(ui, self.opts.slip_all_takes, "options.slip_all_takes");
                 self.cmd_menu_chk(ui, self.opts.loop_playback, "options.loop_playback");
+                self.cmd_menu_chk(ui, self.opts.preview_mute_audio, "preview.mute_audio");
+                self.cmd_menu_chk(ui, self.opts.preview_mute_video, "preview.mute_video");
+                self.cmd_menu_chk(
+                    ui,
+                    self.opts.bypass_all_audio_fx,
+                    "options.bypass_all_audio_fx",
+                );
+                ui.separator();
+                self.cmd_menu_btn(ui, "options.customize_toolbar");
                 ui.separator();
                 let sr_s = self.audio.sr.to_string();
                 ui.label(tr_args(
@@ -2465,60 +3369,102 @@ impl App {
         }
     }
 
+    pub(crate) fn open_customize_toolbar(&mut self) {
+        self.dlg.customize_toolbar_open = true;
+        self.dlg.customize_toolbar_draft = Some(self.prefs.toolbar_buttons.clone());
+    }
+
+    fn toolbar_button_visual(&self, id: &str) -> (Icon, Option<&'static str>, Option<bool>) {
+        match id {
+            "file.new" => (Icon::NewFile, None, None),
+            "file.open" => (Icon::OpenFolder, None, None),
+            "file.save" => (Icon::SaveDisk, None, None),
+            "file.render" => (Icon::RenderClapper, None, None),
+            "view.tab.encoder" => (Icon::EncoderQueue, Some("Encoder"), None),
+            "file.project_props" => (Icon::GearProps, None, None),
+            "file.import_media" => (Icon::ImportMedia, None, None),
+            "edit.cut" => (Icon::Cut, None, None),
+            "edit.copy" => (Icon::Copy, None, None),
+            "edit.paste" => (Icon::Paste, None, None),
+            "edit.undo" => (Icon::Undo, None, None),
+            "edit.redo" => (Icon::Redo, None, None),
+            "options.snapping" => (Icon::MagnetSnap, None, Some(self.opts.snapping)),
+            "options.snap_to_grid" => (Icon::TimelineGrid, None, Some(self.opts.snap_to_grid)),
+            "options.auto_ripple" => (Icon::AutoRipple, None, Some(self.opts.auto_ripple)),
+            "view.envelopes" => (Icon::Envelopes, None, Some(self.opts.show_envelopes)),
+            "options.ignore_grouping" => {
+                (Icon::IgnoreGrouping, None, Some(self.opts.ignore_grouping))
+            }
+            "options.loop_playback" => (Icon::LoopPlayback, None, Some(self.opts.loop_playback)),
+            "options.bypass_all_audio_fx" => (
+                Icon::FxAudio,
+                Some("Bypass"),
+                Some(self.opts.bypass_all_audio_fx),
+            ),
+            "preview.mute_audio" => (Icon::MuteAudio, None, Some(self.opts.preview_mute_audio)),
+            "preview.mute_video" => (Icon::MuteVideo, None, Some(self.opts.preview_mute_video)),
+            "preview.split_toggle" => (
+                Icon::SplitPreview,
+                None,
+                Some(!matches!(
+                    self.opts.preview_split_mode,
+                    neoveg_engine::playback::PreviewSplitMode::Off
+                )),
+            ),
+            "edit.properties.layout" => (Icon::LayoutWindow, None, None),
+            "tools.integrations" => (Icon::ExternalApps, None, None),
+            "insert.marker" => (Icon::InsertMarker, Some("M"), None),
+            "insert.marker_cd_track" => (Icon::AudioTrack, Some("CD"), None),
+            "insert.marker_command" => (Icon::FxSparkle, Some("CMD"), None),
+            "track.cycle_automation" => (Icon::Envelopes, Some("Auto"), None),
+            other => {
+                let lbl = commands::find_command(other).map(|c| c.label);
+                (Icon::GearProps, lbl, None)
+            }
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        ui.horizontal_wrapped(|ui| {
-            self.cmd_tool_btn(ui, Icon::NewFile, None, "file.new");
-            self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
-            self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
-            self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
-            self.cmd_tool_btn(ui, Icon::EncoderQueue, None, "view.tab.encoder");
-            self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::Cut, None, "edit.cut");
-            self.cmd_tool_btn(ui, Icon::Copy, None, "edit.copy");
-            self.cmd_tool_btn(ui, Icon::Paste, None, "edit.paste");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::Undo, None, "edit.undo");
-            self.cmd_tool_btn(ui, Icon::Redo, None, "edit.redo");
-            ui.separator();
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.snapping,
-                Icon::MagnetSnap,
-                None,
-                "options.snapping",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.auto_ripple,
-                Icon::AutoRipple,
-                None,
-                "options.auto_ripple",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.show_envelopes,
-                Icon::Envelopes,
-                None,
-                "view.envelopes",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.ignore_grouping,
-                Icon::IgnoreGrouping,
-                None,
-                "options.ignore_grouping",
-            );
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
+        let items = self.prefs.toolbar_buttons.clone();
+        let resp = ui.horizontal_wrapped(|ui| {
+            for id in &items {
+                if id == "|" {
+                    ui.separator();
+                    continue;
+                }
+                let (icon, text, toggle) = self.toolbar_button_visual(id);
+                if let Some(active) = toggle {
+                    self.cmd_tool_toggle(ui, active, icon, text, id);
+                } else {
+                    self.cmd_tool_btn(ui, icon, text, id);
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("⋮")
+                    .on_hover_text(tr(lang, "Personalizar barra de ferramentas..."))
+                    .clicked()
+                {
+                    self.open_customize_toolbar();
+                }
+            });
             if self.loading > 0 {
                 let n_s = self.loading.to_string();
                 ui.separator();
                 crate::splash::spinner_inline(ui, 15.0, ui.ctx().input(|i| i.time), &self.theme);
                 ui.label(tr_args(lang, "carregando {n}...", &[("n", &n_s)]));
+            }
+        });
+        resp.response.context_menu(|ui| {
+            if ui.button("Personalizar barra de ferramentas...").clicked() {
+                self.open_customize_toolbar();
+                ui.close_menu();
+            }
+            if ui.button("Restaurar barra padrão").clicked() {
+                self.prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
+                let _ = self.prefs.save();
+                ui.close_menu();
             }
         });
     }
@@ -2576,26 +3522,138 @@ impl App {
                 "transport.play_toggle",
             );
             self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
+            self.cmd_tool_toggle(
+                ui,
+                self.recorder.is_some(),
+                Icon::RecordDot,
+                None,
+                "transport.record",
+            );
             self.cmd_tool_btn(ui, Icon::GoStart, None, "transport.project_start");
             self.cmd_tool_btn(ui, Icon::GoEnd, None, "transport.project_end");
             self.cmd_tool_btn(ui, Icon::PrevFrame, None, "transport.frame_back");
             self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
             ui.separator();
 
-            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21
-            // (pp. 75–78): Excluir, Aparar, Aparar início, Aparar fim,
-            // Dividir, Travar, Inserir marcador, Inserir região, Encaixe,
-            // Ripple automático, Ignorar agrupamento e Color Grading. Ainda
-            // sem botão porque a função não existe: Gravar, as ferramentas
-            // de edição (Normal, Envelope, Seleção, Zoom), Smart Split,
-            // Crossfades automáticos (sempre ligados), Travar envelopes e as
-            // linhas do tempo aninhadas.
+            // Ferramentas de edição (manual do VEGAS Pro 21, pp. 75–76 e 236):
+            // Normal (com seletor de modos: Normal/Shuffle/Slip/Slide/Stretch/SplitTrim/Roll),
+            // Envelope, Seleção e Zoom.
+            let tool = self.session.edit_tool;
+            let active_mode = self.session.edit_mode;
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Normal,
+                icons::normal_mode_icon(active_mode),
+                None,
+                "edit.tool.normal",
+            );
+            // A seta é desenhada em vetor: a fonte da interface não tem `▼`.
+            let arrow_btn = egui::Button::new("")
+                .min_size(egui::vec2(12.0, ui.spacing().interact_size.y))
+                .frame(false);
+            let modes = egui::menu::menu_custom_button(ui, arrow_btn, |ui| {
+                for mode in neoveg_engine::session::EditMode::NORMAL_MODES {
+                    let id = mode.command_id();
+                    let on =
+                        tool == neoveg_engine::session::EditTool::Normal && active_mode == mode;
+                    let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), id);
+                        ui.close_menu();
+                    }
+                }
+            });
+            crate::scrollbars::paint_arrow_glyph(
+                ui.painter(),
+                modes.response.rect,
+                crate::scrollbars::ArrowDir::Down,
+                ui.visuals().text_color(),
+            );
+            modes.response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Selecionar modo da ferramenta Normal",
+                )
+            });
+            modes
+                .response
+                .on_hover_text(format!("Modo da ferramenta Normal: {}", active_mode.name()));
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Envelope,
+                Icon::EnvelopeTool,
+                None,
+                "edit.tool.envelope",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Selection,
+                Icon::SelectionTool,
+                None,
+                "edit.tool.selection",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Zoom,
+                Icon::ZoomGlass,
+                None,
+                "edit.tool.zoom",
+            );
+            if matches!(
+                tool,
+                neoveg_engine::session::EditTool::Selection
+                    | neoveg_engine::session::EditTool::Zoom
+            ) {
+                let axis = self.session.box_axis;
+                let axis_btn = egui::Button::new(axis.short_name())
+                    .min_size(egui::vec2(38.0, ui.spacing().interact_size.y));
+                let axis_menu = egui::menu::menu_custom_button(ui, axis_btn, |ui| {
+                    for (mode, cmd_id) in [
+                        (
+                            neoveg_engine::session::BoxAxisMode::Both,
+                            "edit.tool.axis.both",
+                        ),
+                        (
+                            neoveg_engine::session::BoxAxisMode::Horizontal,
+                            "edit.tool.axis.horizontal",
+                        ),
+                        (
+                            neoveg_engine::session::BoxAxisMode::Vertical,
+                            "edit.tool.axis.vertical",
+                        ),
+                    ] {
+                        if ui.selectable_label(axis == mode, mode.name()).clicked() {
+                            self.exec_cmd(Some(ui.ctx()), cmd_id);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                axis_menu.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "Selecionar eixo de Seleção/Zoom",
+                    )
+                });
+                axis_menu
+                    .response
+                    .on_hover_text(format!("Eixo da caixa: {}", axis.name()));
+            }
+            ui.separator();
+
+            // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21 (pp. 75–78):
+            // Excluir, Aparar, Aparar início, Aparar fim, Dividir, Smart Split,
+            // Juntar eventos, Travar, Inserir marcador, Inserir região, Encaixe,
+            // Ripple automático, Ignorar agrupamento e Color Grading.
             for (icon, id) in [
                 (Icon::DeleteTrash, "edit.delete"),
                 (Icon::TrimSelection, "edit.trim_to_selection"),
                 (Icon::TrimStart, "edit.trim_start"),
                 (Icon::TrimEnd, "edit.trim_end"),
                 (Icon::Split, "edit.split"),
+                (Icon::SmartSplit, "edit.smart_split"),
+                (Icon::HealEvents, "edit.heal_events"),
             ] {
                 self.cmd_tool_btn(ui, icon, None, id);
             }
@@ -2968,9 +4026,17 @@ impl App {
         let mut work = self.session.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let script = p.clone();
+        // janelas da camada de Forms própria são desenhadas por esta interface
+        let (ui, ui_rx) = crate::script_forms::bridge();
+        let options = neoveg_scripting::ScriptRunOptions {
+            ui: Some(ui),
+            // só para testar a camada própria no Windows
+            force_forms_shim: std::env::var_os("NEOVEG_SCRIPTS_FORMS_PROPRIA")
+                .is_some_and(|v| v == "1"),
+        };
         let spawned = crate::util::spawn("script-net", move || {
             let outcome = match crate::util::catch_isolated(|| {
-                neoveg_scripting::run_cs_script_on_session(&script, &mut work)
+                neoveg_scripting::run_cs_script_on_session_with(&script, &mut work, &options)
             }) {
                 Ok(Ok(msgs)) => ScriptOutcome::Done(Ok(msgs)),
                 Ok(Err(e)) => ScriptOutcome::Done(Err(e.to_string())),
@@ -2991,6 +4057,8 @@ impl App {
                     started: std::time::Instant::now(),
                     media_before,
                     rx,
+                    ui_rx,
+                    active: None,
                 });
             }
             Err(e) => {
@@ -3008,15 +4076,28 @@ impl App {
     /// modal; ao terminar, aplica a sessão do script (ou só o erro).
     fn poll_script_job(&mut self, ctx: &egui::Context) {
         let lang = self.lang();
-        let Some(job) = &self.script_job else {
+        let theme = self.theme.clone();
+        let Some(job) = &mut self.script_job else {
             return;
         };
         let (outcome, done) = match job.rx.try_recv() {
             Ok(r) => r,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // janela pedida pelo script (camada de Forms própria)
+                if job.active.is_none() {
+                    if let Ok(call) = job.ui_rx.try_recv() {
+                        job.active = crate::script_forms::Active::start(call);
+                    }
+                }
+                if let Some(active) = &mut job.active {
+                    if active.show(ctx) {
+                        job.active = None;
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    return;
+                }
                 let el = job.started.elapsed().as_secs_f64();
                 let path = job.path.display().to_string();
-                let theme = self.theme.clone();
                 egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         crate::splash::spinner_inline(ui, 20.0, el, &theme);
@@ -3209,6 +4290,9 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // saída normal: a cópia de recuperação não é mais necessária
+        if let Some(rec) = self.recorder.take() {
+            let _ = rec.stop();
+        }
         self.encoder.save_to_disk();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");
@@ -3230,6 +4314,7 @@ impl App {
         self.last_frame = Instant::now();
         self.audio.tick_without_device(dt);
         self.poll_loader();
+        self.poll_integrations();
         self.poll_script_job(ctx);
         self.poll_render();
         let lang = self.lang();
@@ -3239,6 +4324,18 @@ impl App {
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(dt as f32);
+        if let Some(rec) = &self.recorder {
+            let pk = rec.take_peaks();
+            let err = rec.last_error();
+            let tids = self.recorder_tracks.clone();
+            for tid in tids {
+                self.recording_peaks.insert(tid, pk);
+            }
+            if let Some(e) = err {
+                self.set_status(e);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
 
         let playing = self.is_playing();
         if playing {
@@ -3257,6 +4354,8 @@ impl App {
         if self.render_job.is_some()
             || self.prerender_job.is_some()
             || self.loudness_job.is_some()
+            || self.integrations.probing
+            || self.integrations.blender_job.is_some()
             || self.loading > 0
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -3286,6 +4385,7 @@ impl App {
 
         self.floating_panel_windows(ctx);
         self.show_dialogs(ctx);
+        self.show_integrations_window(ctx);
         self.show_encoder_dialogs(ctx);
         self.crash_report_window(ctx);
         self.recovery_window(ctx);
@@ -3393,6 +4493,8 @@ impl App {
 
     fn show_dock_panel(&mut self, ctx: &egui::Context, at_top: bool) {
         if !self.dock_visible {
+            // Um arraste de aba não sobrevive à área de janelas escondida.
+            crate::dock_drop::end(ctx);
             return;
         }
         let panel = if at_top {
@@ -3527,6 +4629,8 @@ impl App {
 
     pub fn apply_window_layout(&mut self, mut l: WindowLayout) {
         l.sanitize();
+        self.dock_maximized = None;
+        self.timeline_restore = None;
         self.dock_height = l.dock_height;
         self.preview_ratio = l.preview_ratio;
         self.dock_visible = l.dock_visible;
@@ -3828,6 +4932,8 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::Delete => Key::Delete,
         ShortcutKey::F2 => Key::F2,
         ShortcutKey::F8 => Key::F8,
+        ShortcutKey::F11 => Key::F11,
+        ShortcutKey::Backtick => Key::Backtick,
         ShortcutKey::ArrowLeft => Key::ArrowLeft,
         ShortcutKey::ArrowRight => Key::ArrowRight,
         ShortcutKey::ArrowUp => Key::ArrowUp,
@@ -3837,5 +4943,7 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::OpenBracket => Key::OpenBracket,
         ShortcutKey::CloseBracket => Key::CloseBracket,
         ShortcutKey::Backslash => Key::Backslash,
+        ShortcutKey::Equals => Key::Equals,
+        ShortcutKey::Minus => Key::Minus,
     }
 }

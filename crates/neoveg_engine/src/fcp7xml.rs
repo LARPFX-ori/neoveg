@@ -11,8 +11,8 @@
 use crate::fcpxml::parse_transition_kind_name;
 use crate::fcpxml::{escape_xml, parse_xml_document, XmlNode};
 use crate::model::{
-    new_id, Event, Id, Marker, MediaItem, MediaSource, Project, Track, TrackKind, TransitionSpec,
-    MAX_DIM,
+    new_id, Event, GenSpec, Id, Marker, MediaItem, MediaSource, Project, TextSpec, Track,
+    TrackKind, TransitionSpec, MAX_DIM,
 };
 use crate::otio::{decode_target_url, encode_target_url, read_bounded_utf8_file};
 use neoveg_common::error::NeovegError;
@@ -137,9 +137,102 @@ struct Ctx {
     links: Vec<Vec<String>>,
     clips: usize,
     warnings: Vec<String>,
+    /// Altura da sequência, para converter `fontsize` (pontos) em % do quadro.
+    height: u32,
+}
+
+/// Maior texto aceito de um gerador `Text` (entrada hostil, §0.4).
+const MAX_FCP7_TEXT_BYTES: usize = 64 * 1024;
+
+/// Verdadeiro para `generatoritem` com o gerador `Text` (Listing 5-2 do
+/// documento da Apple: `<effectid>Text</effectid>`).
+fn is_text_generator(n: &XmlNode) -> bool {
+    n.child("effect")
+        .and_then(|e| child_text(e, "effectid"))
+        .is_some_and(|id| id.trim().eq_ignore_ascii_case("Text"))
+}
+
+/// Parâmetro `parameterid` de um `<effect>`.
+fn effect_param<'a>(effect: &'a XmlNode, id: &str) -> Option<&'a XmlNode> {
+    effect
+        .children
+        .iter()
+        .find(|p| p.tag == "parameter" && child_text(p, "parameterid").map(str::trim) == Some(id))
+}
+
+/// `<value><alpha/><red/><green/><blue/></value>` (0..255) → RGBA 0..1.
+fn parse_argb(param: &XmlNode) -> Option<[f32; 4]> {
+    let v = param.child("value")?;
+    let c = |tag: &str| -> Option<f32> {
+        let x: f32 = child_text(v, tag)?.trim().parse().ok()?;
+        x.is_finite().then(|| (x / 255.0).clamp(0.0, 1.0))
+    };
+    Some([
+        c("red")?,
+        c("green")?,
+        c("blue")?,
+        c("alpha").unwrap_or(1.0),
+    ])
 }
 
 impl Ctx {
+    /// Mídia gerada para um `generatoritem` `Text`: texto (`str`), tamanho
+    /// (`fontsize`, em pontos) e cor (`fontcolor`).
+    fn text_media_for(&mut self, item: &XmlNode) -> Option<MediaItem> {
+        let effect = item.child("effect")?;
+        let mut text = effect_param(effect, "str")
+            .and_then(|p| child_text(p, "value"))
+            .unwrap_or("")
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        if text.len() > MAX_FCP7_TEXT_BYTES {
+            let mut end = MAX_FCP7_TEXT_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            self.warnings
+                .push("texto de gerador FCP7 muito longo foi truncado".into());
+        }
+        let mut spec = TextSpec {
+            text,
+            ..TextSpec::default()
+        };
+        if let Some(pts) = effect_param(effect, "fontsize")
+            .and_then(|p| child_text(p, "value"))
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+        {
+            let h = self.height.max(1) as f32;
+            spec.size = (pts / h * 100.0).clamp(0.5, 100.0);
+        }
+        if let Some(c) = effect_param(effect, "fontcolor").and_then(parse_argb) {
+            spec.color = c;
+        }
+        let rate = parse_rate(item).unwrap_or(self.fps);
+        let name = child_text(item, "name")
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or("Texto")
+            .to_string();
+        let m = MediaItem {
+            id: new_id(),
+            name,
+            source: MediaSource::Generated(GenSpec::Text(spec)),
+            duration: child_frames(item, "duration")
+                .filter(|d| *d > 0)
+                .map(|d| frames_to_ticks(d, rate)),
+            has_video: true,
+            has_audio: false,
+            width: 0,
+            height: 0,
+            fps: Some(rate),
+            info: "Título FCP7".into(),
+            proxy_path: None,
+        };
+        self.media.push(m.clone());
+        Some(m)
+    }
+
     fn media_for(&mut self, clip: &XmlNode, kind: TrackKind) -> Option<MediaItem> {
         let f = clip.child("file")?;
         let fid = f.attr("id").unwrap_or("").to_string();
@@ -204,6 +297,9 @@ impl Ctx {
                         .unwrap_or("Cross Dissolve")
                         .to_string(),
                 }),
+                "generatoritem" if kind == TrackKind::Video && is_text_generator(c) => {
+                    Some(TrackItem::Clip(c))
+                }
                 "generatoritem" => {
                     self.warnings.push(format!(
                         "gerador FCP7 '{}' ignorado (sem equivalente)",
@@ -301,7 +397,12 @@ impl Ctx {
                 .push(format!("clipe FCP7 '{name}' sem duração válida ignorado"));
             return None;
         }
-        let item = match self.media_for(clip, kind) {
+        let found = if clip.tag == "generatoritem" {
+            self.text_media_for(clip)
+        } else {
+            self.media_for(clip, kind)
+        };
+        let item = match found {
             Some(m) => m,
             None => {
                 self.warnings
@@ -373,6 +474,7 @@ pub fn import_fcp7_str(text: &str) -> Result<(Project, Vec<String>), NeovegError
         links: vec![],
         clips: 0,
         warnings: vec![],
+        height: 1080,
     };
 
     let media = seq.child("media");
@@ -391,6 +493,7 @@ pub fn import_fcp7_str(text: &str) -> Result<(Project, Vec<String>), NeovegError
         width = dim("width").unwrap_or(width);
         height = dim("height").unwrap_or(height);
     }
+    ctx.height = height;
 
     let mut tracks: Vec<Track> = vec![];
     let v_nodes: Vec<&XmlNode> = video
@@ -456,6 +559,7 @@ pub fn import_fcp7_str(text: &str) -> Result<(Project, Vec<String>), NeovegError
                 id: new_id(),
                 t: frames_to_ticks(f, fps),
                 label: child_text(m, "name").unwrap_or("").to_string(),
+                ..Default::default()
             })
         })
         .collect();
@@ -563,8 +667,12 @@ impl Exporter<'_> {
             return;
         };
         let path = match &m.source {
-            MediaSource::File { path } => path.clone(),
+            MediaSource::File { path } | MediaSource::NestedProject { path } => path.clone(),
             MediaSource::ImageSequence { paths, .. } => paths.first().cloned().unwrap_or_default(),
+            MediaSource::Generated(GenSpec::Text(spec)) if kind == TrackKind::Video => {
+                self.text_generator(e, spec, m.duration);
+                return;
+            }
             MediaSource::Generated(_) => {
                 self.out.push_str(&format!(
                     "          <!-- gerado pelo Neoveg, sem arquivo: {} -->\n",
@@ -632,6 +740,71 @@ impl Exporter<'_> {
             );
         }
         o.push_str("          </clipitem>\n");
+    }
+
+    /// Título do Neoveg como `generatoritem` `Text`, na forma do Listing 5-2
+    /// do documento da Apple (`str`, `fontsize`, `fontcolor`).
+    fn text_generator(&mut self, e: &Event, spec: &TextSpec, media_dur: Option<Ticks>) {
+        let fps = self.fps;
+        let start = fps.ticks_to_frame_round(e.start);
+        let end = fps.ticks_to_frame_round(e.end()).max(start + 1);
+        let in_f = fps.ticks_to_frame_round(e.offset).max(0);
+        let out_f = in_f + (end - start);
+        let dur = media_dur
+            .map(|d| fps.ticks_to_frame_round(d))
+            .unwrap_or(out_f)
+            .max(out_f);
+        let byte = |v: f32| {
+            if v.is_finite() {
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                0
+            }
+        };
+        let [r, g, b, a] = spec.color;
+        let pts = if spec.size.is_finite() {
+            (spec.size.clamp(0.5, 100.0) * self.project.settings.height as f32 / 100.0).round()
+        } else {
+            0.0
+        };
+        // quebra de linha do FCP7 é `&#13;`
+        let text = escape_xml(&spec.text).replace('\n', "&#13;");
+        self.clip_n += 1;
+        let o = &mut self.out;
+        o.push_str(&format!(
+            "          <generatoritem id=\"generatoritem-{}\">\n",
+            self.clip_n
+        ));
+        o.push_str(&format!(
+            "            <name>{}</name>\n            <duration>{dur}</duration>\n",
+            escape_xml(&e.name)
+        ));
+        o.push_str(&rate_xml(fps, "            "));
+        o.push_str(&format!(
+            "            <in>{in_f}</in>\n            <out>{out_f}</out>\n            <start>{start}</start>\n            <end>{end}</end>\n            <enabled>{}</enabled>\n            <anamorphic>FALSE</anamorphic>\n            <alphatype>black</alphatype>\n",
+            if e.mute { "FALSE" } else { "TRUE" }
+        ));
+        o.push_str(
+            "            <effect>\n              <name>Text</name>\n              <effectid>Text</effectid>\n              <effectcategory>Text</effectcategory>\n              <effecttype>generator</effecttype>\n              <mediatype>video</mediatype>\n",
+        );
+        o.push_str(&format!(
+            "              <parameter>\n                <parameterid>str</parameterid>\n                <name>Text</name>\n                <value>{text}</value>\n              </parameter>\n"
+        ));
+        if pts > 0.0 {
+            o.push_str(&format!(
+                "              <parameter>\n                <parameterid>fontsize</parameterid>\n                <value>{pts}</value>\n              </parameter>\n"
+            ));
+        }
+        o.push_str(&format!(
+            "              <parameter>\n                <parameterid>fontcolor</parameterid>\n                <name>Font Color</name>\n                <value>\n                  <alpha>{}</alpha>\n                  <red>{}</red>\n                  <green>{}</green>\n                  <blue>{}</blue>\n                </value>\n              </parameter>\n",
+            byte(a),
+            byte(r),
+            byte(g),
+            byte(b)
+        ));
+        o.push_str(
+            "            </effect>\n            <sourcetrack>\n              <mediatype>video</mediatype>\n            </sourcetrack>\n          </generatoritem>\n",
+        );
     }
 }
 
@@ -889,6 +1062,202 @@ mod tests {
         assert!(looks_like_fcp7(SAMPLE));
         assert!(!looks_like_fcp7("<fcpxml version=\"1.10\"/>"));
         assert!(!looks_like_fcp7(""));
+    }
+
+    /// Geradores `Text` na forma do Listing 5-2 do documento da Apple
+    /// (legendas): o primeiro completo, o segundo só com `start`/`end`.
+    const TEXT_SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <sequence id="seq-t">
+    <name>Legendas</name>
+    <rate><timebase>30</timebase><ntsc>TRUE</ntsc></rate>
+    <media>
+      <video>
+        <format><samplecharacteristics><width>720</width><height>480</height></samplecharacteristics></format>
+        <track>
+          <generatoritem>
+            <name>Text</name>
+            <duration>3600</duration>
+            <rate><ntsc>TRUE</ntsc><timebase>30</timebase></rate>
+            <in>1650</in>
+            <out>1784</out>
+            <start>0</start>
+            <end>134</end>
+            <enabled>TRUE</enabled>
+            <anamorphic>FALSE</anamorphic>
+            <alphatype>black</alphatype>
+            <effect id="subtitle">
+              <name>Text</name>
+              <effectid>Text</effectid>
+              <effectcategory>Text</effectcategory>
+              <effecttype>generator</effecttype>
+              <mediatype>video</mediatype>
+              <parameter><parameterid>str</parameterid><name>Text</name><value>Primeira linha&#13;segunda linha</value></parameter>
+              <parameter><parameterid>fontname</parameterid><name>Font</name><value>Futura</value></parameter>
+              <parameter><parameterid>fontsize</parameterid><value>48</value></parameter>
+              <parameter><parameterid>fontcolor</parameterid><name>Font Color</name>
+                <value><alpha>255</alpha><red>255</red><green>0</green><blue>51</blue></value></parameter>
+            </effect>
+            <sourcetrack><mediatype>video</mediatype></sourcetrack>
+          </generatoritem>
+          <generatoritem>
+            <start>135</start>
+            <end>219</end>
+            <effect id="subtitle2">
+              <name>Text</name>
+              <effectid>Text</effectid>
+              <effectcategory>Text</effectcategory>
+              <effecttype>generator</effecttype>
+              <mediatype>video</mediatype>
+              <parameter><parameterid>str</parameterid><name>Text</name><value>Outra fala</value></parameter>
+            </effect>
+          </generatoritem>
+          <generatoritem>
+            <name>Slug</name>
+            <start>220</start>
+            <end>300</end>
+            <effect><name>Slug</name><effectid>Slug</effectid><effecttype>generator</effecttype></effect>
+          </generatoritem>
+        </track>
+      </video>
+    </media>
+  </sequence>
+</xmeml>
+"#;
+
+    fn text_of(p: &Project, ev: &Event) -> TextSpec {
+        match p.media(ev.media_id).map(|m| &m.source) {
+            Some(MediaSource::Generated(GenSpec::Text(t))) => t.clone(),
+            other => panic!("evento sem título: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imports_text_generators_from_spec_listing() {
+        let (p, warnings) = import_fcp7_str(TEXT_SAMPLE).expect("importa");
+        let v = p
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video)
+            .expect("trilha de vídeo");
+        assert_eq!(v.events.len(), 2, "dois títulos; o Slug fica de fora");
+        assert!(warnings.iter().any(|w| w.contains("Slug")), "{warnings:?}");
+        let fps = FrameRate::FPS_29_97;
+        let a = &v.events[0];
+        assert_eq!(a.start, frames_to_ticks(0, fps));
+        assert_eq!(a.length, frames_to_ticks(134, fps));
+        assert_eq!(a.offset, frames_to_ticks(1650, fps));
+        let ta = text_of(&p, a);
+        assert_eq!(ta.text, "Primeira linha\nsegunda linha");
+        assert!((ta.size - 10.0).abs() < 1e-3, "48 pt em 480 linhas = 10%");
+        assert!((ta.color[0] - 1.0).abs() < 1e-6 && ta.color[1] == 0.0);
+        assert!((ta.color[2] - 0.2).abs() < 1e-6);
+        let b = &v.events[1];
+        assert_eq!(b.start, frames_to_ticks(135, fps));
+        assert_eq!(b.length, frames_to_ticks(84, fps));
+        assert_eq!(text_of(&p, b).text, "Outra fala");
+    }
+
+    #[test]
+    fn text_generator_export_round_trips() {
+        let mut p = Project::new_default();
+        let spec = TextSpec {
+            text: "Olá & <adeus>\nlinha 2".into(),
+            size: 12.5,
+            color: [0.0, 1.0, 0.5, 1.0],
+            ..TextSpec::default()
+        };
+        let imp = crate::media::import_generated(GenSpec::Text(spec));
+        let mut ev = Event::new(&imp.item, Ticks::from_secs_i64(2), Ticks::from_secs_i64(3));
+        ev.name = "Título".into();
+        p.media.push(imp.item);
+        let height = p.settings.height;
+        let vt = p
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::Video)
+            .expect("trilha de vídeo");
+        vt.events.push(ev);
+        let xml = export_fcp7_string(&p, None);
+        assert!(xml.contains("<effectid>Text</effectid>"), "{xml}");
+        assert!(xml.contains("Olá &amp; &lt;adeus&gt;&#13;linha 2"), "{xml}");
+        assert!(!xml.contains("<!-- gerado"), "título não vira comentário");
+        let (q, warnings) = import_fcp7_str(&xml).expect("reimporta");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let v = q
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video && !t.events.is_empty())
+            .expect("trilha com o título");
+        let e = &v.events[0];
+        let fps = p.settings.fps;
+        assert_eq!(
+            fps.ticks_to_frame_round(e.start),
+            fps.ticks_to_frame_round(Ticks::from_secs_i64(2))
+        );
+        let t = text_of(&q, e);
+        assert_eq!(t.text, "Olá & <adeus>\nlinha 2");
+        assert_eq!(t.color, [0.0, 1.0, 128.0 / 255.0, 1.0]);
+        // o tamanho volta pela altura do quadro (arredondado em pontos)
+        let pts = (12.5 * height as f32 / 100.0).round();
+        assert!((t.size - pts / height as f32 * 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hostile_text_generator_values_are_bounded() {
+        let big = "x".repeat(MAX_FCP7_TEXT_BYTES + 100);
+        let xml = TEXT_SAMPLE
+            .replace("Outra fala", &big)
+            .replace("<value>48</value>", "<value>NaN</value>")
+            .replace("<red>255</red>", "<red>99999</red>")
+            .replace("<green>0</green>", "<green>-7</green>");
+        // o analisador XML já descarta textos acima de 64 KiB; o limite do
+        // gerador é a segunda barreira
+        let (p, _) = import_fcp7_str(&xml).expect("importa");
+        let v = p
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video)
+            .expect("trilha");
+        let a = text_of(&p, &v.events[0]);
+        assert_eq!(a.size, TextSpec::default().size, "NaN mantém o padrão");
+        assert_eq!(a.color[0], 1.0);
+        assert_eq!(a.color[1], 0.0);
+        assert!(text_of(&p, &v.events[1]).text.len() <= MAX_FCP7_TEXT_BYTES);
+        // gerador de texto numa trilha de áudio não vira evento
+        let in_audio = TEXT_SAMPLE
+            .replace("<video>", "<audio>")
+            .replace("</video>", "</audio>");
+        let (q, _) = import_fcp7_str(&in_audio).expect("importa");
+        assert!(q.tracks.iter().all(|t| t.events.is_empty()));
+    }
+
+    #[test]
+    fn fuzz_text_generator_mutations_never_panic() {
+        let base = TEXT_SAMPLE.as_bytes();
+        let mut seed: u64 = 0x7E47_6E4E;
+        for i in 0..300 {
+            let mut b = base.to_vec();
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let pos = (seed as usize) % b.len().max(1);
+            match i % 3 {
+                0 => b.truncate(pos),
+                1 => {
+                    if let Some(x) = b.get_mut(pos) {
+                        *x ^= 1 << (seed % 8);
+                    }
+                }
+                _ => b.splice(pos..pos, b"-1".iter().copied()).for_each(drop),
+            }
+            let text = String::from_utf8_lossy(&b);
+            let r = std::panic::catch_unwind(|| {
+                let _ = import_fcp7_str(&text);
+            });
+            assert!(r.is_ok(), "pânico na mutação {i}");
+        }
     }
 
     /// Fuzzing por mutação (§0.8): truncamentos e inversões de bits não

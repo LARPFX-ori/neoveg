@@ -4,7 +4,7 @@
 
 use super::{App, DockTab, FxTarget};
 use crate::icons::{self, Icon};
-use crate::model::{FxInstance, FxKind, Ticks, TrackKind};
+use crate::model::{ColorGradeCurves, FxInstance, FxKind, Ticks, TrackKind};
 use crate::theme::ThemeColors;
 use eframe::egui;
 use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
@@ -236,6 +236,7 @@ impl App {
                         *slot = pv;
                     }
                 }
+                fx_work.color_grade = None;
                 checkpoint_op = true;
                 modified = true;
             }
@@ -348,6 +349,28 @@ impl App {
                             ui.end_row();
                         }
                     });
+
+                ui.add_space(6.0);
+                ui.separator();
+                let mut cg = fx_work.color_grade.take().unwrap_or_default();
+                let (cg_changed, cg_ckpt) = draw_lut_curves_hsl_section(ui, &mut cg, &self.theme);
+                if cg_changed {
+                    cg.sanitize();
+                    modified = true;
+                    if cg_ckpt {
+                        checkpoint_op = true;
+                    }
+                }
+                let cg_empty = cg.lut_path.is_none()
+                    && cg.master.is_empty()
+                    && cg.red.is_empty()
+                    && cg.green.is_empty()
+                    && cg.blue.is_empty()
+                    && cg
+                        .hsl_bands
+                        .iter()
+                        .all(|b| b[0] == 0.0 && b[1] == 0.0 && b[2] == 0.0);
+                fx_work.color_grade = (!cg_empty).then_some(cg);
             });
 
         if modified {
@@ -718,6 +741,343 @@ fn paint_balance_pad_art(
     );
 }
 
+fn lut_display_name(lut_path: Option<&str>) -> String {
+    let Some(p) = lut_path.filter(|s| !s.trim().is_empty()) else {
+        return "Nenhuma".to_string();
+    };
+    if let Some((_, label)) = ColorGradeCurves::BUILTIN_LUTS
+        .iter()
+        .find(|(id, _)| *id == p)
+    {
+        return (*label).to_string();
+    }
+    std::path::Path::new(p)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string())
+}
+
+/// Seção de LUT (.cube ou integrada), Curvas RGB e 6 bandas HSL no painel Color Grading.
+fn draw_lut_curves_hsl_section(
+    ui: &mut egui::Ui,
+    cg: &mut ColorGradeCurves,
+    theme: &ThemeColors,
+) -> (bool, bool) {
+    let mut changed = false;
+    let mut ckpt = false;
+
+    ui.strong("LUT de Câmera / Look (.cube)");
+    ui.horizontal_wrapped(|ui| {
+        let cur_label = lut_display_name(cg.lut_path.as_deref());
+        egui::ComboBox::from_id_salt("cg_lut_combo")
+            .selected_text(cur_label)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(cg.lut_path.is_none(), "Nenhuma")
+                    .clicked()
+                {
+                    cg.lut_path = None;
+                    changed = true;
+                    ckpt = true;
+                }
+                for (id, name) in ColorGradeCurves::BUILTIN_LUTS {
+                    let active = cg.lut_path.as_deref() == Some(id);
+                    if ui.selectable_label(active, name).clicked() {
+                        cg.lut_path = Some(id.to_string());
+                        changed = true;
+                        ckpt = true;
+                    }
+                }
+            });
+        if ui
+            .button("Carregar .cube...")
+            .on_hover_text("Selecionar arquivo de LUT 1D/3D no formato .cube")
+            .clicked()
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("LUT Cube", &["cube", "CUBE"])
+                .pick_file()
+            {
+                cg.lut_path = Some(path.display().to_string());
+                changed = true;
+                ckpt = true;
+            }
+        }
+        if ui
+            .add_enabled(cg.lut_path.is_some(), egui::Button::new("Limpar"))
+            .clicked()
+        {
+            cg.lut_path = None;
+            changed = true;
+            ckpt = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Intensidade da LUT");
+        if ui
+            .add(egui::Slider::new(&mut cg.lut_strength, 0.0..=1.0).fixed_decimals(2))
+            .changed()
+        {
+            changed = true;
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.strong("Curvas RGB");
+    let ch_id = egui::Id::new("cg_curve_channel_state");
+    let mut active_ch = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<usize>(ch_id).unwrap_or(0));
+    let channels = [
+        (0usize, "Master", theme.text_primary),
+        (1, "Vermelho", Color32::from_rgb(235, 95, 95)),
+        (2, "Verde", Color32::from_rgb(95, 220, 120)),
+        (3, "Azul", Color32::from_rgb(95, 165, 240)),
+    ];
+    ui.horizontal_wrapped(|ui| {
+        for &(ci, name, col) in &channels {
+            let text =
+                egui::RichText::new(name).color(if active_ch == ci { theme.accent } else { col });
+            if ui.selectable_label(active_ch == ci, text).clicked() {
+                active_ch = ci;
+            }
+        }
+        if ui.small_button("Redefinir curva").clicked() {
+            match active_ch {
+                1 => cg.red.clear(),
+                2 => cg.green.clear(),
+                3 => cg.blue.clear(),
+                _ => cg.master.clear(),
+            }
+            changed = true;
+            ckpt = true;
+        }
+        if ui.small_button("Zerar curvas").clicked() {
+            cg.master.clear();
+            cg.red.clear();
+            cg.green.clear();
+            cg.blue.clear();
+            changed = true;
+            ckpt = true;
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(ch_id, active_ch));
+
+    let line_col = channels
+        .get(active_ch)
+        .map(|c| c.2)
+        .unwrap_or(theme.text_primary);
+    let curve_pts = match active_ch {
+        1 => &mut cg.red,
+        2 => &mut cg.green,
+        3 => &mut cg.blue,
+        _ => &mut cg.master,
+    };
+    if draw_rgb_curve_editor(ui, curve_pts, line_col, theme) {
+        changed = true;
+    }
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.strong("Curvas HSL (6 setores)");
+    let band_id = egui::Id::new("cg_hsl_band_state");
+    let mut active_band = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<usize>(band_id).unwrap_or(0))
+        .min(5);
+    let band_colors = [
+        Color32::from_rgb(235, 80, 80),
+        Color32::from_rgb(235, 210, 75),
+        Color32::from_rgb(80, 210, 110),
+        Color32::from_rgb(75, 210, 225),
+        Color32::from_rgb(85, 135, 235),
+        Color32::from_rgb(220, 85, 200),
+    ];
+    ui.horizontal_wrapped(|ui| {
+        for (bi, &name) in ColorGradeCurves::HSL_BAND_NAMES.iter().enumerate() {
+            let lbl = egui::RichText::new(name).color(if active_band == bi {
+                theme.accent
+            } else {
+                band_colors[bi]
+            });
+            if ui.selectable_label(active_band == bi, lbl).clicked() {
+                active_band = bi;
+            }
+        }
+        if ui.small_button("Zerar HSL").clicked() {
+            cg.hsl_bands.clear();
+            changed = true;
+            ckpt = true;
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(band_id, active_band));
+
+    let mut band = cg.hsl_bands.get(active_band).copied().unwrap_or([0.0; 3]);
+    let mut band_changed = false;
+    egui::Grid::new("cg_hsl_sliders")
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Matiz");
+            band_changed |= ui
+                .add(egui::Slider::new(&mut band[0], -0.5..=0.5).fixed_decimals(2))
+                .changed();
+            ui.end_row();
+            ui.label("Saturação");
+            band_changed |= ui
+                .add(egui::Slider::new(&mut band[1], -1.0..=1.0).fixed_decimals(2))
+                .changed();
+            ui.end_row();
+            ui.label("Luminância");
+            band_changed |= ui
+                .add(egui::Slider::new(&mut band[2], -1.0..=1.0).fixed_decimals(2))
+                .changed();
+            ui.end_row();
+        });
+    if band_changed {
+        if cg.hsl_bands.len() < 6 {
+            cg.hsl_bands.resize(6, [0.0, 0.0, 0.0]);
+        }
+        cg.hsl_bands[active_band] = band;
+        changed = true;
+    }
+
+    (changed, ckpt)
+}
+
+fn draw_rgb_curve_editor(
+    ui: &mut egui::Ui,
+    pts: &mut Vec<[f32; 2]>,
+    line_col: Color32,
+    theme: &ThemeColors,
+) -> bool {
+    let side = ui.available_width().clamp(96.0, 172.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, theme.tl_ruler_bg);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0_f32, theme.border),
+        StrokeKind::Inside,
+    );
+
+    for step in 1..4 {
+        let f = step as f32 * 0.25;
+        let gx = rect.left() + f * rect.width();
+        let gy = rect.top() + f * rect.height();
+        let grid_stroke = Stroke::new(0.8_f32, theme.border.gamma_multiply(0.45));
+        painter.line_segment([pos2(gx, rect.top()), pos2(gx, rect.bottom())], grid_stroke);
+        painter.line_segment([pos2(rect.left(), gy), pos2(rect.right(), gy)], grid_stroke);
+    }
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_top()],
+        Stroke::new(1.0_f32, theme.border.gamma_multiply(0.7)),
+    );
+
+    let drag_id = ui.id().with("cg_curve_drag_idx");
+    let mut changed = false;
+    let to_screen = |x: f32, y: f32| -> Pos2 {
+        let sx = rect.left() + x.clamp(0.0, 1.0) * rect.width();
+        let sy = rect.bottom() - y.clamp(0.0, 1.0) * rect.height();
+        pos2(sx, sy)
+    };
+    let to_norm = |p: Pos2| -> [f32; 2] {
+        let w = rect.width().max(1.0);
+        let h = rect.height().max(1.0);
+        let nx = ((p.x - rect.left()) / w).clamp(0.0, 1.0);
+        let ny = ((rect.bottom() - p.y) / h).clamp(0.0, 1.0);
+        [nx, ny]
+    };
+
+    if resp.drag_started() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if pts.is_empty() {
+                *pts = ColorGradeCurves::default_curve();
+            }
+            let hit = pts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let d = to_screen(p[0], p[1]).distance(pos);
+                    (d <= 14.0).then_some((i, d))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i);
+            let idx = if let Some(i) = hit {
+                i
+            } else if pts.len() < 32 {
+                let np = to_norm(pos);
+                pts.push(np);
+                pts.len() - 1
+            } else {
+                0
+            };
+            ui.ctx().data_mut(|d| d.insert_temp(drag_id, Some(idx)));
+        }
+    }
+    if resp.dragged() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let drag_idx = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<Option<usize>>(drag_id).unwrap_or(None));
+            if let Some(idx) = drag_idx {
+                if let Some(slot) = pts.get_mut(idx) {
+                    *slot = to_norm(pos);
+                    changed = true;
+                }
+            }
+        }
+    } else if resp.drag_stopped() {
+        ui.ctx().data_mut(|d| d.insert_temp(drag_id, None::<usize>));
+        if !pts.is_empty() {
+            pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+            changed = true;
+        }
+    } else if resp.secondary_clicked() && pts.len() > 2 {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if let Some((i, _)) = pts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i > 0 && *i + 1 < pts.len())
+                .filter_map(|(i, p)| {
+                    let d = to_screen(p[0], p[1]).distance(pos);
+                    (d <= 12.0).then_some((i, d))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+            {
+                pts.remove(i);
+                changed = true;
+            }
+        }
+    }
+
+    let mut sampled = Vec::with_capacity(33);
+    for s in 0..=32 {
+        let x = s as f32 / 32.0;
+        let y = ColorGradeCurves::eval_curve(pts, x);
+        sampled.push(to_screen(x, y));
+    }
+    for w in sampled.windows(2) {
+        painter.line_segment([w[0], w[1]], Stroke::new(1.8_f32, line_col));
+    }
+    let display_pts = if pts.is_empty() {
+        vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]
+    } else {
+        pts.clone()
+    };
+    for pt in display_pts {
+        let c = to_screen(pt[0], pt[1]);
+        painter.circle_filled(c, 4.0, line_col);
+        painter.circle_stroke(c, 4.0, Stroke::new(1.0_f32, theme.text_primary));
+    }
+    resp.on_hover_text(
+        "Arraste pontos para ajustar (clique em área vazia para adicionar; botão direito remove)",
+    );
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,6 +1119,11 @@ mod tests {
                         &th,
                     );
                     paint_balance_pad_art(ui.painter(), tiny, f32::NAN, f32::INFINITY, &th);
+                    let mut cg = ColorGradeCurves {
+                        master: vec![[f32::NAN, f32::INFINITY], [0.5, 0.7]],
+                        ..Default::default()
+                    };
+                    let _ = draw_lut_curves_hsl_section(ui, &mut cg, &th);
                 }
             });
         });

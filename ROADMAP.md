@@ -25,9 +25,9 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Pool global do `rayon` dimensionado pelos núcleos da máquina (`Preferences.effective_worker_threads()`).
 - **Áudio em Rust puro com licenças SPDX permitidas (`media/{audio,audio_extra,wav}.rs`):** leitores/escritores próprios para `WAV`/`BWF`/`RF64` (PCM, Float32, G.711 µ-law/A-law, IMA ADPCM), `AIFF`/`AIFC`, `AU`/`SND`, `CAF`, `Wave64` (`.w64`), `VOC`, `IFF 8SVX` e `QOA`; além de `FLAC` (`claxon`, `Apache-2.0`), Ogg Vorbis (`lewton`, `MIT OR Apache-2.0`) e `MP3` (`puremp3`, `MIT OR CC0-1.0`), com verificação opcional via oráculo externo `ffprobe` em `target/fixtures/` (sem dependências `MPL-2.0`/`GPL`/`LGPL`).
 - **Imagens e sequências em Rust puro (`media/img_extra.rs`, `image` 0.25):** importação de 31 extensões incluindo `DPX`, `Cineon`, `OpenEXR`, `QOI`, `TGA`, `PNM`, `HDR`, `DDS`, `ICO`/`CUR`, `Farbfeld`, `WBMP`, `XBM`, `XPM`, `IFF/ILBM` e `WebP`/`GIF` animados; exportação de `GIF` animado, 10 sequências de imagem e capturas multi-formato.
-- **Media Foundation no Windows (`media/mf/mod.rs` e `encode.rs`):** fronteira FFI isolada com RAII e `// SAFETY:` para leitura em streaming de `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `M4A`, `AAC`, `WMV`, `ASF`, `WMA`, `3GP`, `3G2`, `M2TS`/`MTS`/`TS`, `MPEG`/`VOB`, `MP2`/`MPA`, `M4B` e `ALAC`, além de codificação via `IMFSinkWriter` para `MP4 (H.264/HEVC)`, `MOV`, `3GP`, `WMV`, `M4A`, `AAC`, `WMA` e `MP3`.
+- **Contrato de decodificador do sistema (`media/system.rs`, `SystemVideoReader` / `VideoSource::System`):** abstração comum em `neoveg_engine::media` desacoplada do Windows para leitores nativos e fallback multiplataforma, implementada no Windows pelo backend Media Foundation (`media/mf/mod.rs` e `encode.rs`, fronteira FFI isolada com RAII e `// SAFETY:`) para leitura em streaming de `MP4`, `MOV`, `MKV`, `WEBM`, `M4V`, `M4A`, `AAC`, `WMV`, `ASF`, `WMA`, `3GP`, `3G2`, `M2TS`/`MTS`/`TS`, `MPEG`/`VOB`, `MP2`/`MPA`, `M4B` e `ALAC`, além de codificação via `IMFSinkWriter` para `MP4 (H.264/HEVC)`, `MOV`, `3GP`, `WMV`, `M4A`, `AAC`, `WMA` e `MP3`.
 - **Experiência VEGAS Pro em `neoveg_ui`:**
-  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **70 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
+  - **7 temas visuais** incluindo 2 temas de **Alto Contraste WCAG AAA** (>= 7:1) e **74 ícones vetoriais coloridos nativos** (`crates/neoveg_ui/src/icons.rs`) desenhados em `egui::Painter` com adaptação automática ao Alto Contraste;
   - Janelas **Trimmer** (`Alt+2`, pré-visualização A/V de mídia, marcação `In`/`Out` com navegação quadro a quadro, seleção *Áudio + Vídeo* / *Apenas Vídeo* / *Apenas Áudio* e envio com Desfazer) e **Detalhes da Edição (*Edit Details*, `Alt+3`)** tabular com edição em linha (*Eventos*, *Marcadores*, *Regiões*, *Trilhas*, *Barramentos*), filtro e cópia TSV;
   - Playhead físico de **1 px** contrastado ao tema e ao Auto Ripple, **Linha do Playhead** com cabeçalho no topo, **retângulos nos números das faixas**, **Visor de Tempo** dedicado acima da lista de faixas (alinhado à régua e marcadores), controle **Taxa (`Playback Rate`)** + botões de trilha abaixo das faixas, **barras de rolagem clássicas com setas (`◀`/`▶`, `▲`/`▼`), botões de zoom horizontal e altura de trilhas (`−`/`+`) e ajuste ao projeto** na timeline e **Barra de Status de Renderização** na base da timeline com faixa indicadora de pré-render no topo;
   - Painéis da área acoplável, **Prévia de Vídeo** e **Master Bus** destacáveis em **janelas nativas do SO/Windows** (`show_viewport_immediate`, com fallback embutido em testes headless) e layouts `.neoveglayout` (4 presets + salvamento/carregamento);
@@ -37,7 +37,7 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - Painel **Color Grading** (`crates/neoveg_ui/src/color_grading.rs`) acoplável/flutuante com rodas tonais vetoriais (*Lift*, *Gamma*, *Gain*), pad *Temp × Tinta*, sliders e predefinições ligados ao `FxKind::ColorCorrector`;
   - Janela **Renderizar como... em 2 colunas** com pesquisa, favoritos ★ persistidos, modelos de formato e progresso com spinner vetorial original;
   - **Neoveg Encoder (`neoveg_engine::encoder`, `encoder_panel.rs`):** fila em lote persistente com codificação paralela de múltiplas saídas por origem, painel *Codificação* ao vivo com miniatura e ETA, *Navegador de Predefinições* (`.neovegpreset`, grupos e apelidos), *Pastas Monitoradas*, *Configurações de Exportação* com Corte/Escala em 5 modos, LUT `.cube` 1D/3D em sala limpa, sobreposições (Imagem, Nome e Timecode) e Ajustador de Tempo;
-  - Janela dinâmica de **Atalhos de teclado** (regravação, remoção e filtro ligados à Tabela Única) e diálogo **Preferências...** em 2 painéis (barra lateral com 8 categorias: *Geral*, *Aparência e Layout*, *Edição e Timeline*, *Vídeo e Prévia*, *Áudio*, *Memória e Desempenho*, *Salvamento Automático* e *Atalhos e Controles*, com rolagem contínua/por página, comportamento da roda do mouse, guias de Área Segura configuráveis e parâmetros persistidos com sanitização).
+  - Janela dinâmica de **Atalhos de teclado** (regravação, remoção e filtro ligados à Tabela Única) e diálogo **Preferências...** em 2 painéis (barra lateral com 9 categorias: *Geral*, *Aparência e Layout*, *Edição e Timeline*, *Vídeo e Prévia*, *Áudio*, *Memória e Desempenho*, *Salvamento Automático*, *Atalhos e Controles* e *Aplicativos externos*, com rolagem contínua/por página, comportamento da roda do mouse, guias de Área Segura configuráveis e parâmetros persistidos com sanitização).
 - **Dock `egui_tiles` e testes de UI `egui_kittest`:** árvore de painéis 3 colunas com faixa de abas inferior em linha única rolável (`◀`/`▶` + barra horizontal), painéis com barras de rolagem clássicas com setas (`▲`/`▼` / `◀`/`▶`), destaque em janelas nativas e suíte automatizada de interação (`kittest_tests.rs`).
 - **Áudio avançado (`fundsp` + `rubato` + `ebur128` + `dasp`):** até 26 barramentos auxiliares (`Bus A`..`Bus Z`) com envios *pre/post-fader*, roteamento acíclico no cabeçalho e Mixer, envelopes Volume/Pan, trilhas de barramentos na timeline (`Ctrl+B`), DSP nativo via `fundsp`, reamostragem *Sinc* para *Playback Rate* (`0.25x`–`4.00x`) com `rubato` e **Medidores de Loudness EBU R128 / ITU-R BS.1770-4** (`Ctrl+Alt+7`, tempo real + varredura offline com metas R128/Streaming/ATSC/Podcast).
 - **Intercâmbio aberto em Sala Limpa (`neoveg_engine/src/{otio,fcpxml,edl,subtitles}.rs`):** importação e exportação via **OpenTimelineIO (`.otio`)**, **Final Cut Pro XML (`.fcpxml`)**, **EDL CMX 3600 (`.edl`)** e **legendas SubRip (`.srt`) / W3C WebVTT (`.vtt`)**, integrados à Tabela Única de Comandos (`Arquivo → Intercâmbio & Legendas`) e arrastar-e-soltar, com suíte de fuzzing por mutação (`AGENTS.md` §0.8).
@@ -50,14 +50,14 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 - **Concluído:**
   - *Surround Panner* 5.1 (`engine/surround.rs`, painel `surround_panel.rs`): modo do Master estéreo/5.1, posição 2D por trilha e barramento no anel ITU-R BS.775, LFE, downmix para monitoração e render WAV de 6 canais (`WAVE_FORMAT_EXTENSIBLE`);
   - **Takes múltiplos por evento** (`takes.rs`): adicionar como take, próximo/anterior (`T`/`Shift+T`), escolher/excluir o ativo e *Slip em todos os takes*, com divisão e aparo sincronizados;
-  - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e importação de **AAF** (`aaf.rs`);
+  - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e **AAF** (`.aaf`, `aaf.rs`, `aaf_metadict.rs`, `file.import_aaf` / `file.export_aaf` em Sala Limpa);
   - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores*;
   - Descoberta de plug-ins VST3/OFX nas pastas padrão (`plugins.rs`) e efeitos de vídeo OFX aplicados a eventos pelo host isolado `neoveg --plugin-host` (`plugin_host.rs`, `plugin_host/ofx.rs`);
-  - Efeitos OFX com **keyframes de parâmetros** (linear; Boolean/Choice seguram o valor; Integer arredonda) e tempo na **taxa de quadros do projeto** (antes 30 fps fixos);
-  - **Host VST3 para efeitos de áudio** (`plugin_host/vst3.rs`, VST 3 SDK 3.8 sob MIT pelos bindings `vst3`): efeitos aplicados a eventos, trilhas, barramentos e Master pelo subprocesso `neoveg --plugin-host serve-vst3`, uma instância por mixer e por efeito, abertura assíncrona na reprodução (o sinal passa seco até o plug-in abrir) e síncrona no render, tempo limite de 2 s por bloco com recriação do host, e editor de parâmetros normalizados no diálogo de FX;
-- **Backends nativos Linux e macOS:** bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
-- **Intercâmbio aberto restante:** exportação AAF a partir da especificação pública.
-- **Hospedagem de plug-ins externos:** OFX com tiles, contexto General completo e `getValueAtTime` em outros tempos; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros, instrumentos (MIDI), estado completo salvo no projeto e compensação de latência.
+  - Efeitos OFX com **keyframes de parâmetros** (linear; Boolean/Choice seguram o valor; Integer arredonda), avaliação completa de curvas no host (`getValueAtTime`, `getDerivative`, `getIntegral`, consultas `getNumKeys`/`getKeyTime`/`getKeyIndex`), clipes opcionais desconectados no contexto *General* e tempo na **taxa de quadros do projeto**;
+  - **Host VST3 para efeitos de áudio** (`plugin_host/vst3.rs`, VST 3 SDK 3.8 sob MIT pelos bindings `vst3`): efeitos aplicados a eventos, trilhas, barramentos e Master pelo subprocesso `neoveg --plugin-host serve-vst3`, uma instância por mixer e por efeito, abertura assíncrona na reprodução (o sinal passa seco até o plug-in abrir) e síncrona no render, tempo limite de 2 s por bloco com recriação do host, **persistência do estado completo (`IComponent::getState`/`setState`)**, **compensação automática de latência (PDC)** entre ramos paralelos e pré-roll no render offline/loudness, e editor de parâmetros normalizados no diálogo de FX;
+  - **Integração com a suíte ArtCraft e o Blender** (`integrations/` e `integrations_ui.rs`): descoberta automática e caminhos manuais (`Preferências > Aplicativos externos`) para **PhotoCraft**, **VectorCraft**, **FilmCraft**, **EffectCraft**, **AniCraft**, **SoundCraft** e **Blender**, canal de controle JSON-lines em loopback (`127.0.0.1`) com desafio HMAC-SHA256 em Rust puro, envio de cópias editáveis (*Add As Takes* + BWF `bext` com `TimeReference` + SVG limpo + OTIO), renderização headless de `.anicraft`, `.ecproj` e `.blend` em sequências PNG direto para a timeline e ida-e-volta de câmera/marcadores Blender (`.py` / `.json`);
+- **Backends nativos Linux e macOS:** contrato comum `SystemVideoReader` (`media/system.rs`) e leitor/demuxer de contêineres MP4/MOV/MKV/WEBM em Rust puro (`media/demux/`, ISO/IEC 14496-12, QTFF, RFC 8794, RFC 9559) concluídos; pendentes as bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO.
+- **Hospedagem de plug-ins externos restantes:** OFX com tiles e múltiplas entradas em contexto *General*; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros em tempo real e instrumentos (MIDI).
 
 ## UI/UX que ainda falta (manual do VEGAS Pro 21)
 
@@ -72,64 +72,61 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Mídia do Projeto
 
-- **Pastas de mídia (*bins*)** com busca (p. 144) e **pastas inteligentes** (*smart bins*, p. 172).
-- **Modos de exibição** (miniaturas, lista, detalhes, p. 142) e **scrub ao passar o mouse** sobre a miniatura (p. 135).
-- **Substituir e trocar mídia** mantendo os eventos (pp. 137 e 144).
-- **Selecionar todos os eventos que usam uma mídia** (p. 144).
-- **Storyboards** (p. 155).
+- **Pastas de mídia (*bins*)** com hierarquia, arrastar-e-soltar e busca + **pastas inteligentes** (*smart bins* embutidas e personalizáveis, pp. 144 e 172) implementadas em `model.rs`, `session.rs` e `project_media.rs`.
+- **Modos de exibição** (**Miniaturas**, **Lista**, **Detalhes** ordenáveis com contagem de uso e **Storyboard**, p. 142) e **scrub ao passar o mouse** (`thumbnail_at`) com linha de tempo e timecode ao vivo (p. 135).
+- **Substituir e trocar mídia** mantendo eventos, takes e propriedades (`replace_media_item` e `swap_media_references`, pp. 137 e 144).
+- **Selecionar todos os eventos que usam uma mídia** (`media.select_events`, p. 144).
+- **Storyboards** com sequência ordenável, cálculo de duração e **Inserir storyboard na timeline** em passo único de Desfazer (`media.insert_storyboard`, p. 155).
 
 ### Prévia de Vídeo
 
-- **Prévia em tela dividida** (antes e depois do efeito, p. 203).
-- **Prévia dinâmica em RAM** (p. 207).
-- **Zoom e deslocamento dentro da prévia** (p. 208).
-- **Copiar o quadro atual para a área de transferência** (p. 200). Salvar o quadro em PNG já existe (`file.snapshot`).
-- **Silenciar todo o áudio ou todo o vídeo** da prévia (p. 200).
-- **Monitor externo** (p. 210).
-- **Soltar efeitos na prévia** para aplicá-los ao vídeo de saída (p. 55).
+- **Prévia em tela dividida** (`PreviewSplitMode::FxBypass` e `Clipboard`, linha divisória arrastável horizontal/vertical, p. 203).
+- **Prévia dinâmica em RAM** (`Shift+B`, `RamPreviewCache` limitado ao orçamento de memória das Preferências, p. 207).
+- **Zoom e deslocamento dentro da prévia** (roda do mouse, menu de níveis `Ajustar`–`400%` e arraste de enquadramento, p. 208).
+- **Copiar o quadro atual para a área de transferência** (`preview.copy_frame`, imagem RGBA para SO e comparação dividida, p. 200), além de salvar em PNG (`file.snapshot`).
+- **Silenciar todo o áudio ou todo o vídeo** da prévia (`preview.mute_audio` / `preview.mute_video`, p. 200).
+- **Monitor externo** em janela secundária destacada (`Alt+Shift+4`, tela cheia opcional, p. 210).
+- **Soltar efeitos na prévia** aplicando-os à saída mestre de vídeo (`MasterVideo` Video Output FX, p. 55).
 
 ### Edição na linha do tempo
 
 - **Seletor de ferramenta de edição** na barra de transporte (p. 236):
-  - Normal, com os modos Shuffle, Slip, Slide, Stretch e Split Trim;
-  - as ferramentas Envelope, Seleção e Zoom.
-
-  O motor já tem `EditMode` (Normal, Slip, Slide, Stretch, Roll, Shuffle, Ripple); falta a interface. Hoje o slip é feito com um modificador durante o arraste.
-- **Inserir evento vazio** (p. 243).
-- **Smart Split** (p. 308) e **juntar eventos divididos** (*healing*, p. 309).
-- **Detecção de cenas/cortes** (p. 300).
-- **Modo de edição expandido** ao clicar na borda entre dois eventos (p. 329) e **exibição da duração do evento** (p. 329).
-- **Vínculos de sincronia** entre eventos (*sync links*, p. 351).
-- **Colar atributos do evento seletivamente** (p. 369).
-- **Esticar o tempo ou mudar o tom** de um evento de áudio (p. 363).
-- **Estabilização de vídeo** (p. 341).
-- **Diálogo *Take Chooser*** com prévia (p. 347). Hoje a escolha é por uma lista no submenu *Take*.
-- **Gravação de áudio** nas trilhas, com armar a trilha (p. 821).
+  - ferramenta **Normal** com os 7 modos na interface e no motor (**Normal**, **Shuffle**, **Slip**, **Slide**, **Stretch**, **Split Trim** e **Roll**), ícone dinâmico no seletor e modificadores diretos (`Alt`, `Ctrl+Alt`, `Ctrl+borda`, `Ctrl+Alt+Shift`);
+  - ferramentas **Envelope**, **Seleção** (caixa) e **Zoom** (caixa e clique), além de `D`/`Shift+D` e seletor de **eixo Livre / Horizontal / Vertical** na barra, no menu e no menu de contexto (pp. 239–240).
+- **Smart Split (`Alt+S`)**, **Juntar eventos (`Heal`)**, **Inserir evento vazio** (`insert.empty_event`, p. 243) e **Exibição da duração nos cabeçalhos dos eventos** (p. 329) implementados.
+- **Vínculos de sincronia (*Sync Links*, p. 351):** criar vínculo unidirecional (`event.sync_link_create`), selecionar rede (`event.sync_link_select`), desvincular (`event.sync_link_unlink`), realce visual e proteção contra ciclos implementados.
+- **Colar atributos do evento** (`Ctrl+Alt+V`) e **Colar atributos seletivamente...** (p. 369) implementados (inclusive **Tom / Pitch**).
+- **Esticar o tempo e mudar o tom (`Time Stretch` / `Pitch Shift`, p. 363):** transposição por semitons (`=`/`-`) e oitavas (`Ctrl+=`/`Ctrl+-`) em `-24..+24 st`, opção *Preservar tom ao esticar* com compensador **WSOLA** em tempo de execução no mixer e coluna *Tom* em *Detalhes da Edição* e *Propriedades do evento* implementados.
+- **Diálogo *Take Chooser*** com prévia de quadro, listagem, renomeação, reordenação, adição e exclusão de takes (`event.take_chooser`, p. 347) implementado.
+- **Detecção de cenas/cortes** (`edit.detect_scenes`, análise BT.601 + histograma L1 em `engine/scene_detect.rs` para dividir eventos ou inserir marcadores, p. 300) implementada.
+- **Modo de edição expandido** (`Ctrl+Shift+E` / duplo clique na borda, prévia dupla A/B Saída | Entrada, deslocamento quadro a quadro `Ctrl+[`/`Ctrl+]` e ripple Out/In, p. 329) implementado.
+- **Estabilização de vídeo** (`FxKind::Stabilization`, estimativa de movimento global em sala limpa + zoom de borda sem bordas pretas, p. 341) implementada.
+- **Gravação de áudio** nas trilhas armadas (`track.record_arm`, `transport.record`, captura `cpal` em WAV PCM 16 bits + medidor de pico no cabeçalho, p. 821) implementada.
 
 ### Trilhas
 
-- **Agrupar trilhas** em pastas recolhíveis (p. 382).
-- **Propriedades padrão de trilha** (p. 414).
-- **Renderizar para uma nova trilha** (p. 415).
-- **Composição pai/filho e máscaras** (p. 740).
-- **Linhas do tempo aninhadas** (p. 114).
-- **Edição multicâmera** (p. 416).
-- **Edição 3D estereoscópica** (p. 426).
+- **Agrupar trilhas** em pastas recolhíveis (`insert.track_folder` / `track.toggle_folder`, indentação hierárquica e cascata de mudo na timeline e no mixer, p. 382) implementado.
+- **Propriedades padrão de trilha** (`track.set_defaults` persistido nas Preferências, p. 414) e **Renderizar para uma nova trilha** (`track.render_to_new_track`, p. 415) implementados.
+- **Composição pai/filho e máscaras** (`parent_track_id`, `parent_motion` de grupo no *Movimento da trilha* e modos de máscara por luminância/alfa, p. 740) implementados.
+- **Linhas do tempo aninhadas** (`MediaSource::NestedProject` / `insert.nested_timeline` com detecção de ciclos em profundidade limitada e pré-mixagem de áudio, p. 114) implementadas.
+- **Edição multicâmera** (`tools.multicam_create`, `tools.multicam_mode` / `Ctrl+Shift+D`, grade ao vivo na Prévia e corte por clique ou teclas `1..9`, p. 416) implementada.
+- **Edição 3D estereoscópica** (`Stereo3dMode` — Anáglifo, Lado a lado e Acima/Abaixo — mais disposição e convergência por evento nas Propriedades, p. 426) implementada.
 
 ### Efeitos, cor e legendas
 
-- **Pacotes e cadeias de efeitos salvos** para reutilizar (p. 514).
-- **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56). Hoje há um preset *Padrão* por efeito.
-- **Rastreamento de movimento** (p. 713).
-- ***Color Grading* (pp. 769–781):**
-  - presets de LUT de câmera e de *look*;
-  - curvas de cor e curvas HSL.
+- **Pacotes e cadeias de efeitos salvos** para reutilizar (salvar/carregar/exportar `.neovegfxchain`, p. 514) implementado.
+- **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56) implementados.
+- **Rastreamento de movimento** planar quadro a quadro para *Pan/Crop* ou *Track Motion* (`tools.motion_track`, p. 713) implementado.
+- ***Color Grading* (pp. 769–781):** LUTs integradas e arquivos `.cube` externos com controle de intensidade, **curvas RGB** interativas (*Master/R/G/B*) e **curvas HSL** em 6 setores de matiz, além das rodas tonais, implementados.
+- **Inserir legendas a partir das regiões** do projeto (`insert.subtitles_from_regions`, p. 722) implementado.
+- **Efeitos de áudio fora de tempo real** (`tools.apply_audio_fx`, p. 940) e **ignorar todos os efeitos de áudio** de uma vez (`options.bypass_all_audio_fx` + botão no Mixer, p. 946) implementados.
 
-  As rodas tonais já existem.
-- **Inserir legendas a partir das regiões** do projeto (p. 722).
-- **Efeitos de áudio fora de tempo real** (p. 940) e **ignorar todos os efeitos de áudio** de uma vez (p. 946).
+### Janela, Automação e Preferências
 
-### Automação e Preferências
-
-- **Modos de automação** dos envelopes (como *Touch* e *Latch*, p. 1008).
-- **Abas das Preferências que ainda não têm equivalente** (pp. 1061–1115): dispositivo de prévia, dispositivo de áudio, MIDI, sincronização, controle externo e entrada/saída de arquivos.
+- **Barra de ferramentas personalizável** (`options.customize_toolbar`, adicionar/remover/reordenar comandos da Tabela Única e separadores persistidos nas Preferências, p. 75) implementado.
+- **Grade da régua e Encaixar na grade** (`RulerGridSpacing` — Automático, Quadro, Subdivisões em segundos e Batidas/BPM — mais `options.snap_to_grid` / `Ctrl+F8`, pp. 86, 232) implementado.
+- **Marcadores de CD (faixa/índice + exportação `.cue`) e Marcadores de comando** (`insert.marker_cd_track` / `N`, `insert.marker_cd_index`, `insert.marker_command`, pp. 131, 495, 725) implementados.
+- **Modos de automação dos envelopes** (*Off / Read / Touch / Latch*, escrita em tempo real durante a reprodução + *bypass* em *Off*, p. 1008) e **borda redimensionável dos cabeçalhos de trilha** (arraste progressivo e duplo clique para recolher/expandir, p. 69) implementados.
+- **Área de janelas acopláveis** (pp. 41–44): arrastar uma aba mostra 5 alvos sobre o grupo sob o ponteiro (meio junta, lados dividem) com contorno de onde a janela vai ficar; soltar fora da área destaca a aba numa janela própria; Esc cancela. **Maximizar/Restaurar** um painel na área de janelas (duplo clique na aba ou menu da aba). **`F11`** minimiza/restaura a área de janelas, **`Shift+F11`** a lista de trilhas e **`Ctrl+F11`** maximiza/restaura a timeline (p. 80), pela Tabela Única (`view.toggle_dock_area`, `view.toggle_track_list`, `view.maximize_timeline`). Implementado.
+- **Ainda falta na área de janelas:** docas flutuantes com várias abas na mesma janela, `Ctrl` + arrastar uma janela flutuante de volta para a área, a preferência *Permitir que janelas flutuantes acoplem*, lembrar posição e tamanho de cada janela destacada no `.neoveglayout` e os atalhos alternativos ``Alt+` ``, ``Shift+Alt+` `` e ``Ctrl+Alt+` `` (a crase é tecla morta no ABNT2).
+- **Abas restantes das Preferências** (*Dispositivo de Prévia*, *Dispositivo de Áudio*, *MIDI / Sync / Controle Externo* e *Entrada/Saída File I/O*, pp. 1061–1115) implementadas.

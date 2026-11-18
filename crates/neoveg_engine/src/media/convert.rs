@@ -96,16 +96,6 @@ pub fn convert_to_compatible(
     })
 }
 
-#[cfg(not(windows))]
-fn convert_inner(src: &Path, _dest_dir: &Path, _progress: &ConvertProgress) -> Result<Converted> {
-    bail!(
-        "a conversão usa o decodificador de mídia do sistema (Windows Media Foundation), \
-         que não está disponível neste sistema: {}",
-        src.display()
-    )
-}
-
-#[cfg(windows)]
 fn convert_inner(src: &Path, dest_dir: &Path, progress: &ConvertProgress) -> Result<Converted> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("não foi possível criar a pasta {}", dest_dir.display()))?;
@@ -114,7 +104,7 @@ fn convert_inner(src: &Path, dest_dir: &Path, progress: &ConvertProgress) -> Res
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     progress.start(&name, 1);
-    let loaded = super::mf::open_media(src).map_err(|e| {
+    let loaded = super::system::open_media(src).map_err(|e| {
         anyhow!(
             "nenhum decodificador do sistema reconhece {}: {e:#}",
             src.display()
@@ -131,9 +121,9 @@ fn convert_inner(src: &Path, dest_dir: &Path, progress: &ConvertProgress) -> Res
     match loaded.video {
         Some(vr) => {
             let src_info = VideoSrc {
-                width: vr.width,
-                height: vr.height,
-                fps: vr.fps,
+                width: vr.width(),
+                height: vr.height(),
+                fps: vr.fps(),
                 duration: loaded.duration,
             };
             convert_video(

@@ -127,6 +127,15 @@ fn timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// Data (`YYYY-MM-DD`) e hora (`HH:MM:SS`) locais formatadas via `chrono` (Regra Rust 5).
+pub fn local_date_time_strings() -> (String, String) {
+    let now = chrono::Local::now();
+    (
+        now.format("%Y-%m-%d").to_string(),
+        now.format("%H:%M:%S").to_string(),
+    )
+}
+
 fn append(file: &str, line: &str) {
     if let Ok(mut f) = OpenOptions::new()
         .create(true)

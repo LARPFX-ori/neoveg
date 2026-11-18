@@ -776,6 +776,7 @@ impl App {
         let lang = self.lang();
         self.session.reset_project(p, None);
         self.thumbs.clear();
+        self.project_media.clear_thumbs();
         let w_s = self.project.settings.width.to_string();
         let h_s = self.project.settings.height.to_string();
         let fps_s = self.project.settings.fps.label_in(lang);

@@ -15,6 +15,11 @@ use std::collections::HashSet;
 mod keyframes;
 use keyframes::KfArea;
 use neoveg_engine::media::audio::WaveChannel;
+use neoveg_engine::session::{
+    apply_roll_from_snapshot, apply_shuffle_from_snapshot, apply_slide_from_snapshot,
+    apply_stretch_from_snapshot, BoxAxisMode, EditMode, EditTool, StretchEventSnapshot,
+    TrackEventSnapshot,
+};
 use neoveg_engine::track_keyframes::KfRowKind;
 
 /// Altura de cada linha de quadros-chave abaixo de uma trilha de vídeo.
@@ -103,6 +108,7 @@ enum Drag {
         origin_t: Ticks,
         origin_track: usize,
         orig: Vec<(Id, Ticks, usize)>,
+        sync_followers: Vec<(Id, Ticks)>,
     },
     Trim {
         left: bool,
@@ -123,6 +129,48 @@ enum Drag {
     Slip {
         origin_t: Ticks,
         orig: Vec<(Id, Ticks)>,
+    },
+    Shuffle {
+        anchor_id: Id,
+        track_idx: usize,
+        origin_t: Ticks,
+        anchor_orig_start: Ticks,
+        snap: Vec<TrackEventSnapshot>,
+        partners: Vec<(Id, Ticks)>,
+        sync_followers: Vec<(Id, Ticks)>,
+    },
+    Slide {
+        anchor_id: Id,
+        track_idx: usize,
+        origin_t: Ticks,
+        anchor_orig_start: Ticks,
+        snap: Vec<TrackEventSnapshot>,
+        partners: Vec<(Id, Ticks)>,
+        sync_followers: Vec<(Id, Ticks)>,
+    },
+    Stretch {
+        left: bool,
+        origin_t: Ticks,
+        anchor_id: Id,
+        snaps: Vec<StretchEventSnapshot>,
+    },
+    Roll {
+        anchor_id: Id,
+        track_idx: usize,
+        left_edge: bool,
+        origin_t: Ticks,
+        orig_edge: Ticks,
+        snap: Vec<TrackEventSnapshot>,
+    },
+    SplitTrim {
+        event_id: Id,
+        origin_t: Ticks,
+        cur_t: Ticks,
+    },
+    /// Caixa das ferramentas Seleção (`zoom: false`) e Zoom.
+    Box {
+        zoom: bool,
+        start: Pos2,
     },
     EnvPoint {
         owner: EnvOwner,
@@ -183,6 +231,16 @@ pub struct TimelineState {
     drop_hint: Option<(usize, Ticks)>,
     /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
     pub kf_collapsed: HashSet<Id>,
+    /// Ponto atual da caixa das ferramentas Seleção e Zoom.
+    box_cur: Option<Pos2>,
+    /// Área das faixas e posição de cada trilha no último quadro.
+    pub(crate) last_lanes: Rect,
+    pub(crate) last_rows: Vec<(f32, f32)>,
+    /// Largura atual e anterior do painel esquerdo de cabeçalhos de trilha (p. 69).
+    pub header_w: f32,
+    pub header_prev_w: f32,
+    /// Valor fixado em automação *Latch* enquanto a reprodução continua.
+    latch_hold: Option<(usize, EnvKind, f32)>,
 }
 
 impl Default for TimelineState {
@@ -198,6 +256,12 @@ impl Default for TimelineState {
             snap_line: None,
             drop_hint: None,
             kf_collapsed: HashSet::new(),
+            box_cur: None,
+            last_lanes: Rect::NOTHING,
+            last_rows: Vec::new(),
+            header_w: HEADER_W,
+            header_prev_w: HEADER_W,
+            latch_hold: None,
         }
     }
 }
@@ -209,6 +273,32 @@ impl TimelineState {
     /// Zoom máximo (aproximado): cerca de 4 ticks por pixel, onde o tempo
     /// exato ainda separa cada pixel; bem além de uma amostra por pixel.
     pub const MAX_PX_PER_SEC: f32 = (neoveg_engine::time::TICKS_PER_SEC / 4) as f32;
+
+    pub const MIN_HEADER_W: f32 = 48.0;
+    pub const COLLAPSED_HEADER_W: f32 = 72.0;
+    pub const MAX_HEADER_W: f32 = 420.0;
+
+    /// Ajusta a largura dos cabeçalhos de trilha dentro dos limites seguros (§0.4).
+    pub fn set_header_w(&mut self, w: f32) {
+        if w.is_finite() {
+            self.header_w = w.clamp(Self::MIN_HEADER_W, Self::MAX_HEADER_W);
+        }
+    }
+
+    /// Lista de trilhas recolhida (largura mínima dos cabeçalhos).
+    pub fn header_collapsed(&self) -> bool {
+        self.header_w <= 104.0
+    }
+
+    /// Duplo clique na borda do cabeçalho alterna entre largura recolhida e expandida (p. 69).
+    pub fn toggle_header_collapse(&mut self) {
+        if self.header_collapsed() {
+            self.header_w = self.header_prev_w.clamp(180.0, Self::MAX_HEADER_W);
+        } else {
+            self.header_prev_w = self.header_w;
+            self.header_w = Self::COLLAPSED_HEADER_W;
+        }
+    }
 
     /// Zoom dentro dos limites; valor inválido (NaN, infinito, <= 0) volta ao
     /// padrão (§0.4).
@@ -325,6 +415,28 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
     (s, s.div_i64(6).max(f1))
 }
 
+fn effective_grid_step(
+    grid: neoveg_engine::session::RulerGridSpacing,
+    pps: f32,
+    settings: &ProjectSettings,
+    width_px: f32,
+) -> (Ticks, Ticks) {
+    if let Some(mut step) = grid.step_ticks(settings) {
+        let view_secs = (f64::from(width_px.max(200.0))
+            / f64::from(pps.max(TimelineState::MIN_PX_PER_SEC)))
+        .min(neoveg_engine::time::MAX_SECONDS as f64);
+        let max_marks = f64::from(MAX_RULER_MARKS / 2);
+        while view_secs / step.as_secs_f64().max(1e-6) > max_marks {
+            step = step.saturating_mul(2);
+            if step >= Ticks::MAX.div_i64(2) {
+                break;
+            }
+        }
+        return (step, step);
+    }
+    nice_step(pps, settings.fps)
+}
+
 const BUS_TRACK_H: f32 = 58.0;
 
 impl App {
@@ -335,6 +447,12 @@ impl App {
         let mut track_spans = Vec::with_capacity(n);
         let mut kf_areas = Vec::with_capacity(n);
         for t in &self.project.tracks {
+            if self.project.is_track_hidden_by_folder(t.id) {
+                track_rects.push((y, 0.0));
+                track_spans.push((y, 0.0));
+                kf_areas.push(None);
+                continue;
+            }
             let kf = self.kf_visible_rows(t);
             let kf_h = kf.len() as f32 * KF_ROW_H;
             track_rects.push((y, t.height));
@@ -440,42 +558,49 @@ impl App {
         let ti = self.track_at(pos.y, layout)?;
         let (y0, h) = layout[ti];
         let track = &self.project.tracks[ti];
-        for (ei, e) in track.events.iter().enumerate().rev() {
-            let r = self.event_rect(e, left, y0, h);
-            if !r.expand2(vec2(EDGE_PX, 0.0)).contains(pos) {
-                continue;
-            }
-            let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
-            if fxb.map(|b| b.contains(pos)).unwrap_or(false) {
-                return Some((ti, ei, Zone::FxButton));
-            }
-            if pcb.map(|b| b.contains(pos)).unwrap_or(false) {
-                return Some((ti, ei, Zone::PanCropButton));
-            }
-            let fi_x = r.left() + (e.fade_in.len.as_secs_f64() as f32 * self.tl.px_per_sec);
-            let fo_x = r.right() - (e.fade_out.len.as_secs_f64() as f32 * self.tl.px_per_sec);
-            if pos.y < r.top() + 10.0 {
-                if (pos.x - fi_x).abs() < 6.0 && pos.x < r.center().x + 6.0 {
-                    return Some((ti, ei, Zone::FadeIn));
+        for strict in [true, false] {
+            for (ei, e) in track.events.iter().enumerate().rev() {
+                let r = self.event_rect(e, left, y0, h);
+                let hit_rect = if strict {
+                    r
+                } else {
+                    r.expand2(vec2(EDGE_PX, 0.0))
+                };
+                if !hit_rect.contains(pos) {
+                    continue;
                 }
-                if (pos.x - fo_x).abs() < 6.0 && pos.x > r.center().x - 6.0 {
-                    return Some((ti, ei, Zone::FadeOut));
+                let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
+                if fxb.map(|b| b.contains(pos)).unwrap_or(false) {
+                    return Some((ti, ei, Zone::FxButton));
                 }
-            }
-            if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
-                let gy = Self::gain_handle_y(r, e.gain_db);
-                if (pos.y - gy).abs() <= 4.5 && pos.x > fi_x + 5.0 && pos.x < fo_x - 5.0 {
-                    return Some((ti, ei, Zone::GainHandle));
+                if pcb.map(|b| b.contains(pos)).unwrap_or(false) {
+                    return Some((ti, ei, Zone::PanCropButton));
                 }
-            }
-            if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
-                return Some((ti, ei, Zone::LeftEdge));
-            }
-            if (pos.x - r.right()).abs() <= EDGE_PX {
-                return Some((ti, ei, Zone::RightEdge));
-            }
-            if r.contains(pos) {
-                return Some((ti, ei, Zone::Body));
+                let fi_x = r.left() + (e.fade_in.len.as_secs_f64() as f32 * self.tl.px_per_sec);
+                let fo_x = r.right() - (e.fade_out.len.as_secs_f64() as f32 * self.tl.px_per_sec);
+                if pos.y < r.top() + 10.0 {
+                    if (pos.x - fi_x).abs() < 6.0 && pos.x < r.center().x + 6.0 {
+                        return Some((ti, ei, Zone::FadeIn));
+                    }
+                    if (pos.x - fo_x).abs() < 6.0 && pos.x > r.center().x - 6.0 {
+                        return Some((ti, ei, Zone::FadeOut));
+                    }
+                }
+                if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
+                    let gy = Self::gain_handle_y(r, e.gain_db);
+                    if (pos.y - gy).abs() <= 4.5 && pos.x > fi_x + 5.0 && pos.x < fo_x - 5.0 {
+                        return Some((ti, ei, Zone::GainHandle));
+                    }
+                }
+                if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
+                    return Some((ti, ei, Zone::LeftEdge));
+                }
+                if (pos.x - r.right()).abs() <= EDGE_PX {
+                    return Some((ti, ei, Zone::RightEdge));
+                }
+                if r.contains(pos) {
+                    return Some((ti, ei, Zone::Body));
+                }
             }
         }
         None
@@ -544,6 +669,19 @@ impl App {
                     }
                 }
             }
+            if self.opts.snap_to_grid {
+                let (_, gminor) = effective_grid_step(
+                    self.opts.ruler_grid,
+                    self.tl.px_per_sec,
+                    &self.project.settings,
+                    self.tl.width,
+                );
+                let gstep = gminor.0.max(1);
+                let g0 = (t.0 / gstep).saturating_mul(gstep);
+                let g1 = g0.saturating_add(gstep);
+                consider(Ticks::from_raw(g0));
+                consider(Ticks::from_raw(g1));
+            }
             if let Some((_, c)) = best {
                 self.tl.snap_line = Some(c);
                 return c;
@@ -558,8 +696,11 @@ impl App {
     pub fn timeline_ui(&mut self, ui: &mut egui::Ui) {
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
-        let left = full.left() + HEADER_W;
-        let show_h_col = full.width() > HEADER_W + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
+        let max_hdr =
+            (full.width() - 96.0).clamp(TimelineState::MIN_HEADER_W, TimelineState::MAX_HEADER_W);
+        let hdr_w = self.tl.header_w.clamp(TimelineState::MIN_HEADER_W, max_hdr);
+        let left = full.left() + hdr_w;
+        let show_h_col = full.width() > hdr_w + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
         let show_footer = full.height() > TOP_H + BOTTOM_BARS_H + 40.0;
         let bottom_h = if show_footer { BOTTOM_BARS_H } else { 0.0 };
         let show_v_col = show_h_col && full.height() > TOP_H + bottom_h + 60.0;
@@ -629,6 +770,63 @@ impl App {
         self.headers_ui(ui, headers, &rows);
         self.draw_keyframe_labels(ui, headers, &rows);
 
+        // Divisor interativo da largura dos cabeçalhos de trilha (p. 69):
+        // arrastar oculta progressivamente botões; duplo clique alterna largura.
+        let edge_r = Rect::from_min_max(
+            pos2(left - 3.0, full.top()),
+            pos2(left + 3.0, lanes.bottom()),
+        );
+        let edge_resp = ui.interact(
+            edge_r,
+            ui.id().with("tl_header_edge"),
+            Sense::click_and_drag(),
+        );
+        edge_resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                "Divisor de largura dos cabeçalhos",
+            )
+        });
+        if edge_resp.hovered() || edge_resp.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            ui.painter().line_segment(
+                [pos2(left, full.top()), pos2(left, lanes.bottom())],
+                Stroke::new(2.0_f32, self.theme.accent),
+            );
+        }
+        if edge_resp.dragged() {
+            let dx = edge_resp.drag_delta().x;
+            self.tl.set_header_w(self.tl.header_w + dx);
+        }
+        if edge_resp.double_clicked() {
+            self.tl.toggle_header_collapse();
+        }
+        edge_resp.on_hover_text(
+            "Arraste para redimensionar os cabeçalhos (duplo clique para recolher/expandir)",
+        );
+
+        // Automação Latch: sustenta o último valor gravado durante a reprodução.
+        if self.is_playing() {
+            if let Some((lti, lkind, lval)) = self.tl.latch_hold {
+                let is_latch = self
+                    .project
+                    .tracks
+                    .get(lti)
+                    .is_some_and(|t| t.automation_mode == AutomationMode::Latch);
+                if is_latch {
+                    let pt = self.play_pos();
+                    let tol = self.project.settings.frame_dur().div_i64(2);
+                    self.session
+                        .record_automation_point(lti, lkind, pt, lval, tol);
+                } else {
+                    self.tl.latch_hold = None;
+                }
+            }
+        } else {
+            self.tl.latch_hold = None;
+        }
+
         if show_v_col {
             let v_col = Rect::from_min_max(
                 pos2(lanes_right, lanes.top()),
@@ -656,6 +854,101 @@ impl App {
         }
         self.draw_cursors(ui, top.union(lanes));
         self.rename_popup(ui);
+    }
+
+    fn effective_box_rect(&self, raw: Rect, lanes: Rect) -> Rect {
+        match self.session.box_axis {
+            BoxAxisMode::Both => raw,
+            BoxAxisMode::Horizontal => Rect::from_min_max(
+                pos2(raw.left(), lanes.top()),
+                pos2(raw.right(), lanes.bottom()),
+            ),
+            BoxAxisMode::Vertical => Rect::from_min_max(
+                pos2(lanes.left(), raw.top()),
+                pos2(lanes.right(), raw.bottom()),
+            ),
+        }
+    }
+
+    /// Fim da caixa das ferramentas Seleção e Zoom (manual do VEGAS Pro 21,
+    /// pp. 239–240). Seleção: seleciona os eventos que a caixa toca (Shift ou
+    /// Ctrl somam à seleção). Zoom: o trecho da caixa ocupa a largura (ou
+    /// altura das trilhas no eixo vertical) da linha do tempo.
+    fn finish_box(
+        &mut self,
+        rect: Rect,
+        zoom: bool,
+        lanes: Rect,
+        layout: &[(f32, f32)],
+        mods: egui::Modifiers,
+    ) {
+        let left = lanes.left();
+        let axis = self.session.box_axis;
+        let rect = self.effective_box_rect(rect, lanes);
+        if zoom {
+            if axis == BoxAxisMode::Vertical {
+                if rect.height() < 8.0 {
+                    return;
+                }
+                let hit_tracks: Vec<usize> = layout
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ti, &(y0, h))| {
+                        (y0 + h >= rect.top() && y0 <= rect.bottom()).then_some(ti)
+                    })
+                    .collect();
+                if !hit_tracks.is_empty() {
+                    let target_h = (lanes.height() / hit_tracks.len() as f32).clamp(32.0, 220.0);
+                    for ti in hit_tracks {
+                        if let Some(tr) = self.project.tracks.get_mut(ti) {
+                            tr.height = target_h;
+                        }
+                    }
+                }
+                return;
+            }
+            // caixa muito estreita é um clique (tratado em `clicked`)
+            if rect.width() < 4.0 {
+                return;
+            }
+            let t0 = self.tl.x2t(rect.left().max(left), left);
+            let t1 = self.tl.x2t(rect.right().min(lanes.right()), left);
+            if t1 <= t0 {
+                return;
+            }
+            let secs = (t1 - t0).as_secs_f64() as f32;
+            self.tl.px_per_sec = TimelineState::clamp_pps(lanes.width() / secs);
+            self.tl.scroll_x = t0;
+            return;
+        }
+        let mut hits: Vec<Id> = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            let Some(&(y0, h)) = layout.get(ti) else {
+                continue;
+            };
+            if axis == BoxAxisMode::Vertical && (y0 + h < rect.top() || y0 > rect.bottom()) {
+                continue;
+            }
+            for e in &tr.events {
+                if axis == BoxAxisMode::Vertical || self.event_rect(e, left, y0, h).intersects(rect)
+                {
+                    hits.push(e.id);
+                }
+            }
+        }
+        if !(mods.shift || mods.command) {
+            self.sel_events.clear();
+        }
+        self.sel_events.extend(hits);
+    }
+
+    /// Retângulo de um evento na tela no último quadro (testes de interface).
+    #[cfg(test)]
+    pub(crate) fn event_screen_rect(&self, id: Id) -> Option<Rect> {
+        let (ti, ei) = self.project.find_event(id)?;
+        let &(y0, h) = self.tl.last_rows.get(ti)?;
+        let e = self.project.tracks.get(ti)?.events.get(ei)?;
+        Some(self.event_rect(e, self.tl.last_lanes.left(), y0, h))
     }
 
     fn fit_project_to_timeline(&mut self, lanes_width: f32) {
@@ -1248,7 +1541,6 @@ impl App {
         painter.rect_filled(marker_r, 0.0, self.theme.tl_marker_bar);
         painter.rect_filled(ruler_r, 0.0, self.theme.tl_ruler_bg);
         let left = r.left();
-        let fps = self.project.settings.fps;
 
         // região de loop
         if let Some((a, b)) = self.project.loop_region {
@@ -1287,7 +1579,12 @@ impl App {
                 self.theme.accent,
             );
         }
-        let (major, minor) = nice_step(self.tl.px_per_sec, fps);
+        let (major, minor) = effective_grid_step(
+            self.opts.ruler_grid,
+            self.tl.px_per_sec,
+            &self.project.settings,
+            r.width(),
+        );
         let step = minor.0.max(1);
         let maj = major.0.max(step);
         let half_minor = step / 4;
@@ -1357,25 +1654,47 @@ impl App {
         }
         let mut sorted: Vec<&Marker> = self.project.markers.iter().collect();
         sorted.sort_by_key(|a| a.t);
-        for (i, m) in sorted.iter().enumerate() {
+        let mut std_n = 0usize;
+        let mut cd_tr_n = 0usize;
+        let mut cd_ix_n = 0usize;
+        for m in &sorted {
             let x = self.tl.t2x(m.t, left);
-            let col = self.theme.tl_region;
+            let (col, badge, tag_w) = match m.kind {
+                MarkerKind::Standard => {
+                    std_n += 1;
+                    (self.theme.tl_region, format!("{}", std_n % 10), 14.0)
+                }
+                MarkerKind::CdTrack => {
+                    cd_tr_n += 1;
+                    (Color32::from_rgb(56, 152, 226), format!("T{cd_tr_n}"), 22.0)
+                }
+                MarkerKind::CdIndex => {
+                    cd_ix_n += 1;
+                    (Color32::from_rgb(76, 176, 108), format!("I{cd_ix_n}"), 20.0)
+                }
+                MarkerKind::Command => (Color32::from_rgb(168, 92, 212), "CMD".to_string(), 28.0),
+            };
             painter.rect_filled(
-                Rect::from_min_size(pos2(x, marker_r.top()), vec2(14.0, MARKER_H - 2.0)),
+                Rect::from_min_size(pos2(x, marker_r.top()), vec2(tag_w, MARKER_H - 2.0)),
                 1.0,
                 col,
             );
             painter.text(
-                pos2(x + 3.0, marker_r.top() + 2.0),
+                pos2(x + 2.0, marker_r.top() + 2.0),
                 Align2::LEFT_TOP,
-                format!("{}", (i + 1) % 10),
-                FontId::proportional(11.0),
+                badge,
+                FontId::proportional(10.0),
                 crate::theme::contrast_on(col),
             );
+            let display_lbl = if m.kind == MarkerKind::Command && !m.command_type.is_empty() {
+                format!("{} [{}]", m.label, m.command_type)
+            } else {
+                m.label.clone()
+            };
             painter.text(
-                pos2(x + 17.0, marker_r.top() + 2.0),
+                pos2(x + tag_w + 3.0, marker_r.top() + 2.0),
                 Align2::LEFT_TOP,
-                &m.label,
+                display_lbl,
                 FontId::proportional(11.0),
                 self.theme.tl_region_band,
             );
@@ -1560,6 +1879,25 @@ impl App {
         let lang = self.lang();
         resp.context_menu(|ui| match self.tl.ctx_target.clone() {
             CtxTarget::Marker(id) => {
+                ui.menu_button(tr(lang, "Tipo de marcador"), |ui| {
+                    let cur_kind = self
+                        .project
+                        .markers
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.kind)
+                        .unwrap_or_default();
+                    for k in MarkerKind::ALL {
+                        if ui.radio(cur_kind == k, k.label()).clicked() {
+                            self.checkpoint();
+                            if let Some(m) = self.project.markers.iter_mut().find(|m| m.id == id) {
+                                m.kind = k;
+                            }
+                            self.changed();
+                            ui.close_menu();
+                        }
+                    }
+                });
                 if ui.button(tr(lang, "Renomear marcador")).clicked() {
                     let label = self
                         .project
@@ -1636,12 +1974,53 @@ impl App {
                     ui.close_menu();
                 }
                 if ui
+                    .button(tr(lang, "Inserir marcador de faixa de CD (N)"))
+                    .clicked()
+                {
+                    self.exec_cmd(Some(ui.ctx()), "insert.marker_cd_track");
+                    ui.close_menu();
+                }
+                if ui
+                    .button(tr(lang, "Inserir marcador de índice de CD"))
+                    .clicked()
+                {
+                    self.exec_cmd(Some(ui.ctx()), "insert.marker_cd_index");
+                    ui.close_menu();
+                }
+                if ui
+                    .button(tr(lang, "Inserir marcador de comando..."))
+                    .clicked()
+                {
+                    self.exec_cmd(Some(ui.ctx()), "insert.marker_command");
+                    ui.close_menu();
+                }
+                if ui
                     .button(tr(lang, "Inserir região da seleção (R)"))
                     .clicked()
                 {
                     self.insert_region();
                     ui.close_menu();
                 }
+                ui.separator();
+                if ui
+                    .checkbox(
+                        &mut self.opts.snap_to_grid,
+                        tr(lang, "Encaixar na grade (Ctrl+F8)"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                }
+                ui.menu_button(tr(lang, "Grade da régua"), |ui| {
+                    for g in neoveg_engine::session::RulerGridSpacing::ALL {
+                        if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
+                            self.opts.ruler_grid = g;
+                            self.set_status(format!("Grade da régua: {}", g.label()));
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.separator();
                 if ui.button(tr(lang, "Limpar região de loop")).clicked() {
                     self.project.loop_region = None;
                     self.time_sel = None;
@@ -1708,15 +2087,39 @@ impl App {
                 self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
             }
         }
+        let hdr_w = area.width().max(TimelineState::MIN_HEADER_W);
+        let show_name = hdr_w >= 100.0;
+        let show_btns = hdr_w >= 155.0;
+        let show_sliders = hdr_w >= 170.0;
+        let show_auto_badge = hdr_w >= 210.0;
+        let playing_now = self.is_playing();
+        let play_t_now = if playing_now {
+            self.play_pos()
+        } else {
+            Ticks::ZERO
+        };
+        let auto_tol = self.project.settings.frame_dur().div_i64(2);
         let n = self.project.tracks.len();
         for ti in 0..n {
             let (y0, h) = rows.track_rects[ti];
-            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
+            if h <= 0.0 {
+                continue;
+            }
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(hdr_w, h));
             if r.bottom() < area.top() || r.top() > area.bottom() {
                 continue;
             }
             let selected = self.sel_track == Some(ti);
             let track = &self.project.tracks[ti];
+            let tid = track.id;
+            let depth = self.project.track_depth(tid);
+            let indent = (depth.min(4) as f32) * 8.0;
+            let is_folder = track.is_folder;
+            let folder_collapsed = track.collapsed;
+            let has_parent = track.parent_track_id.is_some();
+            let has_children = self.project.has_track_children(tid);
+            let mask_mode = track.mask_mode;
+            let is_multicam = track.multicam;
             let bg = if selected {
                 self.theme.tl_header_sel
             } else {
@@ -1728,13 +2131,24 @@ impl App {
                 0.0,
                 shade(track.color, 1.0),
             );
+            if depth > 0 {
+                let gx = r.left() + 6.0 + indent * 0.5;
+                let mid_y = r.center().y;
+                painter.line_segment(
+                    [pos2(gx, r.top()), pos2(gx, mid_y)],
+                    Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                );
+                painter.line_segment(
+                    [pos2(gx, mid_y), pos2(r.left() + 9.0 + indent, mid_y)],
+                    Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                );
+            }
             painter.line_segment(
                 [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
                 Stroke::new(1.0_f32, self.theme.border),
             );
 
             // clique no fundo seleciona a trilha
-            let tid = track.id;
             let bresp = ui.interact(r, ui.id().with(("thdr", tid)), Sense::click());
             if bresp.clicked() {
                 self.session.sel_track = Some(ti);
@@ -1747,7 +2161,7 @@ impl App {
             }
 
             let inner = Rect::from_min_max(
-                pos2(r.left() + 10.0, r.top() + 3.0),
+                pos2(r.left() + 10.0 + indent, r.top() + 3.0),
                 pos2(r.right() - 14.0, r.bottom() - 3.0),
             );
             let mut child =
@@ -1771,9 +2185,9 @@ impl App {
                 // todos os botões do cabeçalho, inclusive os ocultos. O manual
                 // o põe acima do número; aqui fica ao lado, para não aumentar
                 // a altura do cabeçalho.
-                let (cur_mute, cur_solo) = {
+                let (cur_mute, cur_solo, cur_auto) = {
                     let t = &self.project.tracks[ti];
-                    (t.mute, t.solo)
+                    (t.mute, t.solo, t.automation_mode)
                 };
                 let adj = self.project.tracks[ti].is_adjustment();
                 ui.menu_button(egui::RichText::new("…").small(), |ui| {
@@ -1803,6 +2217,16 @@ impl App {
                     {
                         more = Some(HeaderAction::TrackMotion);
                         ui.close_menu();
+                    }
+                    if !is_folder {
+                        ui.menu_button(format!("Automação ({})", cur_auto.short_label()), |ui| {
+                            for m in AutomationMode::ALL {
+                                if ui.radio(cur_auto == m, m.label()).clicked() {
+                                    more = Some(HeaderAction::SetAutomation(m));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                     }
                     ui.separator();
                     if ui
@@ -1842,7 +2266,9 @@ impl App {
                 );
                 icons::paint_inline(
                     ui,
-                    if kind == TrackKind::Video {
+                    if is_folder {
+                        Icon::TrackFolder
+                    } else if kind == TrackKind::Video {
                         Icon::VideoTrack
                     } else {
                         Icon::AudioTrack
@@ -1850,6 +2276,21 @@ impl App {
                     14.0,
                     &self.theme,
                 );
+                if is_folder {
+                    let toggle_lbl = if folder_collapsed { ">" } else { "v" };
+                    if ui
+                        .small_button(toggle_lbl)
+                        .on_hover_text(if folder_collapsed {
+                            "Expandir pasta de trilhas"
+                        } else {
+                            "Recolher pasta de trilhas"
+                        })
+                        .clicked()
+                    {
+                        self.session.toggle_track_folder(ti);
+                        self.sync_status_from_session();
+                    }
+                }
                 let is_adjustment = self.project.tracks[ti].is_adjustment();
                 if is_adjustment {
                     ui.label(
@@ -1863,20 +2304,55 @@ impl App {
                         "Trilha de ajuste (Adjustment Track): os efeitos desta trilha \
                          valem para todas as trilhas de vídeo abaixo dela",
                     ));
+                } else if !is_folder && is_video && has_children {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "PAI"))
+                            .small()
+                            .strong()
+                            .color(self.theme.accent),
+                    )
+                    .on_hover_text(tr(
+                        lang,
+                        "Trilha pai em composição Pai/Filho (Track Motion de grupo)",
+                    ));
+                }
+                if !is_folder && is_video && mask_mode != neoveg_engine::model::TrackMaskMode::None
+                {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "MSK"))
+                            .small()
+                            .strong()
+                            .color(self.theme.accent),
+                    )
+                    .on_hover_text(mask_mode.label());
+                }
+                if is_multicam {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "MC"))
+                            .small()
+                            .strong()
+                            .color(self.theme.accent),
+                    )
+                    .on_hover_text(tr(lang, "Trilha Multicâmera"));
+                }
+                if has_parent && !is_folder {
+                    ui.label(egui::RichText::new("↳").small().weak())
+                        .on_hover_text(tr(lang, "Filha vinculada à trilha/pasta pai"));
                 }
                 let t = &mut self.project.tracks[ti];
-                let r = ui.add(
-                    // 56 px: o botão Mais ocupa o resto da largura fixa do
-                    // cabeçalho, e com 78 px o último ícone (Track Motion)
-                    // ficava cortado
-                    egui::TextEdit::singleline(&mut t.name)
-                        .desired_width(56.0)
-                        .font(egui::TextStyle::Small),
-                );
-                if r.changed() {
-                    changed_track = true;
+                if show_name {
+                    let name_w = (hdr_w - 194.0).clamp(40.0, 72.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut t.name)
+                            .desired_width(name_w)
+                            .font(egui::TextStyle::Small),
+                    );
+                    if r.changed() {
+                        changed_track = true;
+                    }
                 }
-                if btns.mute
+                if show_btns
+                    && btns.mute
                     && ui
                         .selectable_label(t.mute, "M")
                         .on_hover_text(tr(lang, "Mudo (Z)"))
@@ -1884,7 +2360,9 @@ impl App {
                 {
                     more = Some(HeaderAction::Mute);
                 }
-                if btns.solo
+                if show_btns
+                    && btns.solo
+                    && !is_folder
                     && ui
                         .selectable_label(t.solo, "S")
                         .on_hover_text(tr(lang, "Solo (X)"))
@@ -1893,7 +2371,9 @@ impl App {
                     more = Some(HeaderAction::Solo);
                 }
                 let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
-                if btns.fx
+                if show_btns
+                    && btns.fx
+                    && !is_folder
                     && ui
                         .small_button(fxlabel)
                         .on_hover_text(tr(lang, "Efeitos da trilha"))
@@ -1901,14 +2381,59 @@ impl App {
                 {
                     more = Some(HeaderAction::Fx);
                 }
-                if kind == TrackKind::Video
+                if show_auto_badge && !is_folder {
+                    let auto_mode = t.automation_mode;
+                    let badge_txt = if auto_mode.is_write() {
+                        egui::RichText::new(auto_mode.short_label())
+                            .small()
+                            .strong()
+                            .color(self.theme.offline_fg)
+                    } else {
+                        egui::RichText::new(auto_mode.short_label()).small()
+                    };
+                    if ui
+                        .selectable_label(auto_mode.is_write(), badge_txt)
+                        .on_hover_text(format!(
+                            "{} — clique para alternar (Off / Read / Touch / Latch)",
+                            auto_mode.label()
+                        ))
+                        .clicked()
+                    {
+                        more = Some(HeaderAction::CycleAutomation);
+                    }
+                }
+                if show_btns
+                    && kind == TrackKind::Video
                     && btns.track_motion
                     && !is_adjustment
+                    && !is_folder
                     && icons::small_icon_button(ui, Icon::TrackMotion, None, false, &self.theme)
                         .on_hover_text(tr(lang, "Movimento da trilha (Track Motion)"))
                         .clicked()
                 {
                     self.dlg.track_motion = Some(tid);
+                }
+                if show_btns && kind == TrackKind::Audio && !is_folder {
+                    let (rec_armed, rec_locked) = {
+                        let tk = &self.project.tracks[ti];
+                        (tk.record_armed, tk.locked)
+                    };
+                    let rec_resp =
+                        icons::small_icon_button(ui, Icon::RecordDot, None, rec_armed, &self.theme);
+                    rec_resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            !rec_locked,
+                            "Armar gravação",
+                        )
+                    });
+                    if rec_resp
+                        .on_hover_text("Armar faixa para gravação (Ctrl+Shift+R)")
+                        .clicked()
+                    {
+                        self.session.toggle_record_arm(ti);
+                        self.sync_status_from_session();
+                    }
                 }
                 if kf_has
                     && icons::small_icon_button(
@@ -1946,14 +2471,25 @@ impl App {
                 }
                 Some(HeaderAction::Fx) => self.dlg.fx_target = Some(FxTarget::Track(tid)),
                 Some(HeaderAction::TrackMotion) => self.dlg.track_motion = Some(tid),
+                Some(HeaderAction::SetAutomation(mode)) => {
+                    self.session.set_track_automation_mode(ti, mode);
+                    self.sync_status_from_session();
+                }
+                Some(HeaderAction::CycleAutomation) => {
+                    self.session.cycle_track_automation_mode(ti);
+                    self.sync_status_from_session();
+                }
                 Some(HeaderAction::EditButtons) => {
                     self.dlg.header_buttons = Some((is_video, btns));
                 }
                 None => {}
             }
-            if h >= 50.0 {
+            let mut auto_record: Option<(EnvKind, f32)> = None;
+            let mut auto_released = false;
+            if h >= 50.0 && show_sliders {
                 child.horizontal(|ui| {
                     let t = &mut self.project.tracks[ti];
+                    let am = t.automation_mode;
                     if kind == TrackKind::Audio {
                         ui.label(egui::RichText::new(tr(lang, "Vol")).small());
                         let r = ui.add(
@@ -1968,6 +2504,15 @@ impl App {
                         }
                         if r.double_clicked() {
                             t.volume_db = 0.0;
+                        }
+                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                            auto_record = Some((
+                                EnvKind::Volume,
+                                crate::model::db_to_lin(t.volume_db).clamp(0.0, 2.0),
+                            ));
+                        }
+                        if r.drag_stopped() {
+                            auto_released = true;
                         }
                         changed_track |= r.changed() || r.double_clicked();
                     } else {
@@ -1986,13 +2531,20 @@ impl App {
                             t.opacity = pct / 100.0;
                             changed_track = true;
                         }
+                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                            auto_record = Some((EnvKind::Opacity, t.opacity.clamp(0.0, 1.0)));
+                        }
+                        if r.drag_stopped() {
+                            auto_released = true;
+                        }
                     }
                 });
             }
-            if h >= 72.0 {
+            if h >= 72.0 && show_sliders {
                 child.horizontal(|ui| {
                     if kind == TrackKind::Audio {
                         let t = &mut self.project.tracks[ti];
+                        let am = t.automation_mode;
                         ui.label(egui::RichText::new(tr(lang, "Pan")).small());
                         let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
                         if r.drag_started() {
@@ -2000,6 +2552,12 @@ impl App {
                         }
                         if r.double_clicked() {
                             t.pan = 0.0;
+                        }
+                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                            auto_record = Some((EnvKind::Pan, t.pan.clamp(-1.0, 1.0)));
+                        }
+                        if r.drag_stopped() {
+                            auto_released = true;
                         }
                         changed_track |= r.changed() || r.double_clicked();
                         ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
@@ -2076,9 +2634,27 @@ impl App {
             if changed_track {
                 self.changed();
             }
-            // medidor de nível (áudio)
+            if let Some((ekind, eval)) = auto_record {
+                let am = self.project.tracks[ti].automation_mode;
+                self.session
+                    .record_automation_point(ti, ekind, play_t_now, eval, auto_tol);
+                if am == AutomationMode::Latch {
+                    self.tl.latch_hold = Some((ti, ekind, eval));
+                }
+            } else if auto_released
+                && self.project.tracks[ti].automation_mode == AutomationMode::Touch
+            {
+                self.tl.latch_hold = None;
+            }
+            // medidor de nível (áudio / entrada armada durante gravação)
             if kind == TrackKind::Audio {
-                let lv = self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]);
+                let rec_lv = if self.project.tracks[ti].record_armed {
+                    self.recording_peaks.get(&tid).copied()
+                } else {
+                    None
+                };
+                let lv = rec_lv
+                    .unwrap_or_else(|| self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]));
                 let mr = Rect::from_min_max(
                     pos2(r.right() - 11.0, r.top() + 4.0),
                     pos2(r.right() - 3.0, r.bottom() - 4.0),
@@ -2121,7 +2697,7 @@ impl App {
                 break;
             }
             let (y0, h) = rows.bus_rects[bi];
-            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(hdr_w, h));
             if r.bottom() < area.top() || r.top() > area.bottom() {
                 continue;
             }
@@ -2300,6 +2876,96 @@ impl App {
             });
         }
         ui.separator();
+        let is_folder = self.project.tracks[ti].is_folder;
+        let folder_collapsed = self.project.tracks[ti].collapsed;
+        let has_parent = self.project.tracks[ti].parent_track_id.is_some();
+        if is_folder {
+            if ui
+                .button(tr(
+                    lang,
+                    if folder_collapsed {
+                        "Expandir pasta de trilhas"
+                    } else {
+                        "Recolher pasta de trilhas"
+                    },
+                ))
+                .clicked()
+            {
+                self.session.toggle_track_folder(ti);
+                self.sync_status_from_session();
+                ui.close_menu();
+            }
+        } else {
+            if ti > 0
+                && ui
+                    .button(tr(lang, "Tornar filho de composição (Pai/Filho)"))
+                    .clicked()
+            {
+                if let Err(e) = self.session.make_compositing_child(ti) {
+                    self.set_status(format!("{e}"));
+                } else {
+                    self.sync_after_session();
+                }
+                ui.close_menu();
+            }
+            if has_parent
+                && ui
+                    .button(tr(lang, "Promover filho para trilha raiz"))
+                    .clicked()
+            {
+                self.session.unmake_compositing_child(ti);
+                self.sync_after_session();
+                ui.close_menu();
+            }
+            if ui.button(tr(lang, "Agrupar em pasta de trilhas")).clicked() {
+                self.session.sel_track = Some(ti);
+                self.session.insert_track_folder(kind);
+                self.sync_after_session();
+                ui.close_menu();
+            }
+        }
+        if kind == TrackKind::Video && !is_folder {
+            ui.menu_button(tr(lang, "Modo de máscara (Pai/Filho)"), |ui| {
+                let cur_mask = self.project.tracks[ti].mask_mode;
+                for m in neoveg_engine::model::TrackMaskMode::ALL {
+                    if ui.selectable_label(cur_mask == m, m.label()).clicked() {
+                        self.session.set_track_mask_mode(ti, m);
+                        self.sync_after_session();
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        if !is_folder {
+            ui.menu_button(tr(lang, "Modo de automação"), |ui| {
+                let cur_auto = self.project.tracks[ti].automation_mode;
+                for m in AutomationMode::ALL {
+                    if ui.radio(cur_auto == m, m.label()).clicked() {
+                        self.session.set_track_automation_mode(ti, m);
+                        self.sync_status_from_session();
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        ui.separator();
+        if ui
+            .button(tr(lang, "Definir propriedades padrão da trilha"))
+            .clicked()
+        {
+            self.session.sel_track = Some(ti);
+            self.exec_cmd(Some(ui.ctx()), "track.set_defaults");
+            ui.close_menu();
+        }
+        if ui
+            .button(tr(lang, "Renderizar para nova trilha..."))
+            .clicked()
+        {
+            self.session.sel_track = Some(ti);
+            self.exec_cmd(Some(ui.ctx()), "track.render_to_new_track");
+            ui.close_menu();
+        }
+        ui.separator();
         if ui.button(tr(lang, "Duplicar trilha")).clicked() {
             self.duplicate_track(ti);
             ui.close_menu();
@@ -2364,6 +3030,9 @@ impl App {
     fn lanes_interact(&mut self, ui: &mut egui::Ui, lanes: Rect, rows: &TimelineRows) {
         let layout = &rows.track_rects;
         let left = lanes.left();
+        self.tl.last_lanes = lanes;
+        self.tl.last_rows.clone_from(layout);
+        let tool = self.session.edit_tool;
         let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
         let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
             (
@@ -2444,8 +3113,16 @@ impl App {
         }
 
         let hover = pointer.filter(|p| lanes.contains(*p));
-        // cursor do mouse conforme a zona
-        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
+        // cursor do mouse conforme a ferramenta e a zona
+        if let (Some(_), Drag::None, EditTool::Selection) = (hover, &self.tl.drag, tool) {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        } else if let (Some(_), Drag::None, EditTool::Zoom) = (hover, &self.tl.drag, tool) {
+            ui.ctx().set_cursor_icon(CursorIcon::ZoomIn);
+        } else if let (Some(p), Drag::None, EditTool::Envelope) = (hover, &self.tl.drag, tool) {
+            if self.hit_envelope(p, left, rows).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+        } else if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
             if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, rows) {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
@@ -2461,10 +3138,16 @@ impl App {
                         ui.ctx().set_cursor_icon(CursorIcon::PointingHand)
                     }
                     Zone::Body => {
-                        if mods.alt {
-                            ui.ctx().set_cursor_icon(CursorIcon::AllScroll)
+                        let mode = self.session.edit_mode;
+                        if mode == EditMode::SplitTrim || (mods.command && mods.alt && mods.shift) {
+                            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                        } else if mods.alt
+                            || matches!(mode, EditMode::Slip | EditMode::Slide)
+                            || (mods.command && mods.alt)
+                        {
+                            ui.ctx().set_cursor_icon(CursorIcon::AllScroll);
                         } else {
-                            ui.ctx().set_cursor_icon(CursorIcon::Grab)
+                            ui.ctx().set_cursor_icon(CursorIcon::Grab);
                         }
                     }
                 }
@@ -2497,8 +3180,68 @@ impl App {
                 }
             }
         }
+        // caixa das ferramentas Seleção e Zoom
+        if let (Drag::Box { start, .. }, Some(cur)) = (&self.tl.drag, self.tl.box_cur) {
+            let r = self.effective_box_rect(Rect::from_two_pos(*start, cur), lanes);
+            let stroke = Stroke::new(1.0_f32, self.theme.text_primary);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            ui.painter()
+                .with_clip_rect(lanes)
+                .extend(Shape::dashed_line(&corners, stroke, 4.0, 3.0));
+        }
+        if let Drag::SplitTrim {
+            event_id,
+            origin_t,
+            cur_t,
+        } = &self.tl.drag
+        {
+            if let Some((ti, _)) = self.project.find_event(*event_id) {
+                if let Some(&(y0, h)) = layout.get(ti) {
+                    let lo = origin_t.min(cur_t);
+                    let hi = origin_t.max(cur_t);
+                    let x0 = self.tl.t2x(*lo, left).max(lanes.left());
+                    let x1 = self.tl.t2x(*hi, left).min(lanes.right());
+                    if x1 > x0 {
+                        let cut_rect = Rect::from_min_max(pos2(x0, y0), pos2(x1, y0 + h));
+                        ui.painter().with_clip_rect(lanes).rect_filled(
+                            cut_rect,
+                            0.0,
+                            self.theme.offline_fg.gamma_multiply(0.35),
+                        );
+                    }
+                }
+            }
+        }
         if resp.drag_stopped() {
-            if matches!(self.tl.drag, Drag::Move { .. } | Drag::Trim { .. }) {
+            if let (Drag::Box { zoom, start }, Some(cur)) = (self.tl.drag.clone(), self.tl.box_cur)
+            {
+                self.finish_box(Rect::from_two_pos(start, cur), zoom, lanes, layout, mods);
+            }
+            if let Drag::SplitTrim {
+                event_id,
+                origin_t,
+                cur_t,
+            } = self.tl.drag.clone()
+            {
+                self.session.split_trim(event_id, origin_t, cur_t);
+                self.sync_after_session();
+            }
+            self.tl.box_cur = None;
+            if matches!(
+                self.tl.drag,
+                Drag::Move { .. }
+                    | Drag::Trim { .. }
+                    | Drag::Shuffle { .. }
+                    | Drag::Slide { .. }
+                    | Drag::Stretch { .. }
+                    | Drag::Roll { .. }
+            ) {
                 self.project.sort_events();
             }
             if !matches!(self.tl.drag, Drag::Pan { .. }) {
@@ -2508,7 +3251,10 @@ impl App {
         }
 
         if resp.clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+            if tool == EditTool::Zoom {
+                // ferramenta Zoom: um clique mostra o projeto inteiro
+                self.fit_project_to_timeline(lanes.width());
+            } else if let Some(p) = resp.interact_pointer_pos() {
                 self.lane_click(p, left, rows, mods);
             }
         }
@@ -2537,11 +3283,23 @@ impl App {
                         env.sort();
                         self.changed();
                     }
-                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
-                    let e = &self.project.tracks[ti].events[ei];
-                    let sel = (e.start, e.end());
-                    self.time_sel = Some(sel);
-                    self.project.loop_region = Some(sel);
+                } else if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
+                    if matches!(zone, Zone::LeftEdge | Zone::RightEdge)
+                        && self.project.tracks[ti].kind == TrackKind::Video
+                    {
+                        let eid = self.project.tracks[ti].events[ei].id;
+                        if self
+                            .session
+                            .enter_expanded_edit_at(ti, eid, zone == Zone::RightEdge)
+                        {
+                            self.sync_status_from_session();
+                        }
+                    } else {
+                        let e = &self.project.tracks[ti].events[ei];
+                        let sel = (e.start, e.end());
+                        self.time_sel = Some(sel);
+                        self.project.loop_region = Some(sel);
+                    }
                 }
             }
         }
@@ -2583,6 +3341,17 @@ impl App {
     ) {
         let layout = &rows.track_rects;
         let ot = self.tl.x2t(origin.x, left);
+        let tool = self.session.edit_tool;
+        // Seleção e Zoom desenham uma caixa e não mexem em nada (p. 239)
+        if matches!(tool, EditTool::Selection | EditTool::Zoom) {
+            self.tl.drag = Drag::Box {
+                zoom: tool == EditTool::Zoom,
+                start: origin,
+            };
+            self.tl.box_cur = Some(origin);
+            return;
+        }
+        let slip_mode = tool == EditTool::Normal && self.session.edit_mode == EditMode::Slip;
         if let Some((ti, row, Some(key), _)) = self.hit_keyframe(origin, left, rows) {
             if let Some(tr) = self.project.tracks.get(ti).filter(|tr| !tr.locked) {
                 self.tl.drag = Drag::Keyframe {
@@ -2600,6 +3369,11 @@ impl App {
             return;
         }
         if let Some((ti, ei, zone)) = self.hit_event(origin, left, layout) {
+            // ferramenta Envelope: eventos não se movem nem são aparados
+            // (p. 239); a volta acontece antes de qualquer checkpoint
+            if tool == EditTool::Envelope {
+                return;
+            }
             let id = self.project.tracks[ti].events[ei].id;
             if self.project.tracks[ti].events[ei].locked || self.project.tracks[ti].locked {
                 return;
@@ -2631,9 +3405,58 @@ impl App {
                     let e = &self.project.tracks[ti].events[ei];
                     let left_edge = zone == Zone::LeftEdge;
                     let edge_t = if left_edge { e.start } else { e.end() };
+                    let mode = self.session.edit_mode;
                     let mut ids: HashSet<Id> = HashSet::new();
                     ids.insert(id);
                     let group_ids = self.expand_groups(&ids);
+
+                    // Ctrl+borda ou modo Stretch esticam a velocidade (p. 236).
+                    if mods.command || mode == EditMode::Stretch {
+                        let mut snaps = vec![];
+                        for gid in group_ids {
+                            if let Some(ge) = self.project.event(gid) {
+                                let ge_edge = if left_edge { ge.start } else { ge.end() };
+                                if !ge.locked
+                                    && ge_edge.abs_diff(edge_t) < Ticks::from_millis_i64(2)
+                                {
+                                    snaps.push(StretchEventSnapshot::capture(ge));
+                                }
+                            }
+                        }
+                        self.tl.drag = Drag::Stretch {
+                            left: left_edge,
+                            origin_t: ot,
+                            anchor_id: id,
+                            snaps,
+                        };
+                        return;
+                    }
+
+                    // Modo Roll ajusta em conjunto dois eventos contíguos no ponto de corte.
+                    if mode == EditMode::Roll {
+                        let snap = self.capture_track_snapshot(ti);
+                        let tol = Ticks::from_millis_i64(2);
+                        let has_neighbor = snap.iter().any(|s| {
+                            s.id != id
+                                && if left_edge {
+                                    ((s.start + s.length) - edge_t).abs() <= tol
+                                } else {
+                                    (s.start - edge_t).abs() <= tol
+                                }
+                        });
+                        if has_neighbor {
+                            self.tl.drag = Drag::Roll {
+                                anchor_id: id,
+                                track_idx: ti,
+                                left_edge,
+                                origin_t: ot,
+                                orig_edge: edge_t,
+                                snap,
+                            };
+                            return;
+                        }
+                    }
+
                     let mut orig = vec![];
                     for gid in group_ids {
                         if let Some(ge) = self.project.event(gid) {
@@ -2645,7 +3468,7 @@ impl App {
                     }
                     self.tl.drag = Drag::Trim {
                         left: left_edge,
-                        slip: mods.alt,
+                        slip: mods.alt || slip_mode,
                         origin_t: ot,
                         anchor_id: id,
                         orig,
@@ -2653,6 +3476,20 @@ impl App {
                 }
                 Zone::FxButton | Zone::PanCropButton => {}
                 Zone::Body => {
+                    let mode = self.session.edit_mode;
+                    if mode == EditMode::SplitTrim || (mods.command && mods.alt && mods.shift) {
+                        if !self.sel_events.contains(&id) {
+                            self.sel_events.clear();
+                            self.sel_events.insert(id);
+                        }
+                        let snapped = self.snap(ot, &HashSet::new(), mods.shift);
+                        self.tl.drag = Drag::SplitTrim {
+                            event_id: id,
+                            origin_t: snapped,
+                            cur_t: snapped,
+                        };
+                        return;
+                    }
                     self.checkpoint();
                     if !self.sel_events.contains(&id) {
                         if !mods.command && !mods.shift {
@@ -2661,13 +3498,70 @@ impl App {
                         self.sel_events.insert(id);
                     }
                     let ids = self.expand_groups(&self.sel_events.clone());
-                    if mods.alt {
+                    // Ctrl+Alt+arrastar ou modo Slide deslizam mantendo vizinhos contíguos.
+                    if (mods.command && mods.alt) || mode == EditMode::Slide {
+                        let snap = self.capture_track_snapshot(ti);
+                        let anchor_orig_start = self.project.tracks[ti].events[ei].start;
+                        let partners = ids
+                            .iter()
+                            .filter(|pid| !snap.iter().any(|s| s.id == **pid))
+                            .filter_map(|pid| self.project.event(*pid).map(|ev| (*pid, ev.start)))
+                            .collect();
+                        let masters: HashSet<Id> = snap
+                            .iter()
+                            .map(|s| s.id)
+                            .chain(ids.iter().copied())
+                            .collect();
+                        let sync_followers = self.session.sync_followers_for(&masters);
+                        self.tl.drag = Drag::Slide {
+                            anchor_id: id,
+                            track_idx: ti,
+                            origin_t: ot,
+                            anchor_orig_start,
+                            snap,
+                            partners,
+                            sync_followers,
+                        };
+                        return;
+                    }
+                    // Alt, ou a ferramenta Normal no modo Slip (p. 236)
+                    if mods.alt || slip_mode {
                         let orig = ids
                             .iter()
                             .filter_map(|i| self.project.event(*i).map(|e| (*i, e.offset)))
                             .collect();
                         self.tl.drag = Drag::Slip { origin_t: ot, orig };
                         return;
+                    }
+                    // Modo Shuffle reordena eventos na trilha mantendo sequência contínua.
+                    if mode == EditMode::Shuffle && !mods.command {
+                        let snap = self.capture_track_snapshot(ti);
+                        if snap.len() >= 2 {
+                            let anchor_orig_start = self.project.tracks[ti].events[ei].start;
+                            let partners = ids
+                                .iter()
+                                .filter(|pid| !snap.iter().any(|s| s.id == **pid))
+                                .filter_map(|pid| {
+                                    self.project.event(*pid).map(|ev| (*pid, ev.start))
+                                })
+                                .collect();
+                            let masters: HashSet<Id> = snap
+                                .iter()
+                                .map(|s| s.id)
+                                .chain(ids.iter().copied())
+                                .collect();
+                            let sync_followers = self.session.sync_followers_for(&masters);
+                            self.tl.drag = Drag::Shuffle {
+                                anchor_id: id,
+                                track_idx: ti,
+                                origin_t: ot,
+                                anchor_orig_start,
+                                snap,
+                                partners,
+                                sync_followers,
+                            };
+                            return;
+                        }
                     }
                     let mut anchor = id;
                     if mods.command {
@@ -2681,6 +3575,7 @@ impl App {
                             let mut c = self.project.tracks[t].events[e].clone();
                             c.id = new_id();
                             c.group = c.group.map(|g| *gm.entry(g).or_insert_with(new_id));
+                            c.sync_link_master = None;
                             c.fx = c.fx.iter().map(|f| f.duplicate()).collect();
                             if *i == id {
                                 anchor = c.id;
@@ -2709,6 +3604,7 @@ impl App {
                             origin_t: ot,
                             origin_track: ti,
                             orig,
+                            sync_followers: Vec::new(),
                         };
                         return;
                     }
@@ -2720,6 +3616,7 @@ impl App {
                                 .map(|(t, e)| (*i, self.project.tracks[t].events[e].start, t))
                         })
                         .collect();
+                    let sync_followers = self.session.sync_followers_for(&ids);
                     let anchor_start = self.project.tracks[ti].events[ei].start;
                     self.tl.drag = Drag::Move {
                         anchor_id: anchor,
@@ -2727,6 +3624,7 @@ impl App {
                         origin_t: ot,
                         origin_track: ti,
                         orig,
+                        sync_followers,
                     };
                 }
             }
@@ -2742,6 +3640,10 @@ impl App {
 
     fn update_lane_drag(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
         let t = self.tl.x2t(p.x, left);
+        if matches!(self.tl.drag, Drag::Box { .. }) {
+            self.tl.box_cur = Some(p);
+            return;
+        }
         match self.tl.drag.clone() {
             Drag::Keyframe {
                 track,
@@ -2957,6 +3859,7 @@ impl App {
                 origin_t,
                 origin_track,
                 orig,
+                sync_followers,
             } => {
                 let exclude: HashSet<Id> = orig.iter().map(|o| o.0).collect();
                 let raw = anchor_start + (t - origin_t);
@@ -3020,10 +3923,158 @@ impl App {
                         e.start = st + dt;
                     }
                 }
+                for &(fid, f_orig) in &sync_followers {
+                    if let Some(fe) = self.project.event_mut(fid) {
+                        fe.start = (f_orig + dt).max(Ticks::ZERO);
+                    }
+                }
                 self.changed();
+            }
+            Drag::Shuffle {
+                anchor_id,
+                track_idx,
+                origin_t,
+                anchor_orig_start,
+                snap,
+                partners,
+                sync_followers,
+            } => {
+                let target_t = anchor_orig_start + (t - origin_t);
+                if apply_shuffle_from_snapshot(
+                    &mut self.project,
+                    track_idx,
+                    &snap,
+                    anchor_id,
+                    target_t,
+                    &partners,
+                ) {
+                    let actual_dt = self
+                        .project
+                        .event(anchor_id)
+                        .map(|e| e.start - anchor_orig_start)
+                        .unwrap_or(Ticks::ZERO);
+                    for &(fid, f_orig) in &sync_followers {
+                        if let Some(fe) = self.project.event_mut(fid) {
+                            fe.start = (f_orig + actual_dt).max(Ticks::ZERO);
+                        }
+                    }
+                    self.changed();
+                }
+            }
+            Drag::Slide {
+                anchor_id,
+                track_idx,
+                origin_t,
+                anchor_orig_start,
+                snap,
+                partners,
+                sync_followers,
+            } => {
+                let exclude: HashSet<Id> = snap.iter().map(|s| s.id).collect();
+                let raw = anchor_orig_start + (t - origin_t);
+                let snapped = self.snap(raw, &exclude, mods.shift);
+                let dt = snapped - anchor_orig_start;
+                let fd = self.project.settings.frame_dur();
+                if apply_slide_from_snapshot(
+                    &mut self.project,
+                    track_idx,
+                    &snap,
+                    anchor_id,
+                    dt,
+                    fd,
+                    &partners,
+                ) {
+                    let actual_dt = self
+                        .project
+                        .event(anchor_id)
+                        .map(|e| e.start - anchor_orig_start)
+                        .unwrap_or(Ticks::ZERO);
+                    for &(fid, f_orig) in &sync_followers {
+                        if let Some(fe) = self.project.event_mut(fid) {
+                            fe.start = (f_orig + actual_dt).max(Ticks::ZERO);
+                        }
+                    }
+                    self.changed();
+                }
+            }
+            Drag::Stretch {
+                left,
+                origin_t,
+                anchor_id,
+                snaps,
+            } => {
+                let exclude: HashSet<Id> = snaps.iter().map(|s| s.id).collect();
+                let Some(a) = snaps.iter().find(|s| s.id == anchor_id) else {
+                    return;
+                };
+                let orig_edge = if left { a.start } else { a.start + a.length };
+                let target_edge = self.snap(orig_edge + (t - origin_t), &exclude, mods.shift);
+                let dt = target_edge - orig_edge;
+                let fd = self.project.settings.frame_dur();
+                if apply_stretch_from_snapshot(&mut self.project, &snaps, anchor_id, left, dt, fd) {
+                    self.changed();
+                }
+            }
+            Drag::Roll {
+                anchor_id,
+                track_idx,
+                left_edge,
+                origin_t,
+                orig_edge,
+                snap,
+            } => {
+                let exclude: HashSet<Id> = snap.iter().map(|s| s.id).collect();
+                let target_edge = self.snap(orig_edge + (t - origin_t), &exclude, mods.shift);
+                let dt = target_edge - orig_edge;
+                let fd = self.project.settings.frame_dur();
+                if apply_roll_from_snapshot(
+                    &mut self.project,
+                    track_idx,
+                    &snap,
+                    anchor_id,
+                    left_edge,
+                    dt,
+                    fd,
+                ) {
+                    self.changed();
+                }
+            }
+            Drag::SplitTrim {
+                event_id, origin_t, ..
+            } => {
+                let cur_t = self.snap(t, &HashSet::new(), mods.shift);
+                self.tl.drag = Drag::SplitTrim {
+                    event_id,
+                    origin_t,
+                    cur_t,
+                };
             }
             _ => {}
         }
+    }
+
+    fn capture_track_snapshot(&self, track_idx: usize) -> Vec<TrackEventSnapshot> {
+        self.project
+            .tracks
+            .get(track_idx)
+            .map(|tr| {
+                tr.events
+                    .iter()
+                    .filter(|e| !e.locked)
+                    .map(|e| TrackEventSnapshot {
+                        id: e.id,
+                        track_idx,
+                        start: e.start,
+                        length: e.length,
+                        offset: e.offset,
+                        rate: e.rate,
+                        reverse: e.reverse,
+                        looped: e.looped,
+                        media_dur: self.project.media(e.media_id).and_then(|m| m.duration),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn lane_click(&mut self, p: Pos2, left: f32, rows: &TimelineRows, mods: egui::Modifiers) {
@@ -3034,6 +4085,15 @@ impl App {
         }
         if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
             let id = self.project.tracks[ti].events[ei].id;
+            if self.session.edit_tool == EditTool::Normal
+                && self.session.edit_mode == EditMode::SplitTrim
+                && matches!(zone, Zone::Body)
+            {
+                let snapped = self.snap(t, &HashSet::new(), mods.shift);
+                self.session.split_trim(id, snapped, snapped);
+                self.sync_after_session();
+                return;
+            }
             match zone {
                 Zone::FxButton => {
                     self.dlg.fx_target = Some(FxTarget::Event(id));
@@ -3093,34 +4153,11 @@ impl App {
                 self.add_media_to_timeline(id, t, track);
             }
             DndPayload::Fx(kind) => {
-                let want_audio = kind.is_audio();
-                if let Some(eid) = event {
-                    let Some((ti, _)) = self.project.find_event(eid) else {
-                        return;
-                    };
-                    if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
-                        self.checkpoint();
-                        if let Some(ev) = self.project.event_mut(eid) {
-                            ev.fx.push(FxInstance::new(kind));
-                        }
-                        self.dlg.fx_target = Some(FxTarget::Event(eid));
-                        self.changed();
-                        return;
-                    }
-                }
-                if let Some(ti) = track {
-                    if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
-                        self.checkpoint();
-                        self.project.tracks[ti].fx.push(FxInstance::new(kind));
-                        self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[ti].id));
-                        self.changed();
-                        return;
-                    }
-                }
-                self.set_status(tr(
-                    self.lang(),
-                    "Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio",
-                ));
+                self.drop_fx_instance(FxInstance::new(kind), event, track);
+            }
+            DndPayload::FxPreset(mut fx) => {
+                fx.id = new_id();
+                self.drop_fx_instance(fx, event, track);
             }
             DndPayload::Transition(kind) => {
                 if let Some(eid) = event {
@@ -3128,6 +4165,34 @@ impl App {
                 }
             }
         }
+    }
+
+    fn drop_fx_instance(&mut self, fx: FxInstance, event: Option<Id>, track: Option<usize>) {
+        let want_audio = fx.kind.is_audio();
+        if let Some(eid) = event {
+            let Some((ti, _)) = self.project.find_event(eid) else {
+                return;
+            };
+            if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
+                self.checkpoint();
+                if let Some(ev) = self.project.event_mut(eid) {
+                    ev.fx.push(fx);
+                }
+                self.dlg.fx_target = Some(FxTarget::Event(eid));
+                self.changed();
+                return;
+            }
+        }
+        if let Some(ti) = track {
+            if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
+                self.checkpoint();
+                self.project.tracks[ti].fx.push(fx);
+                self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[ti].id));
+                self.changed();
+                return;
+            }
+        }
+        self.set_status("Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio");
     }
 
     pub fn apply_transition(&mut self, eid: Id, kind: TransitionKind) {
@@ -3309,18 +4374,52 @@ impl App {
                     self.insert_generated(GenSpec::Text(TextSpec::default()));
                     ui.close_menu();
                 }
+                if ui.button("Inserir evento vazio aqui").clicked() {
+                    self.cursor = t;
+                    self.sel_track = Some(ti);
+                    self.session.insert_empty_event();
+                    self.sync_after_session();
+                    ui.close_menu();
+                }
+                if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
+                    ui.separator();
+                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                        for axis in BoxAxisMode::ALL {
+                            if ui
+                                .radio(self.session.box_axis == axis, axis.name())
+                                .clicked()
+                            {
+                                self.session.box_axis = axis;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
                 ui.separator();
                 self.track_menu(ui, ti);
             }
             _ => {
-                ui.label("—");
+                if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
+                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                        for axis in BoxAxisMode::ALL {
+                            if ui
+                                .radio(self.session.box_axis == axis, axis.name())
+                                .clicked()
+                            {
+                                self.session.box_axis = axis;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                } else {
+                    ui.label("—");
+                }
             }
         }
     }
 
     /// Submenu Take (manual do VEGAS Pro 21, p. 347): escolher o take ativo,
-    /// próximo/anterior e excluir o ativo. Escolher pela lista substitui o
-    /// diálogo Take Chooser (que pré-visualiza) por enquanto.
+    /// próximo/anterior, Take Chooser e excluir o ativo.
     fn take_submenu(&mut self, ui: &mut egui::Ui, e: &Event) {
         use neoveg_engine::takes;
         let lang = self.lang();
@@ -3354,6 +4453,8 @@ impl App {
                     self.sel_events.clear();
                     self.sel_events.insert(id);
                 }
+                self.cmd_menu_btn(ui, "event.take_chooser");
+                ui.separator();
                 self.cmd_menu_btn(ui, "event.next_take");
                 self.cmd_menu_btn(ui, "event.prev_take");
                 self.cmd_menu_btn(ui, "event.delete_active_take");
@@ -3397,9 +4498,44 @@ impl App {
             ui.close_menu();
         }
         self.take_submenu(ui, &e);
+        ui.menu_button("Editar em aplicativo externo", |ui| {
+            use neoveg_engine::integrations::ExternalApp;
+            if is_video {
+                for app in [
+                    ExternalApp::PhotoCraft,
+                    ExternalApp::VectorCraft,
+                    ExternalApp::EffectCraft,
+                    ExternalApp::AniCraft,
+                    ExternalApp::Blender,
+                ] {
+                    if ui.button(format!("{}...", app.name())).clicked() {
+                        self.send_to_external_app(app, Some(id), Some(e.media_id));
+                        ui.close_menu();
+                    }
+                }
+            } else if ui.button("SoundCraft (cópia BWF)...").clicked() {
+                self.send_to_external_app(ExternalApp::SoundCraft, Some(id), Some(e.media_id));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Gerenciar integrações...").clicked() {
+                self.open_integrations_dialog();
+                ui.close_menu();
+            }
+        });
         ui.separator();
         if ui.button(tr(lang, "Dividir no cursor (S)")).clicked() {
             self.split_at_cursor();
+            ui.close_menu();
+        }
+        if self.time_sel.is_some() && ui.button(tr(lang, "Smart Split (Alt+S)")).clicked() {
+            self.exec_cmd(Some(ui.ctx()), "edit.smart_split");
+            ui.close_menu();
+        }
+        if self.session.can_heal_selection()
+            && ui.button(tr(lang, "Juntar eventos (Heal)")).clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), "edit.heal_events");
             ui.close_menu();
         }
         if ui.button(tr(lang, "Copiar")).clicked() {
@@ -3409,6 +4545,19 @@ impl App {
         if ui.button(tr(lang, "Recortar")).clicked() {
             self.cut_selection();
             ui.close_menu();
+        }
+        if !self.clipboard.is_empty() {
+            if ui.button(tr(lang, "Colar atributos do evento")).clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.paste_attributes");
+                ui.close_menu();
+            }
+            if ui
+                .button(tr(lang, "Colar atributos seletivamente..."))
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "edit.paste_attributes_selective");
+                ui.close_menu();
+            }
         }
         if ui.button(tr(lang, "Excluir")).clicked() {
             self.delete_selection();
@@ -3546,9 +4695,46 @@ impl App {
             self.select_group();
             ui.close_menu();
         }
+        ui.menu_button(tr(lang, "Sync Link"), |ui| {
+            let can_link = self.sel_events.len() >= 2;
+            if ui
+                .add_enabled(
+                    can_link,
+                    egui::Button::new(tr(lang, "Vincular seleção a este (Sync Link)")),
+                )
+                .clicked()
+            {
+                self.session.create_sync_links(Some(id));
+                self.sync_after_session();
+                ui.close_menu();
+            }
+            self.cmd_menu_btn(ui, "event.sync_link_select");
+            self.cmd_menu_btn(ui, "event.sync_link_unlink");
+        });
+        if !is_video {
+            ui.menu_button(tr(lang, "Tom (Pitch)"), |ui| {
+                self.cmd_menu_btn(ui, "event.pitch_up");
+                self.cmd_menu_btn(ui, "event.pitch_down");
+                self.cmd_menu_btn(ui, "event.pitch_up_oct");
+                self.cmd_menu_btn(ui, "event.pitch_down_oct");
+                ui.separator();
+                self.cmd_menu_chk(ui, e.lock_pitch_to_stretch, "event.toggle_pitch_lock");
+                self.cmd_menu_btn(ui, "event.pitch_reset");
+            });
+        }
         if is_video && ui.button(tr(lang, "Congelar quadro no cursor")).clicked() {
             self.freeze_frame();
             ui.close_menu();
+        }
+        if is_video {
+            if ui.button("Detectar cenas e cortes...").clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.detect_scenes");
+                ui.close_menu();
+            }
+            if ui.button("Modo de edição expandido (A/B)").clicked() {
+                self.exec_cmd(Some(ui.ctx()), "edit.expanded_edit_mode");
+                ui.close_menu();
+            }
         }
     }
 
@@ -3618,7 +4804,12 @@ impl App {
         let pps = self.tl.px_per_sec;
         let ctx = ui.ctx().clone();
         // grade
-        let (major, _) = nice_step(pps, self.project.settings.fps);
+        let (major, _) = effective_grid_step(
+            self.opts.ruler_grid,
+            pps,
+            &self.project.settings,
+            lanes.width(),
+        );
         let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
         let mut idx = self.tl.scroll_x.0 / step;
@@ -3648,17 +4839,27 @@ impl App {
             painter.rect_filled(r, 0.0, self.theme.tl_sel_band);
         }
         let audio_map = self.media.audio_map();
+        let sync_masters: HashSet<Id> = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .filter_map(|e| e.sync_link_master)
+            .collect();
         for ti in 0..self.project.tracks.len() {
             let (y0, h) = layout[ti];
-            if y0 + h < lanes.top() || y0 > lanes.bottom() {
+            if h <= 0.0 || y0 + h < lanes.top() || y0 > lanes.bottom() {
                 continue;
             }
             let lane = Rect::from_min_max(pos2(lanes.left(), y0), pos2(lanes.right(), y0 + h));
             let selected = self.sel_track == Some(ti);
+            let track_is_folder = self.project.tracks[ti].is_folder;
             painter.rect_filled(
                 lane,
                 0.0,
-                if selected {
+                if track_is_folder {
+                    shade(self.project.tracks[ti].color, 0.32)
+                } else if selected {
                     self.theme.tl_lane_even
                 } else {
                     self.theme.tl_lane_odd
@@ -3876,6 +5077,9 @@ impl App {
                 if !e.rate.is_normal() {
                     label.push_str(&format!("  [{:.0}%]", e.rate.percent_f64()));
                 }
+                if e.pitch_semitones.abs() > 0.05 {
+                    label.push_str(&format!("  [{:+.1} st]", e.pitch_semitones));
+                }
                 if e.reverse {
                     label.push_str("  [Rev]");
                 }
@@ -3892,10 +5096,45 @@ impl App {
                 if e.group.is_some() {
                     label.push_str("  [Grp]");
                 }
+                let is_sync = e.sync_link_master.is_some() || sync_masters.contains(&e.id);
+                if e.sync_link_master.is_some() {
+                    label.push_str("  [Sync←]");
+                } else if sync_masters.contains(&e.id) {
+                    label.push_str("  [Sync★]");
+                }
                 if let Some(tr) = &e.transition {
                     label = format!("[{}] {}", tr.kind.name(), label);
                 }
-                painter.with_clip_rect(hdr.intersect(lanes)).text(
+                let btns_w = if r.width() < 70.0 {
+                    2.0
+                } else if track.kind == TrackKind::Video {
+                    42.0
+                } else {
+                    24.0
+                };
+                let mut text_right = (r.right() - btns_w).min(lanes.right());
+                if r.width() >= 150.0 {
+                    let dur_str = self.fmt_time(e.length);
+                    let dur_galley = painter.layout_no_wrap(
+                        dur_str,
+                        FontId::monospace(9.5),
+                        hdr_fg.gamma_multiply(0.85),
+                    );
+                    let dur_w = dur_galley.size().x;
+                    if text_right - dur_w - 8.0 > r.left().max(lanes.left()) + 36.0 {
+                        let dx = text_right - dur_w - 4.0;
+                        painter.with_clip_rect(hdr.intersect(lanes)).galley(
+                            pos2(dx, hdr.top() + 1.5),
+                            dur_galley,
+                            hdr_fg,
+                        );
+                        text_right = dx - 4.0;
+                    }
+                }
+                let label_clip =
+                    Rect::from_min_max(hdr.min, pos2(text_right.max(hdr.left()), hdr.bottom()))
+                        .intersect(lanes);
+                painter.with_clip_rect(label_clip).text(
                     pos2(r.left().max(lanes.left()) + 4.0, hdr.top() + 1.0),
                     Align2::LEFT_TOP,
                     label,
@@ -4028,6 +5267,13 @@ impl App {
                         self.theme.tl_event_sel_border
                     };
                     Stroke::new(2.0_f32, sel_col)
+                } else if is_sync {
+                    let sync_col = if self.theme.dark_mode {
+                        Color32::from_rgb(168, 120, 240)
+                    } else {
+                        Color32::from_rgb(110, 55, 190)
+                    };
+                    Stroke::new(1.5_f32, sync_col)
                 } else {
                     Stroke::new(1.0_f32, self.theme.tl_event_border)
                 };
@@ -4103,6 +5349,20 @@ impl App {
                     StrokeKind::Inside,
                 );
                 painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
+            }
+        }
+        // colchetes do Modo de Edição Expandido (p. 329)
+        if let Some(exp) = &self.session.expanded_edit {
+            if let Some(&(y0, h)) = layout.get(exp.track_idx) {
+                let x = self.tl.t2x(exp.edit_point, left);
+                let col = self.theme.accent;
+                let st = Stroke::new(2.0_f32, col);
+                painter.line_segment([pos2(x, y0), pos2(x, y0 + h)], st);
+                painter.line_segment([pos2(x - 6.0, y0 + 2.0), pos2(x + 6.0, y0 + 2.0)], st);
+                painter.line_segment(
+                    [pos2(x - 6.0, y0 + h - 2.0), pos2(x + 6.0, y0 + h - 2.0)],
+                    st,
+                );
             }
         }
         // indicador de soltura
@@ -4287,6 +5547,34 @@ mod zoom_tests {
         let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
         assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
     }
+
+    #[test]
+    fn largura_cabecalho_e_grade_personalizada_protegem_limites_e_teto_de_marcas() {
+        let mut tl = TimelineState::default();
+        tl.set_header_w(f32::NAN);
+        assert_eq!(tl.header_w, HEADER_W);
+        tl.set_header_w(1.0);
+        assert_eq!(tl.header_w, TimelineState::MIN_HEADER_W);
+        tl.set_header_w(9999.0);
+        assert_eq!(tl.header_w, TimelineState::MAX_HEADER_W);
+        tl.set_header_w(260.0);
+        tl.toggle_header_collapse();
+        assert_eq!(tl.header_w, TimelineState::COLLAPSED_HEADER_W);
+        tl.toggle_header_collapse();
+        assert!((tl.header_w - 260.0).abs() < 0.01);
+
+        let settings = ProjectSettings::default();
+        for g in neoveg_engine::session::RulerGridSpacing::ALL {
+            for pps in [TimelineState::MIN_PX_PER_SEC, 0.5, 60.0, 5000.0] {
+                let (maj, min) = effective_grid_step(g, pps, &settings, 2000.0);
+                assert!(min.0 > 0 && maj >= min);
+                let view_secs =
+                    (2000.0 / f64::from(pps)).min(neoveg_engine::time::MAX_SECONDS as f64);
+                let marks = view_secs / min.as_secs_f64();
+                assert!(marks <= f64::from(MAX_RULER_MARKS), "{g:?} {pps}: {marks}");
+            }
+        }
+    }
 }
 
 /// Ação pedida por um botão do cabeçalho de faixa ou pelo menu do botão Mais.
@@ -4296,5 +5584,7 @@ enum HeaderAction {
     Solo,
     Fx,
     TrackMotion,
+    SetAutomation(AutomationMode),
+    CycleAutomation,
     EditButtons,
 }

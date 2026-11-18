@@ -1,0 +1,9 @@
+asset:        medidores_loudness.png
+title:        Medidores de Loudness EBU R128 / ITU-R BS.1770-4 do Neoveg com varredura offline e metas
+author:       contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-11-17 por blackghoust9
+notes:        Captura da interface do próprio Neoveg, renderizada fora da tela (eframe::egui_wgpu, 1600×900).
+              Medição obtida sobre áudio WAV senoidal sintético; nenhuma imagem, ícone ou tela de outro produto.

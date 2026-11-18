@@ -9,11 +9,15 @@ pub mod avi;
 #[forbid(unsafe_code)]
 pub mod convert;
 #[forbid(unsafe_code)]
+pub mod demux;
+#[forbid(unsafe_code)]
 pub mod generate;
 #[forbid(unsafe_code)]
 pub mod img_extra;
 #[cfg(windows)]
 pub(crate) mod mf;
+#[forbid(unsafe_code)]
+mod system;
 #[forbid(unsafe_code)]
 pub mod wav;
 #[forbid(unsafe_code)]
@@ -38,7 +42,7 @@ pub const AUDIO_EXTS: &[&str] = &[
 ];
 pub const VIDEO_EXTS: &[&str] = &["avi", "y4m"];
 /// Contêineres de mídia decodificados via API nativa do sistema operacional
-/// (Windows Media Foundation via módulo FFI isolado `media::mf`).
+/// (`media::system`, p. ex. Windows Media Foundation via `media::mf`).
 pub const SYSTEM_CONTAINER_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "m4v", "m4a", "aac", "wmv", "asf", "wma", "3gp", "3g2", "m2ts",
     "mts", "ts", "mpg", "mpeg", "mpe", "vob", "mp2", "mpa", "m4b", "alac",
@@ -47,6 +51,17 @@ pub const UNSUPPORTED_CONTAINERS: &[&str] = &["mp4", "mov", "mkv", "webm", "m4v"
 
 /// Memória máxima para os quadros de um GIF animado.
 const MAX_GIF_BYTES: u64 = 512 << 20;
+/// Profundidade máxima ao aninhar projetos `.neoveg` em outros projetos (§0.5).
+pub const MAX_NESTED_PROJECT_DEPTH: usize = 8;
+/// Duração máxima (segundos) pré-mixada em RAM ao carregar áudio de uma timeline aninhada (§0.4).
+const MAX_NESTED_AUDIO_SECS: i64 = 900;
+
+/// Estado decodificado em memória para uma linha do tempo aninhada (`.neoveg`).
+pub struct NestedProjectEntry {
+    pub project: Box<crate::model::Project>,
+    pub media: Arc<MediaCache>,
+    pub path: PathBuf,
+}
 
 pub fn is_supported(path: &Path) -> bool {
     let ext = ext_of(path);
@@ -130,22 +145,21 @@ pub enum VideoSource {
     Frames(Vec<Arc<RgbaImage>>, Vec<Ticks>),
     Avi(Mutex<avi::AviReader>, Mutex<FrameCache>),
     Y4m(Mutex<y4m::Y4mReader>, Mutex<FrameCache>),
-    #[cfg(windows)]
-    Mf(Arc<mf::MfVideoReader>, Mutex<FrameCache>),
+    System(Arc<dyn system::SystemVideoReader>, Mutex<FrameCache>),
     Sequence(Vec<String>, FrameRate, Mutex<FrameCache>),
     Generated,
+    /// Linha do tempo aninhada (`.neoveg`) com cache próprio de quadros renderizados.
+    Nested(Arc<NestedProjectEntry>, Mutex<FrameCache>),
 }
 
 impl VideoSource {
     fn set_cache_budget(&self, cap: usize, max_bytes: usize) {
         match self {
-            VideoSource::Avi(_, c) | VideoSource::Y4m(_, c) | VideoSource::Sequence(_, _, c) => {
-                c.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set_budget(cap, max_bytes);
-            }
-            #[cfg(windows)]
-            VideoSource::Mf(_, c) => {
+            VideoSource::Avi(_, c)
+            | VideoSource::Y4m(_, c)
+            | VideoSource::System(_, c)
+            | VideoSource::Sequence(_, _, c)
+            | VideoSource::Nested(_, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .set_budget(cap, max_bytes);
@@ -159,13 +173,11 @@ impl VideoSource {
 
     fn clear_cache(&self) {
         match self {
-            VideoSource::Avi(_, c) | VideoSource::Y4m(_, c) | VideoSource::Sequence(_, _, c) => {
-                c.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clear();
-            }
-            #[cfg(windows)]
-            VideoSource::Mf(_, c) => {
+            VideoSource::Avi(_, c)
+            | VideoSource::Y4m(_, c)
+            | VideoSource::System(_, c)
+            | VideoSource::Sequence(_, _, c)
+            | VideoSource::Nested(_, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clear();
@@ -428,10 +440,6 @@ impl MediaCache {
         item: &MediaItem,
         t: Ticks,
     ) -> Option<Arc<RgbaImage>> {
-        // `item` só é lido pelo leitor do Media Foundation (Windows); sem
-        // isto, o build fora do Windows falha com `-D warnings`.
-        #[cfg(not(windows))]
-        let _ = item;
         match source {
             VideoSource::None | VideoSource::Generated => None,
             VideoSource::Still(img) => Some(img.clone()),
@@ -486,9 +494,8 @@ impl MediaCache {
                     .put(idx, img.clone());
                 Some(img)
             }
-            #[cfg(windows)]
-            VideoSource::Mf(reader, cache) => {
-                let fps = item.fps.unwrap_or(reader.fps);
+            VideoSource::System(reader, cache) => {
+                let fps = item.fps.unwrap_or_else(|| reader.fps());
                 let max_idx = item
                     .duration
                     .map(|d| fps.ticks_to_frame_floor(d).max(0))
@@ -503,7 +510,7 @@ impl MediaCache {
                 }
                 let frame_time = fps.frame_to_ticks(idx as i64);
                 let img = Arc::new(
-                    crate::util::guard("decodificação Media Foundation", || {
+                    crate::util::guard("decodificação de vídeo do sistema", || {
                         reader.decode_at(frame_time)
                     })
                     .ok()?
@@ -533,6 +540,38 @@ impl MediaCache {
                     .ok()?
                     .ok()?,
                 );
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .put(idx, img.clone());
+                Some(img)
+            }
+            VideoSource::Nested(nested, cache) => {
+                let fps = item.fps.unwrap_or(nested.project.settings.fps);
+                let max_idx = item
+                    .duration
+                    .map(|d| fps.ticks_to_frame_floor(d).max(0))
+                    .unwrap_or(i64::MAX / 2);
+                let idx = fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
+                if let Some(img) = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(idx)
+                {
+                    return Some(img);
+                }
+                let rw = nested.project.settings.width.clamp(16, 1920) as usize;
+                let rh = nested.project.settings.height.clamp(16, 1080) as usize;
+                let ft = fps.frame_to_ticks(idx as i64);
+                let frame = crate::engine::video::render_frame_preview(
+                    &nested.project,
+                    &nested.media,
+                    ft,
+                    rw,
+                    rh,
+                    true,
+                );
+                let img = Arc::new(frame.to_image()?);
                 cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -623,23 +662,26 @@ impl MediaCache {
         img
     }
 
-    /// Miniatura (para a janela de mídia do projeto e eventos).
-    pub fn thumbnail(&self, item: &MediaItem, max: u32) -> Option<RgbaImage> {
+    /// Miniatura em um instante específico (para *hover scrub* e prévias).
+    pub fn thumbnail_at(&self, item: &MediaItem, t: Ticks, max: u32) -> Option<RgbaImage> {
         let (w, h) = if item.width > 0 && item.height > 0 {
             (item.width, item.height)
         } else {
             (1920, 1080)
         };
-        let s = max as f32 / w.max(h) as f32;
+        let s = max.max(1) as f32 / w.max(h) as f32;
         let (tw, th) = (
             ((w as f32 * s) as u32).max(1),
             ((h as f32 * s) as u32).max(1),
         );
-        let t = item
-            .duration
-            .map(|d| d.div_i64(10).min(Ticks::from_secs_i64(1)))
-            .unwrap_or(Ticks::ZERO);
-        let f = self.video_frame(item, t, tw, th)?;
+        let sample_t = match item.duration {
+            Some(d) if d > Ticks::ZERO => {
+                let end = (d - Ticks::from_millis_i64(1)).max(Ticks::ZERO);
+                t.clamp_safe(Ticks::ZERO, end)
+            }
+            _ => t.max(Ticks::ZERO),
+        };
+        let f = self.video_frame(item, sample_t, tw, th)?;
         if f.width() == tw && f.height() == th {
             return Some((*f).clone());
         }
@@ -649,6 +691,15 @@ impl MediaCache {
             th,
             image::imageops::FilterType::Triangle,
         ))
+    }
+
+    /// Miniatura padrão (para a janela de mídia do projeto e eventos).
+    pub fn thumbnail(&self, item: &MediaItem, max: u32) -> Option<RgbaImage> {
+        let t = item
+            .duration
+            .map(|d| d.div_i64(10).min(Ticks::from_secs_i64(1)))
+            .unwrap_or(Ticks::ZERO);
+        self.thumbnail_at(item, t, max)
     }
 }
 
@@ -706,23 +757,58 @@ pub fn import_file(path: &Path) -> Result<Imported> {
     Ok(imp)
 }
 
+/// Importa um projeto `.neoveg` como linha do tempo aninhada (manual p. 114).
+pub fn import_nested_project(path: &Path) -> Result<Imported> {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Projeto aninhado".into());
+    let mut item = base_item(
+        name,
+        MediaSource::NestedProject {
+            path: path.to_string_lossy().to_string(),
+        },
+    );
+    let mut imp = load_entry(&mut item)?;
+    imp.item = item;
+    Ok(imp)
+}
+
 /// Carrega (ou recarrega, ao abrir um projeto) os dados de um item de mídia.
 /// Atualiza as informações do item (duração, dimensões...). Pânicos dos
 /// decodificadores são isolados e viram erro (§0.6).
 pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
-    match crate::util::guard("importação de mídia", || load_entry_inner(item)) {
+    let mut stack = std::collections::HashSet::new();
+    load_entry_with_stack(item, &mut stack, 0)
+}
+
+fn load_entry_with_stack(
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> Result<Imported> {
+    match crate::util::guard("importação de mídia", || {
+        load_entry_inner(item, stack, depth)
+    }) {
         Ok(r) => r,
         Err(e) => bail!("{e}"),
     }
 }
 
-fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
+fn load_entry_inner(
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> Result<Imported> {
     let mut warning = None;
     let entry = match item.source.clone() {
-        MediaSource::Generated(_) => MediaEntry {
-            video: VideoSource::Generated,
-            audio: None,
-        },
+        MediaSource::Generated(_) => {
+            item.has_video = true;
+            MediaEntry {
+                video: VideoSource::Generated,
+                audio: None,
+            }
+        }
         MediaSource::ImageSequence { paths, fps } => {
             if paths.is_empty() {
                 bail!("sequência vazia");
@@ -855,11 +941,128 @@ fn load_entry_inner(item: &mut MediaItem) -> Result<Imported> {
                 }
             }
         }
+        MediaSource::NestedProject { path } => {
+            if depth >= MAX_NESTED_PROJECT_DEPTH {
+                bail!(
+                    "profundidade máxima de projetos aninhados ({MAX_NESTED_PROJECT_DEPTH}) excedida"
+                );
+            }
+            let p = PathBuf::from(&path);
+            if !p.exists() {
+                bail!("projeto aninhado não encontrado: {path}");
+            }
+            let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if !stack.insert(canon.clone()) {
+                bail!("referência cíclica detectada no projeto aninhado: {path}");
+            }
+            let res = load_nested_project_entry(&p, item, stack, depth + 1, &mut warning);
+            stack.remove(&canon);
+            res?
+        }
     };
     Ok(Imported {
         item: item.clone(),
         entry,
         warning,
+    })
+}
+
+fn load_nested_project_entry(
+    p: &Path,
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    next_depth: usize,
+    warning: &mut Option<String>,
+) -> Result<MediaEntry> {
+    let (mut sub_proj, _) = crate::model::Project::load_file(p).map_err(anyhow::Error::msg)?;
+    let base_dir = p.parent().unwrap_or_else(|| Path::new("."));
+    let sub_cache = Arc::new(MediaCache::default());
+    let mut sub_warnings = Vec::new();
+    for sm in &mut sub_proj.media {
+        if let MediaSource::File { path: sp } | MediaSource::NestedProject { path: sp } =
+            &mut sm.source
+        {
+            let sp_path = Path::new(sp.as_str());
+            if sp_path.is_relative() {
+                let candidate = base_dir.join(sp_path);
+                if candidate.exists() {
+                    *sp = candidate.to_string_lossy().to_string();
+                }
+            }
+        }
+        match load_entry_with_stack(sm, stack, next_depth) {
+            Ok(imp) => {
+                if let Some(w) = imp.warning {
+                    sub_warnings.push(w);
+                }
+                sub_cache.insert(sm.id, imp.entry);
+            }
+            Err(e) => {
+                sub_warnings.push(format!("{}: {e}", sm.name));
+            }
+        }
+    }
+    let dur = sub_proj.duration().max(sub_proj.settings.frame_dur());
+    let has_video = sub_proj.tracks.iter().any(|t| {
+        t.kind == crate::model::TrackKind::Video
+            && !t.is_folder
+            && !t.events.is_empty()
+            && !sub_proj.is_track_effectively_muted(t.id)
+    });
+    let has_audio_events = sub_proj.tracks.iter().any(|t| {
+        t.kind == crate::model::TrackKind::Audio
+            && !t.is_folder
+            && !t.events.is_empty()
+            && !sub_proj.is_track_effectively_muted(t.id)
+    });
+    let audio = if has_audio_events {
+        let sr = sub_proj.settings.sample_rate.clamp(8000, 192_000);
+        let audio_dur = dur.min(Ticks::from_secs_i64(MAX_NESTED_AUDIO_SECS));
+        let total_samples = audio_dur.to_samples_round(sr).max(1) as usize;
+        let capped_samples =
+            total_samples.min((sr as usize).saturating_mul(MAX_NESTED_AUDIO_SECS as usize));
+        let audio_map = sub_cache.audio_map();
+        let mut mixer = crate::engine::audio::Mixer::new_offline(sr);
+        let pdc = mixer.total_latency(&sub_proj) as i64;
+        let mut stereo = Vec::with_capacity(capped_samples.saturating_mul(2));
+        let mut pos = 0usize;
+        let chunk = 2048usize;
+        while pos < capped_samples {
+            let n = (capped_samples - pos).min(chunk);
+            let mut blk = vec![0.0f32; n * 2];
+            mixer.process(&sub_proj, &audio_map, pos as i64 + pdc, &mut blk);
+            stereo.extend_from_slice(&blk);
+            pos += n;
+        }
+        Some(Arc::new(AudioData::from_stereo(sr, stereo)))
+    } else {
+        None
+    };
+
+    item.width = sub_proj.settings.width;
+    item.height = sub_proj.settings.height;
+    item.fps = Some(sub_proj.settings.fps);
+    item.duration = Some(dur);
+    item.has_video = has_video || !has_audio_events;
+    item.has_audio = audio.is_some();
+    item.info = format!(
+        "Projeto aninhado {}x{}, {}, {:.2} s",
+        item.width,
+        item.height,
+        sub_proj.settings.fps.label(),
+        dur.as_secs_f64()
+    );
+    if !sub_warnings.is_empty() {
+        *warning = Some(sub_warnings.join(" | "));
+    }
+    let nested = Arc::new(NestedProjectEntry {
+        project: Box::new(sub_proj),
+        media: sub_cache,
+        path: p.to_path_buf(),
+    });
+    Ok(MediaEntry {
+        video: VideoSource::Nested(nested, Mutex::new(FrameCache::new(16))),
+        audio,
     })
 }
 
@@ -1023,40 +1226,40 @@ pub fn import_sequence(first: &Path, fps: FrameRate) -> Result<Imported> {
     Ok(imp)
 }
 
-#[cfg(windows)]
 fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
-    let loaded = mf::open_media(p)?;
+    let loaded = system::open_media(p)?;
+    let backend = loaded.backend;
     let audio = loaded.audio.map(Arc::new);
     item.has_audio = audio.is_some();
     if let Some(vr) = loaded.video {
-        let vr = Arc::new(vr);
+        let w = vr.width();
+        let h = vr.height();
+        let fps = vr.fps();
         item.has_video = true;
-        item.width = vr.width;
-        item.height = vr.height;
-        item.fps = Some(vr.fps);
+        item.width = w;
+        item.height = h;
+        item.fps = Some(fps);
         let dur = loaded
             .duration
             .or_else(|| audio.as_ref().map(|a| a.duration()));
         item.duration = dur;
         item.info = format!(
-            "Media Foundation {}x{} {}{}",
-            vr.width,
-            vr.height,
-            vr.fps.label(),
+            "{backend} {w}x{h} {}{}",
+            fps.label(),
             audio
                 .as_ref()
                 .map(|a| format!(", áudio {} Hz", a.sample_rate))
                 .unwrap_or_default()
         );
         Ok(MediaEntry {
-            video: VideoSource::Mf(vr, Mutex::new(FrameCache::new(16))),
+            video: VideoSource::System(vr, Mutex::new(FrameCache::new(16))),
             audio,
         })
     } else if let Some(a) = audio {
         let dur = loaded.duration.unwrap_or_else(|| a.duration());
         item.duration = Some(dur);
         item.info = format!(
-            "Áudio (Media Foundation) {} Hz, {:.2} s",
+            "Áudio ({backend}) {} Hz, {:.2} s",
             a.sample_rate,
             dur.as_secs_f64()
         );
@@ -1065,22 +1268,159 @@ fn load_system_container(p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
             audio: Some(a),
         })
     } else {
-        bail!(
-            "{}: contêiner sem fluxos legíveis via Media Foundation",
-            item.name
-        )
+        bail!("{}: contêiner sem fluxos legíveis via {backend}", item.name)
     }
 }
 
-// TODO(roadmap fase 4): backends nativos fora do Windows. Linux via VA-API
-// (sem GStreamer, que é LGPL — AGENTS.md §2.3) e macOS via VideoToolbox/
-// AVFoundation, ambos em fronteira FFI isolada, mais decodificador fallback em
-// Rust puro. Até lá, este caminho devolve erro recuperável.
-#[cfg(not(windows))]
-fn load_system_container(_p: &Path, item: &mut MediaItem) -> Result<MediaEntry> {
-    bail!(
-        "{}: contêineres MP4/MOV/MKV/WEBM/M4V/M4A/AAC usam API nativa do sistema operacional \
-         (Media Foundation no Windows); em outras plataformas utilize AVI (MJPEG/PCM), Y4M, GIF ou WAV/AIFF/FLAC/OGG/MP3",
-        item.name
-    )
+#[cfg(test)]
+mod system_contract_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockSystemReader {
+        calls: Arc<AtomicUsize>,
+        panic_on_decode: bool,
+    }
+
+    impl system::SystemVideoReader for MockSystemReader {
+        fn width(&self) -> u32 {
+            16
+        }
+        fn height(&self) -> u32 {
+            16
+        }
+        fn fps(&self) -> FrameRate {
+            FrameRate::FPS_25
+        }
+        fn decode_at(&self, t: Ticks) -> Result<RgbaImage> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.panic_on_decode {
+                panic!("falha simulada no decodificador do sistema");
+            }
+            let lum = ((t.0 / 1_000_000) % 255) as u8;
+            Ok(RgbaImage::from_pixel(
+                16,
+                16,
+                image::Rgba([lum, 10, 20, 255]),
+            ))
+        }
+    }
+
+    #[test]
+    fn system_video_source_caches_budgets_and_guards_panics() {
+        let cache = MediaCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reader: Arc<dyn system::SystemVideoReader> = Arc::new(MockSystemReader {
+            calls: calls.clone(),
+            panic_on_decode: false,
+        });
+        let id = new_id();
+        cache.insert(
+            id,
+            MediaEntry {
+                video: VideoSource::System(reader, Mutex::new(FrameCache::new(4))),
+                audio: None,
+            },
+        );
+        let item = MediaItem {
+            id,
+            name: "mock.mp4".into(),
+            source: MediaSource::File {
+                path: "mock.mp4".into(),
+            },
+            duration: Some(FrameRate::FPS_25.frame_to_ticks(10)),
+            has_video: true,
+            has_audio: false,
+            width: 16,
+            height: 16,
+            fps: Some(FrameRate::FPS_25),
+            info: String::new(),
+            proxy_path: None,
+        };
+        assert!(cache.video_frame(&item, Ticks::ZERO, 16, 16).is_some());
+        assert!(cache.video_frame(&item, Ticks::ZERO, 16, 16).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        cache.configure_limits(2, 0);
+        cache.clear_frame_caches();
+
+        let bad_id = new_id();
+        let bad_reader: Arc<dyn system::SystemVideoReader> = Arc::new(MockSystemReader {
+            calls: Arc::new(AtomicUsize::new(0)),
+            panic_on_decode: true,
+        });
+        cache.insert(
+            bad_id,
+            MediaEntry {
+                video: VideoSource::System(bad_reader, Mutex::new(FrameCache::new(4))),
+                audio: None,
+            },
+        );
+        let mut bad_item = item;
+        bad_item.id = bad_id;
+        assert!(cache.video_frame(&bad_item, Ticks::ZERO, 16, 16).is_none());
+    }
+
+    #[test]
+    fn projeto_aninhado_carrega_quadros_e_bloqueia_ciclos() {
+        let dir = std::env::temp_dir().join(format!("neoveg_nested_test_{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sub_path = dir.join("sub.neoveg");
+        let cyc_a = dir.join("cyc_a.neoveg");
+        let cyc_b = dir.join("cyc_b.neoveg");
+
+        let mut sub = crate::model::Project::new_default();
+        sub.settings.width = 64;
+        sub.settings.height = 36;
+        let gm = import_generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        })
+        .item;
+        let ev = crate::model::Event::new(&gm, Ticks::ZERO, Ticks::from_secs_i64(2));
+        sub.media.push(gm);
+        sub.tracks[0].events.push(ev);
+        sub.save_file(&sub_path).unwrap();
+
+        let imp = import_nested_project(&sub_path).expect("importa projeto aninhado válido");
+        let cache = MediaCache::default();
+        let item = imp.item.clone();
+        assert!(item.has_video);
+        cache.insert(item.id, imp.entry);
+        let frame = cache
+            .video_frame(&item, Ticks::from_secs_i64(1), 64, 36)
+            .expect("decodifica quadro aninhado");
+        assert_eq!(frame.get_pixel(32, 18).0[0], 255);
+
+        // Ciclo A -> B -> A deve falhar com erro controlado (zero estouro de pilha, §0.5).
+        let mut pa = crate::model::Project::new_default();
+        let ma_b = base_item(
+            "B".into(),
+            MediaSource::NestedProject {
+                path: cyc_b.to_string_lossy().to_string(),
+            },
+        );
+        pa.media.push(ma_b);
+        pa.save_file(&cyc_a).unwrap();
+
+        let mut pb = crate::model::Project::new_default();
+        let mb_a = base_item(
+            "A".into(),
+            MediaSource::NestedProject {
+                path: cyc_a.to_string_lossy().to_string(),
+            },
+        );
+        pb.media.push(mb_a);
+        pb.save_file(&cyc_b).unwrap();
+
+        let mut root_item = base_item(
+            "Ciclo".into(),
+            MediaSource::NestedProject {
+                path: cyc_a.to_string_lossy().to_string(),
+            },
+        );
+        let res = load_entry(&mut root_item);
+        assert!(res.is_ok());
+        assert!(res.unwrap().warning.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

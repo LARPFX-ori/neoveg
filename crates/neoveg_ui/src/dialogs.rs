@@ -14,6 +14,7 @@ use eframe::egui;
 use egui::{pos2, vec2, Color32, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
 use neoveg_common::{recommended_worker_threads, tr, tr_args, Language};
 use neoveg_engine::commands::{resolved_shortcut, Shortcut, ShortcutKey, COMMANDS};
+use neoveg_engine::session::EditorSession;
 use std::path::{Path, PathBuf};
 
 pub struct RenderDialogState {
@@ -552,22 +553,32 @@ pub enum PrefsCategory {
     Appearance,
     Editing,
     VideoPreview,
+    PreviewDevice,
     Audio,
+    AudioDevice,
+    MidiSyncControl,
+    FileIo,
     Memory,
     AutoSave,
     Shortcuts,
+    Integrations,
 }
 
 impl PrefsCategory {
-    pub const ALL: [PrefsCategory; 8] = [
+    pub const ALL: [PrefsCategory; 13] = [
         PrefsCategory::General,
         PrefsCategory::Appearance,
         PrefsCategory::Editing,
         PrefsCategory::VideoPreview,
+        PrefsCategory::PreviewDevice,
         PrefsCategory::Audio,
+        PrefsCategory::AudioDevice,
+        PrefsCategory::MidiSyncControl,
+        PrefsCategory::FileIo,
         PrefsCategory::Memory,
         PrefsCategory::AutoSave,
         PrefsCategory::Shortcuts,
+        PrefsCategory::Integrations,
     ];
 
     pub fn label_in(self, lang: Language) -> &'static str {
@@ -576,10 +587,15 @@ impl PrefsCategory {
             PrefsCategory::Appearance => "Aparência e Layout",
             PrefsCategory::Editing => "Edição e Timeline",
             PrefsCategory::VideoPreview => "Vídeo e Prévia",
+            PrefsCategory::PreviewDevice => "Dispositivo de Prévia",
             PrefsCategory::Audio => "Áudio",
+            PrefsCategory::AudioDevice => "Dispositivo de Áudio",
+            PrefsCategory::MidiSyncControl => "MIDI / Sync / Controle",
+            PrefsCategory::FileIo => "E/S de Arquivos (File I/O)",
             PrefsCategory::Memory => "Memória e Desempenho",
             PrefsCategory::AutoSave => "Salvamento Automático",
             PrefsCategory::Shortcuts => "Atalhos e Controles",
+            PrefsCategory::Integrations => "Aplicativos externos",
         };
         tr(lang, pt)
     }
@@ -587,6 +603,11 @@ impl PrefsCategory {
     pub fn label(self) -> &'static str {
         self.label_in(Language::PtBr)
     }
+}
+
+struct SceneDetectJob {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rx: std::sync::mpsc::Receiver<Vec<Ticks>>,
 }
 
 #[derive(Default)]
@@ -597,6 +618,21 @@ pub struct Dialogs {
     pub track_motion: Option<Id>,
     pub fx_target: Option<FxTarget>,
     pub gen_editor: Option<Id>,
+    pub paste_attrs_open: bool,
+    pub paste_attrs_mask: neoveg_engine::session::PasteAttributesMask,
+    pub take_chooser: Option<Id>,
+    take_chooser_selected: Option<usize>,
+    take_chooser_tex: Option<(egui::TextureHandle, (Id, usize))>,
+    take_chooser_add_media: Option<Id>,
+    take_chooser_name_buf: String,
+    take_chooser_renamed_idx: Option<(Id, usize)>,
+    pub scene_detect: Option<Id>,
+    pub scene_detect_threshold: f32,
+    pub scene_detect_min_frames: u32,
+    pub scene_detect_markers: bool,
+    pub scene_detect_cuts: Vec<Ticks>,
+    pub scene_detect_analyzed: bool,
+    scene_detect_job: Option<SceneDetectJob>,
     pub shortcuts: bool,
     pub prefs_open: bool,
     pub prefs_tab: PrefsCategory,
@@ -620,6 +656,7 @@ pub struct Dialogs {
     pub pc_animate: bool,
     pub tm_animate: bool,
     tm_lock_aspect: bool,
+    pub tm_parent_mode: bool,
     edit_in_progress: bool,
     /// Arquivos aguardando confirmação para conversão.
     pub convert_offer: Option<crate::convert_dialog::ConvertOffer>,
@@ -628,6 +665,23 @@ pub struct Dialogs {
     /// *Editar conjunto de botões visíveis* (botão Mais do cabeçalho de
     /// faixa): `true` = faixas de vídeo, e o rascunho dos botões.
     pub header_buttons: Option<(bool, neoveg_common::prefs::HeaderButtons)>,
+    pub motion_track_src: Option<Id>,
+    pub motion_track_target_is_track: bool,
+    pub motion_track_target_event: Option<Id>,
+    pub motion_track_target_track: Option<Id>,
+    pub motion_track_invert: bool,
+    pub motion_track_step: usize,
+    save_preset_for: Option<(FxTarget, usize)>,
+    save_preset_name: String,
+    save_chain_target: Option<FxTarget>,
+    save_chain_name: String,
+    pub customize_toolbar_open: bool,
+    pub customize_toolbar_draft: Option<Vec<String>>,
+    customize_toolbar_filter: String,
+    pub cmd_marker_open: bool,
+    pub cmd_marker_label: String,
+    pub cmd_marker_type: String,
+    pub cmd_marker_arg: String,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -806,11 +860,230 @@ impl App {
         self.track_motion_window(ctx);
         self.fx_window(ctx);
         self.gen_editor_window(ctx);
+        self.paste_attributes_window(ctx);
+        self.take_chooser_window(ctx);
+        self.scene_detect_window(ctx);
+        self.motion_track_window(ctx);
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
         self.header_buttons_window(ctx);
+        self.customize_toolbar_window(ctx);
+        self.command_marker_window(ctx);
         self.misc_windows(ctx);
+    }
+
+    fn customize_toolbar_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.customize_toolbar_open {
+            return;
+        }
+        let Some(mut draft) = self.dlg.customize_toolbar_draft.take() else {
+            self.dlg.customize_toolbar_open = false;
+            return;
+        };
+        let mut open = true;
+        let mut save_close = false;
+        let mut cancel_close = false;
+        let mut restore_def = false;
+        egui::Window::new("Personalizar barra de ferramentas")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(600.0)
+            .default_height(420.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Escolha quais comandos da Tabela Única aparecem na barra de ferramentas principal (VEGAS Pro p. 75).");
+                ui.horizontal(|ui| {
+                    ui.label("Filtrar:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.customize_toolbar_filter)
+                            .desired_width(220.0),
+                    );
+                    if ui.button("＋ Separador (|)").clicked()
+                        && draft.len() < neoveg_common::prefs::MAX_TOOLBAR_BUTTONS
+                    {
+                        draft.push("|".into());
+                    }
+                });
+                ui.separator();
+                let q = self.dlg.customize_toolbar_filter.trim().to_lowercase();
+                ui.columns(2, |cols| {
+                    cols[0].strong("Comandos disponíveis");
+                    egui::ScrollArea::vertical()
+                        .id_salt("ctb_avail")
+                        .max_height(260.0)
+                        .show(&mut cols[0], |ui| {
+                            for cmd in COMMANDS {
+                                if !q.is_empty()
+                                    && !cmd.label.to_lowercase().contains(&q)
+                                    && !cmd.id.to_lowercase().contains(&q)
+                                {
+                                    continue;
+                                }
+                                ui.horizontal(|ui| {
+                                    let can_add = draft.len()
+                                        < neoveg_common::prefs::MAX_TOOLBAR_BUTTONS;
+                                    if ui
+                                        .add_enabled(can_add, egui::Button::new("Adicionar →").small())
+                                        .clicked()
+                                    {
+                                        draft.push(cmd.id.to_string());
+                                    }
+                                    ui.label(egui::RichText::new(cmd.label).small())
+                                        .on_hover_text(cmd.id);
+                                });
+                            }
+                        });
+
+                    cols[1].strong(format!("Barra ativa ({})", draft.len()));
+                    let mut move_up: Option<usize> = None;
+                    let mut move_down: Option<usize> = None;
+                    let mut remove_idx: Option<usize> = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("ctb_active")
+                        .max_height(260.0)
+                        .show(&mut cols[1], |ui| {
+                            for (i, id) in draft.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    let lbl = if id == "|" {
+                                        "── Separador ──"
+                                    } else {
+                                        neoveg_engine::commands::find_command(id)
+                                            .map(|c| c.label)
+                                            .unwrap_or(id.as_str())
+                                    };
+                                    if i > 0 && ui.small_button("↑").clicked() {
+                                        move_up = Some(i);
+                                    }
+                                    if i + 1 < draft.len() && ui.small_button("↓").clicked() {
+                                        move_down = Some(i);
+                                    }
+                                    if ui.small_button("×").clicked() {
+                                        remove_idx = Some(i);
+                                    }
+                                    ui.label(egui::RichText::new(lbl).small());
+                                });
+                            }
+                        });
+                    if let Some(i) = move_up {
+                        draft.swap(i, i - 1);
+                    }
+                    if let Some(i) = move_down {
+                        draft.swap(i, i + 1);
+                    }
+                    if let Some(i) = remove_idx {
+                        draft.remove(i);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Restaurar padrão").clicked() {
+                        restore_def = true;
+                    }
+                    if ui.button("OK").clicked() {
+                        save_close = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel_close = true;
+                    }
+                });
+            });
+
+        if restore_def {
+            draft = neoveg_common::prefs::default_toolbar_buttons();
+        }
+        if save_close {
+            self.prefs.toolbar_buttons = draft;
+            self.prefs.sanitize();
+            let _ = self.prefs.save();
+            self.dlg.customize_toolbar_open = false;
+            self.set_status("Barra de ferramentas atualizada.");
+        } else if !open || cancel_close {
+            self.dlg.customize_toolbar_open = false;
+        } else {
+            self.dlg.customize_toolbar_draft = Some(draft);
+        }
+    }
+
+    fn command_marker_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.cmd_marker_open {
+            return;
+        }
+        let mut open = true;
+        let mut insert_now = false;
+        let mut cancel_now = false;
+        egui::Window::new("Inserir marcador de comando")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Insere um marcador de comando no cursor (TEXT, URL, CHAPTER ou personalizado, p. 725).");
+                ui.separator();
+                egui::Grid::new("cmd_marker_grid").num_columns(2).show(ui, |ui| {
+                    ui.label("Rótulo:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.cmd_marker_label)
+                            .desired_width(210.0),
+                    );
+                    ui.end_row();
+                    ui.label("Comando:");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("cmd_mk_preset")
+                            .selected_text(if self.dlg.cmd_marker_type.is_empty() {
+                                "TEXT"
+                            } else {
+                                self.dlg.cmd_marker_type.as_str()
+                            })
+                            .show_ui(ui, |ui| {
+                                for k in ["TEXT", "URL", "WM_CAPTION", "CHAPTER"] {
+                                    ui.selectable_value(
+                                        &mut self.dlg.cmd_marker_type,
+                                        k.to_string(),
+                                        k,
+                                    );
+                                }
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dlg.cmd_marker_type)
+                                .desired_width(90.0),
+                        );
+                    });
+                    ui.end_row();
+                    ui.label("Parâmetro:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.cmd_marker_arg)
+                            .desired_width(210.0),
+                    );
+                    ui.end_row();
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Inserir marcador").clicked() {
+                        insert_now = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel_now = true;
+                    }
+                });
+            });
+
+        if insert_now {
+            self.session.insert_marker_kind(
+                MarkerKind::Command,
+                &self.dlg.cmd_marker_label,
+                &self.dlg.cmd_marker_type,
+                &self.dlg.cmd_marker_arg,
+            );
+            self.sync_after_session();
+            self.dlg.cmd_marker_open = false;
+        } else if !open || cancel_now {
+            self.dlg.cmd_marker_open = false;
+        }
     }
 
     /// *Editar conjunto de botões visíveis* (manual do VEGAS Pro 21, p. 69):
@@ -877,6 +1150,819 @@ impl App {
             Some(false) => self.dlg.header_buttons = None,
             None if !open => self.dlg.header_buttons = None,
             None => self.dlg.header_buttons = Some((video, draft)),
+        }
+    }
+
+    fn paste_attributes_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.paste_attrs_open {
+            return;
+        }
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        let mut mask = self.dlg.paste_attrs_mask;
+        egui::Window::new("Colar atributos do evento")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Escolha os atributos da área de transferência para aplicar aos eventos selecionados:");
+                ui.separator();
+                ui.checkbox(&mut mask.fx, "Cadeia de efeitos (Video FX / Audio FX)");
+                ui.checkbox(&mut mask.pan_crop, "Pan/Crop (quadros-chave)");
+                ui.checkbox(&mut mask.gain_db, "Ganho de áudio (dB)");
+                ui.checkbox(&mut mask.rate, "Taxa de reprodução (Velocidade)");
+                ui.checkbox(&mut mask.pitch, "Tom (Pitch Shift / Preservar tom)");
+                ui.checkbox(&mut mask.fades, "Fades de entrada e saída");
+                ui.checkbox(&mut mask.switches, "Opções (Mudo, Loop, Reverso, Proporção)");
+                ui.checkbox(&mut mask.transition, "Transição de entrada");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Marcar tudo").clicked() {
+                        mask = neoveg_engine::session::PasteAttributesMask::ALL;
+                    }
+                    if ui.button("Desmarcar tudo").clicked() {
+                        mask = neoveg_engine::session::PasteAttributesMask {
+                            fx: false,
+                            pan_crop: false,
+                            gain_db: false,
+                            rate: false,
+                            pitch: false,
+                            fades: false,
+                            switches: false,
+                            transition: false,
+                        };
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_apply =
+                        mask.any() && !self.clipboard.is_empty() && !self.sel_events.is_empty();
+                    if ui
+                        .add_enabled(can_apply, egui::Button::new("Aplicar"))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        self.dlg.paste_attrs_mask = mask;
+        if apply {
+            self.session.paste_attributes(mask);
+            self.sync_after_session();
+            self.dlg.paste_attrs_open = false;
+        } else if !open || cancel {
+            self.dlg.paste_attrs_open = false;
+        }
+    }
+
+    /// Diálogo **Take Chooser** (manual do VEGAS Pro 21, p. 347): lista os takes
+    /// do evento selecionado, mostra miniatura de pré-visualização, permite
+    /// renomear, reordenar, adicionar mídia como take e definir o take ativo.
+    fn take_chooser_window(&mut self, ctx: &egui::Context) {
+        use neoveg_engine::{model::Take, takes};
+
+        let Some(id) = self.dlg.take_chooser else {
+            return;
+        };
+        let Some((ti, ei)) = self.project.find_event(id) else {
+            self.dlg.take_chooser = None;
+            self.dlg.take_chooser_tex = None;
+            return;
+        };
+        let is_video = self.project.tracks[ti].kind == TrackKind::Video;
+        let track_locked = self.project.tracks[ti].locked;
+        let ev = self.project.tracks[ti].events[ei].clone();
+        let list = takes::takes(&ev);
+        let active = takes::active_index(&ev);
+        let sel_idx = self
+            .dlg
+            .take_chooser_selected
+            .filter(|&i| i < list.len())
+            .unwrap_or(active);
+        if self.dlg.take_chooser_renamed_idx != Some((id, sel_idx)) {
+            self.dlg.take_chooser_name_buf = list
+                .get(sel_idx)
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+            self.dlg.take_chooser_renamed_idx = Some((id, sel_idx));
+        }
+
+        // Prévia visual do take selecionado (para faixas de vídeo)
+        if is_video {
+            let key = (id, sel_idx);
+            let need_tex = self
+                .dlg
+                .take_chooser_tex
+                .as_ref()
+                .is_none_or(|(_, k)| *k != key);
+            if need_tex {
+                if let Some(tk) = list.get(sel_idx) {
+                    if let Some(m) = self.project.media(tk.media_id).cloned() {
+                        let local = if (self.cursor >= ev.start && self.cursor <= ev.end())
+                            && ev.length > Ticks::ZERO
+                        {
+                            self.cursor - ev.start
+                        } else {
+                            ev.length.div_i64(2)
+                        };
+                        let raw_t = tk.offset + ev.rate.scale_ticks(local);
+                        let mt = match m.duration {
+                            Some(d) if d > Ticks::ZERO => raw_t.clamp_safe(Ticks::ZERO, d),
+                            _ => raw_t.max(Ticks::ZERO),
+                        };
+                        if let Some(img) = self.media.video_frame(&m, mt, 288, 162) {
+                            let ci = super::rgba_to_color_image(&img);
+                            let tex = ctx.load_texture(
+                                "take_chooser_preview",
+                                ci,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.dlg.take_chooser_tex = Some((tex, key));
+                        } else {
+                            self.dlg.take_chooser_tex = None;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.dlg.take_chooser_tex = None;
+        }
+
+        let sel_take_opt = list.get(sel_idx).cloned();
+        let sel_media_info = sel_take_opt
+            .as_ref()
+            .and_then(|tk| self.project.media(tk.media_id))
+            .map(|m| (m.name.clone(), m.info.clone()));
+        let add_candidates: Vec<(Id, String)> = self
+            .project
+            .media
+            .iter()
+            .filter(|m| if is_video { m.has_video } else { m.has_audio })
+            .map(|m| (m.id, m.name.clone()))
+            .collect();
+        if self
+            .dlg
+            .take_chooser_add_media
+            .is_none_or(|mid| !add_candidates.iter().any(|(cid, _)| *cid == mid))
+        {
+            self.dlg.take_chooser_add_media = add_candidates.first().map(|(cid, _)| *cid);
+        }
+
+        let mut open = true;
+        let mut new_sel = sel_idx;
+        let mut activate_idx: Option<usize> = None;
+        let mut move_delta: Option<isize> = None;
+        let mut delete_idx: Option<usize> = None;
+        let mut rename_apply: Option<(usize, String)> = None;
+        let mut add_media: Option<Id> = None;
+        let mut close_dlg = false;
+
+        let editable = !track_locked && !ev.locked;
+        egui::Window::new(format!("Escolher take — {}", ev.name))
+            .open(&mut open)
+            .resizable(true)
+            .default_size([560.0, 360.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.columns(2, |cols| {
+                    let left = &mut cols[0];
+                    left.label(
+                        egui::RichText::new(format!(
+                            "Takes do evento ({} de {})",
+                            active + 1,
+                            list.len()
+                        ))
+                        .strong(),
+                    );
+                    left.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("take_chooser_list")
+                        .max_height(190.0)
+                        .show(left, |ui| {
+                            for (idx, tk) in list.iter().enumerate() {
+                                let name = takes::display_name(tk, |mid| {
+                                    self.project.media(mid).map(|m| m.name.clone())
+                                });
+                                let tag = if idx == active { " [Ativo]" } else { "" };
+                                let resp = ui.selectable_label(
+                                    idx == sel_idx,
+                                    format!("{}. {name}{tag}", idx + 1),
+                                );
+                                if resp.clicked() {
+                                    new_sel = idx;
+                                }
+                                if resp.double_clicked() && editable {
+                                    new_sel = idx;
+                                    activate_idx = Some(idx);
+                                    close_dlg = true;
+                                }
+                            }
+                        });
+                    left.add_space(4.0);
+                    left.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(editable && sel_idx != active, egui::Button::new("Ativar"))
+                            .clicked()
+                        {
+                            activate_idx = Some(sel_idx);
+                        }
+                        if ui
+                            .add_enabled(editable && sel_idx > 0, egui::Button::new("Subir"))
+                            .clicked()
+                        {
+                            move_delta = Some(-1);
+                        }
+                        if ui
+                            .add_enabled(
+                                editable && sel_idx + 1 < list.len(),
+                                egui::Button::new("Descer"),
+                            )
+                            .clicked()
+                        {
+                            move_delta = Some(1);
+                        }
+                        if ui
+                            .add_enabled(editable && list.len() > 1, egui::Button::new("Excluir"))
+                            .clicked()
+                        {
+                            delete_idx = Some(sel_idx);
+                        }
+                    });
+                    if !add_candidates.is_empty() {
+                        left.separator();
+                        left.label(egui::RichText::new("Adicionar mídia como take:").small());
+                        let sel_add_label = self
+                            .dlg
+                            .take_chooser_add_media
+                            .and_then(|mid| {
+                                add_candidates
+                                    .iter()
+                                    .find(|(cid, _)| *cid == mid)
+                                    .map(|(_, n)| n.as_str())
+                            })
+                            .unwrap_or("Selecionar mídia...");
+                        left.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("take_chooser_add_combo")
+                                .selected_text(sel_add_label)
+                                .width(155.0)
+                                .show_ui(ui, |ui| {
+                                    for (cid, cname) in &add_candidates {
+                                        ui.selectable_value(
+                                            &mut self.dlg.take_chooser_add_media,
+                                            Some(*cid),
+                                            cname,
+                                        );
+                                    }
+                                });
+                            if ui
+                                .add_enabled(
+                                    editable && self.dlg.take_chooser_add_media.is_some(),
+                                    egui::Button::new("+ Take"),
+                                )
+                                .clicked()
+                            {
+                                add_media = self.dlg.take_chooser_add_media;
+                            }
+                        });
+                    }
+
+                    let right = &mut cols[1];
+                    right.label(egui::RichText::new("Prévia e propriedades").strong());
+                    right.add_space(4.0);
+                    let preview_size = egui::vec2(240.0, 135.0);
+                    let (prev_rect, _) =
+                        right.allocate_exact_size(preview_size, egui::Sense::hover());
+                    right.painter().rect_filled(
+                        prev_rect,
+                        2.0,
+                        egui::Color32::from_rgb(18, 20, 24),
+                    );
+                    if let Some((tex, key)) = &self.dlg.take_chooser_tex {
+                        if *key == (id, sel_idx) {
+                            let ts = tex.size_vec2();
+                            let scale = (prev_rect.width() / ts.x.max(1.0))
+                                .min(prev_rect.height() / ts.y.max(1.0));
+                            let draw_sz = ts * scale;
+                            let draw_r = egui::Rect::from_center_size(prev_rect.center(), draw_sz);
+                            right.painter().image(
+                                tex.id(),
+                                draw_r,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    } else {
+                        let msg = if is_video {
+                            "(Sem quadro decodificado)"
+                        } else {
+                            "Evento de áudio"
+                        };
+                        right.painter().text(
+                            prev_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            msg,
+                            egui::FontId::proportional(11.0),
+                            self.theme.text_muted,
+                        );
+                    }
+                    right.add_space(6.0);
+                    if let Some((mname, minfo)) = &sel_media_info {
+                        right.label(egui::RichText::new(format!("Mídia: {mname}")).small());
+                        if !minfo.is_empty() {
+                            right.label(
+                                egui::RichText::new(minfo)
+                                    .small()
+                                    .color(self.theme.text_muted),
+                            );
+                        }
+                    }
+                    if let Some(tk) = &sel_take_opt {
+                        right.label(
+                            egui::RichText::new(format!("Offset: {}", self.fmt_time(tk.offset)))
+                                .small(),
+                        );
+                    }
+                    right.add_space(4.0);
+                    right.horizontal(|ui| {
+                        ui.label("Nome:");
+                        let te = ui.add_enabled(
+                            editable,
+                            egui::TextEdit::singleline(&mut self.dlg.take_chooser_name_buf)
+                                .desired_width(130.0),
+                        );
+                        let enter_pressed =
+                            te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (enter_pressed
+                            || ui
+                                .add_enabled(editable, egui::Button::new("Salvar"))
+                                .clicked())
+                            && editable
+                        {
+                            rename_apply =
+                                Some((sel_idx, self.dlg.take_chooser_name_buf.trim().to_string()));
+                        }
+                    });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(editable, egui::Button::new("OK")).clicked() {
+                        activate_idx = Some(new_sel);
+                        close_dlg = true;
+                    }
+                    if ui.button("Fechar").clicked() {
+                        close_dlg = true;
+                    }
+                });
+            });
+
+        self.dlg.take_chooser_selected = Some(new_sel);
+
+        if let Some((ridx, new_name)) = rename_apply {
+            let mut updated = list.clone();
+            if let Some(tk) = updated.get_mut(ridx) {
+                if tk.name != new_name {
+                    tk.name = new_name;
+                    self.checkpoint();
+                    if let Some(ev_mut) = self.project.event_mut(id) {
+                        takes::replace_takes(ev_mut, updated, active);
+                    }
+                    self.changed();
+                }
+            }
+        }
+        if let Some(delta) = move_delta {
+            let target = sel_idx as isize + delta;
+            if target >= 0 && (target as usize) < list.len() {
+                let tidx = target as usize;
+                let mut reordered = list.clone();
+                reordered.swap(sel_idx, tidx);
+                let new_active = if active == sel_idx {
+                    tidx
+                } else if active == tidx {
+                    sel_idx
+                } else {
+                    active
+                };
+                self.checkpoint();
+                if let Some(ev_mut) = self.project.event_mut(id) {
+                    takes::replace_takes(ev_mut, reordered, new_active);
+                }
+                self.dlg.take_chooser_selected = Some(tidx);
+                self.dlg.take_chooser_renamed_idx = None;
+                self.dlg.take_chooser_tex = None;
+                self.changed();
+            }
+        }
+        if let Some(didx) = delete_idx {
+            self.checkpoint();
+            let removed = self
+                .project
+                .event_mut(id)
+                .is_some_and(|ev_mut| takes::delete_take(ev_mut, didx));
+            if removed {
+                let next_sel = didx.min(list.len().saturating_sub(2));
+                self.dlg.take_chooser_selected = Some(next_sel);
+                self.dlg.take_chooser_renamed_idx = None;
+                self.dlg.take_chooser_tex = None;
+                self.changed();
+            } else {
+                self.undo.pop();
+            }
+        }
+        if let Some(mid) = add_media {
+            if let Some(m) = self.project.media(mid).cloned() {
+                let tk = Take {
+                    media_id: m.id,
+                    offset: Ticks::ZERO,
+                    name: m.name,
+                };
+                self.checkpoint();
+                let added = self
+                    .project
+                    .event_mut(id)
+                    .is_some_and(|ev_mut| takes::add_take(ev_mut, tk, true));
+                if added {
+                    let next_active = list.len();
+                    self.dlg.take_chooser_selected = Some(next_active);
+                    self.dlg.take_chooser_renamed_idx = None;
+                    self.dlg.take_chooser_tex = None;
+                    self.changed();
+                } else {
+                    self.undo.pop();
+                }
+            }
+        }
+        if let Some(aidx) = activate_idx {
+            if aidx != active {
+                self.session.set_active_take(id, aidx);
+                self.sync_after_session();
+            }
+        }
+        if !open || close_dlg {
+            self.dlg.take_chooser = None;
+            self.dlg.take_chooser_tex = None;
+            self.dlg.take_chooser_renamed_idx = None;
+        }
+    }
+
+    pub(crate) fn open_scene_detect_for(&mut self, event_id: Id) {
+        self.dlg.scene_detect = Some(event_id);
+        if self.dlg.scene_detect_threshold < 5.0 {
+            self.dlg.scene_detect_threshold = 35.0;
+        }
+        if self.dlg.scene_detect_min_frames == 0 {
+            self.dlg.scene_detect_min_frames = 6;
+        }
+        self.dlg.scene_detect_cuts.clear();
+        self.dlg.scene_detect_analyzed = false;
+        self.dlg.scene_detect_job = None;
+    }
+
+    /// Diálogo **Detecção de Cenas e Cortes** (manual do VEGAS Pro 21, p. 300).
+    fn scene_detect_window(&mut self, ctx: &egui::Context) {
+        use neoveg_engine::engine::scene_detect::{detect_cuts_in_media, SceneDetectConfig};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        // Consulta resultado de análise assíncrona em andamento.
+        let mut finished_cuts: Option<Vec<Ticks>> = None;
+        let mut cancel_job = false;
+        if let Some(job) = &self.dlg.scene_detect_job {
+            match job.rx.try_recv() {
+                Ok(cuts) => {
+                    finished_cuts = Some(cuts);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    finished_cuts = Some(Vec::new());
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        if let Some(cuts) = finished_cuts {
+            self.dlg.scene_detect_cuts = cuts;
+            self.dlg.scene_detect_analyzed = true;
+            self.dlg.scene_detect_job = None;
+        }
+
+        let Some(id) = self.dlg.scene_detect else {
+            return;
+        };
+        let Some((ti, ei)) = self.project.find_event(id) else {
+            self.dlg.scene_detect = None;
+            return;
+        };
+        let ev = self.project.tracks[ti].events[ei].clone();
+        let Some(media_item) = self.project.media(ev.media_id).cloned() else {
+            self.dlg.scene_detect = None;
+            return;
+        };
+
+        let mut open = true;
+        let mut start_scan = false;
+        let mut apply = false;
+        let mut close = false;
+        let running = self.dlg.scene_detect_job.is_some();
+
+        egui::Window::new(format!("Detectar cenas e cortes — {}", ev.name))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(380.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Analisa diferenças visuais entre quadros consecutivos do evento selecionado para localizar mudanças de plano.");
+                ui.separator();
+                egui::Grid::new("scene_detect_grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Sensibilidade ao corte (%)");
+                        ui.add_enabled(
+                            !running,
+                            egui::Slider::new(&mut self.dlg.scene_detect_threshold, 10.0..=90.0)
+                                .fixed_decimals(0)
+                                .suffix(" %"),
+                        );
+                        ui.end_row();
+                        ui.label("Duração mínima da cena");
+                        ui.add_enabled(
+                            !running,
+                            egui::DragValue::new(&mut self.dlg.scene_detect_min_frames)
+                                .range(2..=120)
+                                .suffix(" quadros"),
+                        );
+                        ui.end_row();
+                        ui.label("Ação");
+                        ui.vertical(|ui| {
+                            ui.radio_value(
+                                &mut self.dlg.scene_detect_markers,
+                                false,
+                                "Dividir evento nos cortes detectados",
+                            );
+                            ui.radio_value(
+                                &mut self.dlg.scene_detect_markers,
+                                true,
+                                "Inserir marcadores de cena na timeline",
+                            );
+                        });
+                        ui.end_row();
+                    });
+                ui.separator();
+                if running {
+                    ui.horizontal(|ui| {
+                        crate::splash::spinner_inline(
+                            ui,
+                            ui.input(|i| i.time as f32),
+                            16.0,
+                            &self.theme,
+                        );
+                        ui.label("Analisando quadros do evento...");
+                        if ui.button("Cancelar").clicked() {
+                            cancel_job = true;
+                        }
+                    });
+                } else {
+                    if self.dlg.scene_detect_analyzed {
+                        let msg = if self.dlg.scene_detect_cuts.is_empty() {
+                            "Nenhum corte detectado com esse limiar.".to_string()
+                        } else {
+                            format!(
+                                "{} corte(s) de cena detectado(s).",
+                                self.dlg.scene_detect_cuts.len()
+                            )
+                        };
+                        ui.label(egui::RichText::new(msg).strong());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Analisar clipe").clicked() {
+                            start_scan = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.dlg.scene_detect_cuts.is_empty(),
+                                egui::Button::new("Aplicar na timeline"),
+                            )
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if ui.button("Fechar").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+            });
+
+        if cancel_job {
+            if let Some(job) = self.dlg.scene_detect_job.take() {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        if start_scan {
+            let cancel = std::sync::Arc::new(AtomicBool::new(false));
+            let cancel_w = cancel.clone();
+            let cache = self.media.clone();
+            let fd = self
+                .project
+                .settings
+                .frame_dur()
+                .max(Ticks::from_millis_i64(15));
+            let content_len = ev.rate.scale_ticks(ev.length).max(fd);
+            let range = (ev.offset, ev.offset + content_len);
+            let step = Ticks::from_raw(fd.0.saturating_mul(2)).max(Ticks::from_millis_i64(33));
+            let cfg = SceneDetectConfig {
+                threshold: (self.dlg.scene_detect_threshold / 100.0).clamp(0.1, 0.9),
+                min_scene_ticks: Ticks::from_raw(
+                    fd.0.saturating_mul(i64::from(self.dlg.scene_detect_min_frames.max(2))),
+                ),
+                sample_w: 64,
+                sample_h: 36,
+            };
+            let (tx, rx) = mpsc::channel();
+            self.dlg.scene_detect_analyzed = false;
+            self.dlg.scene_detect_cuts.clear();
+            if crate::util::spawn("scene-detect", move || {
+                let cuts =
+                    detect_cuts_in_media(&media_item, &cache, range, step, cfg, Some(&cancel_w));
+                let _ = tx.send(cuts);
+            })
+            .is_ok()
+            {
+                self.dlg.scene_detect_job = Some(SceneDetectJob { cancel, rx });
+            } else {
+                self.set_status("Não foi possível iniciar o worker de detecção de cenas.");
+            }
+        }
+        if apply {
+            let cuts = self.dlg.scene_detect_cuts.clone();
+            let as_markers = self.dlg.scene_detect_markers;
+            self.session.apply_scene_cuts(id, &cuts, as_markers);
+            self.sync_after_session();
+            self.dlg.scene_detect = None;
+        }
+        if !open || close {
+            if let Some(job) = self.dlg.scene_detect_job.take() {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.dlg.scene_detect = None;
+        }
+    }
+
+    fn motion_track_window(&mut self, ctx: &egui::Context) {
+        let Some(src_id) = self.dlg.motion_track_src else {
+            return;
+        };
+        let Some((src_ti, src_ei)) = self.project.find_event(src_id) else {
+            self.dlg.motion_track_src = None;
+            return;
+        };
+        let src_name = self.project.tracks[src_ti].events[src_ei].name.clone();
+        let video_events: Vec<(Id, String)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+            .flat_map(|t| t.events.iter().map(|e| (e.id, e.name.clone())))
+            .collect();
+        let video_tracks: Vec<(Id, String)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+
+        if self.dlg.motion_track_target_event.is_none() {
+            self.dlg.motion_track_target_event = Some(src_id);
+        }
+        if self.dlg.motion_track_target_track.is_none() {
+            self.dlg.motion_track_target_track = video_tracks.first().map(|t| t.0);
+        }
+        if self.dlg.motion_track_step == 0 {
+            self.dlg.motion_track_step = 1;
+        }
+
+        let mut open = true;
+        let mut run_track = false;
+        let mut close = false;
+        egui::Window::new(format!("Rastreamento de Movimento — {src_name}"))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(390.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Rastreia o deslocamento planar quadro a quadro no evento de vídeo selecionado e gera quadros-chave (Planar / Pan/Crop / Track Motion).");
+                ui.separator();
+                ui.label("Destino dos quadros-chave:");
+                ui.radio_value(
+                    &mut self.dlg.motion_track_target_is_track,
+                    false,
+                    "Pan/Crop de evento de vídeo",
+                );
+                if !self.dlg.motion_track_target_is_track {
+                    let sel_ev_label = self
+                        .dlg
+                        .motion_track_target_event
+                        .and_then(|id| video_events.iter().find(|e| e.0 == id))
+                        .map(|e| e.1.clone())
+                        .unwrap_or_else(|| src_name.clone());
+                    egui::ComboBox::from_id_salt("mt_target_event")
+                        .selected_text(sel_ev_label)
+                        .show_ui(ui, |ui| {
+                            for (eid, ename) in &video_events {
+                                ui.selectable_value(
+                                    &mut self.dlg.motion_track_target_event,
+                                    Some(*eid),
+                                    ename,
+                                );
+                            }
+                        });
+                }
+                ui.radio_value(
+                    &mut self.dlg.motion_track_target_is_track,
+                    true,
+                    "Movimento da trilha (Track Motion)",
+                );
+                if self.dlg.motion_track_target_is_track {
+                    let sel_tr_label = self
+                        .dlg
+                        .motion_track_target_track
+                        .and_then(|id| video_tracks.iter().find(|t| t.0 == id))
+                        .map(|t| t.1.clone())
+                        .unwrap_or_else(|| "Selecionar trilha".into());
+                    egui::ComboBox::from_id_salt("mt_target_track")
+                        .selected_text(sel_tr_label)
+                        .show_ui(ui, |ui| {
+                            for (tid, tname) in &video_tracks {
+                                ui.selectable_value(
+                                    &mut self.dlg.motion_track_target_track,
+                                    Some(*tid),
+                                    tname,
+                                );
+                            }
+                        });
+                }
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut self.dlg.motion_track_invert,
+                    "Inverter movimento (estabilizar / travar ponto)",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Amostragem (quadros)");
+                    ui.add(
+                        egui::DragValue::new(&mut self.dlg.motion_track_step)
+                            .range(1..=30)
+                            .suffix(" q"),
+                    );
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Rastrear e aplicar keyframes").clicked() {
+                        run_track = true;
+                    }
+                    if ui.button("Fechar").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if run_track {
+            let dst_ev = (!self.dlg.motion_track_target_is_track)
+                .then_some(self.dlg.motion_track_target_event.unwrap_or(src_id));
+            let dst_tr = self
+                .dlg
+                .motion_track_target_is_track
+                .then_some(self.dlg.motion_track_target_track)
+                .flatten();
+            match self.session.track_event_motion(
+                &self.media,
+                src_id,
+                dst_ev,
+                dst_tr,
+                self.dlg.motion_track_invert,
+                self.dlg.motion_track_step,
+            ) {
+                Ok(_) => {
+                    self.sync_after_session();
+                    self.dlg.motion_track_src = None;
+                }
+                Err(e) => self.set_status(format!("Rastreamento de movimento: {e}")),
+            }
+        }
+        if !open || close {
+            self.dlg.motion_track_src = None;
         }
     }
 
@@ -976,6 +2062,27 @@ impl App {
                             }
                         });
                     ui.end_row();
+                    ui.label(tr(lang, "Modo 3D Estereoscópico"));
+                    egui::ComboBox::from_id_salt("stereo_3d_mode")
+                        .selected_text(s.stereo_3d.label())
+                        .show_ui(ui, |ui| {
+                            for m3d in Stereo3dMode::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.stereo_3d, m3d, m3d.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
+                    ui.label(tr(lang, "Tempo musical (BPM)"));
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut s.bpm)
+                                .range(20.0..=300.0)
+                                .speed(0.5)
+                                .suffix(" BPM"),
+                        )
+                        .changed();
+                    ui.end_row();
                     ui.label(tr(lang, "Cor de fundo"));
                     changed |= ui.color_edit_button_rgb(&mut s.background).changed();
                     ui.end_row();
@@ -1018,15 +2125,26 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut changed = false;
-        let media_info = {
+        let (media_info, sync_master_name, has_sync_followers) = {
             let Some(e) = self.project.event(id) else {
                 return;
             };
-            self.project
+            let info = self
+                .project
                 .media(e.media_id)
                 .map(|m| format!("{}  —  {}", m.name, m.info))
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let master_name = e.sync_link_master.and_then(|mid| {
+                self.project
+                    .event(mid)
+                    .map(|me| format!("{} ({})", me.name, self.fmt_time(me.start)))
+            });
+            let followers = self.session.has_sync_followers(id);
+            (info, master_name, followers)
         };
+        let mut unlink_sync = false;
+        let mut select_sync = false;
+        let mut open_tc = false;
         let mut open_pc = false;
         let mut open_fx = false;
         egui::Window::new(tr(lang, "Propriedades do evento"))
@@ -1080,6 +2198,28 @@ impl App {
                         changed |= ui
                             .add(egui::Slider::new(&mut e.gain_db, -40.0..=20.0).suffix(" dB"))
                             .changed();
+                        ui.end_row();
+                        ui.label("Tom (Pitch Shift)");
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut e.pitch_semitones, -24.0..=24.0)
+                                            .step_by(0.1)
+                                            .suffix(" st"),
+                                    )
+                                    .changed();
+                                if e.pitch_semitones.abs() > 1e-4
+                                    && ui.small_button("0 st").clicked()
+                                {
+                                    e.pitch_semitones = 0.0;
+                                    changed = true;
+                                }
+                            });
+                            changed |= ui
+                                .checkbox(&mut e.lock_pitch_to_stretch, "Preservar tom ao esticar")
+                                .changed();
+                        });
                         ui.end_row();
                     }
                     ui.label(tr(lang, "Fade de entrada"));
@@ -1157,7 +2297,59 @@ impl App {
                             }
                         });
                         ui.end_row();
+                        ui.label("3D Estereoscópico");
+                        ui.vertical(|ui| {
+                            egui::ComboBox::from_id_salt(("ep_s3d", id))
+                                .selected_text(e.stereo_3d.layout.label())
+                                .show_ui(ui, |ui| {
+                                    for l in Stereo3dSourceLayout::ALL {
+                                        changed |= ui
+                                            .selectable_value(&mut e.stereo_3d.layout, l, l.label())
+                                            .changed();
+                                    }
+                                });
+                            changed |= ui
+                                .checkbox(
+                                    &mut e.stereo_3d.swap_lr,
+                                    "Inverter olho esquerdo/direito",
+                                )
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::Slider::new(
+                                        &mut e.stereo_3d.horizontal_offset,
+                                        -0.25..=0.25,
+                                    )
+                                    .step_by(0.002)
+                                    .text("Convergência"),
+                                )
+                                .changed();
+                        });
+                        ui.end_row();
                     }
+                    ui.label("Sync Link");
+                    ui.horizontal(|ui| {
+                        if let Some(mname) = &sync_master_name {
+                            ui.label(format!("Segue: {mname}"));
+                            if ui.small_button("Desvincular").clicked() {
+                                unlink_sync = true;
+                            }
+                            if ui.small_button("Selecionar rede").clicked() {
+                                select_sync = true;
+                            }
+                        } else if has_sync_followers {
+                            ui.label("Evento mestre com seguidores");
+                            if ui.small_button("Selecionar rede").clicked() {
+                                select_sync = true;
+                            }
+                            if ui.small_button("Liberar seguidores").clicked() {
+                                unlink_sync = true;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("Sem vínculo de sincronização").weak());
+                        }
+                    });
+                    ui.end_row();
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -1167,8 +2359,30 @@ impl App {
                     if ui.button(tr(lang, "Efeitos do evento...")).clicked() {
                         open_fx = true;
                     }
+                    if ui.button("Escolher take...").clicked() {
+                        open_tc = true;
+                    }
                 });
             });
+        if unlink_sync {
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.session.unlink_sync_links();
+            self.sync_after_session();
+        }
+        if select_sync {
+            if !self.sel_events.contains(&id) {
+                self.sel_events.clear();
+                self.sel_events.insert(id);
+            }
+            self.session.select_sync_linked();
+            self.sync_after_session();
+        }
+        if open_tc {
+            self.dlg.take_chooser = Some(id);
+        }
         if open_pc {
             self.dlg.pan_crop = Some(id);
         }
@@ -1595,13 +2809,18 @@ impl App {
         let s = self.project.settings.clone();
         let t = self.cursor;
         let tol = s.frame_dur().div_i64(2);
-        let cur = self.project.tracks[ti].motion.eval(t);
-        let keys: Vec<(Ticks, Curve)> = self.project.tracks[ti]
-            .motion
-            .keys
-            .iter()
-            .map(|k| (k.t, k.curve))
-            .collect();
+        let has_children = self.project.has_track_children(tid);
+        if !has_children {
+            self.dlg.tm_parent_mode = false;
+        }
+        let use_parent = has_children && self.dlg.tm_parent_mode;
+        let motion_ref = if use_parent {
+            &self.project.tracks[ti].parent_motion
+        } else {
+            &self.project.tracks[ti].motion
+        };
+        let cur = motion_ref.eval(t);
+        let keys: Vec<(Ticks, Curve)> = motion_ref.keys.iter().map(|k| (k.t, k.curve)).collect();
         let lang = self.lang();
         let mut open = true;
         let mut new_key: Option<MotionKey> = None;
@@ -1617,6 +2836,22 @@ impl App {
         .open(&mut open)
         .default_size([720.0, 420.0])
         .show(ctx, |ui| {
+            if has_children {
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Alvo:"));
+                    ui.selectable_value(
+                        &mut self.dlg.tm_parent_mode,
+                        false,
+                        tr(lang, "Movimento da trilha"),
+                    );
+                    ui.selectable_value(
+                        &mut self.dlg.tm_parent_mode,
+                        true,
+                        tr(lang, "Movimento Pai/Filho (Grupo)"),
+                    );
+                });
+                ui.separator();
+            }
             ui.horizontal(|ui| {
                 let size =
                     vec2(420.0, 420.0 * s.height as f32 / s.width as f32).min(vec2(420.0, 360.0));
@@ -1782,17 +3017,27 @@ impl App {
         let mut changed = false;
         if let Some(k) = new_key {
             let tr = &mut self.session.project.tracks[ti];
-            if self.dlg.tm_animate || tr.motion.keys.len() > 1 {
-                tr.motion.set(t, k, tol);
-            } else if let Some(f) = tr.motion.keys.first_mut() {
+            let dst_motion = if use_parent {
+                &mut tr.parent_motion
+            } else {
+                &mut tr.motion
+            };
+            if self.dlg.tm_animate || dst_motion.keys.len() > 1 {
+                dst_motion.set(t, k, tol);
+            } else if let Some(f) = dst_motion.keys.first_mut() {
                 f.value = k;
             }
             changed = true;
         }
         if let Some(a) = action {
             let tr = &mut self.project.tracks[ti];
+            let dst_motion = if use_parent {
+                &mut tr.parent_motion
+            } else {
+                &mut tr.motion
+            };
             match a {
-                "reset" => tr.motion = Keyframes::default(),
+                "reset" => *dst_motion = Keyframes::default(),
                 "pip" => {
                     let k = MotionKey {
                         x: 0.3,
@@ -1801,15 +3046,15 @@ impl App {
                         scale_y: 0.33,
                         rot: 0.0,
                     };
-                    if tr.motion.keys.len() > 1 {
-                        tr.motion.set(t, k, tol);
-                    } else {
-                        tr.motion.keys[0].value = k;
+                    if dst_motion.keys.len() > 1 {
+                        dst_motion.set(t, k, tol);
+                    } else if let Some(f) = dst_motion.keys.first_mut() {
+                        f.value = k;
                     }
                 }
-                "add" => tr.motion.set(t, cur.clone(), tol),
-                "del" if tr.motion.keys.len() > 1 => {
-                    tr.motion.keys.retain(|k| k.t.abs_diff(t) > tol);
+                "add" => dst_motion.set(t, cur.clone(), tol),
+                "del" if dst_motion.keys.len() > 1 => {
+                    dst_motion.keys.retain(|k| k.t.abs_diff(t) > tol);
                 }
                 _ => {}
             }
@@ -1901,6 +3146,14 @@ impl App {
         let mut changed = false;
         let mut add: Option<FxKind> = None;
         let mut op: Option<(usize, &str)> = None;
+        let mut apply_saved_chain: Option<usize> = None;
+        let mut delete_saved_chain: Option<usize> = None;
+        let mut export_chain_file = false;
+        let mut import_chain_file = false;
+        let mut confirm_save_chain: Option<String> = None;
+        let mut confirm_save_preset: Option<(FxInstance, String)> = None;
+        let mut open_color_grading = false;
+        let saved_chains_snapshot = self.prefs.fx_chains.clone();
         let Some(chain) = self.fx_chain_mut(target) else {
             return;
         };
@@ -1908,9 +3161,9 @@ impl App {
         egui::Window::new(title)
             .id(egui::Id::new("fx_chain_win"))
             .open(&mut open)
-            .default_width(420.0)
+            .default_width(440.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     egui::ComboBox::from_id_salt("fx_add")
                         .selected_text(tr(lang, "+ Adicionar efeito..."))
                         .show_ui(ui, |ui| {
@@ -1925,6 +3178,58 @@ impl App {
                                 }
                             }
                         });
+                    egui::ComboBox::from_id_salt("fx_saved_chains")
+                        .selected_text(tr(lang, "Cadeias salvas..."))
+                        .show_ui(ui, |ui| {
+                            let mut any_match = false;
+                            for (ci, c) in saved_chains_snapshot.iter().enumerate() {
+                                if c.audio != audio {
+                                    continue;
+                                }
+                                any_match = true;
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            false,
+                                            format!("{} ({})", c.name, c.items.len()),
+                                        )
+                                        .clicked()
+                                    {
+                                        apply_saved_chain = Some(ci);
+                                    }
+                                    if ui.small_button("×").on_hover_text(tr(lang, "Excluir cadeia")).clicked() {
+                                        delete_saved_chain = Some(ci);
+                                    }
+                                });
+                            }
+                            if !any_match {
+                                ui.label(egui::RichText::new(tr(lang, "Nenhuma cadeia salva ainda.")).small().weak());
+                            }
+                            ui.separator();
+                            if ui.button(tr(lang, "Exportar cadeia (.neovegfxchain)...")).clicked() {
+                                export_chain_file = true;
+                            }
+                            if ui.button(tr(lang, "Importar cadeia (.neovegfxchain)...")).clicked() {
+                                import_chain_file = true;
+                            }
+                        });
+                    let has_saveable = chain_copy
+                        .iter()
+                        .any(|fx| !matches!(fx.kind, FxKind::Ofx | FxKind::Vst3));
+                    if ui
+                        .add_enabled(has_saveable, egui::Button::new(tr(lang, "Salvar cadeia...")))
+                        .on_hover_text(tr(lang, "Salvar esta sequência de efeitos como pacote reutilizável (Filter Package)"))
+                        .clicked()
+                    {
+                        self.dlg.save_chain_target = Some(target);
+                        if self.dlg.save_chain_name.trim().is_empty() {
+                            self.dlg.save_chain_name = if audio {
+                                tr(lang, "Cadeia de áudio").into()
+                            } else {
+                                tr(lang, "Cadeia de vídeo").into()
+                            };
+                        }
+                    }
                     ui.label(
                         egui::RichText::new(tr_args(
                             lang,
@@ -1934,6 +3239,22 @@ impl App {
                         .small(),
                     );
                 });
+                if self.dlg.save_chain_target == Some(target) {
+                    ui.horizontal(|ui| {
+                        ui.label("Nome da cadeia:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dlg.save_chain_name)
+                                .desired_width(160.0),
+                        );
+                        let valid = !self.dlg.save_chain_name.trim().is_empty();
+                        if ui.add_enabled(valid, egui::Button::new("Salvar")).clicked() {
+                            confirm_save_chain = Some(self.dlg.save_chain_name.trim().to_string());
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            self.dlg.save_chain_target = None;
+                        }
+                    });
+                }
                 ui.separator();
                 if chain_copy.is_empty() {
                     ui.label(tr(lang, "Nenhum efeito na cadeia."));
@@ -2009,9 +3330,50 @@ impl App {
                                             {
                                                 op = Some((i, "reset"));
                                             }
+                                            if !matches!(fx.kind, FxKind::Ofx | FxKind::Vst3)
+                                                && ui
+                                                    .small_button("Salvar preset")
+                                                    .on_hover_text("Salvar parâmetros atuais como preset próprio no navegador")
+                                                    .clicked()
+                                            {
+                                                self.dlg.save_preset_for = Some((target, i));
+                                                self.dlg.save_preset_name =
+                                                    format!("{} personalizado", fx.kind.name());
+                                            }
                                         },
                                     );
                                 });
+                                if self.dlg.save_preset_for == Some((target, i)) {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Preset:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(
+                                                &mut self.dlg.save_preset_name,
+                                            )
+                                            .desired_width(150.0),
+                                        );
+                                        let valid = !self.dlg.save_preset_name.trim().is_empty();
+                                        if ui.add_enabled(valid, egui::Button::new("Salvar")).clicked()
+                                        {
+                                            confirm_save_preset = Some((
+                                                fx.clone(),
+                                                self.dlg.save_preset_name.trim().to_string(),
+                                            ));
+                                        }
+                                        if ui.button("Cancelar").clicked() {
+                                            self.dlg.save_preset_for = None;
+                                        }
+                                    });
+                                }
+                                if fx.kind == FxKind::ColorCorrector
+                                    && ui
+                                        .small_button(
+                                            "Editar LUT (.cube) e Curvas RGB/HSL no Color Grading",
+                                        )
+                                        .clicked()
+                                {
+                                    open_color_grading = true;
+                                }
                                 if fx.kind == FxKind::Ofx {
                                     changed |= crate::plugin_manager::ofx_params_editor(
                                         ui,
@@ -2137,6 +3499,7 @@ impl App {
                     });
                     let vst3 = chain_copy[i].vst3.take().map(|mut v| {
                         v.params.clear();
+                        v.state = None;
                         v
                     });
                     chain_copy[i] = FxInstance::new(chain_copy[i].kind);
@@ -2147,6 +3510,112 @@ impl App {
                 _ => {}
             }
             changed = true;
+        }
+        if let Some(ci) = apply_saved_chain {
+            if let Some(saved) = self.prefs.fx_chains.get(ci).cloned() {
+                let items = EditorSession::instantiate_saved_fx_chain(&saved);
+                if !items.is_empty() {
+                    self.checkpoint();
+                    chain_copy.extend(items);
+                    changed = true;
+                    self.set_status(format!("Cadeia \"{}\" aplicada.", saved.name));
+                }
+            }
+        }
+        if let Some(ci) = delete_saved_chain {
+            if ci < self.prefs.fx_chains.len() {
+                self.prefs.fx_chains.remove(ci);
+                let _ = self.prefs.save();
+            }
+        }
+        if let Some(name) = confirm_save_chain {
+            if let Some(chain_pref) =
+                EditorSession::capture_saved_fx_chain(&name, audio, &chain_copy)
+            {
+                self.prefs
+                    .fx_chains
+                    .retain(|c| !(c.audio == audio && c.name == chain_pref.name));
+                self.prefs.fx_chains.push(chain_pref);
+                self.prefs.sanitize();
+                let _ = self.prefs.save();
+                self.dlg.save_chain_target = None;
+                self.set_status(format!("Cadeia \"{name}\" salva nas Preferências."));
+            }
+        }
+        if let Some((fx, name)) = confirm_save_preset {
+            let mut preset = neoveg_common::prefs::UserFxPresetPref {
+                name: name.clone(),
+                fx_kind: fx.kind.id().to_string(),
+                values: fx.values(local_t),
+            };
+            if preset.sanitize() {
+                self.prefs
+                    .user_fx_presets
+                    .retain(|p| !(p.fx_kind == preset.fx_kind && p.name == preset.name));
+                self.prefs.user_fx_presets.push(preset);
+                self.prefs.sanitize();
+                let _ = self.prefs.save();
+                self.dlg.save_preset_for = None;
+                self.set_status(format!("Preset \"{name}\" salvo para {}.", fx.kind.name()));
+            }
+        }
+        if export_chain_file {
+            if let Some(chain_pref) =
+                EditorSession::capture_saved_fx_chain("Cadeia exportada", audio, &chain_copy)
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Cadeia Neoveg FX", &["neovegfxchain", "json"])
+                    .set_file_name("cadeia.neovegfxchain")
+                    .save_file()
+                {
+                    match serde_json::to_string_pretty(&chain_pref) {
+                        Ok(json) => {
+                            if let Err(e) = std::fs::write(&path, json) {
+                                self.set_status(format!("Erro exportando cadeia: {e}"));
+                            } else {
+                                self.set_status("Cadeia de efeitos exportada.");
+                            }
+                        }
+                        Err(e) => self.set_status(format!("Erro serializando cadeia: {e}")),
+                    }
+                }
+            }
+        }
+        if import_chain_file {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Cadeia Neoveg FX", &["neovegfxchain", "json"])
+                .pick_file()
+            {
+                match std::fs::read_to_string(&path).ok().and_then(|s| {
+                    serde_json::from_str::<neoveg_common::prefs::SavedFxChainPref>(&s).ok()
+                }) {
+                    Some(mut pref) => {
+                        if pref.sanitize() && pref.audio == audio {
+                            let items = EditorSession::instantiate_saved_fx_chain(&pref);
+                            if !items.is_empty() {
+                                self.checkpoint();
+                                chain_copy.extend(items);
+                                changed = true;
+                                self.prefs
+                                    .fx_chains
+                                    .retain(|c| !(c.audio == audio && c.name == pref.name));
+                                self.prefs.fx_chains.push(pref);
+                                self.prefs.sanitize();
+                                let _ = self.prefs.save();
+                                self.set_status("Cadeia de efeitos importada e aplicada.");
+                            }
+                        } else {
+                            self.set_status(
+                                "Arquivo de cadeia incompatível (áudio/vídeo) ou inválido.",
+                            );
+                        }
+                    }
+                    None => self.set_status("Não foi possível ler a cadeia .neovegfxchain."),
+                }
+            }
+        }
+        if open_color_grading {
+            self.exec_cmd(Some(ctx), "view.tab.color_grading");
         }
         if changed {
             if let Some(chain) = self.fx_chain_mut(target) {
@@ -2358,6 +3827,7 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut start = false;
+        let mut send_encoder = false;
         let has_loop = self.project.loop_region.is_some();
         let pw = self.project.settings.width;
         let ph = self.project.settings.height;
@@ -2717,7 +4187,7 @@ impl App {
                     });
 
                     right.add_space(6.0);
-                    right.horizontal(|ui| {
+                    right.horizontal_wrapped(|ui| {
                         if icons::icon_button(
                             ui,
                             Icon::RenderClapper,
@@ -2730,6 +4200,19 @@ impl App {
                         {
                             start = true;
                         }
+                        if icons::icon_button(
+                            ui,
+                            Icon::EncoderQueue,
+                            Some(tr(lang, "Enviar para o Encoder")),
+                            false,
+                            true,
+                            &self.theme,
+                        )
+                        .on_hover_text(tr(lang, "Adiciona a timeline à fila em lote do Neoveg Encoder"))
+                        .clicked()
+                        {
+                            send_encoder = true;
+                        }
                         if ui.button(tr(lang, "Cancelar")).clicked() {
                             cancel_btn = true;
                         }
@@ -2738,6 +4221,10 @@ impl App {
             });
 
         if cancel_btn {
+            open = false;
+        }
+        if send_encoder {
+            self.send_timeline_to_encoder();
             open = false;
         }
 
@@ -3128,7 +4615,7 @@ impl App {
         };
         let def_w = 690.0_f32.min(max_w);
         let def_h = 500.0_f32.min(max_h);
-        let extra_wrap = if def_w < 460.0 { 26.0 } else { 0.0 };
+        let extra_wrap = if def_w < 460.0 { 44.0 } else { 0.0 };
         let body_h = (def_h - 108.0 - extra_wrap).max(110.0);
         let nav_inner_h = (body_h - 10.0).max(90.0);
 
@@ -3368,6 +4855,7 @@ impl App {
         if clear_cache_now {
             self.media.clear_frame_caches();
             self.thumbs.clear();
+            self.project_media.clear_thumbs();
             self.set_status(tr(self.lang(), "Cache de quadros e miniaturas liberado."));
         }
 
@@ -3780,6 +5268,8 @@ fn capture_shortcut(ctx: &egui::Context) -> Option<Option<Shortcut>> {
         (Key::Delete, ShortcutKey::Delete),
         (Key::F2, ShortcutKey::F2),
         (Key::F8, ShortcutKey::F8),
+        (Key::F11, ShortcutKey::F11),
+        (Key::Backtick, ShortcutKey::Backtick),
         (Key::ArrowLeft, ShortcutKey::ArrowLeft),
         (Key::ArrowRight, ShortcutKey::ArrowRight),
         (Key::ArrowUp, ShortcutKey::ArrowUp),
@@ -3789,6 +5279,8 @@ fn capture_shortcut(ctx: &egui::Context) -> Option<Option<Shortcut>> {
         (Key::OpenBracket, ShortcutKey::OpenBracket),
         (Key::CloseBracket, ShortcutKey::CloseBracket),
         (Key::Backslash, ShortcutKey::Backslash),
+        (Key::Equals, ShortcutKey::Equals),
+        (Key::Minus, ShortcutKey::Minus),
     ];
     for &(ek, sk) in KEYS {
         if ctx.input(|i| i.key_pressed(ek)) {
@@ -4221,10 +5713,15 @@ fn render_prefs_category(
         PrefsCategory::Appearance => prefs_appearance(ui, cx, draft, act),
         PrefsCategory::Editing => prefs_editing(ui, cx, draft, act),
         PrefsCategory::VideoPreview => prefs_video_preview(ui, cx, draft, act),
+        PrefsCategory::PreviewDevice => prefs_preview_device(ui, cx, draft),
         PrefsCategory::Audio => prefs_audio(ui, cx, draft, act),
+        PrefsCategory::AudioDevice => prefs_audio_device(ui, cx, draft),
+        PrefsCategory::MidiSyncControl => prefs_midi_sync(ui, cx, draft),
+        PrefsCategory::FileIo => prefs_file_io(ui, cx, draft),
         PrefsCategory::Memory => prefs_memory(ui, cx, draft, act),
         PrefsCategory::AutoSave => prefs_autosave(ui, cx, draft),
         PrefsCategory::Shortcuts => prefs_shortcuts(ui, cx, draft, act),
+        PrefsCategory::Integrations => prefs_integrations(ui, cx, draft),
     }
 }
 
@@ -4938,6 +6435,378 @@ fn prefs_shortcuts(
                 )
                 .wrap(),
             );
+        },
+    );
+}
+
+fn prefs_integrations(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    use neoveg_engine::integrations::{discovery::discover_app, ExternalApp};
+
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Suíte ArtCraft & Blender (Executáveis Manuais / Autodetecção)",
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Deixe vazio para detectar no PATH ou pastas padrão do sistema; defina manualmente se estiver em pasta portátil.",
+                )
+                .small()
+                .color(cx.theme.text_muted),
+            );
+            for app in ExternalApp::ALL {
+                let id = app.id();
+                let st = discover_app(app, &draft.external_apps, false);
+                let hint = if st.available() {
+                    st.desktop_exe
+                        .as_ref()
+                        .or(st.cli_exe.as_ref())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Detectado".into())
+                } else {
+                    "Automático".into()
+                };
+                if let Some(buf) = draft.external_apps.path_mut(id) {
+                    prefs_row(ui, inner_lw, &format!("{}:", app.name()), |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(buf)
+                                .desired_width(210.0)
+                                .hint_text(&hint),
+                        );
+                        if ui.small_button("...").clicked() {
+                            let mut fd = rfd::FileDialog::new();
+                            if cfg!(windows) {
+                                fd = fd.add_filter("Executável", &["exe"]);
+                            }
+                            if let Some(p) = fd.pick_file() {
+                                *buf = p.to_string_lossy().to_string();
+                            }
+                        }
+                        if !buf.is_empty() && ui.small_button("Limpar").clicked() {
+                            buf.clear();
+                        }
+                    });
+                }
+            }
+        },
+    );
+
+    prefs_group_box(ui, cx.theme, "Comportamento de Controle e Takes", |ui| {
+        prefs_row(ui, inner_lw, "Tempo limite RPC / CLI:", |ui| {
+            ui.add_sized(
+                [72.0, 20.0],
+                egui::DragValue::new(&mut draft.external_apps.rpc_timeout_secs)
+                    .range(5..=300)
+                    .speed(1),
+            );
+            ui.label("segundos (5–300 s)");
+        });
+        prefs_indented(ui, inner_lw, |ui| {
+            ui.checkbox(
+                &mut draft.external_apps.watch_edited_copies,
+                "Recarregar automaticamente cópias editadas salvas externamente",
+            );
+        });
+    });
+}
+
+fn prefs_preview_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Dispositivo de Prévia Secundário (p. 1061)",
+        |ui| {
+            let mode_label = match draft.preview_device.device_mode.as_str() {
+                "window" => "Janela destacável no editor",
+                "external_deck" => "Monitor externo / Saída secundária dedicada",
+                _ => "Monitor secundário do Windows (Tela cheia)",
+            };
+            prefs_row(ui, inner_lw, "Dispositivo de saída:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_prev_dev_mode")
+                    .selected_text(mode_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.preview_device.device_mode,
+                            "secondary_monitor".into(),
+                            "Monitor secundário do Windows (Tela cheia)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.preview_device.device_mode,
+                            "window".into(),
+                            "Janela destacável no editor",
+                        );
+                        ui.selectable_value(
+                            &mut draft.preview_device.device_mode,
+                            "external_deck".into(),
+                            "Monitor externo / Saída secundária dedicada",
+                        );
+                    });
+            });
+            prefs_row(ui, inner_lw, "Nível de fundo (cinza):", |ui| {
+                ui.add_sized(
+                    [64.0, 20.0],
+                    egui::DragValue::new(&mut draft.preview_device.bg_gray).range(0..=48),
+                );
+            });
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.preview_device.scale_to_fit,
+                    "Ajustar imagem para caber mantendo a proporção (Scale to Fit)",
+                );
+                ui.checkbox(
+                    &mut draft.preview_device.match_project_fps,
+                    "Sincronizar taxa de atualização com os quadros por segundo do projeto",
+                );
+                ui.checkbox(
+                    &mut draft.preview_device.show_alpha_checkerboard,
+                    "Exibir quadriculado para áreas transparentes (Canal Alfa)",
+                );
+            });
+        },
+    );
+}
+
+fn prefs_audio_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Driver e Dispositivo de Áudio (p. 1075)",
+        |ui| {
+            let drv_label = match draft.audio_device.driver_mode.as_str() {
+                "wasapi_shared" => "WASAPI Compartilhado (Windows)",
+                "wasapi_exclusive" => "WASAPI Exclusivo (Baixa latência)",
+                "low_latency" => "Modo Baixa Latência",
+                _ => "Mapper / Padrão do Sistema Operacional (cpal)",
+            };
+            prefs_row(ui, inner_lw, "Tipo de dispositivo:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_aud_dev_drv")
+                    .selected_text(drv_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "os_default".into(),
+                            "Mapper / Padrão do Sistema Operacional (cpal)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "wasapi_shared".into(),
+                            "WASAPI Compartilhado (Windows)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "wasapi_exclusive".into(),
+                            "WASAPI Exclusivo (Baixa latência)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "low_latency".into(),
+                            "Modo Baixa Latência",
+                        );
+                    });
+            });
+            prefs_ro_row(
+                ui,
+                cx.theme,
+                inner_lw,
+                "Dispositivo ativo no motor:",
+                &format!("{} ({} Hz)", cx.audio_device, cx.audio_sr),
+                false,
+            );
+            prefs_row(ui, inner_lw, "Dispositivo preferencial:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.audio_device.preferred_device)
+                        .desired_width(210.0)
+                        .hint_text("Automático (padrão do SO)"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Tamanho do buffer (latência):", |ui| {
+                ui.add_sized(
+                    [68.0, 20.0],
+                    egui::DragValue::new(&mut draft.audio_device.buffer_ms)
+                        .range(5..=250)
+                        .suffix(" ms"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Compensação de gravação:", |ui| {
+                ui.add_sized(
+                    [68.0, 20.0],
+                    egui::DragValue::new(&mut draft.audio_device.record_offset_ms)
+                        .range(-500..=500)
+                        .suffix(" ms"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Pasta padrão de gravações:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.audio_device.default_record_dir)
+                        .desired_width(200.0)
+                        .hint_text("Pasta do projeto / temporária"),
+                );
+                if ui.small_button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        draft.audio_device.default_record_dir = d.to_string_lossy().into_owned();
+                    }
+                }
+            });
+        },
+    );
+}
+
+fn prefs_midi_sync(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "MIDI e Sincronização MTC / SMPTE (p. 1090)",
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.midi_sync.mtc_input_enabled,
+                    "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+                );
+                ui.checkbox(
+                    &mut draft.midi_sync.mtc_output_enabled,
+                    "Enviar código de tempo MIDI (Gerador MTC para dispositivos externos)",
+                );
+            });
+            prefs_row(ui, inner_lw, "Porta de entrada MIDI:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.midi_sync.midi_in_device)
+                        .desired_width(210.0)
+                        .hint_text("Nenhuma / Todas"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Porta de saída MIDI:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.midi_sync.midi_out_device)
+                        .desired_width(210.0)
+                        .hint_text("Nenhuma"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Taxa de quadros de Sync:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_sync_fps")
+                    .selected_text(format!("{} qps", draft.midi_sync.sync_fps))
+                    .show_ui(ui, |ui| {
+                        for f in ["24", "25", "29.97", "30"] {
+                            ui.selectable_value(
+                                &mut draft.midi_sync.sync_fps,
+                                f.to_string(),
+                                format!("{f} qps SMPTE"),
+                            );
+                        }
+                    });
+            });
+            prefs_row(ui, inner_lw, "Deslocamento de Sync:", |ui| {
+                ui.add_sized(
+                    [76.0, 20.0],
+                    egui::DragValue::new(&mut draft.midi_sync.sync_offset_ms)
+                        .range(-60_000..=60_000)
+                        .suffix(" ms"),
+                );
+            });
+        },
+    );
+
+    prefs_group_box(ui, cx.theme, "Dispositivos de Controle Externo", |ui| {
+        prefs_indented(ui, inner_lw, |ui| {
+            ui.checkbox(
+                &mut draft.midi_sync.control_surface_enabled,
+                "Ativar superfície de controle externa (faders e transporte)",
+            );
+        });
+        prefs_row(ui, inner_lw, "Protocolo da superfície:", |ui| {
+            egui::ComboBox::from_id_salt("prefs_ctrl_proto")
+                .selected_text(match draft.midi_sync.control_surface_protocol.as_str() {
+                    "generic_cc" => "MIDI CC Genérico",
+                    "osc" => "Open Sound Control (OSC)",
+                    _ => "Mackie Control Universal",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut draft.midi_sync.control_surface_protocol,
+                        "mackie".into(),
+                        "Mackie Control Universal",
+                    );
+                    ui.selectable_value(
+                        &mut draft.midi_sync.control_surface_protocol,
+                        "generic_cc".into(),
+                        "MIDI CC Genérico",
+                    );
+                    ui.selectable_value(
+                        &mut draft.midi_sync.control_surface_protocol,
+                        "osc".into(),
+                        "Open Sound Control (OSC)",
+                    );
+                });
+        });
+        prefs_row(ui, inner_lw, "Sensibilidade dos controles:", |ui| {
+            ui.add(
+                egui::Slider::new(&mut draft.midi_sync.control_surface_sensitivity, 0.2..=3.0)
+                    .fixed_decimals(2),
+            );
+        });
+    });
+}
+
+fn prefs_file_io(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Entrada / Saída e Hardware de Vídeo (p. 1105)",
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.file_io.hardware_accel_decode,
+                    "Ativar decodificação de vídeo acelerada por hardware (GPU/SO)",
+                );
+                ui.checkbox(
+                    &mut draft.file_io.hardware_accel_encode,
+                    "Usar aceleração por hardware na renderização quando suportado",
+                );
+                ui.checkbox(
+                    &mut draft.file_io.prefer_system_demuxer,
+                    "Priorizar leitores nativos do sistema operacional para MP4/MOV",
+                );
+                ui.checkbox(
+                    &mut draft.file_io.auto_build_proxies_4k,
+                    "Sugerir/gerar proxies automaticamente para mídias 4K ou superiores",
+                );
+            });
+            prefs_row(ui, inner_lw, "FPS de sequências de imagem:", |ui| {
+                ui.add_sized(
+                    [76.0, 20.0],
+                    egui::DragValue::new(&mut draft.file_io.image_sequence_fps)
+                        .range(1.0..=120.0)
+                        .fixed_decimals(2),
+                );
+            });
+            prefs_row(ui, inner_lw, "Pasta padrão de projetos:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.file_io.default_project_dir)
+                        .desired_width(200.0)
+                        .hint_text("Padrão do sistema"),
+                );
+                if ui.small_button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        draft.file_io.default_project_dir = d.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            prefs_row(ui, inner_lw, "Pasta de arquivos proxy:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.file_io.default_proxy_dir)
+                        .desired_width(200.0)
+                        .hint_text("Mesma pasta da mídia original"),
+                );
+                if ui.small_button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        draft.file_io.default_proxy_dir = d.to_string_lossy().into_owned();
+                    }
+                }
+            });
         },
     );
 }

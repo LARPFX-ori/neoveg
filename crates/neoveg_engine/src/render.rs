@@ -675,8 +675,25 @@ fn run_audio_only_with_pause(
 
     let mut mixer = Mixer::new_offline(sr);
     let am = media.audio_map();
-    let mut pos = start_sample;
     let mut buf = vec![0f32; 8192 * ch];
+    // Compensação de latência dos plug-ins (PDC): enche a linha de atraso e
+    // lê o projeto adiantado em `pdc` amostras.
+    let pdc = mixer.total_latency(p) as i64;
+    let mut pre = 0_i64;
+    while pre < pdc {
+        if prog.cancel.load(Ordering::Relaxed) {
+            bail!("cancelado");
+        }
+        let n = ((pdc - pre) as usize).min(8192);
+        let slice = &mut buf[..n * ch];
+        if ch == 2 {
+            mixer.process(p, &am, start_sample.saturating_add(pre), slice);
+        } else {
+            mixer.process_multichannel(p, &am, start_sample.saturating_add(pre), slice);
+        }
+        pre += n as i64;
+    }
+    let mut pos = start_sample;
     while pos < end_sample {
         if prog.cancel.load(Ordering::Relaxed) {
             bail!("cancelado");
@@ -685,9 +702,9 @@ fn run_audio_only_with_pause(
         let n = ((end_sample - pos) as usize).min(8192);
         let slice = &mut buf[..n * ch];
         if ch == 2 {
-            mixer.process(p, &am, pos, slice);
+            mixer.process(p, &am, pos.saturating_add(pdc), slice);
         } else {
-            mixer.process_multichannel(p, &am, pos, slice);
+            mixer.process_multichannel(p, &am, pos.saturating_add(pdc), slice);
         }
         match &mut sink {
             AudioSink::Wav(w) => w.write(slice)?,
@@ -761,6 +778,9 @@ pub fn run_with_options(
     let audio_map = media.audio_map();
     let has_audio = s.include_audio && !audio_map.is_empty();
     let mut mixer = Mixer::new_offline(sr);
+    // Compensação de latência dos plug-ins (PDC): o áudio é lido adiantado
+    // em `pdc` amostras para alinhar com o vídeo.
+    let pdc = mixer.total_latency(p) as i64;
 
     #[cfg(windows)]
     type MfVideoEnc = crate::media::mf::encode::MfSinkEncoder;
@@ -892,6 +912,21 @@ pub fn run_with_options(
     };
 
     let batch = rayon::current_num_threads().clamp(1, 8) as u64;
+    if has_audio && pdc > 0 {
+        let mut pre = 0_i64;
+        let base = sample_at(0);
+        let mut prime_buf = vec![0f32; 8192 * 2];
+        while pre < pdc {
+            let n = ((pdc - pre) as usize).min(8192);
+            mixer.process(
+                p,
+                &audio_map,
+                base.saturating_add(pre),
+                &mut prime_buf[..n * 2],
+            );
+            pre += n as i64;
+        }
+    }
     let mut i = 0u64;
     let quality = s.jpeg_quality.clamp(10, 100);
     let (src_w, src_h) = opts
@@ -1007,7 +1042,7 @@ pub fn run_with_options(
                 let a1 = sample_at(fi + 1);
                 let n = (a1 - a0).max(0) as usize;
                 let mut buf = vec![0f32; n * 2];
-                mixer.process(p, &audio_map, a0, &mut buf);
+                mixer.process(p, &audio_map, a0.saturating_add(pdc), &mut buf);
                 match (&mut sink, &mut side_wav) {
                     (Sink::Avi(wr), _) => wr.write_audio(&to_i16(&buf))?,
                     #[cfg(windows)]

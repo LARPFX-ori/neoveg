@@ -7,7 +7,12 @@ use egui_kittest::Harness;
 
 fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
     let _lock = lock_test_prefs();
-    let mut app = App::with_context_in(&cc.egui_ctx, None, Some(neoveg_common::Language::PtBr));
+    let mut app = {
+        let _prefs_read = crate::tests::PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context_in(&cc.egui_ctx, None, Some(neoveg_common::Language::PtBr))
+    };
     app.splash.active = false;
     app.pending_welcome_after_splash = false;
     app.dismiss_welcome();
@@ -126,7 +131,10 @@ fn kittest_layout_salvo_e_preferencias_navegacao() {
     // Salva e recarrega `.neoveglayout` preservando a árvore do egui_tiles.
     let snap = harness.state().current_window_layout("Teste Kittest");
     assert!(snap.tile_tree.is_some());
-    let path = std::env::temp_dir().join("neoveg_kittest_layout.neoveglayout");
+    let path = std::env::temp_dir().join(format!(
+        "neoveg_kittest_layout_{}.neoveglayout",
+        std::process::id()
+    ));
     crate::layout::save_layout_file(&snap, &path).expect("gravação do layout de teste");
     let loaded = crate::layout::load_layout_file(&path).expect("leitura do layout de teste");
     let _ = std::fs::remove_file(&path);
@@ -1260,4 +1268,759 @@ fn kittest_i18n_welcome_combo_idioma_e_criar_projeto_ja() {
     harness.run_steps(3);
     assert!(!harness.state().is_welcome_open());
     assert_eq!(harness.state().lang(), Language::Ja);
+}
+
+#[test]
+fn kittest_encoder_visivel_na_barra_e_em_renderizar_como() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // O botão "Encoder" fica visível diretamente na barra superior ao iniciar.
+    harness.get_by_label("Encoder").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+
+    // Em "Renderizar como", "Enviar para o Encoder" enfileira a timeline e foca o Encoder.
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut();
+        app.exec_cmd(Some(&ctx), "view.tab.project_media");
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.exec_cmd(Some(&ctx), "file.render");
+    }
+    harness.run_steps(2);
+    assert!(harness.state().dlg.render.is_some());
+
+    let before = harness.state().encoder.state.items.len();
+    harness.get_by_label("Enviar para o Encoder").click();
+    harness.run_steps(3);
+
+    assert!(harness.state().dlg.render.is_none());
+    assert_eq!(harness.state().dock_tab, DockTab::Encoder);
+    assert_eq!(harness.state().encoder.state.items.len(), before + 1);
+}
+
+#[test]
+fn kittest_janela_integracoes_artcraft_e_blender() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "tools.integrations");
+    harness.run_steps(3);
+    assert!(harness.state().integrations.open);
+
+    for name in [
+        "PhotoCraft",
+        "VectorCraft",
+        "FilmCraft",
+        "EffectCraft",
+        "AniCraft",
+        "SoundCraft",
+        "Blender",
+    ] {
+        assert!(
+            harness.query_by_label(name).is_some(),
+            "app '{name}' deve aparecer na janela de Integrações"
+        );
+    }
+
+    harness.get_by_label("Configurar caminhos...").click();
+    harness.run_steps(3);
+    assert!(harness.state().dlg.prefs_open);
+    assert_eq!(
+        harness.state().dlg.prefs_tab,
+        crate::dialogs::PrefsCategory::Integrations
+    );
+}
+
+#[test]
+fn kittest_seletor_modos_ferramenta_normal_e_colar_atributos() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // Abre o seletor de modos da ferramenta Normal na barra e alterna para Shuffle.
+    harness
+        .get_by_label("Selecionar modo da ferramenta Normal")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label("Modo Shuffle (reordenar)").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().session.edit_mode,
+        neoveg_engine::session::EditMode::Shuffle
+    );
+
+    // Prepara dois eventos, copia atributos e testa o diálogo Colar atributos seletivamente.
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut();
+        app.session.sel_track = Some(0);
+        app.cursor = crate::model::Ticks::ZERO;
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.cursor = crate::model::Ticks::from_secs_i64(6);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.4, 0.8, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let ids: Vec<crate::model::Id> =
+            app.project.tracks[0].events.iter().map(|e| e.id).collect();
+        if let Some(ev0) = app.project.event_mut(ids[0]) {
+            ev0.fade_in.len = crate::model::Ticks::from_secs_i64(1);
+        }
+        app.sel_events.clear();
+        app.sel_events.insert(ids[0]);
+        app.copy_selection();
+        app.sel_events.clear();
+        app.sel_events.insert(ids[1]);
+        app.exec_cmd(Some(&ctx), "edit.paste_attributes_selective");
+    }
+    harness.run_steps(2);
+    assert!(harness.state().dlg.paste_attrs_open);
+
+    harness.get_by_label("Aplicar").click();
+    harness.run_steps(2);
+    assert!(!harness.state().dlg.paste_attrs_open);
+    let ev1_id = *harness.state().sel_events.iter().next().unwrap();
+    assert_eq!(
+        harness.state().project.event(ev1_id).unwrap().fade_in.len,
+        crate::model::Ticks::from_secs_i64(1)
+    );
+}
+
+#[test]
+fn kittest_take_chooser_pitch_evento_vazio_e_eixo() {
+    use neoveg_engine::{model::Take, session::BoxAxisMode, takes};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Inserir evento vazio pela Tabela Única.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.empty_event");
+    harness.run_steps(2);
+    let empty_id = *harness.state().sel_events.iter().next().unwrap();
+    assert_eq!(
+        harness.state().project.event(empty_id).unwrap().name,
+        "Evento vazio"
+    );
+
+    // 2. Inserir dois geradores na trilha de vídeo e adicionar take alternativo -> abrir Take Chooser.
+    {
+        let app = harness.state_mut();
+        app.session.sel_track = Some(0);
+        app.cursor = crate::model::Ticks::from_secs_i64(8);
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.cursor = crate::model::Ticks::from_secs_i64(15);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.8, 0.2, 0.2, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let ev_vid_id = app.project.tracks[0].events[1].id;
+        let mid2 = app.project.media.last().unwrap().id;
+        if let Some(ev) = app.project.event_mut(ev_vid_id) {
+            assert!(takes::add_take(
+                ev,
+                Take {
+                    media_id: mid2,
+                    offset: crate::model::Ticks::ZERO,
+                    name: "Take B".into(),
+                },
+                true
+            ));
+        }
+        app.sel_events.clear();
+        app.sel_events.insert(ev_vid_id);
+        app.exec_cmd(Some(&ctx), "event.take_chooser");
+    }
+    harness.run_steps(3);
+    assert!(harness.state().dlg.take_chooser.is_some());
+    assert!(harness.query_by_label("Takes do evento (2 de 2)").is_some());
+
+    // Seleciona primeiro take, confirma OK e verifica mudança do ativo.
+    let ev_vid_id = harness.state().dlg.take_chooser.unwrap();
+    harness.get_by_label("1. Barras de cor").click();
+    harness.run_steps(2);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert!(harness.state().dlg.take_chooser.is_none());
+    assert_eq!(
+        takes::active_index(harness.state().project.event(ev_vid_id).unwrap()),
+        0
+    );
+
+    // 3. Seletor de eixo na barra de ferramentas quando Seleção está ativa.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "edit.tool.selection");
+    harness.run_steps(2);
+    harness
+        .get_by_label("Selecionar eixo de Seleção/Zoom")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label("Apenas horizontal").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().session.box_axis, BoxAxisMode::Horizontal);
+}
+
+#[test]
+fn kittest_modo_expandido_deteccao_cenas_e_armar_gravacao() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    {
+        let app = harness.state_mut();
+        app.session.sel_track = Some(0);
+        app.cursor = crate::model::Ticks::ZERO;
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.cursor = crate::model::Ticks::from_secs_i64(5);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.1, 0.7, 0.2, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let ev0 = app.project.tracks[0].events[0].id;
+        app.sel_events.clear();
+        app.sel_events.insert(ev0);
+    }
+    harness.run_steps(2);
+
+    // 1. Diálogo Detectar cenas e cortes abre e fecha limpo.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "edit.detect_scenes");
+    harness.run_steps(2);
+    assert!(harness.state().dlg.scene_detect.is_some());
+    assert!(harness.query_by_label("Analisar clipe").is_some());
+    harness.get_by_label("Fechar").click();
+    harness.run_steps(2);
+    assert!(harness.state().dlg.scene_detect.is_none());
+
+    // 2. Modo de edição expandido ativa controles A/B na Prévia de Vídeo e nudges.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "edit.expanded_edit_mode");
+    harness.run_steps(4);
+    assert!(harness.state().session.expanded_edit.is_some());
+    assert!(harness.query_by_label("Ambos (Roll)").is_some());
+    harness.get_by_label("Saída esquerda (Out)").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .state()
+            .session
+            .expanded_edit
+            .as_ref()
+            .unwrap()
+            .focus,
+        neoveg_engine::session::ExpandedEdgeFocus::LeftOut
+    );
+
+    // 3. Armar faixa de áudio para gravação no cabeçalho da faixa.
+    harness.get_by_label("Armar gravação").click();
+    harness.run_steps(2);
+    assert!(harness.state().project.tracks[1].record_armed);
+}
+
+#[test]
+fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // Insere duas mídias geradas no projeto e seleciona a aba Mídia do Projeto.
+    {
+        let app = harness.state_mut();
+        let imp1 = neoveg_engine::media::import_generated(crate::model::GenSpec::ColorBars);
+        let id1 = imp1.item.id;
+        app.media.insert(id1, imp1.entry);
+        app.session.register_imported_media(imp1.item, None);
+        let imp2 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.5, 0.9, 1.0],
+        });
+        let id2 = imp2.item.id;
+        app.media.insert(id2, imp2.entry);
+        app.session.register_imported_media(imp2.item, None);
+        app.add_media_to_timeline(id1, crate::model::Ticks::ZERO, Some(0));
+        app.session.active_media_id = Some(id1);
+        app.dock_tab = DockTab::ProjectMedia;
+        app.pending_dock_focus = Some(DockTab::ProjectMedia);
+    }
+    harness.run_steps(2);
+
+    // 1. Criar pasta manual (Bin) e pasta inteligente personalizada pela UI.
+    harness.get_by_label("Nova pasta (Bin)").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.media_bins.len(), 1);
+
+    harness.get_by_label("Nova pasta inteligente").click();
+    harness.run_steps(2);
+    assert!(harness.state().project_media.smart_dialog_open);
+    harness.get_by_label("Salvar filtro").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.smart_bins.len(), 1);
+
+    // 2. Alternar entre modos Lista, Detalhes e Storyboard.
+    harness.get_by_label("Lista").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project_media.view_mode,
+        crate::project_media::MediaViewMode::List
+    );
+
+    harness.get_by_label("Detalhes").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project_media.view_mode,
+        crate::project_media::MediaViewMode::Details
+    );
+
+    // 3. Selecionar eventos na timeline e trocar mídia mantendo os eventos.
+    let (id1, id2) = {
+        let app = harness.state();
+        (app.project.media[0].id, app.project.media[1].id)
+    };
+    harness.state_mut().session.sel_events.clear();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "media.select_events");
+    harness.run_steps(1);
+    assert_eq!(harness.state().sel_events.len(), 1);
+    assert_eq!(
+        harness.state_mut().session.swap_media_references(id1, id2),
+        1
+    );
+    assert_eq!(harness.state().project.tracks[0].events[0].media_id, id2);
+
+    // 4. Storyboard: criar, adicionar mídia e inserir na linha do tempo.
+    harness.get_by_label("Storyboard").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.storyboards.len(), 1);
+    let sb_id = harness.state().project.storyboards[0].id;
+    harness.state_mut().session.active_media_id = Some(id2);
+    harness.get_by_label("+ Adicionar selecionada").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.storyboards[0].items.len(), 1);
+    harness.state_mut().cursor = crate::model::Ticks::from_secs_i64(10);
+    let before = harness.state().project.tracks[0].events.len();
+    harness
+        .get_by_label("Inserir storyboard na timeline")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.tracks[0].events.len(), before + 1);
+    assert_eq!(harness.state().session.active_storyboard_id, Some(sb_id));
+}
+
+#[test]
+fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Botão de tela dividida alterna Bypass FX.
+    harness.get_by_label("Tela dividida").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().opts.preview_split_mode,
+        neoveg_engine::playback::PreviewSplitMode::FxBypass
+    );
+
+    // 2. Copiar quadro armazena buffer da área de transferência interna.
+    harness.get_by_label("Copiar quadro").click();
+    harness.run_steps(2);
+    assert!(harness.state().preview_clipboard.is_some());
+
+    // 3. Zoom dentro da prévia ajusta e restaura para Fit (1.0).
+    harness.state_mut().exec_cmd(Some(&ctx), "preview.zoom_in");
+    harness.run_steps(1);
+    assert!(harness.state().preview_zoom > 1.1);
+    harness.state_mut().exec_cmd(Some(&ctx), "preview.zoom_fit");
+    assert!((harness.state().preview_zoom - 1.0).abs() < 1e-4);
+
+    // 4. Silenciar áudio e vídeo da prévia via barra de ferramentas.
+    harness.get_by_label("Silenciar áudio da prévia").click();
+    harness.get_by_label("Silenciar vídeo da prévia").click();
+    harness.run_steps(2);
+    assert!(harness.state().opts.preview_mute_audio);
+    assert!(harness.state().opts.preview_mute_video);
+
+    // 5. Soltar efeito de vídeo na prévia aplica em Master Video Output FX.
+    assert!(harness
+        .state_mut()
+        .session
+        .apply_video_fx_to_output(crate::model::FxKind::Invert));
+    assert_eq!(harness.state().project.master.video_fx.len(), 1);
+
+    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo
+    // sem deslocar os botões estáticos da barra quando "Limpar RAM" aparece.
+    let ext_rect_before = harness.get_by_label("Monitor externo").raw_bounds();
+    harness.get_by_label("Prévia em RAM").click();
+    harness.run_steps(4);
+    if harness.state().ram_preview.frames.is_empty() {
+        let _ = harness
+            .state_mut()
+            .ram_preview
+            .insert_frame(0, image::RgbaImage::new(16, 16));
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Limpar RAM").is_some());
+    assert_eq!(
+        harness.get_by_label("Monitor externo").raw_bounds(),
+        ext_rect_before,
+        "botão Monitor externo não pode deslocar quando Limpar RAM aparece"
+    );
+    harness.get_by_label("Monitor externo").click();
+    harness.run_steps(2);
+    assert!(harness.state().external_monitor);
+}
+
+#[test]
+fn kittest_trilhas_pastas_comp_pai_filho_multicam_e_3d() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Pasta recolhível de trilhas e composição Pai/Filho via Tabela Única.
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.track_folder");
+    harness.run_steps(2);
+    assert!(harness.state().project.tracks[0].is_folder);
+    let child_id = harness.state().project.tracks[1].id;
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.toggle_folder");
+    harness.run_steps(2);
+    assert!(harness.state().project.is_track_hidden_by_folder(child_id));
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.toggle_folder");
+    harness.run_steps(2);
+    assert!(!harness.state().project.is_track_hidden_by_folder(child_id));
+
+    // 2. Grade Multicâmera e troca de ângulo na Prévia de Vídeo.
+    harness.state_mut().session.sel_track = Some(1);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.track_video");
+    harness.run_steps(1);
+    let imp1 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+        color: [1.0, 0.0, 0.0, 1.0],
+    });
+    let imp2 = neoveg_engine::media::import_generated(crate::model::GenSpec::SolidColor {
+        color: [0.0, 1.0, 0.0, 1.0],
+    });
+    {
+        let st = harness.state_mut();
+        st.media.insert(imp1.item.id, imp1.entry);
+        st.media.insert(imp2.item.id, imp2.entry);
+        let ev1 = crate::model::Event::new(
+            &imp1.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(4),
+        );
+        let ev2 = crate::model::Event::new(
+            &imp2.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(4),
+        );
+        st.project.media.extend([imp1.item, imp2.item]);
+        st.project.tracks[1].events.push(ev1);
+        st.project.tracks[2].events.push(ev2);
+        st.session.sel_events.clear();
+        let _ = st.session.create_multicam_track();
+    }
+    harness.run_steps(2);
+    assert!(harness.state().opts.multicam_mode);
+    harness.get_by_label("Câmera 2").click();
+    harness.run_steps(2);
+    let (_, _, _, active, _) = harness
+        .state()
+        .session
+        .active_multicam_event_at(crate::model::Ticks::ZERO)
+        .expect("multicamera ativa");
+    assert_eq!(active, 1);
+
+    // 3. Alternar modo 3D Estereoscópico pelo botão da Prévia.
+    harness.get_by_label("Modo 3D Estereoscópico").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.settings.stereo_3d,
+        crate::model::Stereo3dMode::AnaglyphRedCyan
+    );
+}
+
+#[test]
+fn kittest_efeitos_cadeias_lut_curvas_legendas_e_bypass_audio() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // Prepara mídia gerada animada, evento selecionado e uma região na timeline.
+    let ev_id = {
+        let st = harness.state_mut();
+        let imp = neoveg_engine::media::import_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec {
+                text: "Cena teste".into(),
+                anim: crate::model::TextAnim::CrawlLeft,
+                anim_duration: 2.0,
+                ..crate::model::TextSpec::default()
+            },
+        ));
+        let ev = crate::model::Event::new(
+            &imp.item,
+            crate::model::Ticks::ZERO,
+            crate::model::Ticks::from_secs_i64(2),
+        );
+        let ev_id = ev.id;
+        st.media.insert(imp.item.id, imp.entry);
+        st.project.media.push(imp.item);
+        st.project.tracks[0].events.push(ev);
+        st.project.regions.push(crate::model::Region {
+            id: crate::model::new_id(),
+            start: crate::model::Ticks::ZERO,
+            end: crate::model::Ticks::from_secs_i64(2),
+            label: "Fala inicial".into(),
+        });
+        st.session.sel_events.insert(ev_id);
+        st.changed();
+        ev_id
+    };
+    harness.run_steps(2);
+
+    // 1. Janela de FX do evento: adiciona Sépia, salva cadeia e salva preset próprio.
+    harness.state_mut().exec_cmd(Some(&ctx), "tools.fx_event");
+    harness.run_steps(2);
+    {
+        let st = harness.state_mut();
+        if let Some(ev) = st.project.event_mut(ev_id) {
+            ev.fx
+                .push(crate::model::FxInstance::new(crate::model::FxKind::Sepia));
+            ev.fx.push(crate::model::FxInstance::new(
+                crate::model::FxKind::ColorCorrector,
+            ));
+        }
+        st.changed();
+    }
+    harness.run_steps(2);
+    harness.get_by_label("Salvar cadeia...").click();
+    harness.run_steps(2);
+    harness.get_by_label("Salvar").click();
+    harness.run_steps(2);
+    assert!(!harness.state().prefs.fx_chains.is_empty());
+
+    // 2. Painel Color Grading mostra LUT, Curvas RGB e Curvas HSL.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.color_grading");
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("LUT de Câmera / Look (.cube)")
+        .is_some());
+    assert!(harness.query_by_label("Curvas RGB").is_some());
+    assert!(harness.query_by_label("Curvas HSL (6 setores)").is_some());
+
+    // 3. Legendas a partir das regiões via Tabela Única.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.subtitles_from_regions");
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .tracks
+        .iter()
+        .any(|t| t.name.starts_with("Legendas") && !t.events.is_empty()));
+
+    // 4. Bypass global de FX de áudio no Mixer e Opções.
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.mixer");
+    harness.run_steps(2);
+    harness.get_by_label("Bypass FX").click();
+    harness.run_steps(2);
+    assert!(harness.state().opts.bypass_all_audio_fx);
+
+    // 5. Rastreamento de movimento grava keyframes no Pan/Crop.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "tools.motion_track");
+    harness.run_steps(2);
+    harness.get_by_label("Rastrear e aplicar keyframes").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .project
+            .event(ev_id)
+            .expect("ev")
+            .pan_crop
+            .keys
+            .len()
+            >= 2
+    );
+}
+
+#[test]
+fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
+    struct PrefsBackup {
+        path: std::path::PathBuf,
+        prev: Option<Vec<u8>>,
+    }
+    impl Drop for PrefsBackup {
+        fn drop(&mut self) {
+            let _w = crate::tests::PREFS_LOCK
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &self.prev {
+                Some(bytes) => {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+    let prefs_path = Preferences::file_path();
+    let prev_prefs = {
+        let _r = crate::tests::PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::read(&prefs_path).ok()
+    };
+    let _prefs_backup = PrefsBackup {
+        path: prefs_path,
+        prev: prev_prefs,
+    };
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.state_mut().prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Barra de ferramentas personalizável.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.customize_toolbar");
+    harness.run_steps(2);
+    let before_tb = harness.state().prefs.toolbar_buttons.len();
+    harness.get_by_label("＋ Separador (|)").click();
+    harness.run_steps(1);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().prefs.toolbar_buttons.len(), before_tb + 1);
+
+    // 2. Grade da régua e Encaixar na grade.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.snap_to_grid");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.grid_cycle");
+    harness.run_steps(2);
+    assert!(harness.state().opts.snap_to_grid);
+    assert_ne!(
+        harness.state().opts.ruler_grid,
+        neoveg_engine::session::RulerGridSpacing::Auto
+    );
+
+    // 3. Marcadores de CD (faixa/índice) e Marcador de Comando.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_track");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_index");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_command");
+    harness.run_steps(2);
+    harness.get_by_label("Inserir marcador").click();
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdTrack));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdIndex));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::Command));
+
+    // 4. Modos de automação (Off / Read / Touch / Latch).
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.cycle_automation");
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.tracks[0].automation_mode,
+        crate::model::AutomationMode::Touch
+    );
+
+    // 5. Divisor de largura do cabeçalho de trilha recolhe progressivamente e restaura (p. 69).
+    assert!(harness
+        .query_by_label("Divisor de largura dos cabeçalhos")
+        .is_some());
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w < 100.0);
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w >= 180.0);
+
+    // 6. Novas abas de Preferências (Dispositivo de Prévia, Dispositivo de Áudio, MIDI/Sync, File I/O).
+    harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+    harness.run_steps(2);
+    for (tab_lbl, expected_txt) in [
+        (
+            "Dispositivo de Prévia",
+            "Dispositivo de Prévia Secundário (p. 1061)",
+        ),
+        ("Dispositivo de Áudio", "Compensação de gravação:"),
+        (
+            "MIDI / Sync / Controle",
+            "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+        ),
+        ("E/S de Arquivos (File I/O)", "FPS de sequências de imagem:"),
+    ] {
+        harness.get_by_label(tab_lbl).click();
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label(expected_txt).is_some(),
+            "aba '{tab_lbl}' não exibiu '{expected_txt}'"
+        );
+    }
 }

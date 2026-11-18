@@ -6,6 +6,8 @@ use crate::model::*;
 use eframe::egui::Key;
 use egui::{pos2, vec2, Event, Modifiers, PointerButton, Pos2};
 
+pub(super) static PREFS_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 fn raw(events: Vec<Event>, modifiers: Modifiers, t: f64) -> egui::RawInput {
     egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1500.0, 920.0))),
@@ -45,7 +47,7 @@ fn press(p: Pos2, down: bool) -> Event {
 }
 
 fn make_avi() -> PathBuf {
-    let path = std::env::temp_dir().join("nvov_ui_smoke.avi");
+    let path = std::env::temp_dir().join(format!("nvov_ui_smoke_{}.avi", std::process::id()));
     let mut w =
         crate::media::avi::AviWriter::create(&path, 160, 90, FrameRate::FPS_25, Some(48000))
             .unwrap();
@@ -87,6 +89,9 @@ fn ui_smoke() {
         }
     }
     let lock = crate::kittest_tests::lock_test_prefs();
+    let _prefs_lock = PREFS_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let prefs_path = crate::Preferences::file_path();
     let _prefs_guard = PrefsGuard {
         _lock: lock,
@@ -258,7 +263,7 @@ fn ui_smoke() {
     frame(&mut app, vec![], Modifiers::NONE);
 
     // salvar / abrir projeto (.neoveg e retrocompatibilidade .nvp)
-    let pp = std::env::temp_dir().join("neoveg_ui_smoke.neoveg");
+    let pp = std::env::temp_dir().join(format!("neoveg_ui_smoke_{}.neoveg", std::process::id()));
     assert!(app.write_project(&pp));
     app.open_project_path(pp.clone());
     for _ in 0..100 {
@@ -733,9 +738,9 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     assert!(app.dlg.prefs_open);
     for (idx, cat) in crate::dialogs::PrefsCategory::ALL.iter().enumerate() {
         app.dlg.prefs_tab = *cat;
-        let t0 = 4.0 + idx as f64 * 0.1;
+        let t0 = 4.0 + idx as f64 * 0.04;
         let _ = ctx.run(small_raw(t0), |c| app.frame_ui(c));
-        let out = ctx.run(small_raw(t0 + 0.05), |c| app.frame_ui(c));
+        let out = ctx.run(small_raw(t0 + 0.02), |c| app.frame_ui(c));
         let mut texts = Vec::new();
         for clipped in &out.shapes {
             collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);
@@ -872,4 +877,403 @@ fn assert_welcome_ui_layout(app: &mut App) {
     if !prev_open {
         app.dismiss_welcome();
     }
+}
+
+/// Ferramentas de edição na linha do tempo (manual do VEGAS Pro 21, p. 236):
+/// Envelope não move eventos, Seleção seleciona pela caixa sem mover, Zoom
+/// aproxima pela caixa e ajusta o projeto com um clique, e o modo Slip da
+/// Normal desliza a mídia sem mover o evento.
+#[test]
+fn ferramentas_de_edicao_na_timeline() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0;
+    let mut frame = |app: &mut App, ev: Vec<Event>| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, Modifiers::NONE, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![]);
+    app.dismiss_splash();
+    frame(&mut app, vec![]);
+    app.dismiss_welcome();
+    app.session.sel_track = Some(0);
+    app.cursor = Ticks::ZERO;
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(6);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.dlg.gen_editor = None;
+    app.sel_events.clear();
+    for _ in 0..4 {
+        frame(&mut app, vec![]);
+    }
+    let ids: Vec<Id> = app.project.tracks[0].events.iter().map(|e| e.id).collect();
+    assert_eq!(ids.len(), 2, "dois eventos na trilha de vídeo");
+    let (a, b) = (ids[0], ids[1]);
+    let ra = app.event_screen_rect(a).expect("evento a na tela");
+    let rb = app.event_screen_rect(b).expect("evento b na tela");
+    let start = |app: &App, id| app.project.event(id).map(|e| e.start);
+    let drag = |app: &mut App, frame: &mut dyn FnMut(&mut App, Vec<Event>), p0: Pos2, p1: Pos2| {
+        frame(app, vec![Event::PointerMoved(p0), press(p0, true)]);
+        for k in 1..=8 {
+            let p = p0 + (p1 - p0) * (k as f32 / 8.0);
+            frame(app, vec![Event::PointerMoved(p)]);
+        }
+        frame(app, vec![press(p1, false)]);
+        frame(app, vec![]);
+    };
+
+    // Envelope: arrastar o corpo do evento não o move nem cria Desfazer
+    app.exec_cmd(Some(&ctx), "edit.tool.envelope");
+    let undo0 = app.undo.len();
+    let sa = start(&app, a);
+    drag(
+        &mut app,
+        &mut frame,
+        ra.center(),
+        ra.center() + vec2(120.0, 0.0),
+    );
+    assert_eq!(start(&app, a), sa, "Envelope não move eventos");
+    assert_eq!(app.undo.len(), undo0, "nem cria passo de Desfazer");
+
+    // Seleção: a caixa seleciona os dois eventos e não move nenhum
+    app.exec_cmd(Some(&ctx), "edit.tool.selection");
+    app.sel_events.clear();
+    let sb = start(&app, b);
+    drag(&mut app, &mut frame, ra.center(), rb.center());
+    assert!(app.sel_events.contains(&a) && app.sel_events.contains(&b));
+    assert_eq!(
+        (start(&app, a), start(&app, b)),
+        (sa, sb),
+        "Seleção não move"
+    );
+
+    // Zoom: a caixa aproxima; um clique mostra o projeto inteiro
+    app.exec_cmd(Some(&ctx), "edit.tool.zoom");
+    let pps0 = app.tl.px_per_sec;
+    let y = ra.center().y;
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(ra.left() + 10.0, y),
+        pos2(ra.left() + 70.0, y),
+    );
+    assert!(app.tl.px_per_sec > pps0, "a caixa aproxima o zoom");
+    let p = pos2(ra.left() + 10.0, y);
+    frame(&mut app, vec![Event::PointerMoved(p), press(p, true)]);
+    frame(&mut app, vec![press(p, false)]);
+    frame(&mut app, vec![]);
+    assert_eq!(app.tl.scroll_x, Ticks::ZERO, "o clique volta ao início");
+    assert!(
+        app.tl.px_per_sec < pps0 * 2.0,
+        "e afasta para o projeto inteiro"
+    );
+
+    // Normal no modo Slip: o arraste desliza a mídia e o evento fica
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.slip");
+    for _ in 0..2 {
+        frame(&mut app, vec![]);
+    }
+    let rb = app.event_screen_rect(b).expect("evento b na tela");
+    let off0 = app.project.event(b).map(|e| e.offset);
+    drag(
+        &mut app,
+        &mut frame,
+        rb.center(),
+        rb.center() - vec2(40.0, 0.0),
+    );
+    assert_eq!(start(&app, b), sb, "Slip não move o evento");
+    assert_ne!(
+        app.project.event(b).map(|e| e.offset),
+        off0,
+        "a mídia desliza"
+    );
+}
+
+#[test]
+fn modos_shuffle_slide_stretch_split_trim_na_timeline() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0;
+    let mut frame = |app: &mut App, ev: Vec<Event>| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, Modifiers::NONE, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![]);
+    app.dismiss_splash();
+    frame(&mut app, vec![]);
+    app.dismiss_welcome();
+
+    app.session.sel_track = Some(0);
+    app.cursor = Ticks::ZERO;
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(5);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(10);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.dlg.gen_editor = None;
+    app.sel_events.clear();
+    for _ in 0..4 {
+        frame(&mut app, vec![]);
+    }
+    let ids: Vec<Id> = app.project.tracks[0].events.iter().map(|e| e.id).collect();
+    assert_eq!(ids.len(), 3);
+    let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+    let drag = |app: &mut App, frame: &mut dyn FnMut(&mut App, Vec<Event>), p0: Pos2, p1: Pos2| {
+        frame(app, vec![Event::PointerMoved(p0), press(p0, true)]);
+        for k in 1..=8 {
+            let p = p0 + (p1 - p0) * (k as f32 / 8.0);
+            frame(app, vec![Event::PointerMoved(p)]);
+        }
+        frame(app, vec![press(p1, false)]);
+        frame(app, vec![]);
+    };
+
+    // 1. Modo Shuffle: arrastar C para antes de A reordena [C, A, B] sem lacunas.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.shuffle");
+    frame(&mut app, vec![]);
+    let ra = app.event_screen_rect(a).expect("evento a na tela");
+    let rc = app.event_screen_rect(c).expect("evento c na tela");
+    drag(
+        &mut app,
+        &mut frame,
+        rc.center(),
+        ra.left_top() + vec2(4.0, ra.height() * 0.5),
+    );
+    assert_eq!(app.project.event(c).map(|e| e.start), Some(Ticks::ZERO));
+
+    // 2. Modo Slide: desliza evento do meio (A) ajustando vizinhos sem mover seu conteúdo.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.slide");
+    frame(&mut app, vec![]);
+    let ra_after = app.event_screen_rect(a).expect("evento a após shuffle");
+    let a_off_before = app.project.event(a).map(|e| e.offset);
+    let a_start_before = app.project.event(a).unwrap().start;
+    drag(
+        &mut app,
+        &mut frame,
+        ra_after.center(),
+        ra_after.center() + vec2(40.0, 0.0),
+    );
+    assert!(app.project.event(a).unwrap().start > a_start_before);
+    assert_eq!(app.project.event(a).map(|e| e.offset), a_off_before);
+    assert_eq!(
+        app.project.event(b).map(|e| e.start),
+        app.project.event(a).map(|e| e.end())
+    );
+
+    // 3. Modo Stretch: arrastar borda direita altera Rate e comprimento.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.stretch");
+    frame(&mut app, vec![]);
+    let rc_now = app.event_screen_rect(c).expect("evento c para stretch");
+    let rate_before = app.project.event(c).unwrap().rate;
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(rc_now.right() - 2.0, rc_now.center().y),
+        pos2(rc_now.right() + 40.0, rc_now.center().y),
+    );
+    assert_ne!(app.project.event(c).unwrap().rate, rate_before);
+
+    // 4. Modo SplitTrim: arrastar trecho interno recorta o segmento.
+    app.exec_cmd(Some(&ctx), "edit.tool.mode.split_trim");
+    frame(&mut app, vec![]);
+    let n_before = app.project.tracks[0].events.len();
+    let rb_now = app.event_screen_rect(b).expect("evento b para split trim");
+    let rx0 = rb_now.left() + rb_now.width() * 0.25;
+    let rx1 = rb_now.left() + rb_now.width() * 0.65;
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(rx0, rb_now.center().y),
+        pos2(rx1, rb_now.center().y),
+    );
+    assert!(app.project.tracks[0].events.len() > n_before);
+}
+
+#[test]
+fn ui_sync_links_arraste_unidirecional_e_eixos_selecao() {
+    use neoveg_engine::session::BoxAxisMode;
+
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0f64;
+    let mut frame = |app: &mut App, ev: Vec<Event>| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, Modifiers::NONE, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![]);
+    app.dismiss_splash();
+    frame(&mut app, vec![]);
+    app.dismiss_welcome();
+
+    app.session.sel_track = Some(0);
+    app.cursor = Ticks::ZERO;
+    app.insert_generated(GenSpec::ColorBars);
+    app.cursor = Ticks::from_secs_i64(7);
+    app.session.sel_track = Some(0);
+    app.insert_generated(GenSpec::ColorBars);
+    app.session.sel_track = Some(1);
+    app.cursor = Ticks::ZERO;
+    app.session.insert_empty_event();
+    app.dlg.gen_editor = None;
+    for _ in 0..4 {
+        frame(&mut app, vec![]);
+    }
+    let m_id = app.project.tracks[0].events[0].id;
+    let f_id = app.project.tracks[1].events[0].id;
+    let other_v = app.project.tracks[0].events[1].id;
+    app.sel_events = [m_id, f_id].into_iter().collect();
+    assert_eq!(app.session.create_sync_links(Some(m_id)), 1);
+    app.sync_after_session();
+    frame(&mut app, vec![]);
+
+    let drag = |app: &mut App, frame: &mut dyn FnMut(&mut App, Vec<Event>), p0: Pos2, p1: Pos2| {
+        frame(app, vec![Event::PointerMoved(p0), press(p0, true)]);
+        for k in 1..=6 {
+            let p = p0 + (p1 - p0) * (k as f32 / 6.0);
+            frame(app, vec![Event::PointerMoved(p)]);
+        }
+        frame(app, vec![press(p1, false)]);
+        frame(app, vec![]);
+    };
+
+    // 1. Arrastar mestre (m_id) arrasta o seguidor (f_id) pelo mesmo delta horizontal.
+    app.sel_events = [m_id].into_iter().collect();
+    let rm = app.event_screen_rect(m_id).expect("retângulo mestre");
+    let m0 = app.project.event(m_id).unwrap().start;
+    let f0 = app.project.event(f_id).unwrap().start;
+    drag(
+        &mut app,
+        &mut frame,
+        rm.center(),
+        rm.center() + vec2(60.0, 0.0),
+    );
+    let dm = app.project.event(m_id).unwrap().start - m0;
+    let df = app.project.event(f_id).unwrap().start - f0;
+    assert!(dm > Ticks::ZERO);
+    assert_eq!(dm, df, "seguidor Sync Link deve acompanhar mestre");
+
+    // 2. Arrastar seguidor (f_id) não move o mestre (unidirecional).
+    app.sel_events = [f_id].into_iter().collect();
+    frame(&mut app, vec![]);
+    let rf = app.event_screen_rect(f_id).expect("retângulo seguidor");
+    let m_before = app.project.event(m_id).unwrap().start;
+    let f_before = app.project.event(f_id).unwrap().start;
+    drag(
+        &mut app,
+        &mut frame,
+        rf.center(),
+        rf.center() + vec2(40.0, 0.0),
+    );
+    assert!(app.project.event(f_id).unwrap().start > f_before);
+    assert_eq!(app.project.event(m_id).unwrap().start, m_before);
+
+    // 3. Eixo Vertical da ferramenta Seleção seleciona todos os eventos da trilha 0 cruzada.
+    app.exec_cmd(Some(&ctx), "edit.tool.selection");
+    app.exec_cmd(Some(&ctx), "edit.tool.axis.vertical");
+    app.sel_events.clear();
+    frame(&mut app, vec![]);
+    let rm_now = app.event_screen_rect(m_id).expect("mestre após move");
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(rm_now.left() + 4.0, rm_now.top() + 4.0),
+        pos2(rm_now.left() + 10.0, rm_now.bottom() - 4.0),
+    );
+    assert!(app.sel_events.contains(&m_id));
+    assert!(
+        app.sel_events.contains(&other_v),
+        "eixo vertical deve pegar toda a trilha"
+    );
+    assert!(!app.sel_events.contains(&f_id));
+
+    // 4. Eixo Horizontal seleciona todas as trilhas dentro do intervalo temporal da caixa.
+    app.exec_cmd(Some(&ctx), "edit.tool.axis.horizontal");
+    app.sel_events.clear();
+    frame(&mut app, vec![]);
+    let rf_now = app.event_screen_rect(f_id).expect("seguidor após move");
+    let box_x0 = rm_now.center().x.min(rf_now.center().x);
+    let box_x1 = rm_now.center().x.max(rf_now.center().x);
+    drag(
+        &mut app,
+        &mut frame,
+        pos2(box_x0, rm_now.top() + 4.0),
+        pos2(box_x1, rm_now.top() + 10.0),
+    );
+    assert_eq!(app.session.box_axis, BoxAxisMode::Horizontal);
+    assert!(app.sel_events.contains(&m_id));
+    assert!(
+        app.sel_events.contains(&f_id),
+        "eixo horizontal deve atravessar todas as trilhas"
+    );
+}
+
+/// F11, Shift+F11 e Ctrl+F11 do VEGAS Pro 21: área de janelas, lista de
+/// trilhas e timeline maximizada; Ctrl+F11 de novo volta ao estado de antes.
+#[test]
+fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0;
+    let mut frame = |app: &mut App, ev: Vec<Event>, mods: Modifiers| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, mods, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dismiss_splash();
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dismiss_welcome();
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert!(app.dock_visible);
+    assert!(!app.tl.header_collapsed());
+
+    frame(&mut app, key(Key::F11, Modifiers::NONE), Modifiers::NONE);
+    assert!(!app.dock_visible, "F11 minimiza a área de janelas");
+    frame(&mut app, key(Key::F11, Modifiers::NONE), Modifiers::NONE);
+    assert!(app.dock_visible, "F11 restaura a área de janelas");
+
+    frame(&mut app, key(Key::F11, Modifiers::SHIFT), Modifiers::SHIFT);
+    assert!(
+        app.tl.header_collapsed(),
+        "Shift+F11 recolhe a lista de trilhas"
+    );
+    frame(&mut app, key(Key::F11, Modifiers::SHIFT), Modifiers::SHIFT);
+    assert!(!app.tl.header_collapsed());
+
+    frame(
+        &mut app,
+        key(Key::F11, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
+    assert!(!app.dock_visible && app.tl.header_collapsed());
+    frame(&mut app, vec![], Modifiers::NONE);
+    frame(
+        &mut app,
+        key(Key::F11, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
+    assert!(app.dock_visible && !app.tl.header_collapsed());
+
+    // Com a timeline maximizada, F11 também restaura tudo.
+    app.exec_cmd(Some(&ctx), "view.maximize_timeline");
+    app.exec_cmd(Some(&ctx), "view.toggle_dock_area");
+    assert!(app.dock_visible && !app.tl.header_collapsed());
+    assert!(app.timeline_restore.is_none());
+
+    // Painel maximizado na área de janelas: desenha e restaura sem pânico.
+    app.dock_maximized = Some(crate::dock::DockPane::Tab(DockTab::Mixer));
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert_eq!(
+        app.dock_maximized,
+        Some(crate::dock::DockPane::Tab(DockTab::Mixer))
+    );
+    app.detach_dock_tab(DockTab::Mixer);
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert_eq!(
+        app.dock_maximized, None,
+        "destacado, deixa de estar maximizado"
+    );
 }

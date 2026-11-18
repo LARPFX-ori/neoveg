@@ -30,6 +30,128 @@ pub struct ProjectSettings {
     /// Layout de canais da mixagem (estéreo ou 5.1 surround).
     #[serde(default)]
     pub channel_layout: ChannelLayout,
+    /// Modo de visualização/renderização 3D estereoscópica (manual p. 426).
+    #[serde(default)]
+    pub stereo_3d: Stereo3dMode,
+    /// Tempo musical em batidas por minuto para régua e grade de compassos (p. 232).
+    #[serde(default = "default_bpm")]
+    pub bpm: f64,
+}
+
+fn default_bpm() -> f64 {
+    120.0
+}
+
+/// Modo 3D estereoscópico do projeto (*Project Properties → Video → Stereoscopic 3D mode*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Stereo3dMode {
+    #[default]
+    Off,
+    AnaglyphRedCyan,
+    SideBySideHalf,
+    SideBySideFull,
+    TopBottomHalf,
+    LeftOnly,
+    RightOnly,
+}
+
+impl Stereo3dMode {
+    pub const ALL: [Stereo3dMode; 7] = [
+        Stereo3dMode::Off,
+        Stereo3dMode::AnaglyphRedCyan,
+        Stereo3dMode::SideBySideHalf,
+        Stereo3dMode::SideBySideFull,
+        Stereo3dMode::TopBottomHalf,
+        Stereo3dMode::LeftOnly,
+        Stereo3dMode::RightOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stereo3dMode::Off => "Desligado (2D)",
+            Stereo3dMode::AnaglyphRedCyan => "Anáglifo (Vermelho / Ciano)",
+            Stereo3dMode::SideBySideHalf => "Lado a lado (50% largura)",
+            Stereo3dMode::SideBySideFull => "Lado a lado (largura cheia)",
+            Stereo3dMode::TopBottomHalf => "Acima / Abaixo (50% altura)",
+            Stereo3dMode::LeftOnly => "Somente olho esquerdo",
+            Stereo3dMode::RightOnly => "Somente olho direito",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Stereo3dMode::Off => "2D",
+            Stereo3dMode::AnaglyphRedCyan => "3D Anáglifo",
+            Stereo3dMode::SideBySideHalf => "3D L/R 50%",
+            Stereo3dMode::SideBySideFull => "3D L/R 100%",
+            Stereo3dMode::TopBottomHalf => "3D Cima/Baixo",
+            Stereo3dMode::LeftOnly => "3D Esq.",
+            Stereo3dMode::RightOnly => "3D Dir.",
+        }
+    }
+}
+
+/// Disposição de origem dos dois olhos em um clipe/evento 3D estereoscópico.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Stereo3dSourceLayout {
+    #[default]
+    Mono2D,
+    SideBySideHalf,
+    SideBySideFull,
+    TopBottomHalf,
+}
+
+impl Stereo3dSourceLayout {
+    pub const ALL: [Stereo3dSourceLayout; 4] = [
+        Stereo3dSourceLayout::Mono2D,
+        Stereo3dSourceLayout::SideBySideHalf,
+        Stereo3dSourceLayout::SideBySideFull,
+        Stereo3dSourceLayout::TopBottomHalf,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stereo3dSourceLayout::Mono2D => "2D padrão (sintetizar profundidade)",
+            Stereo3dSourceLayout::SideBySideHalf => "Lado a lado (50%)",
+            Stereo3dSourceLayout::SideBySideFull => "Lado a lado (completo)",
+            Stereo3dSourceLayout::TopBottomHalf => "Acima / Abaixo (50%)",
+        }
+    }
+}
+
+/// Ajuste 3D estereoscópico por evento de vídeo (convergência horizontal e inversão L/R).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Stereo3dClip {
+    pub layout: Stereo3dSourceLayout,
+    pub swap_lr: bool,
+    /// Deslocamento horizontal relativo à largura do quadro (`-0.25..=0.25`).
+    pub horizontal_offset: f32,
+}
+
+impl Stereo3dClip {
+    pub fn sanitized(self) -> Self {
+        let off = if self.horizontal_offset.is_finite() {
+            self.horizontal_offset.clamp(-0.25, 0.25)
+        } else {
+            0.0
+        };
+        Self {
+            layout: self.layout,
+            swap_lr: self.swap_lr,
+            horizontal_offset: off,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.layout == Stereo3dSourceLayout::Mono2D
+            && !self.swap_lr
+            && self.horizontal_offset.abs() <= 1e-6
+    }
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Layout de canais do projeto (*Project Properties → Audio → Master bus mode*).
@@ -122,6 +244,8 @@ impl Default for ProjectSettings {
             background: default_bg(),
             manually_configured: false,
             channel_layout: ChannelLayout::Stereo,
+            stereo_3d: Stereo3dMode::Off,
+            bpm: default_bpm(),
         }
     }
 }
@@ -161,6 +285,15 @@ pub struct Project {
     pub notes: String,
     #[serde(default)]
     pub loop_region: Option<(Ticks, Ticks)>,
+    /// Pastas manuais (*bins*) da janela Mídia do Projeto.
+    #[serde(default)]
+    pub media_bins: Vec<MediaBin>,
+    /// Pastas inteligentes (*smart bins*) personalizadas do projeto.
+    #[serde(default)]
+    pub smart_bins: Vec<SmartBin>,
+    /// Sequências de *storyboard* para montagem rápida na timeline.
+    #[serde(default)]
+    pub storyboards: Vec<Storyboard>,
 }
 
 impl Project {
@@ -306,6 +439,124 @@ impl Project {
         order
     }
 
+    /// Índice da trilha por ID.
+    pub fn track_index(&self, track_id: Id) -> Option<usize> {
+        self.tracks.iter().position(|t| t.id == track_id)
+    }
+
+    /// Profundidade hierárquica da trilha (0 = raiz), protegida contra ciclos (§0.5).
+    pub fn track_depth(&self, track_id: Id) -> usize {
+        let mut depth = 0usize;
+        let mut cur = track_id;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(cur);
+        while depth < MAX_TRACK_DEPTH {
+            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+                break;
+            };
+            let Some(pid) = tr.parent_track_id else {
+                break;
+            };
+            if !visited.insert(pid) || !self.tracks.iter().any(|t| t.id == pid) {
+                break;
+            }
+            depth += 1;
+            cur = pid;
+        }
+        depth
+    }
+
+    /// Valida atribuição acíclica de `parent_id` para `child_id` dentro de `MAX_TRACK_DEPTH` (§0.5).
+    pub fn validate_track_parent(&self, child_id: Id, parent_id: Option<Id>) -> Result<(), String> {
+        let Some(pid) = parent_id else {
+            return Ok(());
+        };
+        if pid == child_id {
+            return Err("uma trilha não pode ser pai de si mesma".into());
+        }
+        let Some(child) = self.tracks.iter().find(|t| t.id == child_id) else {
+            return Err("trilha filha inexistente".into());
+        };
+        let Some(parent) = self.tracks.iter().find(|t| t.id == pid) else {
+            return Err("trilha pai inexistente".into());
+        };
+        if !parent.is_folder && parent.kind != child.kind {
+            return Err("composição pai/filho requer trilhas do mesmo tipo (ou uma pasta)".into());
+        }
+        let mut cur = pid;
+        let mut depth = 1usize;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(child_id);
+        while depth <= MAX_TRACK_DEPTH {
+            if !visited.insert(cur) {
+                return Err("vínculo pai/filho criaria ciclo".into());
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+                return Err("ancestral inexistente".into());
+            };
+            let Some(next) = tr.parent_track_id else {
+                return Ok(());
+            };
+            cur = next;
+            depth += 1;
+        }
+        Err(format!(
+            "hierarquia de trilhas excede o limite de {MAX_TRACK_DEPTH} níveis"
+        ))
+    }
+
+    /// Verdadeiro se alguma pasta ancestral da trilha está recolhida.
+    pub fn is_track_hidden_by_folder(&self, track_id: Id) -> bool {
+        let mut cur = self
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.parent_track_id);
+        let mut steps = 0usize;
+        while let Some(pid) = cur {
+            if steps >= MAX_TRACK_DEPTH || pid == track_id {
+                break;
+            }
+            let Some(anc) = self.tracks.iter().find(|t| t.id == pid) else {
+                break;
+            };
+            if anc.is_folder && anc.collapsed {
+                return true;
+            }
+            cur = anc.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se a trilha ou alguma pasta/pai ancestral estiver em mudo.
+    pub fn is_track_effectively_muted(&self, track_id: Id) -> bool {
+        let mut cur = Some(track_id);
+        let mut steps = 0usize;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(tid) = cur {
+            if steps > MAX_TRACK_DEPTH || !visited.insert(tid) {
+                break;
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == tid) else {
+                break;
+            };
+            if tr.mute {
+                return true;
+            }
+            cur = tr.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se houver pelo menos uma trilha filha apontando para `track_id`.
+    pub fn has_track_children(&self, track_id: Id) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.parent_track_id == Some(track_id))
+    }
+
     /// Maior id usado em qualquer objeto do projeto (para continuar a numeração
     /// após carregar um arquivo).
     pub fn max_id(&self) -> Id {
@@ -340,7 +591,79 @@ impl Project {
         for x in &self.regions {
             m = m.max(x.id);
         }
+        for b in &self.media_bins {
+            m = m.max(b.id);
+        }
+        for sb in &self.smart_bins {
+            m = m.max(sb.id);
+        }
+        for st in &self.storyboards {
+            m = m.max(st.id);
+        }
         m
+    }
+
+    /// Garante que atribuir `parent` a uma pasta (`bin_id`) é acíclico e respeita [`MAX_BIN_DEPTH`].
+    pub fn validate_bin_parent(&self, bin_id: Id, parent: Option<Id>) -> bool {
+        let Some(mut cur) = parent else {
+            return true;
+        };
+        if cur == bin_id {
+            return false;
+        }
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(bin_id);
+        for _ in 0..MAX_BIN_DEPTH {
+            if !visited.insert(cur) {
+                return false;
+            }
+            let Some(bin) = self.media_bins.iter().find(|b| b.id == cur) else {
+                return false;
+            };
+            match bin.parent_id {
+                Some(next) => cur = next,
+                None => return true,
+            }
+        }
+        false
+    }
+
+    /// IDs das mídias efetivamente usadas na timeline (take ativo ou alternativo).
+    pub fn used_media_ids(&self) -> std::collections::HashSet<Id> {
+        self.tracks
+            .iter()
+            .flat_map(|t| t.events.iter().flat_map(crate::takes::media_ids))
+            .collect()
+    }
+
+    /// Quantos eventos da linha do tempo referenciam a mídia `media_id`.
+    pub fn media_usage_count(&self, media_id: Id) -> usize {
+        self.tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .filter(|e| crate::takes::uses_media(e, media_id))
+            .count()
+    }
+
+    /// Coleta IDs de mídia pertencentes à pasta `bin_id` (opcionalmente recursivo em subpastas).
+    pub fn collect_bin_media(&self, bin_id: Id, recursive: bool) -> std::collections::HashSet<Id> {
+        let mut out = std::collections::HashSet::new();
+        let mut stack = vec![(bin_id, 0usize)];
+        let mut seen_bins = std::collections::HashSet::new();
+        while let Some((cur, depth)) = stack.pop() {
+            if depth >= MAX_BIN_DEPTH || !seen_bins.insert(cur) {
+                continue;
+            }
+            if let Some(bin) = self.media_bins.iter().find(|b| b.id == cur) {
+                out.extend(bin.media_ids.iter().copied());
+                if recursive {
+                    for child in self.media_bins.iter().filter(|b| b.parent_id == Some(cur)) {
+                        stack.push((child.id, depth + 1));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Ordena os eventos das trilhas por tempo de início.
@@ -389,6 +712,9 @@ impl Project {
         for c in &mut s.background {
             *c = clampf(fin32(*c, 0.0), 0.0, 1.0);
         }
+        if !s.bpm.is_finite() || s.bpm < 20.0 || s.bpm > 300.0 {
+            s.bpm = default_bpm();
+        }
 
         // mídia
         let mut seen_media = std::collections::HashSet::new();
@@ -411,7 +737,7 @@ impl Project {
                     }
                 }
                 MediaSource::Generated(g) => sanitize_gen(g),
-                MediaSource::File { .. } => {}
+                MediaSource::File { .. } | MediaSource::NestedProject { .. } => {}
             }
         }
 
@@ -430,19 +756,23 @@ impl Project {
             t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
             t.surround = t.surround.sanitized();
             t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
-            for k in &mut t.motion.keys {
-                k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                let v = &mut k.value;
-                v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
-                v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
-                v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
-                v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
-                v.rot = fin32(v.rot, 0.0) % 3600.0;
-            }
-            t.motion.keys.sort_by_key(|k| k.t);
-            if t.motion.keys.is_empty() {
-                t.motion = Keyframes::default();
-            }
+            let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
+                for k in &mut mk.keys {
+                    k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                    let v = &mut k.value;
+                    v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
+                    v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
+                    v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
+                    v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
+                    v.rot = fin32(v.rot, 0.0) % 3600.0;
+                }
+                mk.keys.sort_by_key(|k| k.t);
+                if mk.keys.is_empty() {
+                    *mk = Keyframes::default();
+                }
+            };
+            sanitize_motion_list(&mut t.motion);
+            sanitize_motion_list(&mut t.parent_motion);
             sanitize_envelopes(
                 &mut t.envelopes,
                 &[
@@ -471,6 +801,7 @@ impl Project {
                     e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
                 }
                 e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
+                e.pitch_semitones = clampf(fin32(e.pitch_semitones, 0.0), -24.0, 24.0);
                 e.fade_in.len = e.fade_in.len.clamp_safe(Ticks::ZERO, e.length);
                 e.fade_out.len = e
                     .fade_out
@@ -493,6 +824,59 @@ impl Project {
                 }
                 for f in &mut e.fx {
                     sanitize_fx(f);
+                }
+                e.stereo_3d = e.stereo_3d.sanitized();
+            }
+        }
+        // Saneamento da hierarquia pai/filho de trilhas (§0.5: referências inexistentes ou ciclos).
+        let track_ids: Vec<Id> = self.tracks.iter().map(|t| t.id).collect();
+        for ti in 0..track_ids.len() {
+            let tid = track_ids[ti];
+            if self.tracks[ti].parent_track_id.is_some()
+                && self
+                    .validate_track_parent(tid, self.tracks[ti].parent_track_id)
+                    .is_err()
+            {
+                let name = self.tracks[ti].name.clone();
+                self.tracks[ti].parent_track_id = None;
+                fixes.push(format!(
+                    "vínculo pai/filho inválido ou cíclico removido da trilha \"{name}\""
+                ));
+            }
+        }
+        // Saneamento de Sync Links (§0.4 e §0.5: referências inexistentes ou ciclos).
+        let valid_sync: std::collections::HashMap<Id, Id> = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .filter_map(|e| e.sync_link_master.map(|m| (e.id, m)))
+            .collect();
+        for t in &mut self.tracks {
+            for e in &mut t.events {
+                if let Some(mid) = e.sync_link_master {
+                    let mut cur = mid;
+                    let mut visited = std::collections::HashSet::new();
+                    visited.insert(e.id);
+                    let mut ok = seen_events.contains(&mid);
+                    let mut depth = 0usize;
+                    while ok {
+                        if !visited.insert(cur) || depth >= 32 {
+                            ok = false;
+                            break;
+                        }
+                        depth += 1;
+                        let Some(&next) = valid_sync.get(&cur) else {
+                            break;
+                        };
+                        cur = next;
+                    }
+                    if !ok {
+                        e.sync_link_master = None;
+                        fixes.push(format!(
+                            "Sync Link inválido ou cíclico removido do evento \"{}\"",
+                            e.name
+                        ));
+                    }
                 }
             }
         }
@@ -567,6 +951,20 @@ impl Project {
         }
         for m in &mut self.markers {
             m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            m.label = m.label.chars().filter(|&c| c != '\0').take(256).collect();
+            m.command_type = m
+                .command_type
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(64)
+                .collect();
+            m.command_arg = m
+                .command_arg
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(512)
+                .collect();
         }
         for r in &mut self.regions {
             if r.end < r.start {
@@ -579,6 +977,90 @@ impl Project {
             .loop_region
             .filter(|(a, b)| b > a && *a >= Ticks::ZERO)
             .map(|(a, b)| (a.min(Ticks::MAX), b.min(Ticks::MAX)));
+
+        // Pastas manuais (bins), pastas inteligentes e storyboards (§0.4 e §0.5)
+        if self.media_bins.len() > MAX_MEDIA_BINS {
+            self.media_bins.truncate(MAX_MEDIA_BINS);
+            fixes.push(format!("pastas de mídia limitadas a {MAX_MEDIA_BINS}"));
+        }
+        let mut seen_bins = std::collections::HashSet::new();
+        for bin in &mut self.media_bins {
+            if !seen_bins.insert(bin.id) {
+                bin.id = new_id();
+                seen_bins.insert(bin.id);
+                fixes.push("id de pasta de mídia duplicado renumerado".into());
+            }
+            if bin.name.trim().is_empty() {
+                bin.name = "Pasta".into();
+            }
+            let mut seen_m = std::collections::HashSet::new();
+            bin.media_ids
+                .retain(|id| media_ids.contains(id) && seen_m.insert(*id));
+        }
+        let bin_ids: std::collections::HashSet<Id> = self.media_bins.iter().map(|b| b.id).collect();
+        for bi in 0..self.media_bins.len() {
+            let bid = self.media_bins[bi].id;
+            if let Some(pid) = self.media_bins[bi].parent_id {
+                if !bin_ids.contains(&pid) || !self.validate_bin_parent(bid, Some(pid)) {
+                    self.media_bins[bi].parent_id = None;
+                    fixes.push(format!(
+                        "hierarquia inválida/cíclica da pasta \"{}\" restaurada para a raiz",
+                        self.media_bins[bi].name
+                    ));
+                }
+            }
+        }
+
+        if self.smart_bins.len() > MAX_MEDIA_BINS {
+            self.smart_bins.truncate(MAX_MEDIA_BINS);
+            fixes.push(format!("pastas inteligentes limitadas a {MAX_MEDIA_BINS}"));
+        }
+        let mut seen_smart = std::collections::HashSet::new();
+        for sb in &mut self.smart_bins {
+            if !seen_smart.insert(sb.id) {
+                sb.id = new_id();
+                seen_smart.insert(sb.id);
+                fixes.push("id de pasta inteligente duplicado renumerado".into());
+            }
+            if sb.name.trim().is_empty() {
+                sb.name = sb.rule.label().into();
+            }
+            if sb.query.len() > 128 {
+                sb.query = sb.query.chars().take(128).collect();
+            }
+        }
+
+        if self.storyboards.len() > MAX_STORYBOARDS {
+            self.storyboards.truncate(MAX_STORYBOARDS);
+            fixes.push(format!("storyboards limitados a {MAX_STORYBOARDS}"));
+        }
+        let mut seen_sb = std::collections::HashSet::new();
+        for st in &mut self.storyboards {
+            if !seen_sb.insert(st.id) {
+                st.id = new_id();
+                seen_sb.insert(st.id);
+                fixes.push("id de storyboard duplicado renumerado".into());
+            }
+            if st.name.trim().is_empty() {
+                st.name = "Storyboard".into();
+            }
+            if st.items.len() > MAX_STORYBOARD_ITEMS {
+                st.items.truncate(MAX_STORYBOARD_ITEMS);
+                fixes.push(format!(
+                    "itens do storyboard \"{}\" limitados a {MAX_STORYBOARD_ITEMS}",
+                    st.name
+                ));
+            }
+            st.items.retain(|it| media_ids.contains(&it.media_id));
+            for it in &mut st.items {
+                it.trim_in = it.trim_in.map(|t| t.clamp_safe(Ticks::ZERO, Ticks::MAX));
+                it.duration_override = it
+                    .duration_override
+                    .filter(|d| *d > Ticks::ZERO)
+                    .map(|d| d.min(Ticks::MAX));
+            }
+        }
+
         self.sort_events();
         fixes
     }
@@ -622,6 +1104,13 @@ fn sanitize_fx(f: &mut FxInstance) {
         }
     } else {
         f.vst3 = None;
+    }
+    if let Some(cg) = f.color_grade.as_mut() {
+        if f.kind == FxKind::ColorCorrector {
+            cg.sanitize();
+        } else {
+            f.color_grade = None;
+        }
     }
     let specs = f.kind.params();
     f.params.truncate(specs.len());
@@ -835,9 +1324,131 @@ pub struct MediaItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MediaSource {
-    File { path: String },
-    ImageSequence { paths: Vec<String>, fps: FrameRate },
+    File {
+        path: String,
+    },
+    ImageSequence {
+        paths: Vec<String>,
+        fps: FrameRate,
+    },
     Generated(GenSpec),
+    /// Linha do tempo aninhada (projeto `.neoveg` inserido como evento, p. 114).
+    NestedProject {
+        path: String,
+    },
+}
+
+pub const MAX_MEDIA_BINS: usize = 256;
+pub const MAX_BIN_DEPTH: usize = 32;
+pub const MAX_STORYBOARDS: usize = 64;
+pub const MAX_STORYBOARD_ITEMS: usize = 1024;
+
+/// Pasta manual (*Bin*) para organização hierárquica da mídia do projeto.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaBin {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<Id>,
+    #[serde(default)]
+    pub media_ids: Vec<Id>,
+}
+
+/// Critério de filtragem de uma pasta inteligente (*Smart Bin*).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SmartBinRule {
+    #[default]
+    AllVideo,
+    AudioOnly,
+    StillImages,
+    Generated,
+    Unused,
+    WithProxy,
+    NameContains,
+}
+
+impl SmartBinRule {
+    pub const ALL: [SmartBinRule; 7] = [
+        SmartBinRule::AllVideo,
+        SmartBinRule::AudioOnly,
+        SmartBinRule::StillImages,
+        SmartBinRule::Generated,
+        SmartBinRule::Unused,
+        SmartBinRule::WithProxy,
+        SmartBinRule::NameContains,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SmartBinRule::AllVideo => "Com vídeo",
+            SmartBinRule::AudioOnly => "Somente áudio",
+            SmartBinRule::StillImages => "Imagens estáticas",
+            SmartBinRule::Generated => "Mídias geradas",
+            SmartBinRule::Unused => "Não utilizadas",
+            SmartBinRule::WithProxy => "Com proxy de vídeo",
+            SmartBinRule::NameContains => "Texto no nome",
+        }
+    }
+
+    pub fn matches(
+        self,
+        query: &str,
+        m: &MediaItem,
+        used_media: &std::collections::HashSet<Id>,
+    ) -> bool {
+        let base = match self {
+            SmartBinRule::AllVideo => m.has_video && m.duration.is_some(),
+            SmartBinRule::AudioOnly => m.has_audio && !m.has_video,
+            SmartBinRule::StillImages => {
+                m.has_video
+                    && m.duration.is_none()
+                    && !matches!(m.source, MediaSource::Generated(_))
+            }
+            SmartBinRule::Generated => matches!(m.source, MediaSource::Generated(_)),
+            SmartBinRule::Unused => !used_media.contains(&m.id),
+            SmartBinRule::WithProxy => m.proxy_path.is_some(),
+            SmartBinRule::NameContains => true,
+        };
+        if !base {
+            return false;
+        }
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        m.name.to_lowercase().contains(&q) || m.info.to_lowercase().contains(&q)
+    }
+}
+
+/// Pasta inteligente (*Smart Bin*) persistente com filtro dinâmico.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartBin {
+    pub id: Id,
+    pub name: String,
+    pub rule: SmartBinRule,
+    #[serde(default)]
+    pub query: String,
+}
+
+/// Entrada ordenada de uma mídia dentro de um *Storyboard*.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoryboardItem {
+    pub media_id: Id,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub trim_in: Option<Ticks>,
+    #[serde(default)]
+    pub duration_override: Option<Ticks>,
+}
+
+/// Sequência de *storyboard* do projeto para organização e inserção sequencial.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Storyboard {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub items: Vec<StoryboardItem>,
 }
 
 /// Mídia gerada (Media Generators): cores sólidas, gradientes, padrões, texto.
@@ -1053,6 +1664,36 @@ impl BlendMode {
     pub fn name(self) -> &'static str {
         self.name_in(neoveg_common::Language::PtBr)
     }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            BlendMode::SourceAlpha => "SourceAlpha",
+            BlendMode::Add => "Add",
+            BlendMode::Subtract => "Subtract",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::HardLight => "HardLight",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::Darken => "Darken",
+            BlendMode::Difference => "Difference",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Self {
+        match raw.trim() {
+            "Add" => BlendMode::Add,
+            "Subtract" => BlendMode::Subtract,
+            "Multiply" => BlendMode::Multiply,
+            "Screen" => BlendMode::Screen,
+            "Overlay" => BlendMode::Overlay,
+            "HardLight" => BlendMode::HardLight,
+            "Lighten" => BlendMode::Lighten,
+            "Darken" => BlendMode::Darken,
+            "Difference" => BlendMode::Difference,
+            _ => BlendMode::SourceAlpha,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -1213,6 +1854,26 @@ impl Envelope {
     pub fn sort(&mut self) {
         self.points.sort_by_key(|p| p.t);
     }
+
+    pub fn set_point(&mut self, t: Ticks, v: f32, tol: Ticks) {
+        let (lo, hi) = self.kind.range();
+        let v = if v.is_finite() {
+            crate::util::clampf(v, lo, hi)
+        } else {
+            self.kind.default_value()
+        };
+        let t = t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+        if let Some(p) = self.points.iter_mut().find(|p| p.t.abs_diff(t) <= tol) {
+            p.v = v;
+        } else {
+            self.points.push(EnvPoint {
+                t,
+                v,
+                curve: Curve::Linear,
+            });
+            self.sort();
+        }
+    }
 }
 
 /// Track Motion (movimento 2D da trilha inteira).
@@ -1247,6 +1908,44 @@ impl Lerp for MotionKey {
             scale_x: self.scale_x.lerp(&o.scale_x, t),
             scale_y: self.scale_y.lerp(&o.scale_y, t),
             rot: self.rot.lerp(&o.rot, t),
+        }
+    }
+}
+
+/// Profundidade máxima permitida na hierarquia de pastas e trilhas pai/filho (§0.5).
+pub const MAX_TRACK_DEPTH: usize = 16;
+
+/// Modo de máscara em composição Pai/Filho (VEGAS Pro p. 740).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum TrackMaskMode {
+    #[default]
+    None,
+    /// Usa luminância × alfa da trilha como máscara sobre a composição.
+    MultiplyMask,
+    /// Inverte a máscara de luminância (`1 - luma * alpha`).
+    InvertedMultiplyMask,
+    /// Usa exclusivamente o canal alfa da trilha como máscara.
+    AlphaMask,
+    /// Inverte a máscara de canal alfa (`1 - alpha`).
+    InvertedAlphaMask,
+}
+
+impl TrackMaskMode {
+    pub const ALL: [TrackMaskMode; 5] = [
+        TrackMaskMode::None,
+        TrackMaskMode::MultiplyMask,
+        TrackMaskMode::InvertedMultiplyMask,
+        TrackMaskMode::AlphaMask,
+        TrackMaskMode::InvertedAlphaMask,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackMaskMode::None => "Normal (sem máscara)",
+            TrackMaskMode::MultiplyMask => "Máscara por luminância",
+            TrackMaskMode::InvertedMultiplyMask => "Máscara por luminância invertida",
+            TrackMaskMode::AlphaMask => "Máscara por alfa",
+            TrackMaskMode::InvertedAlphaMask => "Máscara por alfa invertido",
         }
     }
 }
@@ -1298,6 +1997,78 @@ pub struct Track {
     /// intensidade dada por opacidade × envelope de opacidade. Ignorado em áudio.
     #[serde(default)]
     pub adjustment: bool,
+    /// Áudio: faixa armada para gravação ao vivo (`Rec`).
+    #[serde(default)]
+    pub record_armed: bool,
+    /// Áudio: monitoração de entrada durante gravação/espera.
+    #[serde(default)]
+    pub input_monitor: bool,
+    /// Pasta de trilhas (Track Group) recolhível sem eventos próprios.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_folder: bool,
+    /// Pasta recolhida na timeline (oculta visualmente as trilhas filhas).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    /// Trilha pai (pasta de grupo ou composição Pai/Filho em vídeo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_track_id: Option<Id>,
+    /// Modo de máscara da trilha na composição Pai/Filho.
+    #[serde(default)]
+    pub mask_mode: TrackMaskMode,
+    /// Movimento 2D/3D do grupo Pai/Filho (Parent Track Motion, p. 740).
+    #[serde(default)]
+    pub parent_motion: Keyframes<MotionKey>,
+    /// Trilha marcada como multicâmera (angles em takes).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multicam: bool,
+    /// Modo de automação dos envelopes da faixa (Desligado / Ler / Touch / Latch, p. 1008).
+    #[serde(default)]
+    pub automation_mode: AutomationMode,
+}
+
+/// Modo de automação de envelopes por trilha ou barramento (manual VEGAS Pro 21, p. 1008).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AutomationMode {
+    /// Ignora os envelopes durante a reprodução/mixagem.
+    Off,
+    /// Apenas lê a curva de automação existente (padrão).
+    #[default]
+    Read,
+    /// Grava pontos ao arrastar durante a reprodução e retorna ao liberar.
+    Touch,
+    /// Grava pontos e mantém o último valor enquanto a reprodução continua.
+    Latch,
+}
+
+impl AutomationMode {
+    pub const ALL: [AutomationMode; 4] = [
+        AutomationMode::Off,
+        AutomationMode::Read,
+        AutomationMode::Touch,
+        AutomationMode::Latch,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Automação desligada (Off)",
+            AutomationMode::Read => "Automação: Ler (Read)",
+            AutomationMode::Touch => "Automação: Touch (Gravar ao tocar)",
+            AutomationMode::Latch => "Automação: Latch (Gravar e reter)",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Off",
+            AutomationMode::Read => "Read",
+            AutomationMode::Touch => "Touch",
+            AutomationMode::Latch => "Latch",
+        }
+    }
+
+    pub fn is_write(self) -> bool {
+        matches!(self, AutomationMode::Touch | AutomationMode::Latch)
+    }
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1336,6 +2107,8 @@ pub struct AudioBus {
     pub fx: Vec<FxInstance>,
     #[serde(default)]
     pub envelopes: Vec<Envelope>,
+    #[serde(default)]
+    pub automation_mode: AutomationMode,
 }
 
 impl AudioBus {
@@ -1351,11 +2124,18 @@ impl AudioBus {
             output_bus: None,
             fx: vec![],
             envelopes: vec![],
+            automation_mode: AutomationMode::Read,
         }
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
         self.envelopes.iter().find(|e| e.kind == kind)
+    }
+
+    pub fn active_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        (self.automation_mode != AutomationMode::Off)
+            .then(|| self.envelope(kind))
+            .flatten()
     }
 
     pub fn is_audible(&self, any_bus_solo: bool) -> bool {
@@ -1405,26 +2185,46 @@ impl Track {
             output_bus: None,
             sends: vec![],
             adjustment: false,
+            record_armed: false,
+            input_monitor: false,
+            is_folder: false,
+            collapsed: false,
+            parent_track_id: None,
+            mask_mode: TrackMaskMode::None,
+            parent_motion: Keyframes::default(),
+            multicam: false,
+            automation_mode: AutomationMode::Read,
         }
+    }
+
+    /// Verdadeiro para pasta/grupo de trilhas.
+    pub fn is_folder_track(&self) -> bool {
+        self.is_folder
     }
 
     /// Verdadeiro para trilha de vídeo marcada como trilha de ajuste.
     pub fn is_adjustment(&self) -> bool {
-        self.kind == TrackKind::Video && self.adjustment
+        self.kind == TrackKind::Video && self.adjustment && !self.is_folder
     }
 
     /// Verdadeiro se a trilha pode receber eventos do tipo `kind`. Trilhas de
-    /// ajuste não recebem eventos: o compositor os ignoraria.
+    /// ajuste ou pastas não recebem eventos: o compositor os ignoraria.
     pub fn accepts(&self, kind: TrackKind) -> bool {
-        self.kind == kind && !self.is_adjustment()
+        self.kind == kind && !self.is_adjustment() && !self.is_folder
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
         self.envelopes.iter().find(|e| e.kind == kind)
     }
 
+    pub fn active_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        (self.automation_mode != AutomationMode::Off)
+            .then(|| self.envelope(kind))
+            .flatten()
+    }
+
     pub fn env_value(&self, kind: EnvKind, t: Ticks) -> f32 {
-        self.envelope(kind)
+        self.active_envelope(kind)
             .map(|e| e.eval(t))
             .unwrap_or(kind.default_value())
     }
@@ -1492,10 +2292,11 @@ pub enum TransitionKind {
     Zoom,
     Blinds,
     Checker,
+    WarpFlow,
 }
 
 impl TransitionKind {
-    pub const ALL: [TransitionKind; 16] = [
+    pub const ALL: [TransitionKind; 17] = [
         TransitionKind::Dissolve,
         TransitionKind::FadeThroughBlack,
         TransitionKind::WipeLeft,
@@ -1512,6 +2313,7 @@ impl TransitionKind {
         TransitionKind::Zoom,
         TransitionKind::Blinds,
         TransitionKind::Checker,
+        TransitionKind::WarpFlow,
     ];
     pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
         let pt = match self {
@@ -1531,6 +2333,7 @@ impl TransitionKind {
             TransitionKind::Zoom => "Zoom",
             TransitionKind::Blinds => "Persianas",
             TransitionKind::Checker => "Tabuleiro",
+            TransitionKind::WarpFlow => "Warp Flow (fluxo óptico)",
         };
         neoveg_common::tr(lang, pt)
     }
@@ -1602,6 +2405,18 @@ pub struct Event {
     /// Nome do take ativo (vazio = nome da mídia).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub take_name: String,
+    /// Deslocamento de tom em semitons (`-24.0..=24.0`, manual VEGAS Pro 21 p. 363).
+    #[serde(default)]
+    pub pitch_semitones: f32,
+    /// Preserva o tom ao esticar/comprimir o evento (`Event::rate != 1`).
+    #[serde(default)]
+    pub lock_pitch_to_stretch: bool,
+    /// ID do evento mestre para *Sync Link* unidirecional (manual VEGAS Pro 21 p. 351).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_link_master: Option<Id>,
+    /// Parâmetros 3D estereoscópicos do evento (disposição L/R, inversão e deslocamento).
+    #[serde(default, skip_serializing_if = "Stereo3dClip::is_default")]
+    pub stereo_3d: Stereo3dClip,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -1643,6 +2458,30 @@ impl Event {
             alt_takes: Vec::new(),
             take_index: 0,
             take_name: String::new(),
+            pitch_semitones: 0.0,
+            lock_pitch_to_stretch: false,
+            sync_link_master: None,
+            stereo_3d: Stereo3dClip::default(),
+        }
+    }
+
+    /// Fator efetivo de altura tonal do áudio (`1.0` = tom original), considerando
+    /// `pitch_semitones` e `lock_pitch_to_stretch`.
+    pub fn effective_pitch_factor(&self) -> f64 {
+        let rate = self.rate.as_f64();
+        if rate <= 0.0 || !rate.is_finite() {
+            return 1.0;
+        }
+        let semi = if self.pitch_semitones.is_finite() {
+            f64::from(self.pitch_semitones.clamp(-24.0, 24.0))
+        } else {
+            0.0
+        };
+        let p = 2.0_f64.powf(semi / 12.0);
+        if self.lock_pitch_to_stretch {
+            p
+        } else {
+            p * rate
         }
     }
 
@@ -1725,15 +2564,17 @@ pub enum FxCategory {
     Light,
     BlurSharpen,
     Stylize,
+    Transform,
     Key,
 }
 
 impl FxCategory {
-    pub const ALL: [FxCategory; 5] = [
+    pub const ALL: [FxCategory; 6] = [
         FxCategory::Color,
         FxCategory::Light,
         FxCategory::BlurSharpen,
         FxCategory::Stylize,
+        FxCategory::Transform,
         FxCategory::Key,
     ];
 
@@ -1743,6 +2584,7 @@ impl FxCategory {
             FxCategory::Light => "Luz",
             FxCategory::BlurSharpen => "Desfoque e nitidez",
             FxCategory::Stylize => "Estilizar",
+            FxCategory::Transform => "Estabilização",
             FxCategory::Key => "Recorte",
         };
         neoveg_common::tr(lang, pt)
@@ -1776,6 +2618,7 @@ pub enum FxKind {
     Emboss,
     Posterize,
     Colorize,
+    Stabilization,
     // áudio
     Gain,
     ParametricEq,
@@ -1816,7 +2659,7 @@ pub struct OfxParamValue {
 }
 
 /// Máximo de keyframes por parâmetro OFX (entrada hostil, §0.4).
-const MAX_OFX_KEYS: usize = 4096;
+pub(crate) const MAX_OFX_KEYS: usize = 4096;
 
 impl OfxParamValue {
     /// Valores no tempo local `t`: antes do primeiro keyframe vale o
@@ -1941,8 +2784,42 @@ pub struct Vst3ParamValue {
     pub value: f64,
 }
 
+/// Tamanho máximo em bytes do estado binário serializado de um componente VST3.
+pub const MAX_VST3_STATE_BYTES: usize = 1024 * 1024;
+const MAX_VST3_STATE_HEX: usize = MAX_VST3_STATE_BYTES * 2;
+
+/// Codifica bytes arbitrários em string hexadecimal minúscula (limitada a [`MAX_VST3_STATE_BYTES`]).
+pub fn encode_hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let capped = &bytes[..bytes.len().min(MAX_VST3_STATE_BYTES)];
+    let mut out = String::with_capacity(capped.len().saturating_mul(2));
+    for &b in capped {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Decodifica string hexadecimal (par, apenas dígitos ASCII hex e limitada a
+/// [`MAX_VST3_STATE_BYTES`]). Retorna `None` para entrada malformada ou excessiva.
+pub fn decode_hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    let trimmed = hex.trim();
+    if trimmed.len() > MAX_VST3_STATE_HEX || !trimmed.len().is_multiple_of(2) {
+        return None;
+    }
+    let (pairs, _) = trimmed.as_bytes().as_chunks::<2>();
+    let mut out = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        let hi = char::from(pair[0]).to_digit(16)?;
+        let lo = char::from(pair[1]).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
 /// Referência a um efeito VST3: binário do módulo, classe (`TUID` em
-/// hexadecimal) e valores normalizados dos parâmetros alterados pelo usuário.
+/// hexadecimal), valores normalizados dos parâmetros e estado opaco do
+/// componente (`IComponent::getState` em hexadecimal).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vst3FxRef {
     pub binary: String,
@@ -1951,12 +2828,14 @@ pub struct Vst3FxRef {
     pub label: String,
     #[serde(default)]
     pub params: Vec<Vst3ParamValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 const MAX_VST3_REF_PARAMS: usize = 16384;
 
 impl Vst3FxRef {
-    /// Saneia textos, contagens e valores vindos de arquivo (§0.4).
+    /// Saneia textos, contagens, valores e estado binário vindos de arquivo (§0.4).
     pub fn sanitize(&mut self) {
         let cut = |s: &mut String| {
             if s.len() > MAX_OFX_REF_TEXT {
@@ -1980,6 +2859,12 @@ impl Vst3FxRef {
                 0.0
             };
         }
+        self.state = self
+            .state
+            .as_deref()
+            .and_then(decode_hex_bytes)
+            .filter(|b| !b.is_empty())
+            .map(|b| encode_hex_bytes(&b));
     }
 
     /// Grava o valor normalizado de um parâmetro (substitui o anterior).
@@ -2050,6 +2935,7 @@ impl FxKind {
             FxKind::Pixelate | FxKind::Mirror | FxKind::FilmGrain | FxKind::Emboss => {
                 Some(FxCategory::Stylize)
             }
+            FxKind::Stabilization => Some(FxCategory::Transform),
             FxKind::ChromaKeyer => Some(FxCategory::Key),
             FxKind::Gain
             | FxKind::ParametricEq
@@ -2067,7 +2953,7 @@ impl FxKind {
         }
     }
 
-    pub const VIDEO: [FxKind; 18] = [
+    pub const VIDEO: [FxKind; 19] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
         FxKind::ColorCorrector,
@@ -2086,6 +2972,7 @@ impl FxKind {
         FxKind::Emboss,
         FxKind::Posterize,
         FxKind::Colorize,
+        FxKind::Stabilization,
     ];
     pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
@@ -2103,6 +2990,51 @@ impl FxKind {
 
     pub fn is_audio(self) -> bool {
         self == FxKind::Vst3 || Self::AUDIO.contains(&self)
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            FxKind::BrightnessContrast => "BrightnessContrast",
+            FxKind::HslAdjust => "HslAdjust",
+            FxKind::ColorCorrector => "ColorCorrector",
+            FxKind::Levels => "Levels",
+            FxKind::BlackWhite => "BlackWhite",
+            FxKind::Sepia => "Sepia",
+            FxKind::Invert => "Invert",
+            FxKind::GaussianBlur => "GaussianBlur",
+            FxKind::Sharpen => "Sharpen",
+            FxKind::Vignette => "Vignette",
+            FxKind::ChromaKeyer => "ChromaKeyer",
+            FxKind::Pixelate => "Pixelate",
+            FxKind::Mirror => "Mirror",
+            FxKind::Glow => "Glow",
+            FxKind::FilmGrain => "FilmGrain",
+            FxKind::Emboss => "Emboss",
+            FxKind::Posterize => "Posterize",
+            FxKind::Colorize => "Colorize",
+            FxKind::Stabilization => "Stabilization",
+            FxKind::Gain => "Gain",
+            FxKind::ParametricEq => "ParametricEq",
+            FxKind::HighPass => "HighPass",
+            FxKind::LowPass => "LowPass",
+            FxKind::Compressor => "Compressor",
+            FxKind::NoiseGate => "NoiseGate",
+            FxKind::Delay => "Delay",
+            FxKind::Reverb => "Reverb",
+            FxKind::Chorus => "Chorus",
+            FxKind::Distortion => "Distortion",
+            FxKind::Limiter => "Limiter",
+            FxKind::Ofx => "Ofx",
+            FxKind::Vst3 => "Vst3",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        Self::VIDEO
+            .into_iter()
+            .chain(Self::AUDIO)
+            .find(|&k| k.id() == trimmed)
     }
 
     pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
@@ -2125,6 +3057,7 @@ impl FxKind {
             FxKind::Emboss => "Relevo",
             FxKind::Posterize => "Posterizar",
             FxKind::Colorize => "Colorir (Tint)",
+            FxKind::Stabilization => "Estabilizador de Vídeo",
             FxKind::Gain => "Ganho",
             FxKind::ParametricEq => "EQ Paramétrico",
             FxKind::HighPass => "Passa-Altas",
@@ -2242,6 +3175,15 @@ impl FxKind {
                         p("Cor G", 0.0, 1.0, 0.6),
                         p("Cor B", 0.0, 1.0, 0.2),
                         p("Intensidade", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::Stabilization => {
+                const {
+                    &[
+                        p("Suavização (%)", 0.0, 100.0, 65.0),
+                        p("Zoom de borda", 1.0, 1.5, 1.12),
+                        p("Compensar rotação", 0.0, 1.0, 0.35),
                     ]
                 }
             }
@@ -2374,6 +3316,127 @@ impl AnimParam {
     }
 }
 
+/// Curvas RGB, bandas HSL e LUT (.cube ou predefinida) para Color Grading (pp. 769–781).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorGradeCurves {
+    /// Caminho para arquivo `.cube` externo ou `"builtin:<nome>"` (`"builtin:rec709"`, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lut_path: Option<String>,
+    /// Intensidade de mistura da LUT (`0.0..=1.0`).
+    pub lut_strength: f32,
+    /// Curva Master (luminância), pontos `(x, y)` em `[0..1]`. Vazio = identidade.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub master: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub green: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blue: Vec<[f32; 2]>,
+    /// 6 setores HSL (Vermelho, Amarelo, Verde, Ciano, Azul, Magenta): `[matiz (-0.5..0.5), sat (-1..1), lum (-1..1)]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hsl_bands: Vec<[f32; 3]>,
+}
+
+impl Default for ColorGradeCurves {
+    fn default() -> Self {
+        Self {
+            lut_path: None,
+            lut_strength: 1.0,
+            master: Vec::new(),
+            red: Vec::new(),
+            green: Vec::new(),
+            blue: Vec::new(),
+            hsl_bands: Vec::new(),
+        }
+    }
+}
+
+impl ColorGradeCurves {
+    pub const BUILTIN_LUTS: [(&'static str, &'static str); 4] = [
+        ("builtin:rec709", "Câmera: Log -> Rec.709"),
+        ("builtin:teal_orange", "Look: Cinema Teal & Orange"),
+        ("builtin:film_cool", "Look: Película Fria"),
+        ("builtin:mono_film", "Look: P&B Contraste Fílmico"),
+    ];
+
+    pub const HSL_BAND_NAMES: [&'static str; 6] =
+        ["Vermelho", "Amarelo", "Verde", "Ciano", "Azul", "Magenta"];
+
+    pub fn default_curve() -> Vec<[f32; 2]> {
+        vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]
+    }
+
+    pub fn default_hsl_bands() -> Vec<[f32; 3]> {
+        vec![[0.0, 0.0, 0.0]; 6]
+    }
+
+    pub fn sanitize(&mut self) {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        self.lut_strength = fin(self.lut_strength, 1.0).clamp(0.0, 1.0);
+        if self
+            .lut_path
+            .as_ref()
+            .is_some_and(|p| p.trim().is_empty() || p.len() > 1024 || p.contains('\0'))
+        {
+            self.lut_path = None;
+        }
+        let clean_curve = |pts: &mut Vec<[f32; 2]>| {
+            pts.truncate(32);
+            for pt in pts.iter_mut() {
+                pt[0] = fin(pt[0], 0.0).clamp(0.0, 1.0);
+                pt[1] = fin(pt[1], 0.0).clamp(0.0, 1.0);
+            }
+            pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        };
+        clean_curve(&mut self.master);
+        clean_curve(&mut self.red);
+        clean_curve(&mut self.green);
+        clean_curve(&mut self.blue);
+        self.hsl_bands.truncate(6);
+        for b in &mut self.hsl_bands {
+            b[0] = fin(b[0], 0.0).clamp(-0.5, 0.5);
+            b[1] = fin(b[1], 0.0).clamp(-1.0, 1.0);
+            b[2] = fin(b[2], 0.0).clamp(-1.0, 1.0);
+        }
+    }
+
+    /// Avalia uma curva linear por partes em `x in [0..1]`; curva vazia devolve `x`.
+    pub fn eval_curve(pts: &[[f32; 2]], x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        if pts.is_empty() {
+            return x;
+        }
+        if pts.len() == 1 {
+            return pts[0][1].clamp(0.0, 1.0);
+        }
+        if x <= pts[0][0] {
+            return pts[0][1].clamp(0.0, 1.0);
+        }
+        for w in pts.windows(2) {
+            if x <= w[1][0] {
+                let span = (w[1][0] - w[0][0]).max(1e-5);
+                let t = ((x - w[0][0]) / span).clamp(0.0, 1.0);
+                return (w[0][1] + (w[1][1] - w[0][1]) * t).clamp(0.0, 1.0);
+            }
+        }
+        pts.last().map(|p| p[1].clamp(0.0, 1.0)).unwrap_or(x)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.lut_path.is_none()
+            && self.master.is_empty()
+            && self.red.is_empty()
+            && self.green.is_empty()
+            && self.blue.is_empty()
+            && self
+                .hsl_bands
+                .iter()
+                .all(|b| b[0].abs() < 1e-4 && b[1].abs() < 1e-4 && b[2].abs() < 1e-4)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FxInstance {
     pub id: Id,
@@ -2387,6 +3450,9 @@ pub struct FxInstance {
     /// Só em `FxKind::Vst3`: o plug-in VST3 e os valores dos parâmetros dele.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vst3: Option<Vst3FxRef>,
+    /// Curvas RGB/HSL e LUT (.cube) para `FxKind::ColorCorrector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_grade: Option<Box<ColorGradeCurves>>,
 }
 
 impl FxInstance {
@@ -2405,6 +3471,7 @@ impl FxInstance {
                 .collect(),
             ofx: None,
             vst3: None,
+            color_grade: None,
         }
     }
 
@@ -2429,6 +3496,7 @@ impl FxInstance {
             class_id: class_id.into(),
             label: label.into(),
             params: vec![],
+            state: None,
         });
         f
     }
@@ -2485,11 +3553,67 @@ pub struct MasterBus {
     pub video_fx: Vec<FxInstance>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Tipo de marcador na timeline (padrão, faixa/índice de CD ou comando, pp. 131, 495, 725).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MarkerKind {
+    #[default]
+    Standard,
+    CdTrack,
+    CdIndex,
+    Command,
+}
+
+impl MarkerKind {
+    pub const ALL: [MarkerKind; 4] = [
+        MarkerKind::Standard,
+        MarkerKind::CdTrack,
+        MarkerKind::CdIndex,
+        MarkerKind::Command,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkerKind::Standard => "Marcador padrão",
+            MarkerKind::CdTrack => "Faixa de CD de áudio",
+            MarkerKind::CdIndex => "Índice de CD de áudio",
+            MarkerKind::Command => "Marcador de comando",
+        }
+    }
+
+    pub fn short_prefix(self) -> &'static str {
+        match self {
+            MarkerKind::Standard => "",
+            MarkerKind::CdTrack => "CD",
+            MarkerKind::CdIndex => "IDX",
+            MarkerKind::Command => "CMD",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Marker {
     pub id: Id,
     pub t: Ticks,
     pub label: String,
+    pub kind: MarkerKind,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub command_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub command_arg: String,
+}
+
+impl Marker {
+    pub fn new(t: Ticks, kind: MarkerKind, label: impl Into<String>) -> Self {
+        Self {
+            id: new_id(),
+            t,
+            label: label.into(),
+            kind,
+            command_type: String::new(),
+            command_arg: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2605,6 +3729,7 @@ mod tests {
             class_id: "z".into(),
             label: String::new(),
             params: vec![],
+            state: Some("00FF".into()),
         });
         p.master.fx = vec![fx, orphan, native];
         let json = serde_json::to_string(&p).expect("serializa");
@@ -2615,6 +3740,7 @@ mod tests {
                 id: 3,
                 value: f64::NAN,
             });
+            r.state = Some("AABB".into());
         }
         let _ = back.sanitize();
         let r = back.master.fx[0].vst3.as_ref().expect("referência mantida");
@@ -2626,6 +3752,7 @@ mod tests {
                 Vst3ParamValue { id: 3, value: 0.0 },
             ]
         );
+        assert_eq!(r.state.as_deref(), Some("aabb"));
         assert!(r.label.len() <= 4096 && r.label.is_char_boundary(r.label.len()));
         assert!(!back.master.fx[1].enabled, "FX VST3 sem referência desliga");
         assert!(
@@ -2634,12 +3761,39 @@ mod tests {
         );
         assert!(FxKind::Vst3.is_audio());
 
-        // projeto salvo antes do host VST3: sem o campo `vst3`
+        // estado VST3 hostil ou malformado é descartado na sanitização (§0.4)
+        let mut hostile = Vst3FxRef {
+            binary: "b".into(),
+            class_id: "c".into(),
+            label: "l".into(),
+            params: vec![],
+            state: Some("abc".into()), // ímpar
+        };
+        hostile.sanitize();
+        assert_eq!(hostile.state, None);
+        hostile.state = Some("zzzz".into());
+        hostile.sanitize();
+        assert_eq!(hostile.state, None);
+        hostile.state = Some("a".repeat(MAX_VST3_STATE_BYTES * 2 + 2));
+        hostile.sanitize();
+        assert_eq!(hostile.state, None);
+        assert_eq!(
+            decode_hex_bytes(&encode_hex_bytes(b"\x01\xfe")),
+            Some(vec![0x01, 0xfe])
+        );
+
+        // projeto salvo antes do host VST3: sem os campos `vst3`/`state`
         let old = serde_json::json!({
             "id": 5, "kind": "Gain", "enabled": true, "params": [{"value": 0.0, "keys": []}]
         });
         let f: FxInstance = serde_json::from_value(old).expect("formato antigo");
         assert!(f.vst3.is_none());
+        let no_state: Vst3FxRef = serde_json::from_value(serde_json::json!({
+            "binary": "a.vst3",
+            "class_id": "00",
+        }))
+        .expect("vst3 sem campo state");
+        assert_eq!(no_state.state, None);
         // e um FX sem VST3 não grava o campo
         let out = serde_json::to_value(FxInstance::new(FxKind::Gain)).expect("grava");
         assert!(out.get("vst3").is_none());

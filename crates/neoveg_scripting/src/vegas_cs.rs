@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 const MAX_SCRIPT_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CHARS: usize = 1200;
@@ -96,6 +96,9 @@ struct ScriptInputPayload {
     /// (`dotnet_host::media_probe_fn_addr`) e a execução a que pertence.
     probe_fn: u64,
     probe_token: u64,
+    /// Endereço da função que mostra janelas da camada de Forms própria
+    /// (`dotnet_host::ui_request_fn_addr`).
+    ui_fn: u64,
 }
 
 /// Versão do formato de saída da ponte. Uma saída de outra versão veio de
@@ -923,6 +926,66 @@ namespace ScriptPortal.Vegas
         }
     }
 
+    // Chamadas ao Neoveg durante o script: as janelas da camada de Forms
+    // própria (Linux, macOS) são desenhadas pela interface do Neoveg.
+    internal static class NeovegHostCalls
+    {
+        internal static ulong UiFn;
+        internal static ulong Token;
+        internal static Vegas Current;
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int HostFn(ulong token, IntPtr input, int inputLen, IntPtr outBuf, int outCap);
+
+        private const int MaxReply = 4 * 1024 * 1024;
+
+        // null quando este host não mostra janelas; erro do Neoveg vira exceção
+        internal static JsonDocument Ui(object request)
+        {
+            if (UiFn == 0)
+            {
+                return null;
+            }
+            byte[] raw = JsonSerializer.SerializeToUtf8Bytes(request);
+            var fn = Marshal.GetDelegateForFunctionPointer<HostFn>(new IntPtr(unchecked((long)UiFn)));
+            IntPtr inPtr = Marshal.AllocHGlobal(Math.Max(1, raw.Length));
+            IntPtr outPtr = IntPtr.Zero;
+            string json;
+            try
+            {
+                Marshal.Copy(raw, 0, inPtr, raw.Length);
+                outPtr = Marshal.AllocHGlobal(MaxReply);
+                int n = fn(Token, inPtr, raw.Length, outPtr, MaxReply);
+                // a janela já foi mostrada: nunca pede de novo
+                if (n < 0 || n > MaxReply)
+                {
+                    throw new InvalidOperationException("o Neoveg não respondeu ao pedido de janela");
+                }
+                json = Marshal.PtrToStringUTF8(outPtr, n);
+            }
+            finally
+            {
+                if (outPtr != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(outPtr);
+                }
+                Marshal.FreeHGlobal(inPtr);
+            }
+            var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("kind", out var kind)
+                && kind.ValueKind == JsonValueKind.String
+                && kind.GetString() == "error")
+            {
+                string err = root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : "erro";
+                doc.Dispose();
+                throw new InvalidOperationException("janela do script: " + err);
+            }
+            return doc;
+        }
+    }
+
     public sealed class Vegas
     {
         private readonly List<string> _messages = new List<string>();
@@ -953,6 +1016,9 @@ namespace ScriptPortal.Vegas
             Project.s_current = Project;
             Project.MediaPool._owner = Project;
             Project._probeFn = snap.probe_fn;
+            NeovegHostCalls.Current = this;
+            NeovegHostCalls.UiFn = snap.ui_fn;
+            NeovegHostCalls.Token = snap.probe_token;
             Project._probeToken = snap.probe_token;
             foreach (var ms in snap.media ?? new List<MediaSnap>())
             {
@@ -1363,6 +1429,7 @@ namespace ScriptPortal.Vegas
         public List<string> audio_buses { get; set; }
         public List<MediaSnap> media { get; set; }
         public ulong probe_fn { get; set; }
+        public ulong ui_fn { get; set; }
         public ulong probe_token { get; set; }
     }
 
@@ -1670,7 +1737,7 @@ namespace ScriptPortal.Vegas
 
 fn media_snap(m: &MediaItem) -> ScriptMediaSnap {
     let (path, generated) = match &m.source {
-        MediaSource::File { path } => (path.clone(), false),
+        MediaSource::File { path } | MediaSource::NestedProject { path } => (path.clone(), false),
         MediaSource::ImageSequence { paths, .. } => {
             (paths.first().cloned().unwrap_or_default(), false)
         }
@@ -1733,7 +1800,34 @@ impl ProbeRun {
 impl Drop for ProbeRun {
     fn drop(&mut self) {
         probe_runs().remove(&self.0);
+        ui_runs().remove(&self.0);
     }
+}
+
+/// Opções de uma execução de script.
+#[derive(Clone, Default)]
+pub struct ScriptRunOptions {
+    /// Quem mostra as janelas da camada de Forms própria; `None`: sem
+    /// interface (CLI), a camada responde com o padrão.
+    pub ui: Option<Arc<dyn crate::script_ui::ScriptUi>>,
+    /// Compila com a camada de Forms própria mesmo onde o WinForms real
+    /// existe (testes no Windows).
+    pub force_forms_shim: bool,
+}
+
+/// Quem mostra as janelas de cada execução (mesmo `token` do [`ProbeRun`]).
+static UI_RUNS: Mutex<BTreeMap<u64, Arc<dyn crate::script_ui::ScriptUi>>> =
+    Mutex::new(BTreeMap::new());
+
+fn ui_runs() -> MutexGuard<'static, BTreeMap<u64, Arc<dyn crate::script_ui::ScriptUi>>> {
+    UI_RUNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Pedido de janela da execução `token`, vindo da fronteira FFI. O lock não
+/// fica preso enquanto o usuário responde.
+pub(crate) fn ui_request_for_script(token: u64, raw: &[u8]) -> Vec<u8> {
+    let ui = ui_runs().get(&token).cloned();
+    crate::script_ui::handle_request(ui.as_deref(), raw)
 }
 
 #[derive(Serialize)]
@@ -1897,6 +1991,7 @@ fn build_snapshot(
         media,
         probe_fn: dotnet_host::media_probe_fn_addr(),
         probe_token,
+        ui_fn: dotnet_host::ui_request_fn_addr(),
     };
     serde_json::to_vec(&payload)
         .map_err(|e| NeovegError::Json(format!("erro ao serializar contexto do script: {e}")))
@@ -2049,6 +2144,14 @@ fn compile_cs_project(
     .map_err(|e| NeovegError::Io(format!("erro ao gravar .csproj: {e}")))?;
     std::fs::write(src_dir.join("ScriptPortalVegas.cs"), SCRIPT_PORTAL_VEGAS_CS)
         .map_err(|e| NeovegError::Io(format!("erro ao gravar ScriptPortalVegas.cs: {e}")))?;
+    // sem o WinForms real (Linux, macOS), a camada de Forms própria
+    if !env.use_winforms() {
+        std::fs::write(
+            src_dir.join("WinFormsNeoveg.cs"),
+            crate::winforms_shim::WINFORMS_SHIM_CS,
+        )
+        .map_err(|e| NeovegError::Io(format!("erro ao gravar WinFormsNeoveg.cs: {e}")))?;
+    }
     if let Some(source) = source_or_none {
         std::fs::write(src_dir.join("UserScript.cs"), source)
             .map_err(|e| NeovegError::Io(format!("erro ao preparar UserScript.cs: {e}")))?;
@@ -2421,6 +2524,7 @@ fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Mark
                 id: neoveg_engine::model::new_id(),
                 t: marker_ticks(m.ticks.unwrap_or(0))?,
                 label: marker_label(m.label.as_deref().unwrap_or("")),
+                ..Default::default()
             }),
         }
     }
@@ -2620,6 +2724,7 @@ pub fn run_cs_script_impl(
     session: &mut EditorSession,
     host: &mut HeadlessHost,
     messages_out: &mut Vec<String>,
+    options: &ScriptRunOptions,
 ) -> Result<(), NeovegError> {
     if source_or_none.is_none() {
         validate_managed_dll_header(script_path)?;
@@ -2629,6 +2734,15 @@ pub fn run_cs_script_impl(
     let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
     // mídia importada pelo script (AddMedia) fica aqui até o fim da execução
     let probe = ProbeRun::start(seq);
+    if let Some(ui) = &options.ui {
+        ui_runs().insert(seq, Arc::clone(ui));
+    }
+    // compila sem o WinForms real quando pedido; o runtime carregado não muda
+    let compile_env = if options.force_forms_shim {
+        env.without_winforms()
+    } else {
+        env.clone()
+    };
     let stage = TempDirGuard(std::env::temp_dir().join(format!(
         "neoveg_cs_{}_{}",
         std::process::id(),
@@ -2641,7 +2755,7 @@ pub fn run_cs_script_impl(
     let mut last_exit_code = 0;
 
     if let Some(src) = source_or_none {
-        let dll_path = compile_cs_project(&env, Some(src), &stage.0)?;
+        let dll_path = compile_cs_project(&compile_env, Some(src), &stage.0)?;
         let payload = build_snapshot(session, &result_path, None, probe.token())?;
         last_exit_code = dotnet_host::invoke_component(
             &env,

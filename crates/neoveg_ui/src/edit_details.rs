@@ -161,6 +161,7 @@ impl App {
             length: Ticks,
             offset: Ticks,
             rate: f64,
+            pitch_semitones: f32,
             gain_db: f32,
             mute: bool,
             locked: bool,
@@ -186,6 +187,7 @@ impl App {
                     length: e.length,
                     offset: e.offset,
                     rate: e.rate.as_f64(),
+                    pitch_semitones: e.pitch_semitones,
                     gain_db: e.gain_db,
                     mute: e.mute,
                     locked: e.locked,
@@ -207,6 +209,7 @@ impl App {
         let mut edit_len: Option<(usize, usize, Ticks)> = None;
         let mut edit_off: Option<(usize, usize, Ticks)> = None;
         let mut edit_rate: Option<(usize, usize, Rate)> = None;
+        let mut edit_pitch: Option<(usize, usize, f32)> = None;
         let mut edit_gain: Option<(usize, usize, f32)> = None;
         let mut toggle_mute: Option<(usize, usize)> = None;
         let mut toggle_lock: Option<(usize, usize)> = None;
@@ -224,6 +227,7 @@ impl App {
                     "Duração",
                     "Offset",
                     "Taxa",
+                    "Tom",
                     "Ganho",
                     "M",
                     "Bloq",
@@ -311,6 +315,19 @@ impl App {
                         }
                     }
                     if row.kind == TrackKind::Audio {
+                        let mut p_val = row.pitch_semitones;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut p_val)
+                                    .speed(0.25)
+                                    .range(-24.0..=24.0)
+                                    .fixed_decimals(1)
+                                    .suffix(" st"),
+                            )
+                            .changed()
+                        {
+                            edit_pitch = Some((row.ti, row.ei, p_val));
+                        }
                         let mut g = row.gain_db;
                         if ui
                             .add(
@@ -325,6 +342,7 @@ impl App {
                             edit_gain = Some((row.ti, row.ei, g));
                         }
                     } else {
+                        ui.label(egui::RichText::new("—").small().weak());
                         ui.label(egui::RichText::new("—").small().weak());
                     }
                     if ui.selectable_label(row.mute, "M").clicked() {
@@ -401,6 +419,22 @@ impl App {
                 dirty = true;
             }
         }
+        if let Some((ti, ei, p_val)) = edit_pitch {
+            self.checkpoint();
+            if let Some(e) = self
+                .project
+                .tracks
+                .get_mut(ti)
+                .and_then(|t| t.events.get_mut(ei))
+            {
+                e.pitch_semitones = if p_val.is_finite() {
+                    p_val.clamp(-24.0, 24.0)
+                } else {
+                    0.0
+                };
+                dirty = true;
+            }
+        }
         if let Some((ti, ei, g)) = edit_gain {
             self.checkpoint();
             if let Some(e) = self
@@ -469,15 +503,36 @@ impl App {
             return;
         }
         let mut rename: Option<(usize, String)> = None;
+        let mut rekind: Option<(usize, MarkerKind)> = None;
+        let mut recmd: Option<(usize, String, String)> = None;
         let mut retime: Option<(usize, Ticks)> = None;
         let mut remove: Option<usize> = None;
         let mut jump: Option<Ticks> = None;
+        let has_cd = self
+            .project
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::CdTrack | MarkerKind::CdIndex));
+
+        if has_cd && ui.small_button("Exportar CUE Sheet (.cue)...").clicked() {
+            let cue = self.session.export_cd_cue_sheet("audio.wav");
+            if let Some(p) = rfd::FileDialog::new()
+                .add_filter("CD Cue Sheet", &["cue"])
+                .set_file_name("disco.cue")
+                .save_file()
+            {
+                match std::fs::write(&p, cue.as_bytes()) {
+                    Ok(()) => self.set_status("CUE Sheet exportado."),
+                    Err(e) => self.set_status(format!("Erro gravando CUE: {e}")),
+                }
+            }
+        }
 
         egui::Grid::new("ed_markers_grid")
             .striped(true)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                for h in ["#", "Rótulo", "Tempo", "Ir", "×"] {
+                for h in ["#", "Tipo", "Rótulo", "Comando", "Tempo", "Ir", "×"] {
                     let lbl = if matches!(h, "#" | "×") {
                         h
                     } else {
@@ -488,15 +543,52 @@ impl App {
                 ui.end_row();
                 for (row_idx, (i, m)) in items.iter_mut().enumerate() {
                     ui.label(format!("{}", row_idx + 1));
+                    let prev_kind = m.kind;
+                    egui::ComboBox::from_id_salt(("mk_kind", m.id))
+                        .selected_text(m.kind.label())
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            for k in MarkerKind::ALL {
+                                ui.selectable_value(&mut m.kind, k, k.label());
+                            }
+                        });
+                    if m.kind != prev_kind {
+                        rekind = Some((*i, m.kind));
+                    }
                     if ui
                         .add(
                             egui::TextEdit::singleline(&mut m.label)
-                                .desired_width(160.0)
+                                .desired_width(140.0)
                                 .font(egui::TextStyle::Small),
                         )
                         .changed()
                     {
                         rename = Some((*i, m.label.clone()));
+                    }
+                    if m.kind == MarkerKind::Command {
+                        ui.horizontal(|ui| {
+                            let c1 = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut m.command_type)
+                                        .hint_text("TEXT/URL")
+                                        .desired_width(58.0)
+                                        .font(egui::TextStyle::Small),
+                                )
+                                .changed();
+                            let c2 = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut m.command_arg)
+                                        .hint_text("parâmetro")
+                                        .desired_width(90.0)
+                                        .font(egui::TextStyle::Small),
+                                )
+                                .changed();
+                            if c1 || c2 {
+                                recmd = Some((*i, m.command_type.clone(), m.command_arg.clone()));
+                            }
+                        });
+                    } else {
+                        ui.label(egui::RichText::new("—").small().weak());
                     }
                     if let Some(nt) = time_cell_editor(
                         ui,
@@ -518,6 +610,21 @@ impl App {
                     ui.end_row();
                 }
             });
+
+        if let Some((i, k)) = rekind {
+            self.checkpoint();
+            if let Some(m) = self.project.markers.get_mut(i) {
+                m.kind = k;
+                self.changed();
+            }
+        }
+        if let Some((i, ctype, carg)) = recmd {
+            if let Some(m) = self.project.markers.get_mut(i) {
+                m.command_type = ctype;
+                m.command_arg = carg;
+                self.dirty = true;
+            }
+        }
 
         if let Some((i, lbl)) = rename {
             if let Some(m) = self.project.markers.get_mut(i) {

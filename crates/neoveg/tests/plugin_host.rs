@@ -187,6 +187,7 @@ fn vst3_ref(bin: &Path, class_id: &str, label: &str) -> neoveg_engine::model::Vs
         class_id: class_id.into(),
         label: label.into(),
         params: vec![],
+        state: None,
     }
 }
 
@@ -365,6 +366,40 @@ fn vst3_effect_processes_its_input() {
         let mut buf = sine(1024);
         vst3_process(host(), owner, 9, &fx, 48_000, &mut buf, true)
             .expect("processa com parâmetro")
+            .expect("sem pulo");
+        assert!(buf.iter().all(|s| s.is_finite()));
+    }
+    vst3_release_owner(owner);
+    shutdown_workers();
+}
+
+#[test]
+fn vst3_state_and_latency_roundtrip_or_reject_invalid() {
+    use neoveg_engine::plugin_host::{
+        new_vst3_owner, probe_vst3_isolated, vst3_cached_latency, vst3_get_state, vst3_latency,
+        vst3_process, vst3_release_owner,
+    };
+    let bad = vst3_ref(Path::new("nao-existe.vst3"), &"0".repeat(32), "bad");
+    assert!(vst3_get_state(host(), &bad).is_err());
+    assert!(vst3_latency(host(), &bad).is_err());
+
+    let Some(bin) = installed_vst3("MCompressor") else {
+        eprintln!("MCompressor (MeldaProduction) não instalado; teste completo pulado");
+        return;
+    };
+    let classes =
+        probe_vst3_isolated(host(), &bin, Duration::from_secs(60)).expect("sondagem VST3");
+    let class = classes.first().expect("classe");
+    let mut fx = vst3_ref(&bin, &class.class_id, &class.name);
+    let _lat = vst3_latency(host(), &fx).expect("consulta latência");
+    let owner = new_vst3_owner();
+    let _cached = vst3_cached_latency(host(), owner, 101, &fx, 48_000, true);
+    if let Ok(hex) = vst3_get_state(host(), &fx) {
+        assert!(!hex.is_empty());
+        fx.state = Some(hex);
+        let mut buf = vec![0.1f32; 512];
+        vst3_process(host(), owner, 102, &fx, 48_000, &mut buf, true)
+            .expect("restaura estado")
             .expect("sem pulo");
         assert!(buf.iter().all(|s| s.is_finite()));
     }

@@ -5,7 +5,7 @@
 //! caminho de menu, atalho padrão (regravável), `enabled()` e `run()`.
 
 use crate::media::MediaCache;
-use crate::model::{EnvKind, GenSpec, Id, TextSpec, TrackKind};
+use crate::model::{EnvKind, GenSpec, Id, MarkerKind, TextSpec, TrackKind};
 use crate::session::EditorSession;
 use crate::time::Ticks;
 use neoveg_common::{tr, tr_args, tr_menu_path, Language, LayoutType};
@@ -56,6 +56,9 @@ pub enum ShortcutKey {
     Delete,
     F2,
     F8,
+    F11,
+    /// Crase (`` ` ``): no ABNT2 é tecla morta e quase nunca chega à UI.
+    Backtick,
     ArrowLeft,
     ArrowRight,
     ArrowUp,
@@ -65,6 +68,8 @@ pub enum ShortcutKey {
     OpenBracket,
     CloseBracket,
     Backslash,
+    Equals,
+    Minus,
 }
 
 impl ShortcutKey {
@@ -140,6 +145,8 @@ impl ShortcutKey {
             ShortcutKey::Delete => "Delete",
             ShortcutKey::F2 => "F2",
             ShortcutKey::F8 => "F8",
+            ShortcutKey::F11 => "F11",
+            ShortcutKey::Backtick => "`",
             ShortcutKey::ArrowLeft => "Esquerda",
             ShortcutKey::ArrowRight => "Direita",
             ShortcutKey::ArrowUp => "Cima",
@@ -149,6 +156,8 @@ impl ShortcutKey {
             ShortcutKey::OpenBracket => "[",
             ShortcutKey::CloseBracket => "]",
             ShortcutKey::Backslash => "\\",
+            ShortcutKey::Equals => "=",
+            ShortcutKey::Minus => "-",
         }
     }
 
@@ -197,6 +206,8 @@ impl ShortcutKey {
             "del" | "delete" => ShortcutKey::Delete,
             "f2" => ShortcutKey::F2,
             "f8" => ShortcutKey::F8,
+            "f11" => ShortcutKey::F11,
+            "`" | "backtick" | "crase" => ShortcutKey::Backtick,
             "left" | "esquerda" => ShortcutKey::ArrowLeft,
             "right" | "direita" => ShortcutKey::ArrowRight,
             "up" | "cima" => ShortcutKey::ArrowUp,
@@ -206,6 +217,8 @@ impl ShortcutKey {
             "[" | "openbracket" => ShortcutKey::OpenBracket,
             "]" | "closebracket" => ShortcutKey::CloseBracket,
             "\\" | "backslash" => ShortcutKey::Backslash,
+            "=" | "+" | "equal" | "equals" | "plus" => ShortcutKey::Equals,
+            "-" | "minus" => ShortcutKey::Minus,
             _ => return None,
         })
     }
@@ -252,6 +265,10 @@ impl Shortcut {
 
     pub const fn alt(key: ShortcutKey) -> Self {
         Self::new(false, false, true, key)
+    }
+
+    pub const fn alt_shift(key: ShortcutKey) -> Self {
+        Self::new(false, true, true, key)
     }
 
     pub fn format_in(self, lang: Language) -> String {
@@ -417,7 +434,9 @@ impl DockPanel {
 pub enum UiAction {
     NewProject,
     OpenProjectDialog,
-    SaveProject { save_as: bool },
+    SaveProject {
+        save_as: bool,
+    },
     SaveVersion,
     ImportMediaDialog,
     ImportSequenceDialog,
@@ -434,6 +453,7 @@ pub enum UiAction {
     ImportFcp7Dialog,
     ExportFcp7Dialog,
     ImportAafDialog,
+    ExportAafDialog,
     OpenRenderDialog,
     SendToEncoder,
     EncoderStartQueue,
@@ -443,6 +463,9 @@ pub enum UiAction {
     SnapshotDialog,
     OpenProjectProps,
     OpenEventProps,
+    OpenPasteAttributesDialog,
+    OpenTakeChooser,
+    OpenSceneDetectDialog,
     OpenPanCrop,
     OpenFxEvent,
     OpenFxMasterAudio,
@@ -458,20 +481,56 @@ pub enum UiAction {
     BuildProxySelected,
     PrerenderRegion,
     RunScriptDialog,
+    OpenIntegrationsDialog,
+    SendToExternalApp(crate::integrations::ExternalApp),
+    BlenderRenderSceneDialog,
+    BlenderExportScriptDialog,
+    BlenderImportCameraDialog,
     ExitApp,
     SelectDock(DockPanel),
     TogglePreview,
     ToggleMasterBus,
+    /// F11: minimiza/restaura a área de janelas acopláveis (manual do VEGAS Pro 21).
+    ToggleDockArea,
+    /// Shift+F11: minimiza/restaura a lista de trilhas.
+    ToggleTrackList,
+    /// Ctrl+F11: maximiza/restaura a timeline (esconde a área de janelas e a lista de trilhas).
+    ToggleMaximizeTimeline,
     TogglePlay,
+    ToggleRecord,
     PlayFromStart,
     Play,
-    Stop { restore_cursor: bool },
+    Stop {
+        restore_cursor: bool,
+    },
     Shuttle(f64),
     SetCursor(Ticks),
     CenterTimeline,
     ZoomBy(f32),
     JumpMarker(bool),
     JumpMarkerIndex(usize),
+    ProjectMediaSetView(u8),
+    ProjectMediaNewBin,
+    ProjectMediaNewSmartBin,
+    ProjectMediaNewStoryboard,
+    ProjectMediaReplaceDialog,
+    ProjectMediaInsertStoryboard,
+    PreviewToggleSplit,
+    PreviewSplitMode(crate::playback::PreviewSplitMode),
+    PreviewCopyFrame,
+    PreviewRamBuild,
+    PreviewRamClear,
+    PreviewZoom(f32),
+    PreviewToggleExternalMonitor,
+    InsertNestedTimelineDialog,
+    RenderToNewTrack,
+    SetTrackDefaultProps,
+    CycleStereo3dMode,
+    OpenMotionTrackDialog,
+    ApplyAudioFxNonRealtime,
+    OpenCustomizeToolbar,
+    OpenCommandMarkerDialog,
+    SetRulerGrid(crate::session::RulerGridSpacing),
 }
 
 /// Resultado de execução de um comando.
@@ -595,6 +654,70 @@ fn has_selected_events(s: &EditorSession, _h: &dyn CommandHost) -> bool {
 
 fn has_selected_events_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
     h.supports_ui() && !s.sel_events.is_empty()
+}
+
+fn has_selected_audio_events(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_events.iter().any(|&id| {
+        s.project.find_event(id).is_some_and(|(ti, ei)| {
+            let tr = &s.project.tracks[ti];
+            tr.kind == TrackKind::Audio && !tr.locked && !tr.events[ei].locked
+        })
+    })
+}
+
+fn has_selected_video_events_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
+    h.supports_ui()
+        && s.sel_events.iter().any(|&id| {
+            s.project.find_event(id).is_some_and(|(ti, ei)| {
+                let tr = &s.project.tracks[ti];
+                tr.kind == TrackKind::Video
+                    && !tr.locked
+                    && !tr.events[ei].locked
+                    && s.project
+                        .media(tr.events[ei].media_id)
+                        .is_some_and(|m| m.has_video)
+            })
+        })
+}
+
+fn has_selected_audio_track(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_track.is_some_and(|ti| {
+        s.project
+            .tracks
+            .get(ti)
+            .is_some_and(|t| t.kind == TrackKind::Audio && !t.locked)
+    })
+}
+
+fn has_active_media(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.active_media_id
+        .is_some_and(|id| s.project.media(id).is_some())
+}
+
+fn has_active_media_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
+    h.supports_ui() && has_active_media(s, h)
+}
+
+fn can_create_sync_link(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_events
+        .iter()
+        .filter(|&&id| {
+            s.project.find_event(id).is_some_and(|(ti, ei)| {
+                !s.project.tracks[ti].locked && !s.project.tracks[ti].events[ei].locked
+            })
+        })
+        .take(2)
+        .count()
+        >= 2
+}
+
+fn has_sync_link_in_selection(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    s.sel_events.iter().any(|&id| {
+        s.project
+            .event(id)
+            .is_some_and(|e| e.sync_link_master.is_some())
+            || s.has_sync_followers(id)
+    })
 }
 
 fn has_clipboard(s: &EditorSession, _h: &dyn CommandHost) -> bool {
@@ -872,6 +995,19 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::ImportAafDialog, h),
     },
     CommandDef {
+        id: "file.export_aaf",
+        label: "Exportar AAF (.aaf)...",
+        menu_path: "Arquivo/Exportar AAF (.aaf)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            export_or_ui(s, h, UiAction::ExportAafDialog, "aaf", "AAF", |sess, p| {
+                crate::aaf::export_aaf_file(&sess.project, p)
+            })
+        },
+    },
+    CommandDef {
         id: "file.import_fcp7",
         label: "Importar Final Cut Pro 7 XML (.xml)...",
         menu_path: "Arquivo/Importar Final Cut Pro 7 XML (.xml)...",
@@ -1017,6 +1153,27 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.paste_attributes",
+        label: "Colar atributos do evento",
+        menu_path: "Editar/Colar atributos do evento",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::V)),
+        needs_ui: false,
+        enabled: |s, _| !s.clipboard.is_empty() && !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.paste_attributes(crate::session::PasteAttributesMask::ALL);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.paste_attributes_selective",
+        label: "Colar atributos seletivamente...",
+        menu_path: "Editar/Colar atributos seletivamente...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: |s, _| !s.clipboard.is_empty() && !s.sel_events.is_empty(),
+        run: |_s, h| ui_action(UiAction::OpenPasteAttributesDialog, h),
+    },
+    CommandDef {
         id: "edit.delete",
         label: "Excluir",
         menu_path: "Editar/Excluir",
@@ -1037,6 +1194,77 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.split_at_cursor();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.smart_split",
+        label: "Smart Split (corte com transição)",
+        menu_path: "Editar/Smart Split",
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::S)),
+        needs_ui: false,
+        enabled: has_time_selection,
+        run: |s, h| {
+            s.smart_split();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.heal_events",
+        label: "Juntar eventos (Heal)",
+        menu_path: "Editar/Juntar eventos (Heal)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.can_heal_selection(),
+        run: |s, h| {
+            s.heal_events();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.detect_scenes",
+        label: "Detectar cenas e cortes...",
+        menu_path: "Editar/Detectar cenas e cortes...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_video_events_ui,
+        run: |_s, h| ui_action(UiAction::OpenSceneDetectDialog, h),
+    },
+    CommandDef {
+        id: "edit.expanded_edit_mode",
+        label: "Modo de edição expandido (A/B)",
+        menu_path: "Editar/Modo de edição expandido",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::E)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.toggle_expanded_edit();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.expanded_nudge_left",
+        label: "Deslocar corte 1 quadro à esquerda",
+        menu_path: "Editar/Expandido: -1 quadro",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::OpenBracket)),
+        needs_ui: false,
+        enabled: |s, _| s.expanded_edit.is_some(),
+        run: |s, h| {
+            let fd = s.project.settings.frame_dur();
+            s.nudge_expanded_edit(-fd);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.expanded_nudge_right",
+        label: "Deslocar corte 1 quadro à direita",
+        menu_path: "Editar/Expandido: +1 quadro",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::CloseBracket)),
+        needs_ui: false,
+        enabled: |s, _| s.expanded_edit.is_some(),
+        run: |s, h| {
+            let fd = s.project.settings.frame_dur();
+            s.nudge_expanded_edit(fd);
             ok_mutated(s, h)
         },
     },
@@ -1087,6 +1315,339 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |s, h| {
             s.delete_active_take_selected();
             ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.take_chooser",
+        label: "Escolher take...",
+        menu_path: "Editar/Take/Escolher take...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_events_ui,
+        run: |_s, h| ui_action(UiAction::OpenTakeChooser, h),
+    },
+    CommandDef {
+        id: "event.pitch_up",
+        label: "Subir tom (+1 semitom)",
+        menu_path: "Editar/Pitch/Subir 1 semitom",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::Equals)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(1.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_down",
+        label: "Descer tom (-1 semitom)",
+        menu_path: "Editar/Pitch/Descer 1 semitom",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::Minus)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(-1.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_up_oct",
+        label: "Subir tom (+1 oitava)",
+        menu_path: "Editar/Pitch/Subir 1 oitava",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Equals)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(12.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_down_oct",
+        label: "Descer tom (-1 oitava)",
+        menu_path: "Editar/Pitch/Descer 1 oitava",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Minus)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(-12.0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_reset",
+        label: "Redefinir tom (0 st)",
+        menu_path: "Editar/Pitch/Redefinir tom",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.reset_pitch_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.toggle_pitch_lock",
+        label: "Preservar tom ao esticar",
+        menu_path: "Editar/Pitch/Preservar tom ao esticar",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.toggle_lock_pitch_to_stretch();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.sync_link_create",
+        label: "Criar Sync Link (vincular ao primeiro)",
+        menu_path: "Editar/Sync Link/Criar vínculo",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: can_create_sync_link,
+        run: |s, h| {
+            s.create_sync_links(None);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.sync_link_unlink",
+        label: "Desvincular Sync Link",
+        menu_path: "Editar/Sync Link/Desvincular",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_sync_link_in_selection,
+        run: |s, h| {
+            s.unlink_sync_links();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.sync_link_select",
+        label: "Selecionar eventos com Sync Link",
+        menu_path: "Editar/Sync Link/Selecionar vinculados",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_sync_link_in_selection,
+        run: |s, h| {
+            s.select_sync_linked();
+            ok_mutated(s, h)
+        },
+    },
+    // Ferramentas de edição (manual do VEGAS Pro 21, p. 236): trocar de
+    // ferramenta não muda o projeto nem cria passo de Desfazer.
+    CommandDef {
+        id: "edit.tool.normal",
+        label: "Ferramenta Normal",
+        menu_path: "Editar/Ferramenta de edição/Normal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.envelope",
+        label: "Ferramenta Envelope",
+        menu_path: "Editar/Ferramenta de edição/Envelope",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Envelope;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.selection",
+        label: "Ferramenta Seleção",
+        menu_path: "Editar/Ferramenta de edição/Seleção",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Selection;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.zoom",
+        label: "Ferramenta Zoom",
+        menu_path: "Editar/Ferramenta de edição/Zoom",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Zoom;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.next",
+        label: "Próxima ferramenta",
+        menu_path: "Editar/Ferramenta de edição/Próxima ferramenta",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = s.edit_tool.next();
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.prev",
+        label: "Ferramenta anterior",
+        menu_path: "Editar/Ferramenta de edição/Ferramenta anterior",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = s.edit_tool.prev();
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.normal",
+        label: "Modo Normal",
+        menu_path: "Editar/Ferramenta de edição/Modo Normal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Normal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.shuffle",
+        label: "Modo Shuffle (reordenar)",
+        menu_path: "Editar/Ferramenta de edição/Modo Shuffle",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Shuffle;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.slip",
+        label: "Modo Slip (deslizar conteúdo)",
+        menu_path: "Editar/Ferramenta de edição/Modo Slip",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Slip;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.slide",
+        label: "Modo Slide (deslizar evento)",
+        menu_path: "Editar/Ferramenta de edição/Modo Slide",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Slide;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.stretch",
+        label: "Modo Stretch (esticamento)",
+        menu_path: "Editar/Ferramenta de edição/Modo Stretch",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Stretch;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.split_trim",
+        label: "Modo Split Trim (dividir e aparar)",
+        menu_path: "Editar/Ferramenta de edição/Modo Split Trim",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::SplitTrim;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.roll",
+        label: "Modo Roll (ajuste de corte)",
+        menu_path: "Editar/Ferramenta de edição/Modo Roll",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = crate::session::EditMode::Roll;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.mode.next",
+        label: "Alternar modo da ferramenta Normal",
+        menu_path: "Editar/Ferramenta de edição/Alternar modo",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            let modes = crate::session::EditMode::NORMAL_MODES;
+            let idx = modes.iter().position(|m| *m == s.edit_mode).unwrap_or(0);
+            s.edit_tool = crate::session::EditTool::Normal;
+            s.edit_mode = modes[(idx + 1) % modes.len()];
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.axis.both",
+        label: "Eixo de seleção/zoom livre",
+        menu_path: "Editar/Ferramenta de edição/Eixo livre",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.box_axis = crate::session::BoxAxisMode::Both;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.axis.horizontal",
+        label: "Eixo de seleção/zoom horizontal",
+        menu_path: "Editar/Ferramenta de edição/Eixo horizontal",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.box_axis = crate::session::BoxAxisMode::Horizontal;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "edit.tool.axis.vertical",
+        label: "Eixo de seleção/zoom vertical",
+        menu_path: "Editar/Ferramenta de edição/Eixo vertical",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.box_axis = crate::session::BoxAxisMode::Vertical;
+            Ok(CommandOutcome::Executed)
         },
     },
     CommandDef {
@@ -1562,6 +2123,176 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::ToggleMasterBus, h),
     },
+    CommandDef {
+        id: "view.toggle_dock_area",
+        label: "Minimizar/restaurar a área de janelas",
+        menu_path: "Exibir/Minimizar ou restaurar a área de janelas",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::F11)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleDockArea, h),
+    },
+    CommandDef {
+        id: "view.toggle_track_list",
+        label: "Minimizar/restaurar a lista de trilhas",
+        menu_path: "Exibir/Minimizar ou restaurar a lista de trilhas",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::F11)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleTrackList, h),
+    },
+    CommandDef {
+        id: "view.maximize_timeline",
+        label: "Maximizar/restaurar a timeline",
+        menu_path: "Exibir/Maximizar ou restaurar a timeline",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::F11)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleMaximizeTimeline, h),
+    },
+    CommandDef {
+        id: "preview.split_toggle",
+        label: "Prévia: Tela dividida (Antes/Depois)",
+        menu_path: "Exibir/Prévia/Tela dividida",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewToggleSplit, h),
+    },
+    CommandDef {
+        id: "preview.split_bypass",
+        label: "Prévia: Comparar sem efeitos (Bypass FX)",
+        menu_path: "Exibir/Prévia/Tela dividida: FX ignorados",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::PreviewSplitMode(crate::playback::PreviewSplitMode::FxBypass),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "preview.split_clipboard",
+        label: "Prévia: Comparar com área de transferência",
+        menu_path: "Exibir/Prévia/Tela dividida: Área de transferência",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::PreviewSplitMode(crate::playback::PreviewSplitMode::Clipboard),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "preview.ram_build",
+        label: "Prévia dinâmica em RAM (seleção de tempo)",
+        menu_path: "Ferramentas/Prévia dinâmica em RAM",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::B)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewRamBuild, h),
+    },
+    CommandDef {
+        id: "preview.ram_clear",
+        label: "Limpar cache da prévia em RAM",
+        menu_path: "Ferramentas/Limpar prévia em RAM",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewRamClear, h),
+    },
+    CommandDef {
+        id: "preview.zoom_fit",
+        label: "Zoom da prévia: Ajustar à janela",
+        menu_path: "Exibir/Prévia/Ajustar zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(0.0), h),
+    },
+    CommandDef {
+        id: "preview.zoom_100",
+        label: "Zoom da prévia: 100%",
+        menu_path: "Exibir/Prévia/Zoom 100%",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(1.0), h),
+    },
+    CommandDef {
+        id: "preview.zoom_in",
+        label: "Ampliar imagem da prévia",
+        menu_path: "Exibir/Prévia/Ampliar zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(-1.25), h),
+    },
+    CommandDef {
+        id: "preview.zoom_out",
+        label: "Reduzir imagem da prévia",
+        menu_path: "Exibir/Prévia/Reduzir zoom",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewZoom(-0.8), h),
+    },
+    CommandDef {
+        id: "preview.copy_frame",
+        label: "Copiar quadro atual para a área de transferência",
+        menu_path: "Editar/Copiar quadro da prévia",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewCopyFrame, h),
+    },
+    CommandDef {
+        id: "preview.mute_audio",
+        label: "Silenciar todo o áudio na prévia",
+        menu_path: "Opções/Silenciar áudio da prévia",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.preview_mute_audio = !s.opts.preview_mute_audio;
+            s.set_status(if s.opts.preview_mute_audio {
+                "Áudio da prévia silenciado."
+            } else {
+                "Áudio da prévia ativado."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "preview.mute_video",
+        label: "Silenciar todo o vídeo na prévia",
+        menu_path: "Opções/Silenciar vídeo da prévia",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.preview_mute_video = !s.opts.preview_mute_video;
+            s.set_status(if s.opts.preview_mute_video {
+                "Vídeo da prévia silenciado."
+            } else {
+                "Vídeo da prévia ativado."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "preview.external_monitor",
+        label: "Monitor externo (janela de prévia secundária)",
+        menu_path: "Exibir/Monitor externo (Prévia)",
+        default_shortcut: Some(Shortcut::alt_shift(ShortcutKey::Num4)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::PreviewToggleExternalMonitor, h),
+    },
     // --- Inserir ---
     CommandDef {
         id: "insert.track_video",
@@ -1603,6 +2334,32 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "insert.track_folder",
+        label: "Pasta de trilhas (Grupo)",
+        menu_path: "Inserir/Pasta de trilhas (Grupo)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            let kind = s
+                .sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .map(|t| t.kind)
+                .unwrap_or(TrackKind::Video);
+            s.insert_track_folder(kind);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.nested_timeline",
+        label: "Linha do tempo aninhada (.neoveg)...",
+        menu_path: "Inserir/Linha do tempo aninhada (.neoveg)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::InsertNestedTimelineDialog, h),
+    },
+    CommandDef {
         id: "insert.audio_bus",
         label: "Barramento de áudio",
         menu_path: "Inserir/Barramento de áudio",
@@ -1627,6 +2384,39 @@ pub static COMMANDS: &[CommandDef] = &[
             s.insert_marker();
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "insert.marker_cd_track",
+        label: "Marcador de faixa de CD",
+        menu_path: "Inserir/Marcador de faixa de CD",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::N)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_marker_kind(MarkerKind::CdTrack, "", "", "");
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.marker_cd_index",
+        label: "Marcador de índice de CD",
+        menu_path: "Inserir/Marcador de índice de CD",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_marker_kind(MarkerKind::CdIndex, "", "", "");
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.marker_command",
+        label: "Marcador de comando...",
+        menu_path: "Inserir/Marcador de comando...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenCommandMarkerDialog, h),
     },
     CommandDef {
         id: "insert.region",
@@ -1666,6 +2456,18 @@ pub static COMMANDS: &[CommandDef] = &[
                     color: [0.1, 0.2, 0.5, 1.0],
                 },
             )?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.empty_event",
+        label: "Evento vazio",
+        menu_path: "Inserir/Evento vazio",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_empty_event();
             ok_mutated(s, h)
         },
     },
@@ -1739,6 +2541,20 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: has_selected_track,
         run: |s, h| {
             s.toggle_selected_track_solo();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.record_arm",
+        label: "Armar trilha para gravação (Rec)",
+        menu_path: "Trilha/Armar gravação",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::R)),
+        needs_ui: false,
+        enabled: has_selected_audio_track,
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.toggle_record_arm(ti);
+            }
             ok_mutated(s, h)
         },
     },
@@ -1876,6 +2692,126 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::RunScriptDialog, h),
     },
     CommandDef {
+        id: "tools.integrations",
+        label: "Integrações (ArtCraft & Blender)...",
+        menu_path: "Ferramentas/Integrações (ArtCraft & Blender)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenIntegrationsDialog, h),
+    },
+    CommandDef {
+        id: "tools.send_photocraft",
+        label: "Editar no PhotoCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Editar no PhotoCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::PhotoCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_vectorcraft",
+        label: "Editar vetor no VectorCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Editar vetor no VectorCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::VectorCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_soundcraft",
+        label: "Editar áudio no SoundCraft (BWF)...",
+        menu_path: "Ferramentas/Aplicativos externos/Editar áudio no SoundCraft (BWF)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::SoundCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_effectcraft",
+        label: "Enviar para composição no EffectCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Enviar para EffectCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::EffectCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_anicraft",
+        label: "Abrir/Criar animação no AniCraft...",
+        menu_path: "Ferramentas/Aplicativos externos/Abrir no AniCraft...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::AniCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.send_filmcraft",
+        label: "Exportar timeline para FilmCraft (OTIO)...",
+        menu_path: "Ferramentas/Aplicativos externos/Exportar timeline para FilmCraft (OTIO)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| {
+            ui_action(
+                UiAction::SendToExternalApp(crate::integrations::ExternalApp::FilmCraft),
+                h,
+            )
+        },
+    },
+    CommandDef {
+        id: "tools.blender_render",
+        label: "Renderizar cena do Blender para Timeline...",
+        menu_path: "Ferramentas/Aplicativos externos/Blender: Renderizar cena (.blend)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::BlenderRenderSceneDialog, h),
+    },
+    CommandDef {
+        id: "tools.blender_export_script",
+        label: "Exportar marcadores e câmera para Blender (.py)...",
+        menu_path: "Ferramentas/Aplicativos externos/Blender: Exportar script (.py)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::BlenderExportScriptDialog, h),
+    },
+    CommandDef {
+        id: "tools.blender_import_camera",
+        label: "Importar câmera do Blender (.json)...",
+        menu_path: "Ferramentas/Aplicativos externos/Blender: Importar câmera (.json)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::BlenderImportCameraDialog, h),
+    },
+    CommandDef {
         id: "tools.remove_unused_media",
         label: "Remover mídias não utilizadas",
         menu_path: "Ferramentas/Remover mídias não utilizadas",
@@ -1886,6 +2822,365 @@ pub static COMMANDS: &[CommandDef] = &[
             let cache = h.media_cache();
             let removed = s.remove_unused_media(cache);
             h.on_media_removed(&removed);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.toggle_folder",
+        label: "Recolher / expandir pasta da trilha",
+        menu_path: "Editar/Trilha/Recolher ou expandir pasta",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .is_some_and(|t| {
+                    t.is_folder
+                        || t.parent_track_id.is_some_and(|pid| {
+                            s.project.tracks.iter().any(|p| p.id == pid && p.is_folder)
+                        })
+                })
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.toggle_track_folder(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.make_child",
+        label: "Tornar filho de composição",
+        menu_path: "Editar/Trilha/Tornar filho de composição",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .is_some_and(|i| i > 0 && i < s.project.tracks.len())
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.make_compositing_child(ti).map_err(|e| e.to_string())?;
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.unmake_child",
+        label: "Promover filho para trilha raiz",
+        menu_path: "Editar/Trilha/Promover filho para trilha raiz",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .is_some_and(|t| t.parent_track_id.is_some())
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.unmake_compositing_child(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.mask_cycle",
+        label: "Alternar modo de máscara da trilha",
+        menu_path: "Editar/Trilha/Alternar modo de máscara",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.sel_track
+                .and_then(|i| s.project.tracks.get(i))
+                .is_some_and(|t| t.kind == TrackKind::Video && !t.is_folder)
+        },
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                let modes = crate::model::TrackMaskMode::ALL;
+                let cur = s.project.tracks[ti].mask_mode;
+                let next_i = modes
+                    .iter()
+                    .position(|m| *m == cur)
+                    .map(|p| (p + 1) % modes.len())
+                    .unwrap_or(0);
+                s.set_track_mask_mode(ti, modes[next_i]);
+                s.set_status(format!("Máscara da trilha: {}", modes[next_i].label()));
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.set_defaults",
+        label: "Definir propriedades padrão da trilha",
+        menu_path: "Ferramentas/Definir propriedades padrão da trilha",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: |s, h| h.supports_ui() && s.sel_track.is_some(),
+        run: |_s, h| ui_action(UiAction::SetTrackDefaultProps, h),
+    },
+    CommandDef {
+        id: "track.render_to_new_track",
+        label: "Renderizar para nova trilha...",
+        menu_path: "Ferramentas/Renderizar para nova trilha...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: |s, h| {
+            h.supports_ui()
+                && (s.time_sel.is_some_and(|(a, b)| b > a) || s.project.duration() > Ticks::ZERO)
+        },
+        run: |_s, h| ui_action(UiAction::RenderToNewTrack, h),
+    },
+    CommandDef {
+        id: "tools.multicam_create",
+        label: "Multicâmera: Criar trilha multicâmera",
+        menu_path: "Ferramentas/Multicâmera/Criar trilha multicâmera",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.project
+                .tracks
+                .iter()
+                .filter(|t| {
+                    t.kind == TrackKind::Video
+                        && !t.is_folder
+                        && !t.is_adjustment()
+                        && !t.events.is_empty()
+                })
+                .count()
+                >= 2
+        },
+        run: |s, h| {
+            s.create_multicam_track().map_err(|e| e.to_string())?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_mode",
+        label: "Multicâmera: Ativar edição multicâmera",
+        menu_path: "Ferramentas/Multicâmera/Ativar edição multicâmera",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::D)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.multicam_mode = !s.opts.multicam_mode;
+            s.set_status(if s.opts.multicam_mode {
+                "Edição Multicâmera ativada (clique no ângulo ou pressione 1..9)."
+            } else {
+                "Edição Multicâmera desativada."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_1",
+        label: "Multicâmera: Cortar para Câmera 1",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 1",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 0);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_2",
+        label: "Multicâmera: Cortar para Câmera 2",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 2",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 1);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_3",
+        label: "Multicâmera: Cortar para Câmera 3",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 3",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 2);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.multicam_cut_4",
+        label: "Multicâmera: Cortar para Câmera 4",
+        menu_path: "Ferramentas/Multicâmera/Cortar para Câmera 4",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.active_multicam_event_at(s.cursor).is_some(),
+        run: |s, h| {
+            s.switch_multicam_angle(s.cursor, 3);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.stereo_3d",
+        label: "Prévia: Alternar modo 3D Estereoscópico",
+        menu_path: "Exibir/Prévia/Alternar modo 3D Estereoscópico",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::CycleStereo3dMode, h),
+    },
+    CommandDef {
+        id: "insert.subtitles_from_regions",
+        label: "Legendas a partir das regiões",
+        menu_path: "Inserir/Legendas a partir das regiões",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.regions.iter().any(|r| r.end > r.start),
+        run: |s, h| {
+            s.insert_subtitles_from_regions();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.motion_track",
+        label: "Rastrear movimento (Motion Tracking)...",
+        menu_path: "Ferramentas/Rastrear movimento...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_video_events_ui,
+        run: |_s, h| ui_action(UiAction::OpenMotionTrackDialog, h),
+    },
+    CommandDef {
+        id: "tools.apply_audio_fx",
+        label: "Aplicar efeitos de áudio fora de tempo real",
+        menu_path: "Ferramentas/Aplicar efeitos de áudio fora de tempo real",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ApplyAudioFxNonRealtime, h),
+    },
+    CommandDef {
+        id: "options.bypass_all_audio_fx",
+        label: "Ignorar todos os efeitos de áudio",
+        menu_path: "Opções/Ignorar todos os efeitos de áudio",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.bypass_all_audio_fx = !s.opts.bypass_all_audio_fx;
+            s.set_status(if s.opts.bypass_all_audio_fx {
+                "Todos os efeitos de áudio ignorados globalmente (Bypass)."
+            } else {
+                "Efeitos de áudio reativados."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "media.view.thumbnails",
+        label: "Mídia do Projeto: Miniaturas",
+        menu_path: "Exibir/Mídia do Projeto/Miniaturas",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(0), h),
+    },
+    CommandDef {
+        id: "media.view.list",
+        label: "Mídia do Projeto: Lista",
+        menu_path: "Exibir/Mídia do Projeto/Lista",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(1), h),
+    },
+    CommandDef {
+        id: "media.view.details",
+        label: "Mídia do Projeto: Detalhes",
+        menu_path: "Exibir/Mídia do Projeto/Detalhes",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(2), h),
+    },
+    CommandDef {
+        id: "media.view.storyboard",
+        label: "Mídia do Projeto: Storyboard",
+        menu_path: "Exibir/Mídia do Projeto/Storyboard",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaSetView(3), h),
+    },
+    CommandDef {
+        id: "media.new_bin",
+        label: "Nova pasta de mídia (Bin)",
+        menu_path: "Projeto/Nova pasta de mídia (Bin)",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaNewBin, h),
+    },
+    CommandDef {
+        id: "media.new_smart_bin",
+        label: "Nova pasta inteligente...",
+        menu_path: "Projeto/Nova pasta inteligente...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaNewSmartBin, h),
+    },
+    CommandDef {
+        id: "media.new_storyboard",
+        label: "Novo storyboard",
+        menu_path: "Projeto/Novo storyboard",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ProjectMediaNewStoryboard, h),
+    },
+    CommandDef {
+        id: "media.select_events",
+        label: "Selecionar eventos desta mídia",
+        menu_path: "Editar/Selecionar eventos da mídia",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_active_media,
+        run: |s, h| {
+            if let Some(mid) = s.active_media_id {
+                s.select_events_using_media(mid);
+            }
+            h.after_mutation(s);
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
+        id: "media.replace",
+        label: "Substituir mídia selecionada...",
+        menu_path: "Projeto/Substituir mídia selecionada...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_active_media_ui,
+        run: |_s, h| ui_action(UiAction::ProjectMediaReplaceDialog, h),
+    },
+    CommandDef {
+        id: "media.insert_storyboard",
+        label: "Inserir storyboard na timeline",
+        menu_path: "Inserir/Storyboard na timeline",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.active_storyboard_id.is_some_and(|id| {
+                s.project
+                    .storyboards
+                    .iter()
+                    .any(|sb| sb.id == id && !sb.items.is_empty())
+            })
+        },
+        run: |s, h| {
+            if let Some(sb_id) = s.active_storyboard_id {
+                let c = s.cursor;
+                s.insert_storyboard_at_cursor(sb_id, c, 5.0);
+            }
             ok_mutated(s, h)
         },
     },
@@ -1901,6 +3196,58 @@ pub static COMMANDS: &[CommandDef] = &[
             s.opts.snapping = !s.opts.snapping;
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "options.snap_to_grid",
+        label: "Encaixar na grade",
+        menu_path: "Opções/Encaixar na grade",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::F8)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.snap_to_grid = !s.opts.snap_to_grid;
+            s.set_status(if s.opts.snap_to_grid {
+                "Encaixe na grade da régua ativado."
+            } else {
+                "Encaixe na grade da régua desativado."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.grid_cycle",
+        label: "Grade da régua: próximo espaçamento",
+        menu_path: "Opções/Grade da régua/Próximo espaçamento",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.cycle_ruler_grid();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.cycle_automation",
+        label: "Alternar modo de automação da trilha",
+        menu_path: "Trilha/Automação (Off / Read / Touch / Latch)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.sel_track.is_some(),
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.cycle_track_automation_mode(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.customize_toolbar",
+        label: "Personalizar barra de ferramentas...",
+        menu_path: "Opções/Personalizar barra de ferramentas...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenCustomizeToolbar, h),
     },
     CommandDef {
         id: "options.quantize",
@@ -2025,6 +3372,15 @@ pub static COMMANDS: &[CommandDef] = &[
                 h,
             )
         },
+    },
+    CommandDef {
+        id: "transport.record",
+        label: "Gravar áudio nas trilhas armadas",
+        menu_path: "Transporte/Gravar",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::R)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleRecord, h),
     },
     CommandDef {
         id: "transport.shuttle_rev",
@@ -2401,6 +3757,46 @@ mod tests {
     use crate::model::Project;
     use std::collections::HashSet;
 
+    /// D e Shift+D percorrem as ferramentas; trocar de ferramenta ou de
+    /// modo não cria passo de Desfazer.
+    #[test]
+    fn ferramentas_de_edicao_alternam_sem_desfazer() {
+        use crate::session::{EditMode, EditTool};
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert_eq!(s.edit_tool, EditTool::Normal);
+        for want in [
+            EditTool::Envelope,
+            EditTool::Selection,
+            EditTool::Zoom,
+            EditTool::Normal,
+        ] {
+            run_command("edit.tool.next", &mut s, &mut h).unwrap();
+            assert_eq!(s.edit_tool, want);
+        }
+        run_command("edit.tool.prev", &mut s, &mut h).unwrap();
+        assert_eq!(s.edit_tool, EditTool::Zoom);
+        run_command("edit.tool.mode.slip", &mut s, &mut h).unwrap();
+        assert_eq!(
+            (s.edit_tool, s.edit_mode),
+            (EditTool::Normal, EditMode::Slip)
+        );
+        run_command("edit.tool.selection", &mut s, &mut h).unwrap();
+        run_command("edit.tool.mode.normal", &mut s, &mut h).unwrap();
+        assert_eq!(
+            (s.edit_tool, s.edit_mode),
+            (EditTool::Normal, EditMode::Normal)
+        );
+        for mode in EditMode::NORMAL_MODES {
+            run_command(mode.command_id(), &mut s, &mut h).unwrap();
+            assert_eq!((s.edit_tool, s.edit_mode), (EditTool::Normal, mode));
+        }
+        run_command("edit.tool.mode.normal", &mut s, &mut h).unwrap();
+        run_command("edit.tool.mode.next", &mut s, &mut h).unwrap();
+        assert_eq!(s.edit_mode, EditMode::Shuffle);
+        assert!(s.undo.is_empty(), "ferramenta não entra no Desfazer");
+    }
+
     #[test]
     fn ids_da_tabela_sao_unicos() {
         let mut seen = HashSet::new();
@@ -2525,5 +3921,78 @@ mod tests {
             "Projektmedien"
         );
         assert_eq!(DockPanel::Notes.name_in(Language::Fr), "Notes");
+    }
+
+    #[test]
+    fn comandos_pitch_sync_link_eixo_e_evento_vazio() {
+        use crate::model::{new_id, Event, MediaItem, MediaSource};
+        use crate::time::Ticks;
+
+        let mut p = Project::new_default();
+        let mut ma = MediaItem {
+            id: new_id(),
+            name: "voz.wav".into(),
+            source: MediaSource::Generated(GenSpec::ColorBars),
+            duration: Some(Ticks::from_secs_i64(10)),
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        ma.has_video = false;
+        p.media.push(ma.clone());
+        let a1 = Event::new(&ma, Ticks::ZERO, Ticks::from_secs_i64(4));
+        let a2 = Event::new(&ma, Ticks::from_secs_i64(5), Ticks::from_secs_i64(4));
+        let (id1, id2) = (a1.id, a2.id);
+        p.tracks[1].events = vec![a1, a2];
+
+        let mut s = EditorSession::new(p);
+        let mut h = HeadlessHost;
+        s.sel_events.insert(id1);
+        run_command("event.pitch_up", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id1).unwrap().pitch_semitones, 1.0);
+        run_command("event.pitch_down_oct", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id1).unwrap().pitch_semitones, -11.0);
+        run_command("event.toggle_pitch_lock", &mut s, &mut h).unwrap();
+        assert!(s.project.event(id1).unwrap().lock_pitch_to_stretch);
+        run_command("event.pitch_reset", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id1).unwrap().pitch_semitones, 0.0);
+
+        s.sel_events = [id1, id2].into_iter().collect();
+        run_command("event.sync_link_create", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(id2).unwrap().sync_link_master, Some(id1));
+        s.sel_events = [id2].into_iter().collect();
+        run_command("event.sync_link_select", &mut s, &mut h).unwrap();
+        assert_eq!(s.sel_events.len(), 2);
+        run_command("event.sync_link_unlink", &mut s, &mut h).unwrap();
+        assert!(s.project.event(id2).unwrap().sync_link_master.is_none());
+
+        run_command("edit.tool.axis.horizontal", &mut s, &mut h).unwrap();
+        assert_eq!(s.box_axis, crate::session::BoxAxisMode::Horizontal);
+        run_command("insert.empty_event", &mut s, &mut h).unwrap();
+        assert_eq!(s.sel_events.len(), 1);
+
+        s.sel_track = Some(1);
+        run_command("track.record_arm", &mut s, &mut h).unwrap();
+        assert!(!s.armed_audio_tracks().is_empty());
+
+        s.active_media_id = Some(ma.id);
+        run_command("media.select_events", &mut s, &mut h).unwrap();
+        assert_eq!(s.sel_events.len(), 2);
+        let sb = s.create_storyboard("Teste").unwrap();
+        s.add_media_to_storyboard(sb, ma.id);
+        run_command("media.insert_storyboard", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.tracks[1].events.len(), 3);
+
+        assert!(s.apply_video_fx_to_output(crate::model::FxKind::Invert));
+        assert_eq!(s.project.master.video_fx.len(), 1);
+        assert!(!s.apply_video_fx_to_output(crate::model::FxKind::Gain));
+        run_command("preview.mute_audio", &mut s, &mut h).unwrap();
+        assert!(s.opts.preview_mute_audio);
+        run_command("preview.mute_video", &mut s, &mut h).unwrap();
+        assert!(s.opts.preview_mute_video);
     }
 }

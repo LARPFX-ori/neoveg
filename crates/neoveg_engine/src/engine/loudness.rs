@@ -288,8 +288,23 @@ pub fn analyze_project_loudness(
     let audio_map = media.audio_map();
 
     let mut mixer = Mixer::new_offline(sr);
+    let pdc = mixer.total_latency(project) as i64;
     let mut analyzer = LoudnessAnalyzer::try_new(sr)?;
     let mut buf = vec![0.0_f32; ANALYZE_CHUNK_FRAMES * 2];
+    let mut pre = 0_i64;
+    while pre < pdc {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("análise de loudness cancelada".into());
+        }
+        let n = (pdc - pre).min(ANALYZE_CHUNK_FRAMES as i64) as usize;
+        mixer.process(
+            project,
+            &audio_map,
+            start_sample.saturating_add(pre),
+            &mut buf[..n * 2],
+        );
+        pre = pre.saturating_add(n as i64);
+    }
     let mut max_m = -f64::INFINITY;
     let mut max_s = -f64::INFINITY;
     let mut pos = start_sample;
@@ -301,7 +316,7 @@ pub fn analyze_project_loudness(
         }
         let n = (end_sample - pos).min(ANALYZE_CHUNK_FRAMES as i64) as usize;
         let slice = &mut buf[..n * 2];
-        mixer.process(project, &audio_map, pos, slice);
+        mixer.process(project, &audio_map, pos.saturating_add(pdc), slice);
         analyzer.push_interleaved(slice);
         let cur = analyzer.snapshot();
         if cur.momentary_lufs.is_finite() {

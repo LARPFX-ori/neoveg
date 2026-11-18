@@ -189,10 +189,14 @@ impl App {
             .collect();
         for tab in detached {
             let key = crate::layout::panel_key(tab);
+            let (inner_size, min_size) = match tab {
+                DockTab::Encoder => ([1120.0, 680.0], [740.0, 440.0]),
+                _ => ([520.0, 360.0], [260.0, 180.0]),
+            };
             let spec = FloatingViewportSpec {
                 title: tab.name_in(lang),
-                inner_size: [520.0, 360.0],
-                min_size: [260.0, 180.0],
+                inner_size,
+                min_size,
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
@@ -216,6 +220,63 @@ impl App {
                     self.dock_tab = tab;
                     self.pending_dock_focus = Some(tab);
                 }
+            }
+        }
+
+        if self.external_monitor {
+            let vid = egui::ViewportId::from_hash_of("neoveg_external_monitor_viewport");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Monitor Externo (Prévia) - Neoveg")
+                .with_inner_size([960.0, 560.0])
+                .with_min_inner_size([320.0, 200.0])
+                .with_resizable(true)
+                .with_icon(icon);
+            let mut close_ext = false;
+            ctx.show_viewport_immediate(vid, builder, |v_ctx, class| {
+                let draw_body = |ui: &mut egui::Ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Monitor Externo").strong().small());
+                        if ui
+                            .selectable_label(self.external_monitor_fullscreen, "Tela cheia")
+                            .clicked()
+                        {
+                            self.external_monitor_fullscreen = !self.external_monitor_fullscreen;
+                            v_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                                self.external_monitor_fullscreen,
+                            ));
+                        }
+                        if ui.small_button("Fechar").clicked() {
+                            close_ext = true;
+                        }
+                    });
+                    let avail_ext = ui.available_rect_before_wrap();
+                    let ext_sz = vec2(
+                        avail_ext.width().clamp(64.0, 4096.0),
+                        avail_ext.height().clamp(48.0, 2160.0),
+                    );
+                    let (rect, _) = ui.allocate_exact_size(ext_sz, Sense::hover());
+                    let _ = self.draw_preview_canvas(ui, rect, false);
+                };
+                if class == egui::ViewportClass::Embedded {
+                    let mut open_win = true;
+                    egui::Window::new("Monitor Externo")
+                        .id(egui::Id::new("external_monitor_embedded_window"))
+                        .open(&mut open_win)
+                        .default_size([640.0, 380.0])
+                        .show(v_ctx, draw_body);
+                    if !open_win {
+                        close_ext = true;
+                    }
+                } else {
+                    egui::CentralPanel::default().show(v_ctx, draw_body);
+                    if v_ctx.input(|i| i.viewport().close_requested()) {
+                        close_ext = true;
+                    }
+                }
+            });
+            if close_ext {
+                self.external_monitor = false;
+                self.external_monitor_fullscreen = false;
             }
         }
     }
@@ -266,6 +327,91 @@ impl App {
                         ui.selectable_value(&mut self.opts.preview_quality, q, q.name_in(lang));
                     }
                 });
+            let split_active =
+                self.opts.preview_split_mode != neoveg_engine::playback::PreviewSplitMode::Off;
+            let split_resp = icons::icon_button(
+                ui,
+                Icon::SplitPreview,
+                None,
+                split_active,
+                true,
+                &self.theme,
+            );
+            split_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Tela dividida")
+            });
+            if split_resp
+                .on_hover_text("Alternar Prévia em tela dividida (Antes/Depois)")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.split_toggle");
+            }
+            ui.menu_button("Divisão", |ui| {
+                for m in neoveg_engine::playback::PreviewSplitMode::ALL {
+                    if ui
+                        .selectable_label(self.opts.preview_split_mode == m, m.label())
+                        .clicked()
+                    {
+                        self.opts.preview_split_mode = m;
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                ui.checkbox(
+                    &mut self.opts.preview_split_horizontal,
+                    "Divisão horizontal",
+                );
+            });
+            let zoom_txt = if (self.preview_zoom - 1.0).abs() < 0.01 {
+                "Ajustar".to_string()
+            } else {
+                format!("{:.0}%", self.preview_zoom * 100.0)
+            };
+            ui.menu_button(zoom_txt, |ui| {
+                for (lbl, v) in [
+                    ("Ajustar (Fit)", 0.0_f32),
+                    ("50%", 0.5),
+                    ("100%", 1.0),
+                    ("150%", 1.5),
+                    ("200%", 2.0),
+                    ("400%", 4.0),
+                ] {
+                    if ui.button(lbl).clicked() {
+                        if v == 1.0 {
+                            let (pw, ph) = (
+                                self.project.settings.width as f32,
+                                self.project.settings.height as f32,
+                            );
+                            let cw = ui.available_width().max(64.0);
+                            self.preview_zoom = (pw / cw).clamp(1.0, 8.0);
+                            if ph > 0.0 && (self.preview_zoom - 1.0).abs() < 0.01 {
+                                self.preview_zoom = 1.01;
+                            }
+                        } else {
+                            self.apply_preview_zoom(v);
+                        }
+                        ui.close_menu();
+                    }
+                }
+            });
+            let ram_busy = self.ram_preview_job.is_some();
+            let ram_resp = icons::icon_button(
+                ui,
+                Icon::RamCache,
+                None,
+                ram_busy || !self.ram_preview.frames.is_empty(),
+                true,
+                &self.theme,
+            );
+            ram_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Prévia em RAM")
+            });
+            if ram_resp
+                .on_hover_text("Prévia dinâmica em RAM na seleção de tempo (Shift+B)")
+                .clicked()
+            {
+                self.start_ram_preview();
+            }
             if icons::icon_button(
                 ui,
                 Icon::SafeAreas,
@@ -279,11 +425,63 @@ impl App {
             {
                 self.opts.safe_areas = !self.opts.safe_areas;
             }
+            let copy_resp = icons::icon_button(ui, Icon::CopyFrame, None, false, true, &self.theme);
+            copy_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copiar quadro")
+            });
+            if copy_resp
+                .on_hover_text("Copiar quadro atual para a área de transferência")
+                .clicked()
+            {
+                self.copy_preview_frame_to_clipboard(Some(ui.ctx()));
+            }
             if icons::icon_button(ui, Icon::CameraSnap, None, false, true, &self.theme)
                 .on_hover_text(tr(lang, "Salvar quadro em PNG"))
                 .clicked()
             {
                 self.snapshot_dialog();
+            }
+            let mute_a_resp = icons::icon_button(
+                ui,
+                Icon::MuteAudio,
+                None,
+                self.opts.preview_mute_audio,
+                true,
+                &self.theme,
+            );
+            mute_a_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Silenciar áudio da prévia",
+                )
+            });
+            if mute_a_resp
+                .on_hover_text("Silenciar todo o áudio na monitoração da prévia")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.mute_audio");
+            }
+            let mute_v_resp = icons::icon_button(
+                ui,
+                Icon::MuteVideo,
+                None,
+                self.opts.preview_mute_video,
+                true,
+                &self.theme,
+            );
+            mute_v_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Silenciar vídeo da prévia",
+                )
+            });
+            if mute_v_resp
+                .on_hover_text("Silenciar todo o vídeo na prévia")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.mute_video");
             }
             if ui
                 .button("fx")
@@ -304,6 +502,64 @@ impl App {
             {
                 self.exec_cmd(Some(ui.ctx()), "view.tab.color_grading");
             }
+            let ext_resp = icons::small_icon_button(
+                ui,
+                Icon::ExternalMonitor,
+                None,
+                self.external_monitor,
+                &self.theme,
+            );
+            ext_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Monitor externo")
+            });
+            if ext_resp
+                .on_hover_text("Abrir ou fechar Monitor Externo (Alt+Shift+4)")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "preview.external_monitor");
+            }
+            let mc_resp = icons::small_icon_button(
+                ui,
+                Icon::Multicam,
+                if self.opts.multicam_mode {
+                    Some("MC")
+                } else {
+                    None
+                },
+                self.opts.multicam_mode,
+                &self.theme,
+            );
+            mc_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edição Multicâmera")
+            });
+            if mc_resp
+                .on_hover_text("Alternar modo de edição multicâmera (Ctrl+Shift+D)")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "tools.multicam_mode");
+            }
+            let s3d_mode = self.project.settings.stereo_3d;
+            let s3d_lbl = if s3d_mode == neoveg_engine::model::Stereo3dMode::Off {
+                None
+            } else {
+                Some(s3d_mode.short_label())
+            };
+            let s3d_resp = icons::small_icon_button(
+                ui,
+                Icon::Stereo3d,
+                s3d_lbl,
+                s3d_mode != neoveg_engine::model::Stereo3dMode::Off,
+                &self.theme,
+            );
+            s3d_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Modo 3D Estereoscópico")
+            });
+            if s3d_resp
+                .on_hover_text("Alternar modo de prévia 3D Estereoscópico")
+                .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "view.stereo_3d");
+            }
             if !is_floating
                 && icons::small_icon_button(ui, Icon::PopOut, None, false, &self.theme)
                     .on_hover_text(tr(
@@ -314,7 +570,40 @@ impl App {
             {
                 self.preview_detached = true;
             }
+            if self.session.expanded_edit.is_some()
+                && icons::small_icon_button(ui, Icon::ExpandedEdit, Some("A/B"), true, &self.theme)
+                    .on_hover_text("Modo de edição expandido ativo (clique para fechar)")
+                    .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "edit.expanded_edit_mode");
+            }
+            // Mantido ao final da barra para evitar deslocamento horizontal dos botões
+            // estáticos (Monitor externo, Cor, MC, 3D) quando quadros em RAM chegam assincronamente.
+            if !self.ram_preview.frames.is_empty() && ui.small_button("Limpar RAM").clicked() {
+                self.clear_ram_preview();
+            }
         });
+        if let Some(exp) = self.session.expanded_edit.clone() {
+            use neoveg_engine::session::ExpandedEdgeFocus;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Expandido:").small().strong());
+                for f in [
+                    ExpandedEdgeFocus::Both,
+                    ExpandedEdgeFocus::LeftOut,
+                    ExpandedEdgeFocus::RightIn,
+                ] {
+                    if ui.selectable_label(exp.focus == f, f.label()).clicked() {
+                        self.session.set_expanded_focus(f);
+                    }
+                }
+                if ui.small_button("< 1q").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "edit.expanded_nudge_left");
+                }
+                if ui.small_button("1q >").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "edit.expanded_nudge_right");
+                }
+            });
+        }
         let avail = ui.available_rect_before_wrap();
         let font = egui::FontId::proportional(10.5);
         let gap_y = ui.spacing().item_spacing.y;
@@ -339,47 +628,37 @@ impl App {
                 0.0
             };
         let canvas_h = (avail.height() - reserved_h).max(24.0);
-        let (rect, _resp) = ui.allocate_exact_size(vec2(avail.width(), canvas_h), Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
-        let (proj_w, proj_h) = (self.project.settings.width, self.project.settings.height);
-        let aspect = proj_w as f32 / proj_h.max(1) as f32;
-        let (mut w, mut h) = (rect.width(), rect.width() / aspect);
-        if h > rect.height() {
-            h = rect.height();
-            w = h * aspect;
-        }
-        let img_rect = Rect::from_center_size(rect.center(), vec2(w, h));
-        if let Some(tex) = &self.preview_tex {
-            painter.image(
-                tex.id(),
-                img_rect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        if self.opts.safe_areas {
-            let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
-            let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
-            for k in [action_k, title_k] {
-                let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
-                painter.rect_stroke(
-                    r,
-                    0.0,
-                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
-                    StrokeKind::Inside,
-                );
+        let drop_out = ui.dnd_drop_zone::<DndPayload, Rect>(egui::Frame::NONE, |ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(avail.width(), canvas_h), Sense::hover());
+            self.draw_preview_canvas(ui, rect, true)
+        });
+        if let Some(payload) = drop_out.1 {
+            match (*payload).clone() {
+                DndPayload::Fx(kind) => {
+                    if self.session.apply_video_fx_to_output(kind) {
+                        self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                        self.sync_after_session();
+                    } else {
+                        self.sync_status_from_session();
+                    }
+                }
+                DndPayload::FxPreset(mut fx) => {
+                    if fx.kind.is_audio() {
+                        self.set_status(
+                            "Efeitos de áudio não podem ser aplicados na saída de vídeo",
+                        );
+                    } else {
+                        self.checkpoint();
+                        fx.id = new_id();
+                        self.project.master.video_fx.push(fx);
+                        self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                        self.changed();
+                    }
+                }
+                _ => {}
             }
-            let c = img_rect.center();
-            painter.line_segment(
-                [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
-            );
-            painter.line_segment(
-                [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
-            );
         }
+        let img_rect = drop_out.0.inner;
 
         if show_transport {
             let playing = self.is_playing();
@@ -485,10 +764,429 @@ impl App {
         }
     }
 
-    fn sync_master_monitor_audio(&self) {
-        let mut s = crate::util::lock(&self.audio.shared);
-        s.dim = self.master_dim;
-        s.mono_downmix = self.master_mono;
+    pub(crate) fn sync_master_monitor_audio(&self) {
+        {
+            let mut s = crate::util::lock(&self.audio.shared);
+            s.dim = self.master_dim;
+            s.mono_downmix = self.master_mono;
+            s.preview_muted = self.opts.preview_mute_audio;
+        }
+        self.audio
+            .set_bypass_audio_fx(self.opts.bypass_all_audio_fx);
+    }
+
+    fn draw_preview_canvas(&mut self, ui: &mut egui::Ui, rect: Rect, interactive: bool) -> Rect {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
+        let (proj_w, proj_h) = (self.project.settings.width, self.project.settings.height);
+        let aspect = proj_w as f32 / proj_h.max(1) as f32;
+        let (mut fw, mut fh) = (rect.width(), rect.width() / aspect);
+        if fh > rect.height() {
+            fh = rect.height();
+            fw = fh * aspect;
+        }
+        let zoom = self.preview_zoom.clamp(0.25, 8.0);
+        let w = (fw * zoom).max(8.0);
+        let h = (fh * zoom).max(8.0);
+        let max_px = ((w - rect.width()) * 0.5).max(0.0);
+        let max_py = ((h - rect.height()) * 0.5).max(0.0);
+        self.preview_pan.x = self.preview_pan.x.clamp(-max_px, max_px);
+        self.preview_pan.y = self.preview_pan.y.clamp(-max_py, max_py);
+        let img_rect = Rect::from_center_size(rect.center() + self.preview_pan, vec2(w, h));
+
+        let split_mode = self.opts.preview_split_mode;
+        if self.session.expanded_edit.is_some() {
+            if let Some((lt_tex, rt_tex)) = &self.expanded_ab_tex {
+                let mid_x = img_rect.center().x;
+                let left_r = Rect::from_min_max(
+                    img_rect.left_top(),
+                    pos2((mid_x - 1.0).max(img_rect.left()), img_rect.bottom()),
+                );
+                let right_r = Rect::from_min_max(
+                    pos2((mid_x + 1.0).min(img_rect.right()), img_rect.top()),
+                    img_rect.right_bottom(),
+                );
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(lt_tex.id(), left_r, uv, Color32::WHITE);
+                painter.image(rt_tex.id(), right_r, uv, Color32::WHITE);
+                painter.line_segment(
+                    [pos2(mid_x, img_rect.top()), pos2(mid_x, img_rect.bottom())],
+                    Stroke::new(2.0_f32, self.theme.accent),
+                );
+                painter.text(
+                    left_r.left_top() + vec2(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "A: Saída",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    right_r.left_top() + vec2(4.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "B: Entrada",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+            }
+        } else if split_mode != neoveg_engine::playback::PreviewSplitMode::Off
+            && !self.opts.preview_mute_video
+        {
+            use neoveg_engine::playback::PreviewSplitMode;
+            let cmp_tex = match split_mode {
+                PreviewSplitMode::FxBypass => {
+                    self.preview_split_tex.as_ref().map(|t| (t.id(), "Sem FX"))
+                }
+                PreviewSplitMode::Clipboard => self
+                    .preview_clipboard
+                    .as_ref()
+                    .map(|(t, _)| (t.id(), "Transferência")),
+                PreviewSplitMode::Off => None,
+            };
+            let k = self.opts.preview_split_pos.clamp(0.08, 0.92);
+            if let (Some((alt_id, alt_lbl)), Some(main_tex)) = (cmp_tex, &self.preview_tex) {
+                if self.opts.preview_split_horizontal {
+                    let div_y = img_rect.top() + img_rect.height() * k;
+                    let top_r =
+                        Rect::from_min_max(img_rect.left_top(), pos2(img_rect.right(), div_y));
+                    let bot_r =
+                        Rect::from_min_max(pos2(img_rect.left(), div_y), img_rect.right_bottom());
+                    painter.image(
+                        alt_id,
+                        top_r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, k)),
+                        Color32::WHITE,
+                    );
+                    painter.image(
+                        main_tex.id(),
+                        bot_r,
+                        Rect::from_min_max(pos2(0.0, k), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.line_segment(
+                        [pos2(img_rect.left(), div_y), pos2(img_rect.right(), div_y)],
+                        Stroke::new(2.0_f32, self.theme.accent),
+                    );
+                } else {
+                    let div_x = img_rect.left() + img_rect.width() * k;
+                    let left_r =
+                        Rect::from_min_max(img_rect.left_top(), pos2(div_x, img_rect.bottom()));
+                    let right_r =
+                        Rect::from_min_max(pos2(div_x, img_rect.top()), img_rect.right_bottom());
+                    painter.image(
+                        alt_id,
+                        left_r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.image(
+                        main_tex.id(),
+                        right_r,
+                        Rect::from_min_max(pos2(k, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.line_segment(
+                        [pos2(div_x, img_rect.top()), pos2(div_x, img_rect.bottom())],
+                        Stroke::new(2.0_f32, self.theme.accent),
+                    );
+                }
+                painter.text(
+                    img_rect.left_top() + vec2(6.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    alt_lbl,
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    img_rect.right_top() + vec2(-6.0, 4.0),
+                    egui::Align2::RIGHT_TOP,
+                    "Ativa",
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+            } else if let Some(tex) = &self.preview_tex {
+                painter.image(
+                    tex.id(),
+                    img_rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                if split_mode == PreviewSplitMode::Clipboard {
+                    painter.text(
+                        img_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Copie um quadro antes para comparar",
+                        egui::FontId::proportional(11.0),
+                        Color32::from_white_alpha(200),
+                    );
+                }
+            }
+        } else if let Some(tex) = &self.preview_tex {
+            painter.image(
+                tex.id(),
+                img_rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
+        if interactive {
+            let mut dragging_split = false;
+            if split_mode != neoveg_engine::playback::PreviewSplitMode::Off
+                && self.session.expanded_edit.is_none()
+            {
+                let k = self.opts.preview_split_pos.clamp(0.08, 0.92);
+                let hit_rect = if self.opts.preview_split_horizontal {
+                    let y = img_rect.top() + img_rect.height() * k;
+                    Rect::from_min_max(
+                        pos2(img_rect.left(), y - 6.0),
+                        pos2(img_rect.right(), y + 6.0),
+                    )
+                } else {
+                    let x = img_rect.left() + img_rect.width() * k;
+                    Rect::from_min_max(
+                        pos2(x - 6.0, img_rect.top()),
+                        pos2(x + 6.0, img_rect.bottom()),
+                    )
+                };
+                let div_resp = ui.interact(
+                    hit_rect,
+                    ui.id().with("pv_split_handle"),
+                    Sense::click_and_drag(),
+                );
+                if div_resp.dragged() {
+                    dragging_split = true;
+                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                        let new_k = if self.opts.preview_split_horizontal {
+                            (pos.y - img_rect.top()) / img_rect.height().max(1.0)
+                        } else {
+                            (pos.x - img_rect.left()) / img_rect.width().max(1.0)
+                        };
+                        self.opts.preview_split_pos = new_k.clamp(0.08, 0.92);
+                    }
+                }
+            }
+            let canvas_resp = ui.interact(
+                rect,
+                ui.id().with("pv_zoom_pan_canvas"),
+                Sense::click_and_drag(),
+            );
+            if canvas_resp.hovered() {
+                let sy = ui.input(|i| i.smooth_scroll_delta.y);
+                if sy.abs() > 0.5 {
+                    let factor = if sy > 0.0 { 1.12 } else { 1.0 / 1.12 };
+                    self.preview_zoom = (self.preview_zoom * factor).clamp(0.25, 8.0);
+                    if (self.preview_zoom - 1.0).abs() < 0.02 {
+                        self.apply_preview_zoom(0.0);
+                    }
+                }
+            }
+            if !dragging_split && self.preview_zoom > 1.01 && canvas_resp.dragged() {
+                self.preview_pan += canvas_resp.drag_delta();
+            }
+            if canvas_resp.double_clicked() && (self.preview_zoom - 1.0).abs() > 0.02 {
+                self.apply_preview_zoom(0.0);
+            }
+        }
+
+        if self.opts.safe_areas {
+            let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
+            let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
+            for k in [action_k, title_k] {
+                let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
+                    StrokeKind::Inside,
+                );
+            }
+            let c = img_rect.center();
+            painter.line_segment(
+                [c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+            );
+            painter.line_segment(
+                [c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(120)),
+            );
+        }
+
+        if self.opts.preview_mute_video {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "VÍDEO SILENCIADO",
+                egui::FontId::proportional(13.0),
+                self.theme.offline_fg,
+            );
+        } else {
+            let mc_drawn = if interactive && self.opts.multicam_mode {
+                if let Some((_, _, ev_id, active_idx, count)) =
+                    self.session.active_multicam_event_at(self.cursor)
+                {
+                    self.draw_multicam_grid(ui, &painter, img_rect, ev_id, active_idx, count);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !mc_drawn {
+                if let Some(job) = &self.ram_preview_job {
+                    let done = job.done.load(Ordering::Relaxed);
+                    let total = job.total.load(Ordering::Relaxed).max(1);
+                    let pct = (done.saturating_mul(100) / total).min(100);
+                    painter.text(
+                        rect.left_bottom() + vec2(6.0, -4.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("RAM Preview: {pct}% ({done}/{total})"),
+                        egui::FontId::proportional(10.0),
+                        Color32::WHITE,
+                    );
+                }
+            }
+        }
+        img_rect
+    }
+
+    fn draw_multicam_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        ev_id: Id,
+        active_idx: usize,
+        count: usize,
+    ) {
+        let shown = count.clamp(1, 16);
+        let cols = if shown <= 4 {
+            2
+        } else if shown <= 9 {
+            3
+        } else {
+            4
+        };
+        let rows = shown.div_ceil(cols).max(1);
+        let gap = 3.0_f32;
+        let cell_w = ((rect.width() - gap * (cols as f32 - 1.0)) / cols as f32).max(16.0);
+        let cell_h = ((rect.height() - gap * (rows as f32 - 1.0)) / rows as f32).max(16.0);
+        painter.rect_filled(rect, 0.0, Color32::BLACK);
+        let qt = self.project.settings.quantize(self.cursor).0;
+        let take_names: Vec<String> = self
+            .project
+            .event(ev_id)
+            .map(|e| {
+                neoveg_engine::takes::takes(e)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, tk)| {
+                        if tk.name.is_empty() {
+                            format!("Câm {}", i + 1)
+                        } else {
+                            tk.name
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if self.multicam_thumbs.len() > 64 {
+            self.multicam_thumbs.clear();
+        }
+        let mut clicked_angle: Option<usize> = None;
+        for angle_i in 0..shown {
+            let col = angle_i % cols;
+            let row = angle_i / cols;
+            let x0 = rect.left() + col as f32 * (cell_w + gap);
+            let y0 = rect.top() + row as f32 * (cell_h + gap);
+            let cr = Rect::from_min_size(pos2(x0, y0), vec2(cell_w, cell_h));
+            let key = (ev_id, angle_i, qt);
+            if !self.multicam_thumbs.contains_key(&key) {
+                let frame = neoveg_engine::engine::video::render_event_take_still(
+                    &self.project,
+                    &self.media,
+                    ev_id,
+                    angle_i,
+                    Ticks::from_raw(qt),
+                    160,
+                    90,
+                    true,
+                );
+                if let Some(rgba) = frame.to_image() {
+                    let ci = crate::app::rgba_to_color_image(&rgba);
+                    let tex = ui.ctx().load_texture(
+                        format!("mc_{ev_id}_{angle_i}_{qt}"),
+                        ci,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.multicam_thumbs.insert(key, tex);
+                }
+            }
+            if let Some(tex) = self.multicam_thumbs.get(&key) {
+                painter.image(
+                    tex.id(),
+                    cr,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            let active = angle_i == active_idx;
+            let border_col = if active {
+                Color32::from_rgb(250, 210, 50)
+            } else {
+                Color32::from_gray(95)
+            };
+            painter.rect_stroke(
+                cr,
+                0.0,
+                Stroke::new(if active { 2.5_f32 } else { 1.0_f32 }, border_col),
+                StrokeKind::Inside,
+            );
+            let lbl = take_names
+                .get(angle_i)
+                .cloned()
+                .unwrap_or_else(|| format!("Câm {}", angle_i + 1));
+            painter.rect_filled(
+                Rect::from_min_size(
+                    cr.left_top() + vec2(3.0, 3.0),
+                    vec2((cell_w - 6.0).min(120.0), 15.0),
+                ),
+                2.0,
+                Color32::from_black_alpha(180),
+            );
+            painter.text(
+                cr.left_top() + vec2(6.0, 5.0),
+                egui::Align2::LEFT_TOP,
+                format!("[{}] {}", angle_i + 1, lbl),
+                egui::FontId::proportional(10.0),
+                if active {
+                    Color32::from_rgb(255, 225, 90)
+                } else {
+                    Color32::WHITE
+                },
+            );
+            let resp = ui.interact(
+                cr,
+                ui.id().with(("mc_cell", ev_id, angle_i)),
+                Sense::click(),
+            );
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("Câmera {}", angle_i + 1),
+                )
+            });
+            if resp.clicked() {
+                clicked_angle = Some(angle_i);
+            }
+        }
+        if let Some(angle_i) = clicked_angle {
+            if self.session.switch_multicam_angle(self.cursor, angle_i) {
+                self.sync_after_session();
+            }
+        }
     }
 
     fn master_bus_controls(&mut self, ui: &mut egui::Ui, tall_dock: bool) {
@@ -620,212 +1318,7 @@ impl App {
     // -----------------------------------------------------------------
 
     fn media_tab(&mut self, ui: &mut egui::Ui) {
-        let lang = self.lang();
-        ui.horizontal_wrapped(|ui| {
-            if icons::icon_button(
-                ui,
-                Icon::ImportMedia,
-                Some(tr(lang, "Importar...")),
-                false,
-                true,
-                &self.theme,
-            )
-            .clicked()
-            {
-                self.import_dialog();
-            }
-            if ui.button(tr(lang, "Sequência de imagens...")).clicked() {
-                self.import_sequence_dialog();
-            }
-            if ui.button(tr(lang, "Remover não usadas")).clicked() {
-                self.remove_unused_media();
-            }
-        });
-        ui.label(
-            egui::RichText::new(tr(
-                lang,
-                "Arraste uma mídia para a timeline, ou dê um duplo clique para adicionar no cursor.",
-            ))
-            .small()
-            .weak(),
-        );
-        ui.separator();
-        let ctx = ui.ctx().clone();
-        let items: Vec<MediaItem> = self.project.media.clone();
-        let mut remove = None;
-        let mut add_as_take = None;
-        let has_event_selection = !self.sel_events.is_empty();
-        let mut add = None;
-        let mut open_trimmer = None;
-        let mut edit_gen = None;
-        let mut build_proxy = None;
-        egui::Grid::new("media_grid")
-            .striped(true)
-            .num_columns(3)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                for m in &items {
-                    let thumb = self.thumb(&ctx, m.id);
-                    let id = egui::Id::new(("media_drag", m.id));
-                    let resp = ui
-                        .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                            ui.set_min_width(220.0);
-                            ui.horizontal(|ui| {
-                                ui.set_min_height(36.0);
-                                if let Some(t) = &thumb {
-                                    let s = t.size_vec2();
-                                    let h = 36.0;
-                                    let w = (h * s.x / s.y.max(1.0)).clamp(24.0, 84.0);
-                                    ui.image((t.id(), vec2(w, h)));
-                                } else {
-                                    icons::paint_inline(
-                                        ui,
-                                        if m.has_audio {
-                                            Icon::AudioTrack
-                                        } else {
-                                            Icon::MediaItem
-                                        },
-                                        18.0,
-                                        &self.theme,
-                                    );
-                                }
-                                ui.vertical(|ui| {
-                                    ui.set_min_width(140.0);
-                                    ui.add(
-                                        egui::Label::new(egui::RichText::new(&m.name).strong())
-                                            .extend(),
-                                    );
-                                    let dur = m
-                                        .duration
-                                        .map(|d| self.fmt_time(d))
-                                        .unwrap_or_else(|| tr(lang, "estática").into());
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(format!("{}  •  {}", dur, m.info))
-                                                .small(),
-                                        )
-                                        .extend(),
-                                    );
-                                });
-                            });
-                        })
-                        .response;
-                    let resp = ui.interact(resp.rect, id.with("click"), Sense::click());
-                    if resp.double_clicked() {
-                        add = Some(m.id);
-                    }
-                    resp.context_menu(|ui| {
-                        if ui.button(tr(lang, "Adicionar no cursor")).clicked() {
-                            add = Some(m.id);
-                            ui.close_menu();
-                        }
-                        if ui.button(tr(lang, "Abrir no Trimmer")).clicked() {
-                            open_trimmer = Some(m.id);
-                            ui.close_menu();
-                        }
-                        // "Add As Takes" (manual do VEGAS Pro 21, p. 346)
-                        if ui
-                            .add_enabled(
-                                has_event_selection,
-                                egui::Button::new(tr(
-                                    lang,
-                                    "Adicionar como take aos eventos selecionados",
-                                )),
-                            )
-                            .on_disabled_hover_text(tr(
-                                lang,
-                                "Selecione um ou mais eventos na linha do tempo.",
-                            ))
-                            .clicked()
-                        {
-                            add_as_take = Some(m.id);
-                            ui.close_menu();
-                        }
-                        if m.has_video
-                            && !matches!(m.source, MediaSource::Generated(_))
-                            && ui.button(tr(lang, "Gerar proxy de vídeo")).clicked()
-                        {
-                            build_proxy = Some(m.id);
-                            ui.close_menu();
-                        }
-                        if matches!(m.source, MediaSource::Generated(_))
-                            && ui.button(tr(lang, "Editar mídia gerada...")).clicked()
-                        {
-                            edit_gen = Some(m.id);
-                            ui.close_menu();
-                        }
-                        if ui.button(tr(lang, "Remover do projeto")).clicked() {
-                            remove = Some(m.id);
-                            ui.close_menu();
-                        }
-                    });
-                    ui.label(if m.has_video && m.has_audio {
-                        "A/V"
-                    } else if m.has_video {
-                        "V"
-                    } else {
-                        "A"
-                    });
-                    if !self.media.contains(m.id) && !matches!(m.source, MediaSource::Generated(_))
-                    {
-                        ui.colored_label(self.theme.offline_fg, tr(lang, "offline"));
-                    } else if m.proxy_path.is_some() {
-                        ui.label(egui::RichText::new(tr(lang, "[proxy]")).small().weak());
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-                }
-            });
-        if let Some(id) = add {
-            self.checkpoint();
-            let hint = self.sel_track;
-            self.add_media_to_timeline(id, self.cursor, hint);
-        }
-        if let Some(id) = open_trimmer {
-            self.open_in_trimmer(id);
-        }
-        if let Some(id) = build_proxy {
-            self.build_proxy_for_media(id);
-        }
-        if let Some(id) = edit_gen {
-            self.dlg.gen_editor = Some(id);
-        }
-        if let Some(id) = add_as_take {
-            let n = self.session.add_media_as_take_to_selected(id);
-            let n_s = n.to_string();
-            self.set_status(if n == 0 {
-                tr(
-                    lang,
-                    "Nenhum evento selecionado compatível (vídeo/áudio) recebeu o take.",
-                )
-                .to_string()
-            } else {
-                tr_args(lang, "Take adicionado a {n} evento(s)", &[("n", &n_s)])
-            });
-        }
-        if let Some(id) = remove {
-            let used = self.project.tracks.iter().any(|t| {
-                t.events
-                    .iter()
-                    .any(|e| neoveg_engine::takes::uses_media(e, id))
-            });
-            self.checkpoint();
-            if used {
-                // o take dessa mídia sai; o evento só sai se não tiver outro take
-                for t in &mut self.project.tracks {
-                    t.events.retain_mut(|e| {
-                        !neoveg_engine::takes::uses_media(e, id)
-                            || neoveg_engine::takes::remove_media(e, id)
-                    });
-                }
-            }
-            self.project.media.retain(|m| m.id != id);
-            self.media.remove(id);
-            self.thumbs.remove(&id);
-            self.changed();
-        }
+        self.project_media_ui(ui);
     }
 
     // -----------------------------------------------------------------
@@ -1021,6 +1514,15 @@ impl App {
     /// janela Efeitos de Vídeo): aplicam à seleção do tipo certo, à trilha
     /// selecionada ou ao Master, com um passo de Desfazer.
     pub(crate) fn fx_apply_buttons(&mut self, ui: &mut egui::Ui, k: FxKind, audio: bool) {
+        self.fx_apply_instance_buttons(ui, FxInstance::new(k), audio);
+    }
+
+    pub(crate) fn fx_apply_instance_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        fx: FxInstance,
+        audio: bool,
+    ) {
         let lang = self.lang();
         let want_kind = if audio {
             TrackKind::Audio
@@ -1043,9 +1545,13 @@ impl App {
             .clicked()
         {
             self.checkpoint();
-            for id in &sel_ev {
+            for (idx, id) in sel_ev.iter().enumerate() {
                 if let Some(ev) = self.project.event_mut(*id) {
-                    ev.fx.push(FxInstance::new(k));
+                    let mut inst = fx.clone();
+                    if idx > 0 {
+                        inst.id = new_id();
+                    }
+                    ev.fx.push(inst);
                 }
             }
             self.dlg.fx_target = Some(FxTarget::Event(sel_ev[0]));
@@ -1060,17 +1566,17 @@ impl App {
             sel_tr,
         ) {
             self.checkpoint();
-            self.project.tracks[t].fx.push(FxInstance::new(k));
+            self.project.tracks[t].fx.push(fx.clone());
             self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[t].id));
             self.changed();
         }
         if ui.button(tr(lang, "Master")).clicked() {
             self.checkpoint();
             if audio {
-                self.project.master.fx.push(FxInstance::new(k));
+                self.project.master.fx.push(fx);
                 self.dlg.fx_target = Some(FxTarget::MasterAudio);
             } else {
-                self.project.master.video_fx.push(FxInstance::new(k));
+                self.project.master.video_fx.push(fx);
                 self.dlg.fx_target = Some(FxTarget::MasterVideo);
             }
             self.changed();
@@ -1104,6 +1610,16 @@ impl App {
                 .small()
                 .color(self.theme.text_muted),
             );
+            ui.separator();
+            let mut bypass = self.opts.bypass_all_audio_fx;
+            if ui
+                .toggle_value(&mut bypass, "Bypass FX")
+                .on_hover_text("Ignorar todos os plug-ins de efeito de áudio (Opções > Ignorar todos os FX de áudio)")
+                .changed()
+            {
+                let ctx = ui.ctx().clone();
+                self.exec_cmd(Some(&ctx), "options.bypass_all_audio_fx");
+            }
         });
         ui.separator();
 

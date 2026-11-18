@@ -245,6 +245,8 @@ pub(crate) struct GenBrowser {
     /// Preset escolhido (índice em `gen_presets`).
     pub(crate) preset: Option<usize>,
     thumbs: HashMap<usize, egui::TextureHandle>,
+    hover_fonts: Option<generate::Fonts>,
+    hover_anim: Option<(usize, egui::TextureHandle, std::time::Instant, u64)>,
     rx: Option<Receiver<(usize, egui::ColorImage)>>,
     started: bool,
 }
@@ -437,6 +439,8 @@ impl App {
                     .map(|(i, _)| i)
                     .collect();
                 let per_row = ((right_w + 8.0) / (THUMB_W as f32 + 24.0)).floor().max(1.0) as usize;
+                let (widget_bg, accent) = (self.theme.widget_bg, self.theme.accent);
+                let mut any_hovered = false;
                 for row in idxs.chunks(per_row) {
                     ui.horizontal(|ui| {
                         for &i in row {
@@ -444,7 +448,7 @@ impl App {
                                 continue;
                             };
                             let chosen = self.gen_browser.preset == Some(i);
-                            let thumb = self.gen_browser.thumbs.get(&i).cloned();
+                            let static_thumb = self.gen_browser.thumbs.get(&i).cloned();
                             let r = ui.dnd_drag_source(
                                 egui::Id::new(("genb_preset", i)),
                                 DndPayload::Generator(spec.clone()),
@@ -460,23 +464,88 @@ impl App {
                                             2.0,
                                             egui::Color32::from_gray(16),
                                         );
+                                        let thumb = if ui.rect_contains_pointer(r) {
+                                            any_hovered = true;
+                                            let fonts = self
+                                                .gen_browser
+                                                .hover_fonts
+                                                .get_or_insert_with(generate::Fonts::default);
+                                            let needs_new = self
+                                                .gen_browser
+                                                .hover_anim
+                                                .as_ref()
+                                                .is_none_or(|(pi, _, _, _)| *pi != i);
+                                            if needs_new {
+                                                let img_raw = generate::render(
+                                                    spec,
+                                                    0.0,
+                                                    THUMB_W as u32,
+                                                    THUMB_H as u32,
+                                                    fonts,
+                                                );
+                                                let img = egui::ColorImage::from_rgba_unmultiplied(
+                                                    [
+                                                        img_raw.width() as usize,
+                                                        img_raw.height() as usize,
+                                                    ],
+                                                    img_raw.as_raw(),
+                                                );
+                                                let tex = ui.ctx().load_texture(
+                                                    format!("gen_hover_anim_{i}"),
+                                                    img,
+                                                    egui::TextureOptions::LINEAR,
+                                                );
+                                                self.gen_browser.hover_anim =
+                                                    Some((i, tex, std::time::Instant::now(), 0));
+                                            }
+                                            if let Some((_, tex, started, prev_bucket)) =
+                                                self.gen_browser.hover_anim.as_mut()
+                                            {
+                                                let bucket =
+                                                    (started.elapsed().as_millis() / 80) as u64;
+                                                if bucket != *prev_bucket {
+                                                    *prev_bucket = bucket;
+                                                    let t = ((bucket % 60) as f64) * 0.1;
+                                                    let img_raw = generate::render(
+                                                        spec,
+                                                        t,
+                                                        THUMB_W as u32,
+                                                        THUMB_H as u32,
+                                                        fonts,
+                                                    );
+                                                    let img =
+                                                        egui::ColorImage::from_rgba_unmultiplied(
+                                                            [
+                                                                img_raw.width() as usize,
+                                                                img_raw.height() as usize,
+                                                            ],
+                                                            img_raw.as_raw(),
+                                                        );
+                                                    tex.set(img, egui::TextureOptions::LINEAR);
+                                                }
+                                                ui.ctx().request_repaint_after(
+                                                    std::time::Duration::from_millis(80),
+                                                );
+                                                Some(tex.clone())
+                                            } else {
+                                                static_thumb.clone()
+                                            }
+                                        } else {
+                                            static_thumb.clone()
+                                        };
                                         match &thumb {
                                             Some(t) => {
                                                 egui::Image::new((t.id(), size)).paint_at(ui, r);
                                             }
                                             None => {
-                                                ui.painter().rect_filled(
-                                                    r,
-                                                    2.0,
-                                                    self.theme.widget_bg,
-                                                );
+                                                ui.painter().rect_filled(r, 2.0, widget_bg);
                                             }
                                         }
                                         if chosen {
                                             ui.painter().rect_stroke(
                                                 r,
                                                 2.0,
-                                                egui::Stroke::new(2.0_f32, self.theme.accent),
+                                                egui::Stroke::new(2.0_f32, accent),
                                                 egui::StrokeKind::Outside,
                                             );
                                         }
@@ -495,6 +564,9 @@ impl App {
                                 .on_hover_text(tr(lang, "Arraste para a timeline"));
                         }
                     });
+                }
+                if !any_hovered {
+                    self.gen_browser.hover_anim = None;
                 }
                 ui.separator();
                 let cur = self.gen_browser.preset.and_then(|i| presets.get(i));
