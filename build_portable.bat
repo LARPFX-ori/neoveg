@@ -1,0 +1,1 @@
+start "build_portable" cmd /k "python build_portable.py"
