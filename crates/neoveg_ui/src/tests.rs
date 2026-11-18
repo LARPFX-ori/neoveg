@@ -1760,3 +1760,51 @@ fn alt_crase_alterna_a_area_de_janelas_tambem_no_abnt2() {
     });
     assert_eq!(app.dock_visible, antes, "tecla física da crase");
 }
+
+/// Painel Compositores com eventos de vídeo selecionados: o modo vale só
+/// para eles, num passo de Desfazer, e "Usar o da trilha" volta ao da trilha.
+#[test]
+fn compositor_aplicado_aos_eventos_selecionados_com_desfazer() {
+    use crate::model::BlendMode;
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.insert_generated(crate::model::GenSpec::ColorBars);
+    let ids = app.selected_video_events();
+    let ids = if ids.is_empty() {
+        app.project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video)
+            .flat_map(|t| t.events.iter().map(|e| e.id))
+            .take(1)
+            .collect::<Vec<_>>()
+    } else {
+        ids
+    };
+    let Some(&id) = ids.first() else {
+        panic!("o gerador deve criar um evento de vídeo");
+    };
+    let undo_antes = app.session.undo.len();
+    app.apply_event_compositor(&[id], Some(BlendMode::Multiply));
+    assert_eq!(
+        app.project.event(id).and_then(|e| e.blend),
+        Some(BlendMode::Multiply)
+    );
+    assert_eq!(
+        app.session.undo.len(),
+        undo_antes + 1,
+        "um passo de Desfazer"
+    );
+    app.apply_event_compositor(&[id], None);
+    assert_eq!(app.project.event(id).and_then(|e| e.blend), None);
+    // lista vazia não cria passo de Desfazer
+    let n = app.session.undo.len();
+    app.apply_event_compositor(&[], Some(BlendMode::Screen));
+    assert_eq!(app.session.undo.len(), n);
+}

@@ -768,7 +768,7 @@ fn compose_subtree(
             apply_track_mask(out, &layer, track.mask_mode);
         } else {
             let op = track.opacity * track.env_value(EnvKind::Opacity, t);
-            blend(out, &layer, track.blend, op);
+            blend(out, &layer, track.blend_at(t), op);
         }
         return;
     }
@@ -803,7 +803,7 @@ fn compose_subtree(
             if track.mask_mode != TrackMaskMode::None {
                 apply_track_mask(&mut group, &layer, track.mask_mode);
             } else {
-                blend(&mut group, &layer, track.blend, 1.0);
+                blend(&mut group, &layer, track.blend_at(t), 1.0);
             }
         }
     }
