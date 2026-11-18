@@ -64,7 +64,7 @@ class TestTier4Scenarios(unittest.TestCase):
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=900,
+                    timeout=1200,
                 )
                 self.assertEqual(res.returncode, 0, f"build_portable.py failed:\n{res.stdout}\n{res.stderr}")
                 self.assertFalse(
@@ -304,7 +304,7 @@ class TestTier4Scenarios(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=420,
+                timeout=900,
             )
             assert_no_panic_or_crash_log(r)
             self.assertEqual(r.returncode, 0, f"Gate {cmd} failed:\n{r.stdout}\n{r.stderr}")

@@ -2108,15 +2108,30 @@ def stage_isolated_build_workspace(
 
     if copy_repo_assets and (REPO_ROOT / "assets").is_dir():
         shutil.copytree(REPO_ROOT / "assets", ws / "assets")
+    if copy_repo_assets and (REPO_ROOT / "i18n").is_dir():
+        shutil.copytree(REPO_ROOT / "i18n", ws / "i18n")
 
     if with_release_bin:
         rel_dir = ws / "target" / "release"
         rel_dir.mkdir(parents=True, exist_ok=True)
-        src_bin = REPO_ROOT / "target" / "release" / exe_name()
-        if src_bin.is_file():
-            shutil.copy2(src_bin, rel_dir / exe_name())
+        name = exe_name()
+        candidates: list[Path] = []
+        if os.environ.get("NEOVEG_BIN"):
+            candidates.append(Path(os.environ["NEOVEG_BIN"]))
+        if os.environ.get("CARGO_TARGET_DIR"):
+            ctd = Path(os.environ["CARGO_TARGET_DIR"])
+            candidates.extend([ctd / "release" / name, ctd / "debug" / name])
+        candidates.extend(
+            [
+                REPO_ROOT / "target" / "release" / name,
+                REPO_ROOT / "dist" / name,
+                REPO_ROOT / "target" / "debug" / name,
+            ]
+        )
+        src_bin = next((c for c in candidates if c.is_file()), None)
+        if src_bin is not None:
+            shutil.copy2(src_bin, rel_dir / name)
         else:
-            # Create a dummy marker executable only if no real release binary exists yet
-            # (tests that execute the packaged binary use find_neoveg_bin()).
-            (rel_dir / exe_name()).write_bytes(b"MZ" + b"\x00" * 1024)
+            # Create a dummy marker executable only if no real binary exists yet.
+            (rel_dir / name).write_bytes(b"MZ" + b"\x00" * 1024)
     return ws
