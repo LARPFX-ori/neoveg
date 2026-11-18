@@ -1004,6 +1004,8 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
     if avail.width() < 8.0 || avail.height() < 8.0 {
         return;
     }
+    // alvo de "acoplar arrastando" das janelas destacadas (float_dock)
+    app.dock_rect = Some(avail);
 
     let show_preview = app.preview_visible && !app.preview_detached;
     let min_w_for_master = if show_preview { 640.0 } else { 420.0 };

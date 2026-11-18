@@ -289,6 +289,12 @@ pub struct App {
     pub(crate) floating_open: HashMap<String, Option<crate::layout::FloatingGeom>>,
     /// Janelas destacadas desenhadas no último quadro.
     pub(crate) floating_shown: HashSet<String>,
+    /// Acoplar arrastando: movimento de cada janela destacada.
+    pub(crate) float_dock: crate::float_dock::FloatDockTracker,
+    /// Contorno da área de janelas neste quadro (uma janela vai acoplar).
+    pub(crate) float_dock_hint: bool,
+    /// Área de janelas no último quadro em que foi desenhada (pontos).
+    pub(crate) dock_rect: Option<egui::Rect>,
     pub preview_detached: bool,
     pub preview_visible: bool,
     pub master_bus_visible: bool,
@@ -481,6 +487,9 @@ impl App {
             floating_geom: initial_layout.floating_windows.clone(),
             floating_open: HashMap::new(),
             floating_shown: HashSet::new(),
+            float_dock: Default::default(),
+            float_dock_hint: false,
+            dock_rect: None,
             preview_detached: initial_layout.preview_detached,
             preview_visible: initial_layout.preview_visible,
             master_bus_visible,
@@ -2829,6 +2838,28 @@ impl App {
             return;
         }
 
+        // Atalhos alternativos da lista do VEGAS Pro: Alt+` (= F11), Ctrl+Alt+`
+        // (= Ctrl+F11) e Shift+Alt+` (= Shift+F11). Atalhos gravados pelo
+        // usuário vêm antes (acima). A crase é tecla morta no ABNT2: vale
+        // também a tecla física à esquerda do 1.
+        if let Some(id) = backtick_window_alias(ctrl, shift, alt) {
+            let hit = ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { key, physical_key, pressed: true, .. }
+                            if *key == Key::Backtick || *physical_key == Some(Key::Backtick)
+                    )
+                })
+            });
+            if hit {
+                if self.cmd_enabled(id) {
+                    self.exec_cmd(Some(ctx), id);
+                }
+                return;
+            }
+        }
+
         // Teclas numéricas 0-9: ângulo multicâmera (1..9 quando ativo) ou marcador
         if !ctrl && !alt && !shift {
             let nums = [
@@ -4555,6 +4586,8 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| self.timeline_ui(ui));
 
         self.floating_panel_windows(ctx);
+        // a área de janelas deste quadro volta a ser medida ao desenhá-la
+        self.dock_rect = None;
         self.show_dialogs(ctx);
         self.show_integrations_window(ctx);
         self.show_encoder_dialogs(ctx);
@@ -5017,6 +5050,17 @@ pub(crate) fn isolated_color_image(
     let mut raw = img.as_raw().clone();
     crate::preview_overlays::isolate_channel(&mut raw, mode, gray);
     egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &raw)
+}
+
+/// Comando do atalho alternativo com a crase (lista de atalhos do VEGAS Pro):
+/// só com Alt, e no máximo mais um de Ctrl ou Shift.
+pub(crate) fn backtick_window_alias(ctrl: bool, shift: bool, alt: bool) -> Option<&'static str> {
+    match (ctrl, shift, alt) {
+        (false, false, true) => Some("view.toggle_dock_area"),
+        (true, false, true) => Some("view.maximize_timeline"),
+        (false, true, true) => Some("view.toggle_track_list"),
+        _ => None,
+    }
 }
 
 pub(crate) fn rgba_to_color_image(img: &image::RgbaImage) -> egui::ColorImage {

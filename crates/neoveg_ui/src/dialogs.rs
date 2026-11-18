@@ -6216,6 +6216,14 @@ fn prefs_appearance(
     act: &mut PrefsActions<'_>,
 ) {
     let lang = cx.lang;
+    ui.checkbox(
+        &mut draft.allow_floating_dock,
+        tr(lang, "Permitir que janelas flutuantes acoplem"),
+    )
+    .on_hover_text(tr(
+        lang,
+        "Ligado: arrastar uma janela destacada para a área de janelas a acopla (segure Ctrl para não acoplar). Desligado: só acopla segurando Ctrl.",
+    ));
     let mut active_theme = ThemeId::from_pref(&draft.theme);
     prefs_row(ui, cx.label_w, tr(lang, "Tema visual:"), |ui| {
         egui::ComboBox::from_id_salt("prefs_theme_combo")

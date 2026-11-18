@@ -1702,3 +1702,61 @@ fn janelas_destacadas_lembram_posicao_e_tamanho() {
         "layout novo reabre as janelas no lugar dele"
     );
 }
+
+/// Atalhos alternativos da lista do VEGAS Pro: Alt+` minimiza a área de
+/// janelas (como F11). No ABNT2 a crase é tecla morta, então vale a tecla
+/// física à esquerda do 1 mesmo quando ela produz outra tecla lógica.
+#[test]
+fn alt_crase_alterna_a_area_de_janelas_tambem_no_abnt2() {
+    use crate::app::backtick_window_alias;
+    assert_eq!(
+        backtick_window_alias(false, false, true),
+        Some("view.toggle_dock_area")
+    );
+    assert_eq!(
+        backtick_window_alias(true, false, true),
+        Some("view.maximize_timeline")
+    );
+    assert_eq!(
+        backtick_window_alias(false, true, true),
+        Some("view.toggle_track_list")
+    );
+    assert_eq!(backtick_window_alias(false, false, false), None);
+    assert_eq!(backtick_window_alias(true, true, true), None);
+
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.welcome_open = false;
+    app.splash = crate::splash::SplashState::startup(false);
+    app.timeline_restore = None;
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+    let tecla = |key: Key, physical: Option<Key>| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        modifiers: alt,
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: physical,
+            pressed: true,
+            repeat: false,
+            modifiers: alt,
+        }],
+        ..Default::default()
+    };
+    let antes = app.dock_visible;
+    let _ = ctx.run(tecla(Key::Backtick, None), |c| app.handle_shortcuts(c));
+    assert_eq!(app.dock_visible, !antes, "Alt+` como F11");
+    // ABNT2: a tecla física da crase chega como outra tecla lógica
+    let _ = ctx.run(tecla(Key::Quote, Some(Key::Backtick)), |c| {
+        app.handle_shortcuts(c)
+    });
+    assert_eq!(app.dock_visible, antes, "tecla física da crase");
+}
