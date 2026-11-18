@@ -17,6 +17,7 @@ mod convert_dialog;
 mod crash_report;
 mod dialogs;
 mod dock;
+mod dock_drop;
 mod edit;
 mod edit_details;
 mod encoder_panel;

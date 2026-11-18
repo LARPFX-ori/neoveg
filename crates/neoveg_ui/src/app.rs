@@ -281,6 +281,10 @@ pub struct App {
     pub dock_height: f32,
     pub preview_ratio: f32,
     pub dock_tree: egui_tiles::Tree<crate::dock::DockPane>,
+    /// Painel que preenche a área de janelas (botão Maximizar do VEGAS).
+    pub dock_maximized: Option<crate::dock::DockPane>,
+    /// Estado de antes do `Ctrl+F11` (timeline maximizada).
+    pub(crate) timeline_restore: Option<crate::dock::TimelineRestore>,
     pub(crate) pending_dock_focus: Option<DockTab>,
     pub saved_layouts: Vec<(String, PathBuf)>,
     pub theme_id: ThemeId,
@@ -437,6 +441,8 @@ impl App {
             master_dim: false,
             master_mono: false,
             dock_visible: initial_layout.dock_visible,
+            dock_maximized: None,
+            timeline_restore: None,
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
             dock_tree: initial_tree.unwrap_or_else(|| {
@@ -804,6 +810,29 @@ impl App {
             self.cursor = Ticks::from_samples(pos.max(0), self.audio.sr);
         } else {
             self.cursor = self.play_start;
+        }
+    }
+
+    /// `Ctrl+F11`: maximiza a timeline escondendo a área de janelas e a lista
+    /// de trilhas; de novo, volta ao que estava antes (manual do VEGAS Pro 21).
+    pub fn toggle_maximize_timeline(&mut self) {
+        match self.timeline_restore.take() {
+            Some(r) => {
+                self.dock_visible = r.dock_visible;
+                if r.header_expanded && self.tl.header_collapsed() {
+                    self.tl.toggle_header_collapse();
+                }
+            }
+            None => {
+                self.timeline_restore = Some(crate::dock::TimelineRestore {
+                    dock_visible: self.dock_visible,
+                    header_expanded: !self.tl.header_collapsed(),
+                });
+                self.dock_visible = false;
+                if !self.tl.header_collapsed() {
+                    self.tl.toggle_header_collapse();
+                }
+            }
         }
     }
 
@@ -2164,6 +2193,15 @@ impl App {
                     self.dock_visible = true;
                 }
             }
+            UiAction::ToggleDockArea => {
+                if self.timeline_restore.is_some() {
+                    self.toggle_maximize_timeline();
+                } else {
+                    self.dock_visible = !self.dock_visible;
+                }
+            }
+            UiAction::ToggleTrackList => self.tl.toggle_header_collapse(),
+            UiAction::ToggleMaximizeTimeline => self.toggle_maximize_timeline(),
             UiAction::TogglePlay => self.toggle_play(),
             UiAction::ToggleRecord => self.toggle_record(),
             UiAction::PlayFromStart => {
@@ -2705,12 +2743,17 @@ impl App {
                     }
                     ui.close_menu();
                 }
-                if ui
-                    .selectable_label(self.dock_visible, "Área de janelas acopláveis")
-                    .clicked()
-                {
-                    self.dock_visible = !self.dock_visible;
-                    ui.close_menu();
+                // F11, Shift+F11 e Ctrl+F11 do VEGAS Pro, pela Tabela de Comandos.
+                for (cmd_id, on) in [
+                    ("view.toggle_dock_area", self.dock_visible),
+                    ("view.toggle_track_list", !self.tl.header_collapsed()),
+                    ("view.maximize_timeline", self.timeline_restore.is_some()),
+                ] {
+                    let label = menu_label(cmd_id, &self.prefs.shortcuts);
+                    if ui.selectable_label(on, label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), cmd_id);
+                        ui.close_menu();
+                    }
                 }
                 if self.dock_visible
                     && !self.detached_tabs.contains(&self.dock_tab)
@@ -4036,6 +4079,8 @@ impl App {
 
     fn show_dock_panel(&mut self, ctx: &egui::Context, at_top: bool) {
         if !self.dock_visible {
+            // Um arraste de aba não sobrevive à área de janelas escondida.
+            crate::dock_drop::end(ctx);
             return;
         }
         let panel = if at_top {
@@ -4155,6 +4200,8 @@ impl App {
 
     pub fn apply_window_layout(&mut self, mut l: WindowLayout) {
         l.sanitize();
+        self.dock_maximized = None;
+        self.timeline_restore = None;
         self.dock_height = l.dock_height;
         self.preview_ratio = l.preview_ratio;
         self.dock_visible = l.dock_visible;
@@ -4431,6 +4478,8 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::Delete => Key::Delete,
         ShortcutKey::F2 => Key::F2,
         ShortcutKey::F8 => Key::F8,
+        ShortcutKey::F11 => Key::F11,
+        ShortcutKey::Backtick => Key::Backtick,
         ShortcutKey::ArrowLeft => Key::ArrowLeft,
         ShortcutKey::ArrowRight => Key::ArrowRight,
         ShortcutKey::ArrowUp => Key::ArrowUp,

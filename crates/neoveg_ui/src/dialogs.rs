@@ -5035,6 +5035,8 @@ fn capture_shortcut(ctx: &egui::Context) -> Option<Option<Shortcut>> {
         (Key::Delete, ShortcutKey::Delete),
         (Key::F2, ShortcutKey::F2),
         (Key::F8, ShortcutKey::F8),
+        (Key::F11, ShortcutKey::F11),
+        (Key::Backtick, ShortcutKey::Backtick),
         (Key::ArrowLeft, ShortcutKey::ArrowLeft),
         (Key::ArrowRight, ShortcutKey::ArrowRight),
         (Key::ArrowUp, ShortcutKey::ArrowUp),

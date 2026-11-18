@@ -284,9 +284,14 @@ impl TimelineState {
         }
     }
 
+    /// Lista de trilhas recolhida (largura mínima dos cabeçalhos).
+    pub fn header_collapsed(&self) -> bool {
+        self.header_w <= 104.0
+    }
+
     /// Duplo clique na borda do cabeçalho alterna entre largura recolhida e expandida (p. 69).
     pub fn toggle_header_collapse(&mut self) {
-        if self.header_w <= 104.0 {
+        if self.header_collapsed() {
             self.header_w = self.header_prev_w.clamp(180.0, Self::MAX_HEADER_W);
         } else {
             self.header_prev_w = self.header_w;

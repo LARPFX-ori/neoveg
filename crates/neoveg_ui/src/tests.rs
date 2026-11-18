@@ -1207,3 +1207,70 @@ fn ui_sync_links_arraste_unidirecional_e_eixos_selecao() {
         "eixo horizontal deve atravessar todas as trilhas"
     );
 }
+
+/// F11, Shift+F11 e Ctrl+F11 do VEGAS Pro 21: área de janelas, lista de
+/// trilhas e timeline maximizada; Ctrl+F11 de novo volta ao estado de antes.
+#[test]
+fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let mut t = 0.0;
+    let mut frame = |app: &mut App, ev: Vec<Event>, mods: Modifiers| {
+        t += 1.0 / 60.0;
+        let _ = ctx.run(raw(ev, mods, t), |c| app.frame_ui(c));
+    };
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dismiss_splash();
+    frame(&mut app, vec![], Modifiers::NONE);
+    app.dismiss_welcome();
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert!(app.dock_visible);
+    assert!(!app.tl.header_collapsed());
+
+    frame(&mut app, key(Key::F11, Modifiers::NONE), Modifiers::NONE);
+    assert!(!app.dock_visible, "F11 minimiza a área de janelas");
+    frame(&mut app, key(Key::F11, Modifiers::NONE), Modifiers::NONE);
+    assert!(app.dock_visible, "F11 restaura a área de janelas");
+
+    frame(&mut app, key(Key::F11, Modifiers::SHIFT), Modifiers::SHIFT);
+    assert!(
+        app.tl.header_collapsed(),
+        "Shift+F11 recolhe a lista de trilhas"
+    );
+    frame(&mut app, key(Key::F11, Modifiers::SHIFT), Modifiers::SHIFT);
+    assert!(!app.tl.header_collapsed());
+
+    frame(
+        &mut app,
+        key(Key::F11, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
+    assert!(!app.dock_visible && app.tl.header_collapsed());
+    frame(&mut app, vec![], Modifiers::NONE);
+    frame(
+        &mut app,
+        key(Key::F11, Modifiers::COMMAND),
+        Modifiers::COMMAND,
+    );
+    assert!(app.dock_visible && !app.tl.header_collapsed());
+
+    // Com a timeline maximizada, F11 também restaura tudo.
+    app.exec_cmd(Some(&ctx), "view.maximize_timeline");
+    app.exec_cmd(Some(&ctx), "view.toggle_dock_area");
+    assert!(app.dock_visible && !app.tl.header_collapsed());
+    assert!(app.timeline_restore.is_none());
+
+    // Painel maximizado na área de janelas: desenha e restaura sem pânico.
+    app.dock_maximized = Some(crate::dock::DockPane::Tab(DockTab::Mixer));
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert_eq!(
+        app.dock_maximized,
+        Some(crate::dock::DockPane::Tab(DockTab::Mixer))
+    );
+    app.detach_dock_tab(DockTab::Mixer);
+    frame(&mut app, vec![], Modifiers::NONE);
+    assert_eq!(
+        app.dock_maximized, None,
+        "destacado, deixa de estar maximizado"
+    );
+}
