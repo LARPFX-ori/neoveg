@@ -138,17 +138,49 @@ impl App {
         }
     }
 
-    /// Menu de botão direito do botão Áreas de segurança: guias extras,
-    /// salvas nas Preferências.
+    /// Menu das Sobreposições (seta ⏷ ao lado e botão direito do botão Sobreposições,
+    /// manual do VEGAS Pro 21, p. 197): o que aparece quando elas estão
+    /// ligadas. As guias ficam salvas nas Preferências; o isolamento de canal
+    /// vale só para a sessão.
     fn safe_guides_menu(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         let mut changed = false;
-        changed |= ui
-            .checkbox(
-                &mut self.opts.safe_areas,
-                tr(lang, "Áreas de ação e de título"),
-            )
-            .changed();
+        let mut show = false;
+        {
+            let g = &mut self.prefs.safe_guides;
+            changed |= ui
+                .checkbox(&mut g.action_title, tr(lang, "Áreas de ação e de título"))
+                .changed();
+            changed |= ui.checkbox(&mut g.grid, tr(lang, "Grade")).changed();
+            changed |= ui
+                .checkbox(&mut g.rulers, tr(lang, "Réguas (pixels do projeto)"))
+                .changed();
+        }
+        ui.menu_button(tr(lang, "Isolamento de canal"), |ui| {
+            for m in crate::preview_overlays::ChannelIsolation::ALL {
+                if ui
+                    .radio(self.preview_channel == m, tr(lang, m.label()))
+                    .clicked()
+                {
+                    self.preview_channel = m;
+                    show = m != crate::preview_overlays::ChannelIsolation::Off;
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            if ui
+                .checkbox(
+                    &mut self.preview_channel_gray,
+                    tr(lang, "Mostrar em escala de cinza"),
+                )
+                .changed()
+            {
+                show = true;
+            }
+        });
+        if show {
+            self.opts.safe_areas = true;
+        }
         ui.separator();
         let g = &mut self.prefs.safe_guides;
         changed |= ui
@@ -167,8 +199,15 @@ impl App {
             .checkbox(&mut g.cut_1x1, tr(lang, "Recorte central 1:1 (quadrado)"))
             .changed();
         if changed {
-            // ligar uma guia mostra as guias
-            if g.center_cross || g.thirds || g.cut_4x3 || g.cut_9x16 || g.cut_1x1 {
+            // ligar uma guia mostra as sobreposições
+            if g.center_cross
+                || g.thirds
+                || g.cut_4x3
+                || g.cut_9x16
+                || g.cut_1x1
+                || g.action_title
+                || g.grid
+            {
                 self.opts.safe_areas = true;
             }
             if let Err(e) = self.prefs.save() {
@@ -472,6 +511,21 @@ impl App {
                         ui.close_menu();
                     }
                 }
+                ui.separator();
+                if ui.button(tr(lang, "Zoom +5%")).clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "preview.zoom_step_in");
+                }
+                if ui.button(tr(lang, "Zoom -5%")).clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "preview.zoom_step_out");
+                }
+                if ui
+                    .selectable_label(self.preview_zoom_bypass.is_some(), tr(lang, "Ignorar zoom"))
+                    .on_hover_text(tr(lang, "Alterna entre este zoom e o ajuste à janela"))
+                    .clicked()
+                {
+                    self.exec_cmd(Some(ui.ctx()), "preview.zoom_bypass");
+                    ui.close_menu();
+                }
             });
             let ram_busy = self.ram_preview_job.is_some();
             let ram_resp = icons::icon_button(
@@ -499,11 +553,17 @@ impl App {
                 true,
                 &self.theme,
             )
-            .on_hover_text(tr(lang, "Áreas de segurança (botão direito: guias extras)"));
+            .on_hover_text(tr(
+                lang,
+                "Sobreposições: áreas de segurança, grade e canais (seta ao lado ou botão direito: escolher)",
+            ));
             if safe_resp.clicked() {
                 self.opts.safe_areas = !self.opts.safe_areas;
             }
             safe_resp.context_menu(|ui| self.safe_guides_menu(ui));
+            ui.menu_button("⏷", |ui| self.safe_guides_menu(ui))
+                .response
+                .on_hover_text(tr(lang, "Escolher as sobreposições"));
             let copy_resp = icons::icon_button(ui, Icon::CopyFrame, None, false, true, &self.theme);
             copy_resp.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copiar quadro")
@@ -745,8 +805,23 @@ impl App {
                 vec2(avail.width(), transport_h),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    let pad_x = ((ui.available_width() - 88.0) * 0.5).max(0.0);
+                    // barra de transporte da prévia (manual do VEGAS Pro 21,
+                    // p. 201-202); estreita, fica só o essencial
+                    let full = ui.available_width() >= 236.0;
+                    let pad_x =
+                        ((ui.available_width() - if full { 232.0 } else { 88.0 }) * 0.5).max(0.0);
                     ui.add_space(pad_x);
+                    if full {
+                        let looping = self.opts.loop_playback;
+                        self.cmd_tool_toggle(
+                            ui,
+                            looping,
+                            Icon::LoopPlayback,
+                            None,
+                            "options.loop_playback",
+                        );
+                    }
+                    self.cmd_tool_btn(ui, Icon::PlayFromStart, None, "transport.play_from_start");
                     self.cmd_tool_toggle(
                         ui,
                         playing,
@@ -755,7 +830,12 @@ impl App {
                         "transport.play_toggle",
                     );
                     self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
-                    self.cmd_tool_btn(ui, Icon::PlayFromStart, None, "transport.play_from_start");
+                    if full {
+                        self.cmd_tool_btn(ui, Icon::GoStart, None, "transport.project_start");
+                        self.cmd_tool_btn(ui, Icon::GoEnd, None, "transport.project_end");
+                        self.cmd_tool_btn(ui, Icon::PrevFrame, None, "transport.frame_back");
+                        self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
+                    }
                 },
             );
         }
@@ -815,10 +895,22 @@ impl App {
                 font.clone(),
                 fg,
             );
+            // fps realmente exibido durante a reprodução (manual, p. 197)
+            let shown = match self.display_fps.fps().filter(|_| self.is_playing()) {
+                Some(fps) => {
+                    let fps_s = format!("{fps:.2}").replace('.', ",");
+                    tr_args(
+                        lang,
+                        "Exibição: {w}x{h}; {fps} qps",
+                        &[("w", &dw_s), ("h", &dh_s), ("fps", &fps_s)],
+                    )
+                }
+                None => tr_args(lang, "Exibição: {w}x{h}", &[("w", &dw_s), ("h", &dh_s)]),
+            };
             ip.text(
                 pos2(info_rect.right() - 2.0, y2),
                 egui::Align2::RIGHT_TOP,
-                tr_args(lang, "Exibição: {w}x{h}", &[("w", &dw_s), ("h", &dh_s)]),
+                shown,
                 font,
                 fg,
             );
@@ -1050,9 +1142,18 @@ impl App {
                 Sense::click_and_drag(),
             );
             if canvas_resp.hovered() {
+                // roda: 10% por passo; com Ctrl, 1% (manual, p. 209). O egui
+                // entrega Ctrl+roda como zoom_delta.
+                let zd = ui.input(|i| i.zoom_delta());
+                if zd.is_finite() && (zd - 1.0).abs() > 0.001 {
+                    let factor = if zd > 1.0 { 1.01 } else { 1.0 / 1.01 };
+                    self.preview_zoom_bypass = None;
+                    self.preview_zoom = (self.preview_zoom * factor).clamp(0.25, 8.0);
+                }
                 let sy = ui.input(|i| i.smooth_scroll_delta.y);
                 if sy.abs() > 0.5 {
-                    let factor = if sy > 0.0 { 1.12 } else { 1.0 / 1.12 };
+                    self.preview_zoom_bypass = None;
+                    let factor = if sy > 0.0 { 1.10 } else { 1.0 / 1.10 };
                     self.preview_zoom = (self.preview_zoom * factor).clamp(0.25, 8.0);
                     if (self.preview_zoom - 1.0).abs() < 0.02 {
                         self.apply_preview_zoom(0.0);
@@ -1068,18 +1169,31 @@ impl App {
         }
 
         if self.opts.safe_areas {
-            let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
-            let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
-            for k in [action_k, title_k] {
-                let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
-                painter.rect_stroke(
-                    r,
-                    0.0,
-                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
-                    StrokeKind::Inside,
-                );
-            }
             let g = &self.prefs.safe_guides;
+            if g.grid {
+                let st = Stroke::new(1.0_f32, Color32::from_white_alpha(55));
+                for k in crate::preview_overlays::grid_fractions(g.grid_v) {
+                    let x = img_rect.left() + img_rect.width() * k;
+                    painter.line_segment([pos2(x, img_rect.top()), pos2(x, img_rect.bottom())], st);
+                }
+                for k in crate::preview_overlays::grid_fractions(g.grid_h) {
+                    let y = img_rect.top() + img_rect.height() * k;
+                    painter.line_segment([pos2(img_rect.left(), y), pos2(img_rect.right(), y)], st);
+                }
+            }
+            if g.action_title {
+                let action_k = (self.prefs.action_safe_pct as f32 / 100.0).clamp(0.70, 0.98);
+                let title_k = (self.prefs.title_safe_pct as f32 / 100.0).clamp(0.50, action_k);
+                for k in [action_k, title_k] {
+                    let r = Rect::from_center_size(img_rect.center(), img_rect.size() * k);
+                    painter.rect_stroke(
+                        r,
+                        0.0,
+                        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
             if g.center_cross {
                 let c = img_rect.center();
                 painter.line_segment(
@@ -1110,6 +1224,10 @@ impl App {
                     painter.rect_stroke(r, 0.0, cut, StrokeKind::Inside);
                 }
             }
+        }
+
+        if self.prefs.safe_guides.rulers {
+            self.draw_preview_rulers(&painter, rect, img_rect, proj_w, proj_h);
         }
 
         if self.opts.preview_mute_video {
@@ -1149,6 +1267,71 @@ impl App {
             }
         }
         img_rect
+    }
+
+    /// Réguas em pixels do projeto nas bordas de cima e da esquerda da área
+    /// da prévia, alinhadas à imagem (já com zoom e pan).
+    fn draw_preview_rulers(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        img_rect: Rect,
+        proj_w: u32,
+        proj_h: u32,
+    ) {
+        const T: f32 = 14.0;
+        let bg = Color32::from_black_alpha(170);
+        let fg = Color32::from_white_alpha(210);
+        let font = egui::FontId::proportional(9.0);
+        let top = Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.top() + T));
+        let left = Rect::from_min_max(
+            pos2(rect.left(), rect.top() + T),
+            pos2(rect.left() + T, rect.bottom()),
+        );
+        painter.rect_filled(top, 0.0, bg);
+        painter.rect_filled(left, 0.0, bg);
+        for t in
+            crate::preview_overlays::ruler_ticks(img_rect.left(), img_rect.width(), proj_w, 8.0)
+        {
+            if t.pos < top.left() + T || t.pos > top.right() {
+                continue;
+            }
+            let h = if t.major { T } else { T * 0.35 };
+            painter.line_segment(
+                [pos2(t.pos, top.bottom() - h), pos2(t.pos, top.bottom())],
+                Stroke::new(1.0_f32, fg),
+            );
+            if t.major {
+                painter.text(
+                    pos2(t.pos + 2.0, top.top()),
+                    egui::Align2::LEFT_TOP,
+                    t.value.to_string(),
+                    font.clone(),
+                    fg,
+                );
+            }
+        }
+        for t in
+            crate::preview_overlays::ruler_ticks(img_rect.top(), img_rect.height(), proj_h, 8.0)
+        {
+            if t.pos < left.top() || t.pos > left.bottom() {
+                continue;
+            }
+            let w = if t.major { T } else { T * 0.35 };
+            painter.line_segment(
+                [pos2(left.right() - w, t.pos), pos2(left.right(), t.pos)],
+                Stroke::new(1.0_f32, fg),
+            );
+            if t.major {
+                painter.text(
+                    pos2(left.left() + 1.0, t.pos + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    t.value.to_string(),
+                    font.clone(),
+                    fg,
+                );
+            }
+        }
     }
 
     fn draw_multicam_grid(

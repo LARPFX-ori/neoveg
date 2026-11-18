@@ -29,6 +29,7 @@ pub mod integrations_ui;
 pub mod layout;
 mod panels;
 mod plugin_manager;
+mod preview_overlays;
 mod project_media;
 mod script_forms;
 mod scrollbars;
