@@ -403,9 +403,6 @@ impl App {
             {
                 self.start_ram_preview();
             }
-            if !self.ram_preview.frames.is_empty() && ui.small_button("Limpar RAM").clicked() {
-                self.clear_ram_preview();
-            }
             if icons::icon_button(
                 ui,
                 Icon::SafeAreas,
@@ -567,6 +564,11 @@ impl App {
                     .clicked()
             {
                 self.exec_cmd(Some(ui.ctx()), "edit.expanded_edit_mode");
+            }
+            // Mantido ao final da barra para evitar deslocamento horizontal dos botões
+            // estáticos (Monitor externo, Cor, MC, 3D) quando quadros em RAM chegam assincronamente.
+            if !self.ram_preview.frames.is_empty() && ui.small_button("Limpar RAM").clicked() {
+                self.clear_ram_preview();
             }
         });
         if let Some(exp) = self.session.expanded_edit.clone() {

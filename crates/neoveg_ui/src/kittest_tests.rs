@@ -1402,9 +1402,24 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
         .apply_video_fx_to_output(crate::model::FxKind::Invert));
     assert_eq!(harness.state().project.master.video_fx.len(), 1);
 
-    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo.
+    // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo
+    // sem deslocar os botões estáticos da barra quando "Limpar RAM" aparece.
+    let ext_rect_before = harness.get_by_label("Monitor externo").raw_bounds();
     harness.get_by_label("Prévia em RAM").click();
     harness.run_steps(4);
+    if harness.state().ram_preview.frames.is_empty() {
+        let _ = harness
+            .state_mut()
+            .ram_preview
+            .insert_frame(0, image::RgbaImage::new(16, 16));
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Limpar RAM").is_some());
+    assert_eq!(
+        harness.get_by_label("Monitor externo").raw_bounds(),
+        ext_rect_before,
+        "botão Monitor externo não pode deslocar quando Limpar RAM aparece"
+    );
     harness.get_by_label("Monitor externo").click();
     harness.run_steps(2);
     assert!(harness.state().external_monitor);
@@ -1598,4 +1613,148 @@ fn kittest_efeitos_cadeias_lut_curvas_legendas_e_bypass_audio() {
             .len()
             >= 2
     );
+}
+
+#[test]
+fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
+    struct PrefsBackup {
+        path: std::path::PathBuf,
+        prev: Option<Vec<u8>>,
+    }
+    impl Drop for PrefsBackup {
+        fn drop(&mut self) {
+            let _w = crate::tests::PREFS_LOCK
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &self.prev {
+                Some(bytes) => {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+    let prefs_path = Preferences::file_path();
+    let prev_prefs = {
+        let _r = crate::tests::PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::read(&prefs_path).ok()
+    };
+    let _prefs_backup = PrefsBackup {
+        path: prefs_path,
+        prev: prev_prefs,
+    };
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.state_mut().prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Barra de ferramentas personalizável.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.customize_toolbar");
+    harness.run_steps(2);
+    let before_tb = harness.state().prefs.toolbar_buttons.len();
+    harness.get_by_label("＋ Separador (|)").click();
+    harness.run_steps(1);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().prefs.toolbar_buttons.len(), before_tb + 1);
+
+    // 2. Grade da régua e Encaixar na grade.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.snap_to_grid");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.grid_cycle");
+    harness.run_steps(2);
+    assert!(harness.state().opts.snap_to_grid);
+    assert_ne!(
+        harness.state().opts.ruler_grid,
+        neoveg_engine::session::RulerGridSpacing::Auto
+    );
+
+    // 3. Marcadores de CD (faixa/índice) e Marcador de Comando.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_track");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_index");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_command");
+    harness.run_steps(2);
+    harness.get_by_label("Inserir marcador").click();
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdTrack));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdIndex));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::Command));
+
+    // 4. Modos de automação (Off / Read / Touch / Latch).
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.cycle_automation");
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.tracks[0].automation_mode,
+        crate::model::AutomationMode::Touch
+    );
+
+    // 5. Divisor de largura do cabeçalho de trilha recolhe progressivamente e restaura (p. 69).
+    assert!(harness
+        .query_by_label("Divisor de largura dos cabeçalhos")
+        .is_some());
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w < 100.0);
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w >= 180.0);
+
+    // 6. Novas abas de Preferências (Dispositivo de Prévia, Dispositivo de Áudio, MIDI/Sync, File I/O).
+    harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+    harness.run_steps(2);
+    for (tab_lbl, expected_txt) in [
+        (
+            "Dispositivo de Prévia",
+            "Dispositivo de Prévia Secundário (p. 1061)",
+        ),
+        ("Dispositivo de Áudio", "Compensação de gravação:"),
+        (
+            "MIDI / Sync / Controle",
+            "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+        ),
+        ("E/S de Arquivos (File I/O)", "FPS de sequências de imagem:"),
+    ] {
+        harness.get_by_label(tab_lbl).click();
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label(expected_txt).is_some(),
+            "aba '{tab_lbl}' não exibiu '{expected_txt}'"
+        );
+    }
 }

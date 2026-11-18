@@ -120,7 +120,10 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 - **Inserir legendas a partir das regiões** do projeto (`insert.subtitles_from_regions`, p. 722) implementado.
 - **Efeitos de áudio fora de tempo real** (`tools.apply_audio_fx`, p. 940) e **ignorar todos os efeitos de áudio** de uma vez (`options.bypass_all_audio_fx` + botão no Mixer, p. 946) implementados.
 
-### Automação e Preferências
+### Janela, Automação e Preferências
 
-- **Modos de automação** dos envelopes (como *Touch* e *Latch*, p. 1008).
-- **Abas das Preferências que ainda não têm equivalente** (pp. 1061–1115): dispositivo de prévia, dispositivo de áudio, MIDI, sincronização, controle externo e entrada/saída de arquivos.
+- **Barra de ferramentas personalizável** (`options.customize_toolbar`, adicionar/remover/reordenar comandos da Tabela Única e separadores persistidos nas Preferências, p. 75) implementado.
+- **Grade da régua e Encaixar na grade** (`RulerGridSpacing` — Automático, Quadro, Subdivisões em segundos e Batidas/BPM — mais `options.snap_to_grid` / `Ctrl+F8`, pp. 86, 232) implementado.
+- **Marcadores de CD (faixa/índice + exportação `.cue`) e Marcadores de comando** (`insert.marker_cd_track` / `N`, `insert.marker_cd_index`, `insert.marker_command`, pp. 131, 495, 725) implementados.
+- **Modos de automação dos envelopes** (*Off / Read / Touch / Latch*, escrita em tempo real durante a reprodução + *bypass* em *Off*, p. 1008) e **borda redimensionável dos cabeçalhos de trilha** (arraste progressivo e duplo clique para recolher/expandir, p. 69) implementados.
+- **Abas restantes das Preferências** (*Dispositivo de Prévia*, *Dispositivo de Áudio*, *MIDI / Sync / Controle Externo* e *Entrada/Saída File I/O*, pp. 1061–1115) implementadas.

@@ -553,7 +553,11 @@ pub enum PrefsCategory {
     Appearance,
     Editing,
     VideoPreview,
+    PreviewDevice,
     Audio,
+    AudioDevice,
+    MidiSyncControl,
+    FileIo,
     Memory,
     AutoSave,
     Shortcuts,
@@ -561,12 +565,16 @@ pub enum PrefsCategory {
 }
 
 impl PrefsCategory {
-    pub const ALL: [PrefsCategory; 9] = [
+    pub const ALL: [PrefsCategory; 13] = [
         PrefsCategory::General,
         PrefsCategory::Appearance,
         PrefsCategory::Editing,
         PrefsCategory::VideoPreview,
+        PrefsCategory::PreviewDevice,
         PrefsCategory::Audio,
+        PrefsCategory::AudioDevice,
+        PrefsCategory::MidiSyncControl,
+        PrefsCategory::FileIo,
         PrefsCategory::Memory,
         PrefsCategory::AutoSave,
         PrefsCategory::Shortcuts,
@@ -579,7 +587,11 @@ impl PrefsCategory {
             PrefsCategory::Appearance => "Aparência e Layout",
             PrefsCategory::Editing => "Edição e Timeline",
             PrefsCategory::VideoPreview => "Vídeo e Prévia",
+            PrefsCategory::PreviewDevice => "Dispositivo de Prévia",
             PrefsCategory::Audio => "Áudio",
+            PrefsCategory::AudioDevice => "Dispositivo de Áudio",
+            PrefsCategory::MidiSyncControl => "MIDI / Sync / Controle",
+            PrefsCategory::FileIo => "E/S de Arquivos (File I/O)",
             PrefsCategory::Memory => "Memória e Desempenho",
             PrefsCategory::AutoSave => "Salvamento Automático",
             PrefsCategory::Shortcuts => "Atalhos e Controles",
@@ -658,6 +670,13 @@ pub struct Dialogs {
     save_preset_name: String,
     save_chain_target: Option<FxTarget>,
     save_chain_name: String,
+    pub customize_toolbar_open: bool,
+    pub customize_toolbar_draft: Option<Vec<String>>,
+    customize_toolbar_filter: String,
+    pub cmd_marker_open: bool,
+    pub cmd_marker_label: String,
+    pub cmd_marker_type: String,
+    pub cmd_marker_arg: String,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -840,7 +859,222 @@ impl App {
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
         self.header_buttons_window(ctx);
+        self.customize_toolbar_window(ctx);
+        self.command_marker_window(ctx);
         self.misc_windows(ctx);
+    }
+
+    fn customize_toolbar_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.customize_toolbar_open {
+            return;
+        }
+        let Some(mut draft) = self.dlg.customize_toolbar_draft.take() else {
+            self.dlg.customize_toolbar_open = false;
+            return;
+        };
+        let mut open = true;
+        let mut save_close = false;
+        let mut cancel_close = false;
+        let mut restore_def = false;
+        egui::Window::new("Personalizar barra de ferramentas")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(600.0)
+            .default_height(420.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Escolha quais comandos da Tabela Única aparecem na barra de ferramentas principal (VEGAS Pro p. 75).");
+                ui.horizontal(|ui| {
+                    ui.label("Filtrar:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.customize_toolbar_filter)
+                            .desired_width(220.0),
+                    );
+                    if ui.button("＋ Separador (|)").clicked()
+                        && draft.len() < neoveg_common::prefs::MAX_TOOLBAR_BUTTONS
+                    {
+                        draft.push("|".into());
+                    }
+                });
+                ui.separator();
+                let q = self.dlg.customize_toolbar_filter.trim().to_lowercase();
+                ui.columns(2, |cols| {
+                    cols[0].strong("Comandos disponíveis");
+                    egui::ScrollArea::vertical()
+                        .id_salt("ctb_avail")
+                        .max_height(260.0)
+                        .show(&mut cols[0], |ui| {
+                            for cmd in COMMANDS {
+                                if !q.is_empty()
+                                    && !cmd.label.to_lowercase().contains(&q)
+                                    && !cmd.id.to_lowercase().contains(&q)
+                                {
+                                    continue;
+                                }
+                                ui.horizontal(|ui| {
+                                    let can_add = draft.len()
+                                        < neoveg_common::prefs::MAX_TOOLBAR_BUTTONS;
+                                    if ui
+                                        .add_enabled(can_add, egui::Button::new("Adicionar →").small())
+                                        .clicked()
+                                    {
+                                        draft.push(cmd.id.to_string());
+                                    }
+                                    ui.label(egui::RichText::new(cmd.label).small())
+                                        .on_hover_text(cmd.id);
+                                });
+                            }
+                        });
+
+                    cols[1].strong(format!("Barra ativa ({})", draft.len()));
+                    let mut move_up: Option<usize> = None;
+                    let mut move_down: Option<usize> = None;
+                    let mut remove_idx: Option<usize> = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("ctb_active")
+                        .max_height(260.0)
+                        .show(&mut cols[1], |ui| {
+                            for (i, id) in draft.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    let lbl = if id == "|" {
+                                        "── Separador ──"
+                                    } else {
+                                        neoveg_engine::commands::find_command(id)
+                                            .map(|c| c.label)
+                                            .unwrap_or(id.as_str())
+                                    };
+                                    if i > 0 && ui.small_button("↑").clicked() {
+                                        move_up = Some(i);
+                                    }
+                                    if i + 1 < draft.len() && ui.small_button("↓").clicked() {
+                                        move_down = Some(i);
+                                    }
+                                    if ui.small_button("×").clicked() {
+                                        remove_idx = Some(i);
+                                    }
+                                    ui.label(egui::RichText::new(lbl).small());
+                                });
+                            }
+                        });
+                    if let Some(i) = move_up {
+                        draft.swap(i, i - 1);
+                    }
+                    if let Some(i) = move_down {
+                        draft.swap(i, i + 1);
+                    }
+                    if let Some(i) = remove_idx {
+                        draft.remove(i);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Restaurar padrão").clicked() {
+                        restore_def = true;
+                    }
+                    if ui.button("OK").clicked() {
+                        save_close = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel_close = true;
+                    }
+                });
+            });
+
+        if restore_def {
+            draft = neoveg_common::prefs::default_toolbar_buttons();
+        }
+        if save_close {
+            self.prefs.toolbar_buttons = draft;
+            self.prefs.sanitize();
+            let _ = self.prefs.save();
+            self.dlg.customize_toolbar_open = false;
+            self.set_status("Barra de ferramentas atualizada.");
+        } else if !open || cancel_close {
+            self.dlg.customize_toolbar_open = false;
+        } else {
+            self.dlg.customize_toolbar_draft = Some(draft);
+        }
+    }
+
+    fn command_marker_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.cmd_marker_open {
+            return;
+        }
+        let mut open = true;
+        let mut insert_now = false;
+        let mut cancel_now = false;
+        egui::Window::new("Inserir marcador de comando")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Insere um marcador de comando no cursor (TEXT, URL, CHAPTER ou personalizado, p. 725).");
+                ui.separator();
+                egui::Grid::new("cmd_marker_grid").num_columns(2).show(ui, |ui| {
+                    ui.label("Rótulo:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.cmd_marker_label)
+                            .desired_width(210.0),
+                    );
+                    ui.end_row();
+                    ui.label("Comando:");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("cmd_mk_preset")
+                            .selected_text(if self.dlg.cmd_marker_type.is_empty() {
+                                "TEXT"
+                            } else {
+                                self.dlg.cmd_marker_type.as_str()
+                            })
+                            .show_ui(ui, |ui| {
+                                for k in ["TEXT", "URL", "WM_CAPTION", "CHAPTER"] {
+                                    ui.selectable_value(
+                                        &mut self.dlg.cmd_marker_type,
+                                        k.to_string(),
+                                        k,
+                                    );
+                                }
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dlg.cmd_marker_type)
+                                .desired_width(90.0),
+                        );
+                    });
+                    ui.end_row();
+                    ui.label("Parâmetro:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dlg.cmd_marker_arg)
+                            .desired_width(210.0),
+                    );
+                    ui.end_row();
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Inserir marcador").clicked() {
+                        insert_now = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        cancel_now = true;
+                    }
+                });
+            });
+
+        if insert_now {
+            self.session.insert_marker_kind(
+                MarkerKind::Command,
+                &self.dlg.cmd_marker_label,
+                &self.dlg.cmd_marker_type,
+                &self.dlg.cmd_marker_arg,
+            );
+            self.sync_after_session();
+            self.dlg.cmd_marker_open = false;
+        } else if !open || cancel_now {
+            self.dlg.cmd_marker_open = false;
+        }
     }
 
     /// *Editar conjunto de botões visíveis* (manual do VEGAS Pro 21, p. 69):
@@ -1824,6 +2058,16 @@ impl App {
                                     .changed();
                             }
                         });
+                    ui.end_row();
+                    ui.label("Tempo musical (BPM)");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut s.bpm)
+                                .range(20.0..=300.0)
+                                .speed(0.5)
+                                .suffix(" BPM"),
+                        )
+                        .changed();
                     ui.end_row();
                     ui.label("Cor de fundo");
                     changed |= ui.color_edit_button_rgb(&mut s.background).changed();
@@ -4199,7 +4443,7 @@ impl App {
         };
         let def_w = 690.0_f32.min(max_w);
         let def_h = 500.0_f32.min(max_h);
-        let extra_wrap = if def_w < 460.0 { 26.0 } else { 0.0 };
+        let extra_wrap = if def_w < 460.0 { 44.0 } else { 0.0 };
         let body_h = (def_h - 108.0 - extra_wrap).max(110.0);
         let nav_inner_h = (body_h - 10.0).max(90.0);
 
@@ -4335,7 +4579,7 @@ impl App {
                             });
                         });
                     ui.separator();
-                    let compact_h = (body_h - 34.0).max(80.0);
+                    let compact_h = (body_h - 48.0).max(80.0);
                     egui::ScrollArea::vertical()
                         .id_salt(("prefs_body_scroll_compact", self.dlg.prefs_tab as u8))
                         .max_height(compact_h)
@@ -5185,7 +5429,11 @@ fn render_prefs_category(
         PrefsCategory::Appearance => prefs_appearance(ui, cx, draft, act),
         PrefsCategory::Editing => prefs_editing(ui, cx, draft, act),
         PrefsCategory::VideoPreview => prefs_video_preview(ui, cx, draft, act),
+        PrefsCategory::PreviewDevice => prefs_preview_device(ui, cx, draft),
         PrefsCategory::Audio => prefs_audio(ui, cx, draft, act),
+        PrefsCategory::AudioDevice => prefs_audio_device(ui, cx, draft),
+        PrefsCategory::MidiSyncControl => prefs_midi_sync(ui, cx, draft),
+        PrefsCategory::FileIo => prefs_file_io(ui, cx, draft),
         PrefsCategory::Memory => prefs_memory(ui, cx, draft, act),
         PrefsCategory::AutoSave => prefs_autosave(ui, cx, draft),
         PrefsCategory::Shortcuts => prefs_shortcuts(ui, cx, draft, act),
@@ -5817,4 +6065,304 @@ fn prefs_integrations(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut 
             );
         });
     });
+}
+
+fn prefs_preview_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Dispositivo de Prévia Secundário (p. 1061)",
+        |ui| {
+            let mode_label = match draft.preview_device.device_mode.as_str() {
+                "window" => "Janela destacável no editor",
+                "external_deck" => "Monitor externo / Saída secundária dedicada",
+                _ => "Monitor secundário do Windows (Tela cheia)",
+            };
+            prefs_row(ui, inner_lw, "Dispositivo de saída:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_prev_dev_mode")
+                    .selected_text(mode_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.preview_device.device_mode,
+                            "secondary_monitor".into(),
+                            "Monitor secundário do Windows (Tela cheia)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.preview_device.device_mode,
+                            "window".into(),
+                            "Janela destacável no editor",
+                        );
+                        ui.selectable_value(
+                            &mut draft.preview_device.device_mode,
+                            "external_deck".into(),
+                            "Monitor externo / Saída secundária dedicada",
+                        );
+                    });
+            });
+            prefs_row(ui, inner_lw, "Nível de fundo (cinza):", |ui| {
+                ui.add_sized(
+                    [64.0, 20.0],
+                    egui::DragValue::new(&mut draft.preview_device.bg_gray).range(0..=48),
+                );
+            });
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.preview_device.scale_to_fit,
+                    "Ajustar imagem para caber mantendo a proporção (Scale to Fit)",
+                );
+                ui.checkbox(
+                    &mut draft.preview_device.match_project_fps,
+                    "Sincronizar taxa de atualização com os quadros por segundo do projeto",
+                );
+                ui.checkbox(
+                    &mut draft.preview_device.show_alpha_checkerboard,
+                    "Exibir quadriculado para áreas transparentes (Canal Alfa)",
+                );
+            });
+        },
+    );
+}
+
+fn prefs_audio_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Driver e Dispositivo de Áudio (p. 1075)",
+        |ui| {
+            let drv_label = match draft.audio_device.driver_mode.as_str() {
+                "wasapi_shared" => "WASAPI Compartilhado (Windows)",
+                "wasapi_exclusive" => "WASAPI Exclusivo (Baixa latência)",
+                "low_latency" => "Modo Baixa Latência",
+                _ => "Mapper / Padrão do Sistema Operacional (cpal)",
+            };
+            prefs_row(ui, inner_lw, "Tipo de dispositivo:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_aud_dev_drv")
+                    .selected_text(drv_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "os_default".into(),
+                            "Mapper / Padrão do Sistema Operacional (cpal)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "wasapi_shared".into(),
+                            "WASAPI Compartilhado (Windows)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "wasapi_exclusive".into(),
+                            "WASAPI Exclusivo (Baixa latência)",
+                        );
+                        ui.selectable_value(
+                            &mut draft.audio_device.driver_mode,
+                            "low_latency".into(),
+                            "Modo Baixa Latência",
+                        );
+                    });
+            });
+            prefs_ro_row(
+                ui,
+                cx.theme,
+                inner_lw,
+                "Dispositivo ativo no motor:",
+                &format!("{} ({} Hz)", cx.audio_device, cx.audio_sr),
+                false,
+            );
+            prefs_row(ui, inner_lw, "Dispositivo preferencial:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.audio_device.preferred_device)
+                        .desired_width(210.0)
+                        .hint_text("Automático (padrão do SO)"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Tamanho do buffer (latência):", |ui| {
+                ui.add_sized(
+                    [68.0, 20.0],
+                    egui::DragValue::new(&mut draft.audio_device.buffer_ms)
+                        .range(5..=250)
+                        .suffix(" ms"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Compensação de gravação:", |ui| {
+                ui.add_sized(
+                    [68.0, 20.0],
+                    egui::DragValue::new(&mut draft.audio_device.record_offset_ms)
+                        .range(-500..=500)
+                        .suffix(" ms"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Pasta padrão de gravações:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.audio_device.default_record_dir)
+                        .desired_width(200.0)
+                        .hint_text("Pasta do projeto / temporária"),
+                );
+                if ui.small_button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        draft.audio_device.default_record_dir = d.to_string_lossy().into_owned();
+                    }
+                }
+            });
+        },
+    );
+}
+
+fn prefs_midi_sync(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "MIDI e Sincronização MTC / SMPTE (p. 1090)",
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.midi_sync.mtc_input_enabled,
+                    "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+                );
+                ui.checkbox(
+                    &mut draft.midi_sync.mtc_output_enabled,
+                    "Enviar código de tempo MIDI (Gerador MTC para dispositivos externos)",
+                );
+            });
+            prefs_row(ui, inner_lw, "Porta de entrada MIDI:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.midi_sync.midi_in_device)
+                        .desired_width(210.0)
+                        .hint_text("Nenhuma / Todas"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Porta de saída MIDI:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.midi_sync.midi_out_device)
+                        .desired_width(210.0)
+                        .hint_text("Nenhuma"),
+                );
+            });
+            prefs_row(ui, inner_lw, "Taxa de quadros de Sync:", |ui| {
+                egui::ComboBox::from_id_salt("prefs_sync_fps")
+                    .selected_text(format!("{} qps", draft.midi_sync.sync_fps))
+                    .show_ui(ui, |ui| {
+                        for f in ["24", "25", "29.97", "30"] {
+                            ui.selectable_value(
+                                &mut draft.midi_sync.sync_fps,
+                                f.to_string(),
+                                format!("{f} qps SMPTE"),
+                            );
+                        }
+                    });
+            });
+            prefs_row(ui, inner_lw, "Deslocamento de Sync:", |ui| {
+                ui.add_sized(
+                    [76.0, 20.0],
+                    egui::DragValue::new(&mut draft.midi_sync.sync_offset_ms)
+                        .range(-60_000..=60_000)
+                        .suffix(" ms"),
+                );
+            });
+        },
+    );
+
+    prefs_group_box(ui, cx.theme, "Dispositivos de Controle Externo", |ui| {
+        prefs_indented(ui, inner_lw, |ui| {
+            ui.checkbox(
+                &mut draft.midi_sync.control_surface_enabled,
+                "Ativar superfície de controle externa (faders e transporte)",
+            );
+        });
+        prefs_row(ui, inner_lw, "Protocolo da superfície:", |ui| {
+            egui::ComboBox::from_id_salt("prefs_ctrl_proto")
+                .selected_text(match draft.midi_sync.control_surface_protocol.as_str() {
+                    "generic_cc" => "MIDI CC Genérico",
+                    "osc" => "Open Sound Control (OSC)",
+                    _ => "Mackie Control Universal",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut draft.midi_sync.control_surface_protocol,
+                        "mackie".into(),
+                        "Mackie Control Universal",
+                    );
+                    ui.selectable_value(
+                        &mut draft.midi_sync.control_surface_protocol,
+                        "generic_cc".into(),
+                        "MIDI CC Genérico",
+                    );
+                    ui.selectable_value(
+                        &mut draft.midi_sync.control_surface_protocol,
+                        "osc".into(),
+                        "Open Sound Control (OSC)",
+                    );
+                });
+        });
+        prefs_row(ui, inner_lw, "Sensibilidade dos controles:", |ui| {
+            ui.add(
+                egui::Slider::new(&mut draft.midi_sync.control_surface_sensitivity, 0.2..=3.0)
+                    .fixed_decimals(2),
+            );
+        });
+    });
+}
+
+fn prefs_file_io(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
+    let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(
+        ui,
+        cx.theme,
+        "Entrada / Saída e Hardware de Vídeo (p. 1105)",
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.file_io.hardware_accel_decode,
+                    "Ativar decodificação de vídeo acelerada por hardware (GPU/SO)",
+                );
+                ui.checkbox(
+                    &mut draft.file_io.hardware_accel_encode,
+                    "Usar aceleração por hardware na renderização quando suportado",
+                );
+                ui.checkbox(
+                    &mut draft.file_io.prefer_system_demuxer,
+                    "Priorizar leitores nativos do sistema operacional para MP4/MOV",
+                );
+                ui.checkbox(
+                    &mut draft.file_io.auto_build_proxies_4k,
+                    "Sugerir/gerar proxies automaticamente para mídias 4K ou superiores",
+                );
+            });
+            prefs_row(ui, inner_lw, "FPS de sequências de imagem:", |ui| {
+                ui.add_sized(
+                    [76.0, 20.0],
+                    egui::DragValue::new(&mut draft.file_io.image_sequence_fps)
+                        .range(1.0..=120.0)
+                        .fixed_decimals(2),
+                );
+            });
+            prefs_row(ui, inner_lw, "Pasta padrão de projetos:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.file_io.default_project_dir)
+                        .desired_width(200.0)
+                        .hint_text("Padrão do sistema"),
+                );
+                if ui.small_button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        draft.file_io.default_project_dir = d.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            prefs_row(ui, inner_lw, "Pasta de arquivos proxy:", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.file_io.default_proxy_dir)
+                        .desired_width(200.0)
+                        .hint_text("Mesma pasta da mídia original"),
+                );
+                if ui.small_button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        draft.file_io.default_proxy_dir = d.to_string_lossy().into_owned();
+                    }
+                }
+            });
+        },
+    );
 }

@@ -536,6 +536,226 @@ pub struct Preferences {
     /// Cadeias/pacotes de efeitos salvos (Filter Packages / FX Chains, p. 514).
     #[serde(default)]
     pub fx_chains: Vec<SavedFxChainPref>,
+    /// Botões visíveis na barra de ferramentas principal (`|` = separador, p. 75).
+    #[serde(default = "default_toolbar_buttons")]
+    pub toolbar_buttons: Vec<String>,
+    /// Preferências do dispositivo de prévia / monitor externo (p. 1061).
+    #[serde(default)]
+    pub preview_device: PreviewDevicePrefs,
+    /// Preferências do dispositivo de áudio / latência / gravação (p. 1075).
+    #[serde(default)]
+    pub audio_device: AudioDevicePrefs,
+    /// Preferências de MIDI, código de tempo (MTC/SMPTE) e controle externo (p. 1090).
+    #[serde(default)]
+    pub midi_sync: MidiSyncPrefs,
+    /// Preferências de entrada e saída de arquivos, hardware e sequências de imagem (p. 1105).
+    #[serde(default)]
+    pub file_io: FileIoPrefs,
+}
+
+pub const MAX_TOOLBAR_BUTTONS: usize = 64;
+
+pub fn default_toolbar_buttons() -> Vec<String> {
+    [
+        "file.new",
+        "file.open",
+        "file.save",
+        "file.render",
+        "view.tab.encoder",
+        "file.project_props",
+        "|",
+        "file.import_media",
+        "|",
+        "edit.cut",
+        "edit.copy",
+        "edit.paste",
+        "|",
+        "edit.undo",
+        "edit.redo",
+        "|",
+        "options.snapping",
+        "options.snap_to_grid",
+        "options.auto_ripple",
+        "view.envelopes",
+        "options.ignore_grouping",
+        "|",
+        "edit.properties.layout",
+        "tools.integrations",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+/// Preferências do dispositivo secundário/externo de prévia de vídeo.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreviewDevicePrefs {
+    pub device_mode: String,
+    pub scale_to_fit: bool,
+    pub show_alpha_checkerboard: bool,
+    pub match_project_fps: bool,
+    pub bg_gray: u8,
+}
+
+impl Default for PreviewDevicePrefs {
+    fn default() -> Self {
+        Self {
+            device_mode: "secondary_monitor".to_string(),
+            scale_to_fit: true,
+            show_alpha_checkerboard: false,
+            match_project_fps: true,
+            bg_gray: 12,
+        }
+    }
+}
+
+impl PreviewDevicePrefs {
+    pub fn sanitize(&mut self) {
+        if !matches!(
+            self.device_mode.as_str(),
+            "window" | "secondary_monitor" | "external_deck"
+        ) {
+            self.device_mode = "secondary_monitor".to_string();
+        }
+        self.bg_gray = self.bg_gray.min(48);
+    }
+}
+
+/// Preferências de driver e latência do dispositivo de áudio.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioDevicePrefs {
+    pub driver_mode: String,
+    pub preferred_device: String,
+    pub buffer_ms: u32,
+    pub record_offset_ms: i32,
+    pub default_record_dir: String,
+}
+
+impl Default for AudioDevicePrefs {
+    fn default() -> Self {
+        Self {
+            driver_mode: "os_default".to_string(),
+            preferred_device: String::new(),
+            buffer_ms: 20,
+            record_offset_ms: 0,
+            default_record_dir: String::new(),
+        }
+    }
+}
+
+impl AudioDevicePrefs {
+    pub fn sanitize(&mut self) {
+        if !matches!(
+            self.driver_mode.as_str(),
+            "os_default" | "wasapi_shared" | "wasapi_exclusive" | "low_latency"
+        ) {
+            self.driver_mode = "os_default".to_string();
+        }
+        self.preferred_device = clean_text_field(&self.preferred_device, 160);
+        self.buffer_ms = self.buffer_ms.clamp(5, 250);
+        self.record_offset_ms = self.record_offset_ms.clamp(-500, 500);
+        self.default_record_dir = clean_text_field(&self.default_record_dir, 512);
+    }
+}
+
+/// Preferências de MIDI, sincronização MTC/SMPTE e superfícies de controle externas.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MidiSyncPrefs {
+    pub mtc_input_enabled: bool,
+    pub mtc_output_enabled: bool,
+    pub midi_in_device: String,
+    pub midi_out_device: String,
+    pub sync_fps: String,
+    pub sync_offset_ms: i32,
+    pub control_surface_enabled: bool,
+    pub control_surface_protocol: String,
+    pub control_surface_sensitivity: f32,
+}
+
+impl Default for MidiSyncPrefs {
+    fn default() -> Self {
+        Self {
+            mtc_input_enabled: false,
+            mtc_output_enabled: false,
+            midi_in_device: String::new(),
+            midi_out_device: String::new(),
+            sync_fps: "29.97".to_string(),
+            sync_offset_ms: 0,
+            control_surface_enabled: false,
+            control_surface_protocol: "mackie".to_string(),
+            control_surface_sensitivity: 1.0,
+        }
+    }
+}
+
+impl MidiSyncPrefs {
+    pub fn sanitize(&mut self) {
+        self.midi_in_device = clean_text_field(&self.midi_in_device, 160);
+        self.midi_out_device = clean_text_field(&self.midi_out_device, 160);
+        if !matches!(self.sync_fps.as_str(), "24" | "25" | "29.97" | "30") {
+            self.sync_fps = "29.97".to_string();
+        }
+        self.sync_offset_ms = self.sync_offset_ms.clamp(-60_000, 60_000);
+        if !matches!(
+            self.control_surface_protocol.as_str(),
+            "mackie" | "generic_cc" | "osc"
+        ) {
+            self.control_surface_protocol = "mackie".to_string();
+        }
+        if !self.control_surface_sensitivity.is_finite() {
+            self.control_surface_sensitivity = 1.0;
+        }
+        self.control_surface_sensitivity = self.control_surface_sensitivity.clamp(0.2, 3.0);
+    }
+}
+
+/// Preferências de entrada e saída de arquivos e aceleração por hardware.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileIoPrefs {
+    pub hardware_accel_decode: bool,
+    pub hardware_accel_encode: bool,
+    pub image_sequence_fps: f32,
+    pub default_project_dir: String,
+    pub default_proxy_dir: String,
+    pub auto_build_proxies_4k: bool,
+    pub prefer_system_demuxer: bool,
+}
+
+impl Default for FileIoPrefs {
+    fn default() -> Self {
+        Self {
+            hardware_accel_decode: true,
+            hardware_accel_encode: true,
+            image_sequence_fps: 29.97,
+            default_project_dir: String::new(),
+            default_proxy_dir: String::new(),
+            auto_build_proxies_4k: false,
+            prefer_system_demuxer: true,
+        }
+    }
+}
+
+impl FileIoPrefs {
+    pub fn sanitize(&mut self) {
+        if !self.image_sequence_fps.is_finite() {
+            self.image_sequence_fps = 29.97;
+        }
+        self.image_sequence_fps = self.image_sequence_fps.clamp(1.0, 120.0);
+        self.default_project_dir = clean_text_field(&self.default_project_dir, 512);
+        self.default_proxy_dir = clean_text_field(&self.default_proxy_dir, 512);
+    }
+}
+
+fn clean_text_field(raw: &str, max_chars: usize) -> String {
+    raw.trim()
+        .chars()
+        .filter(|&c| c != '\0')
+        .take(max_chars)
+        .collect()
 }
 
 pub const MAX_USER_FX_PRESETS: usize = 256;
@@ -795,6 +1015,11 @@ impl Default for Preferences {
             default_track: DefaultTrackPrefs::default(),
             user_fx_presets: Vec::new(),
             fx_chains: Vec::new(),
+            toolbar_buttons: default_toolbar_buttons(),
+            preview_device: PreviewDevicePrefs::default(),
+            audio_device: AudioDevicePrefs::default(),
+            midi_sync: MidiSyncPrefs::default(),
+            file_io: FileIoPrefs::default(),
         }
     }
 }
@@ -883,6 +1108,18 @@ impl Preferences {
         self.user_fx_presets.retain_mut(|p| p.sanitize());
         self.fx_chains.truncate(MAX_SAVED_FX_CHAINS);
         self.fx_chains.retain_mut(|c| c.sanitize());
+        self.toolbar_buttons.truncate(MAX_TOOLBAR_BUTTONS);
+        self.toolbar_buttons.retain(|id| {
+            let t = id.trim();
+            !t.is_empty() && t.len() <= 80 && !t.contains('\0')
+        });
+        for id in &mut self.toolbar_buttons {
+            *id = id.trim().to_string();
+        }
+        self.preview_device.sanitize();
+        self.audio_device.sanitize();
+        self.midi_sync.sanitize();
+        self.file_io.sanitize();
     }
 
     pub fn load_or_default() -> Self {
@@ -926,6 +1163,42 @@ mod tests {
         assert_eq!(p.worker_threads, 16);
         assert!(p.show_splash);
         assert!(p.show_welcome);
+        assert!(!p.toolbar_buttons.is_empty());
+
+        let hostile_io = FileIoPrefs {
+            image_sequence_fps: f32::NAN,
+            default_project_dir: "a\0b".repeat(300),
+            ..Default::default()
+        };
+        let mut p2 = Preferences {
+            preview_device: PreviewDevicePrefs {
+                device_mode: "invalido".into(),
+                bg_gray: 250,
+                ..Default::default()
+            },
+            audio_device: AudioDevicePrefs {
+                driver_mode: "desconhecido".into(),
+                buffer_ms: 99999,
+                record_offset_ms: -99999,
+                ..Default::default()
+            },
+            midi_sync: MidiSyncPrefs {
+                sync_fps: "999".into(),
+                control_surface_sensitivity: f32::INFINITY,
+                ..Default::default()
+            },
+            file_io: hostile_io,
+            ..Default::default()
+        };
+        p2.sanitize();
+        assert_eq!(p2.preview_device.device_mode, "secondary_monitor");
+        assert_eq!(p2.preview_device.bg_gray, 48);
+        assert_eq!(p2.audio_device.driver_mode, "os_default");
+        assert_eq!(p2.audio_device.buffer_ms, 250);
+        assert_eq!(p2.audio_device.record_offset_ms, -500);
+        assert_eq!(p2.midi_sync.sync_fps, "29.97");
+        assert_eq!(p2.file_io.image_sequence_fps, 29.97);
+        assert!(!p2.file_io.default_project_dir.contains('\0'));
 
         let p_no_splash: Preferences =
             serde_json::from_str(r#"{"show_splash":false,"show_welcome":false}"#).unwrap();

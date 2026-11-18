@@ -1328,11 +1328,11 @@ impl Mixer {
                 start,
                 track.volume_db,
                 if is_surround { 0.0 } else { track.pan },
-                track.envelope(EnvKind::Volume),
+                track.active_envelope(EnvKind::Volume),
                 if is_surround {
                     None
                 } else {
-                    track.envelope(EnvKind::Pan)
+                    track.active_envelope(EnvKind::Pan)
                 },
             );
             self.meters.tracks.insert(track.id, peak);
@@ -1418,11 +1418,11 @@ impl Mixer {
                 start,
                 bus.volume_db,
                 if is_surround { 0.0 } else { bus.pan },
-                bus.envelope(EnvKind::Volume),
+                bus.active_envelope(EnvKind::Volume),
                 if is_surround {
                     None
                 } else {
-                    bus.envelope(EnvKind::Pan)
+                    bus.active_envelope(EnvKind::Pan)
                 },
             );
             self.meters.buses.insert(bus.id, bpeak);

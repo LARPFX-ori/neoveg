@@ -114,11 +114,12 @@ pub enum Icon {
     Multicam,
     Stereo3d,
     RenderTrack,
+    TimelineGrid,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 106] = [
+    pub const ALL: [Icon; 107] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -225,6 +226,7 @@ impl Icon {
         Icon::Multicam,
         Icon::Stereo3d,
         Icon::RenderTrack,
+        Icon::TimelineGrid,
     ];
 }
 
@@ -1548,6 +1550,18 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.polyline(&[(0.50, 0.44), (0.50, 0.64)], pal.green, 0.09);
             c.poly(&[(0.38, 0.56), (0.62, 0.56), (0.50, 0.70)], pal.green, None);
             c.p.rect_filled(c.rect(0.14, 0.74, 0.86, 0.90), c.u(0.04), pal.blue);
+        }
+        Icon::TimelineGrid => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.14, 0.86, 0.86),
+                c.u(0.04),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            for t in [0.38, 0.62] {
+                c.line(t, 0.14, t, 0.86, pal.blue, 0.06);
+                c.line(0.14, t, 0.86, t, pal.muted, 0.06);
+            }
         }
     }
 }

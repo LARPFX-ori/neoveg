@@ -783,6 +783,7 @@ fn collect_markers_and_children(
                         } else {
                             lbl.to_string()
                         },
+                        ..Default::default()
                     });
                 }
             }

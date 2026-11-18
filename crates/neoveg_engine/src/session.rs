@@ -289,6 +289,70 @@ pub struct EditorOptions {
     pub multicam_mode: bool,
     /// Ignora globalmente todos os efeitos de áudio (eventos, trilhas, barramentos e Master, p. 946).
     pub bypass_all_audio_fx: bool,
+    /// Espaçamento da grade da régua da timeline (p. 232).
+    pub ruler_grid: RulerGridSpacing,
+    /// Encaixar edições na grade da régua (Snap to Grid, Ctrl+F8).
+    pub snap_to_grid: bool,
+}
+
+/// Espaçamento configurável da grade vertical da régua da timeline (pp. 86, 232).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum RulerGridSpacing {
+    #[default]
+    Auto,
+    Frame,
+    HalfSecond,
+    OneSecond,
+    TwoSeconds,
+    FiveSeconds,
+    TenSeconds,
+    Beats,
+}
+
+impl RulerGridSpacing {
+    pub const ALL: [RulerGridSpacing; 8] = [
+        RulerGridSpacing::Auto,
+        RulerGridSpacing::Frame,
+        RulerGridSpacing::HalfSecond,
+        RulerGridSpacing::OneSecond,
+        RulerGridSpacing::TwoSeconds,
+        RulerGridSpacing::FiveSeconds,
+        RulerGridSpacing::TenSeconds,
+        RulerGridSpacing::Beats,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RulerGridSpacing::Auto => "Automático (zoom)",
+            RulerGridSpacing::Frame => "Por quadro",
+            RulerGridSpacing::HalfSecond => "0,5 segundo",
+            RulerGridSpacing::OneSecond => "1 segundo",
+            RulerGridSpacing::TwoSeconds => "2 segundos",
+            RulerGridSpacing::FiveSeconds => "5 segundos",
+            RulerGridSpacing::TenSeconds => "10 segundos",
+            RulerGridSpacing::Beats => "Batidas musicais (BPM)",
+        }
+    }
+
+    pub fn step_ticks(self, settings: &ProjectSettings) -> Option<Ticks> {
+        match self {
+            RulerGridSpacing::Auto => None,
+            RulerGridSpacing::Frame => Some(settings.frame_dur().max(Ticks::from_raw(1))),
+            RulerGridSpacing::HalfSecond => Some(Ticks::from_millis_i64(500)),
+            RulerGridSpacing::OneSecond => Some(Ticks::from_secs_i64(1)),
+            RulerGridSpacing::TwoSeconds => Some(Ticks::from_secs_i64(2)),
+            RulerGridSpacing::FiveSeconds => Some(Ticks::from_secs_i64(5)),
+            RulerGridSpacing::TenSeconds => Some(Ticks::from_secs_i64(10)),
+            RulerGridSpacing::Beats => {
+                let bpm = if settings.bpm.is_finite() {
+                    settings.bpm.clamp(20.0, 300.0)
+                } else {
+                    120.0
+                };
+                Some(Ticks::from_secs_f64_clamped(60.0 / bpm).max(Ticks::from_raw(1)))
+            }
+        }
+    }
 }
 
 /// Maior zoom vertical das formas de onda: 12 passos de √2 = 64× (+36 dB).
@@ -326,6 +390,8 @@ impl Default for EditorOptions {
             preview_mute_video: false,
             multicam_mode: false,
             bypass_all_audio_fx: false,
+            ruler_grid: RulerGridSpacing::Auto,
+            snap_to_grid: false,
         }
     }
 }
@@ -1279,14 +1345,181 @@ impl EditorSession {
     }
 
     pub fn insert_marker(&mut self) {
+        self.insert_marker_kind(MarkerKind::Standard, "", "", "");
+    }
+
+    pub fn insert_marker_kind(
+        &mut self,
+        kind: MarkerKind,
+        label: &str,
+        command_type: &str,
+        command_arg: &str,
+    ) {
         self.checkpoint();
-        let n = self.project.markers.len() + 1;
-        self.project.markers.push(Marker {
-            id: new_id(),
-            t: self.cursor,
-            label: format!("Marcador {n}"),
-        });
+        let same_kind = self
+            .project
+            .markers
+            .iter()
+            .filter(|m| m.kind == kind)
+            .count()
+            + 1;
+        let resolved_label = if label.trim().is_empty() {
+            match kind {
+                MarkerKind::Standard => format!("Marcador {same_kind}"),
+                MarkerKind::CdTrack => format!("Faixa CD {same_kind:02}"),
+                MarkerKind::CdIndex => format!("Índice {same_kind:02}"),
+                MarkerKind::Command => format!("Comando {same_kind}"),
+            }
+        } else {
+            label.trim().chars().take(256).collect()
+        };
+        let mut mk = Marker::new(
+            self.cursor.clamp_safe(Ticks::ZERO, Ticks::MAX),
+            kind,
+            resolved_label,
+        );
+        if kind == MarkerKind::Command {
+            mk.command_type = command_type
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(64)
+                .collect();
+            if mk.command_type.is_empty() {
+                mk.command_type = "TEXT".to_string();
+            }
+            mk.command_arg = command_arg
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(512)
+                .collect();
+        }
+        self.project.markers.push(mk);
+        self.project.markers.sort_by_key(|m| m.t);
         self.changed();
+        self.set_status(format!("{} inserido.", kind.label()));
+    }
+
+    /// Gera um arquivo Red Book CUE Sheet (75 quadros/s) a partir dos marcadores de CD do projeto.
+    pub fn export_cd_cue_sheet(&self, audio_filename: &str) -> String {
+        let mut cd_marks: Vec<&Marker> = self
+            .project
+            .markers
+            .iter()
+            .filter(|m| matches!(m.kind, MarkerKind::CdTrack | MarkerKind::CdIndex))
+            .collect();
+        cd_marks.sort_by_key(|m| m.t);
+        let safe_file = if audio_filename.trim().is_empty() {
+            "audio.wav"
+        } else {
+            audio_filename.trim()
+        };
+        let mut out = format!("FILE \"{safe_file}\" WAVE\n");
+        let mut track_num = 0usize;
+        let mut index_num = 1usize;
+        for m in cd_marks {
+            let secs_total = m.t.as_secs_f64().max(0.0);
+            let total_cd_frames = (secs_total * 75.0).round() as u64;
+            let mm = total_cd_frames / (60 * 75);
+            let ss = (total_cd_frames / 75) % 60;
+            let ff = total_cd_frames % 75;
+            match m.kind {
+                MarkerKind::CdTrack => {
+                    track_num += 1;
+                    index_num = 1;
+                    out.push_str(&format!("  TRACK {track_num:02} AUDIO\n"));
+                    out.push_str(&format!("    TITLE \"{}\"\n", m.label.replace('"', "'")));
+                    out.push_str(&format!("    INDEX 01 {mm:02}:{ss:02}:{ff:02}\n"));
+                }
+                MarkerKind::CdIndex => {
+                    if track_num == 0 {
+                        track_num = 1;
+                        out.push_str("  TRACK 01 AUDIO\n");
+                    }
+                    index_num = (index_num + 1).min(99);
+                    out.push_str(&format!(
+                        "    INDEX {index_num:02} {mm:02}:{ss:02}:{ff:02}\n"
+                    ));
+                }
+                MarkerKind::Standard | MarkerKind::Command => {}
+            }
+        }
+        out
+    }
+
+    pub fn set_track_automation_mode(&mut self, ti: usize, mode: AutomationMode) -> bool {
+        let Some(cur) = self.project.tracks.get(ti).map(|t| t.automation_mode) else {
+            return false;
+        };
+        if cur == mode {
+            return true;
+        }
+        self.checkpoint();
+        if let Some(tr) = self.project.tracks.get_mut(ti) {
+            tr.automation_mode = mode;
+        }
+        self.changed();
+        self.set_status(mode.label());
+        true
+    }
+
+    pub fn cycle_track_automation_mode(&mut self, ti: usize) -> Option<AutomationMode> {
+        let cur = self.project.tracks.get(ti)?.automation_mode;
+        let next = match cur {
+            AutomationMode::Off => AutomationMode::Read,
+            AutomationMode::Read => AutomationMode::Touch,
+            AutomationMode::Touch => AutomationMode::Latch,
+            AutomationMode::Latch => AutomationMode::Off,
+        };
+        self.set_track_automation_mode(ti, next);
+        Some(next)
+    }
+
+    /// Grava ou atualiza ponto de automação ao vivo (modos Touch/Latch, p. 1008).
+    pub fn record_automation_point(
+        &mut self,
+        ti: usize,
+        env_kind: EnvKind,
+        t: Ticks,
+        v: f32,
+        tol: Ticks,
+    ) -> bool {
+        let Some(tr) = self.project.tracks.get_mut(ti) else {
+            return false;
+        };
+        if !tr.automation_mode.is_write() {
+            return false;
+        }
+        let env = match tr.envelopes.iter_mut().find(|e| e.kind == env_kind) {
+            Some(e) => {
+                e.visible = true;
+                e
+            }
+            None => {
+                let mut e = Envelope::new(env_kind);
+                e.visible = true;
+                tr.envelopes.push(e);
+                let last_idx = tr.envelopes.len() - 1;
+                &mut tr.envelopes[last_idx]
+            }
+        };
+        env.set_point(t, v, tol);
+        self.changed();
+        true
+    }
+
+    pub fn cycle_ruler_grid(&mut self) -> RulerGridSpacing {
+        let cur = self.opts.ruler_grid;
+        let idx = RulerGridSpacing::ALL
+            .iter()
+            .position(|g| *g == cur)
+            .map(|p| (p + 1) % RulerGridSpacing::ALL.len())
+            .unwrap_or(0);
+        let next = RulerGridSpacing::ALL[idx];
+        self.opts.ruler_grid = next;
+        self.set_status(format!("Grade da régua: {}", next.label()));
+        next
     }
 
     pub fn insert_region(&mut self) {
@@ -3238,6 +3471,7 @@ impl EditorSession {
                         id: new_id(),
                         t,
                         label: format!("Cena {}", idx + 1),
+                        ..Default::default()
                     });
                     count += 1;
                 }
@@ -6246,6 +6480,62 @@ mod tests {
         assert!(!ev_after.fx[0].enabled);
         assert!(sess.undo());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grade_marcadores_cd_comando_e_modos_de_automacao() {
+        let mut p = Project::new_default();
+        p.settings.bpm = 120.0;
+        assert!(RulerGridSpacing::Beats
+            .step_ticks(&p.settings)
+            .is_some_and(|t| (t.as_secs_f64() - 0.5).abs() < 1e-4));
+
+        // Entrada hostil no BPM não entra em pânico na grade musical.
+        p.settings.bpm = f64::NAN;
+        assert!(RulerGridSpacing::Beats.step_ticks(&p.settings).is_some());
+        p.settings.bpm = -999.0;
+        p.sanitize();
+        assert!((p.settings.bpm - 120.0).abs() < 1e-6);
+
+        let mut sess = EditorSession::new(p);
+        assert_eq!(sess.cycle_ruler_grid(), RulerGridSpacing::Frame);
+        sess.cursor = Ticks::from_secs_i64(2);
+        sess.insert_marker_kind(MarkerKind::CdTrack, "Abertura", "", "");
+        sess.cursor = Ticks::from_secs_i64(4);
+        sess.insert_marker_kind(MarkerKind::CdIndex, "Refrão", "", "");
+        sess.cursor = Ticks::from_secs_i64(5);
+        sess.insert_marker_kind(MarkerKind::Command, "Legenda", "TEXT", "Olá");
+
+        assert_eq!(sess.project.markers.len(), 3);
+        let cue = sess.export_cd_cue_sheet("album.wav");
+        assert!(cue.contains("FILE \"album.wav\" WAVE"));
+        assert!(cue.contains("TRACK 01 AUDIO"));
+        assert!(cue.contains("INDEX 01 00:02:00"));
+        assert!(cue.contains("INDEX 02 00:04:00"));
+
+        // Automação: Touch grava ponto visível; Off desativa leitura sem apagar pontos.
+        assert_eq!(
+            sess.cycle_track_automation_mode(0),
+            Some(AutomationMode::Touch)
+        );
+        assert!(sess.record_automation_point(
+            0,
+            EnvKind::Opacity,
+            Ticks::from_secs_i64(1),
+            0.35,
+            Ticks::from_millis_i64(10),
+        ));
+        assert!(
+            (sess.project.tracks[0].env_value(EnvKind::Opacity, Ticks::from_secs_i64(1)) - 0.35)
+                .abs()
+                < 1e-3
+        );
+        sess.set_track_automation_mode(0, AutomationMode::Off);
+        assert!(
+            (sess.project.tracks[0].env_value(EnvKind::Opacity, Ticks::from_secs_i64(1)) - 1.0)
+                .abs()
+                < 1e-5
+        );
     }
 
     fn p_media_id(p: &Project) -> Id {
