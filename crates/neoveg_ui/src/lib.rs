@@ -21,6 +21,7 @@ mod dock_drop;
 mod edit;
 mod edit_details;
 mod encoder_panel;
+pub mod fonts;
 mod fx_browser;
 mod gen_browser;
 mod icons;
@@ -72,13 +73,22 @@ pub fn run_gui(
     open: Option<PathBuf>,
     crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
 ) -> eframe::Result<()> {
+    run_gui_in(open, crash_reports, None)
+}
+
+/// Versão de [`run_gui`] com idioma inicial explícito (por exemplo `--lang` na CLI).
+pub fn run_gui_in(
+    open: Option<PathBuf>,
+    crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
+    initial_lang: Option<neoveg_common::Language>,
+) -> eframe::Result<()> {
     let open_wgpu = open.clone();
     let crash_wgpu = crash_reports.clone();
     match eframe::run_native(
         "Neoveg",
         native_options(eframe::Renderer::Wgpu),
         Box::new(move |cc| {
-            let mut app = App::new(cc, open_wgpu.clone());
+            let mut app = App::with_context_in(&cc.egui_ctx, open_wgpu.clone(), initial_lang);
             app.set_crash_reports(crash_wgpu.clone());
             Ok(Box::new(app))
         }),
@@ -92,9 +102,13 @@ pub fn run_gui(
                 "Neoveg",
                 native_options(eframe::Renderer::Glow),
                 Box::new(move |cc| {
-                    let mut app = App::new(cc, open.clone());
+                    let mut app = App::with_context_in(&cc.egui_ctx, open.clone(), initial_lang);
                     app.set_crash_reports(crash_reports.clone());
-                    app.set_status("Modo gráfico alternativo (OpenGL/software): WGPU indisponível");
+                    let lang = app.lang();
+                    app.set_status(neoveg_common::tr(
+                        lang,
+                        "Modo gráfico alternativo (OpenGL/software): WGPU indisponível",
+                    ));
                     Ok(Box::new(app))
                 }),
             )

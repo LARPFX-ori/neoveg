@@ -40,7 +40,7 @@ pub struct KfRow {
 /// uma linha por efeito de vídeo da trilha, mesmo sem quadros-chave, para
 /// o primeiro poder ser criado pela linha do tempo. Trilhas de áudio não têm
 /// linhas.
-pub fn track_rows(track: &Track, tol: Ticks) -> Vec<KfRow> {
+pub fn track_rows_in(track: &Track, tol: Ticks, lang: neoveg_common::Language) -> Vec<KfRow> {
     if track.kind != TrackKind::Video {
         return vec![];
     }
@@ -48,7 +48,7 @@ pub fn track_rows(track: &Track, tol: Ticks) -> Vec<KfRow> {
     if !track.motion.is_identity() || track.motion.keys.len() > 1 {
         rows.push(KfRow {
             kind: KfRowKind::Motion,
-            label: "Movimento da trilha".into(),
+            label: neoveg_common::tr(lang, "Movimento da trilha").into(),
             times: group_times(track.motion.keys.iter().map(|k| k.t), tol),
             has_curve: true,
         });
@@ -56,7 +56,7 @@ pub fn track_rows(track: &Track, tol: Ticks) -> Vec<KfRow> {
     for fx in track.fx.iter().filter(|f| !f.kind.is_audio()) {
         let label = match (&fx.ofx, fx.kind) {
             (Some(o), FxKind::Ofx) if !o.label.is_empty() => o.label.clone(),
-            _ => fx.kind.name().to_string(),
+            _ => fx.kind.name_in(lang).to_string(),
         };
         let anim = fx.params.iter().flat_map(|p| p.keys.iter().map(|k| k.0));
         let ofx = fx
@@ -72,6 +72,10 @@ pub fn track_rows(track: &Track, tol: Ticks) -> Vec<KfRow> {
         });
     }
     rows
+}
+
+pub fn track_rows(track: &Track, tol: Ticks) -> Vec<KfRow> {
+    track_rows_in(track, tol, neoveg_common::Language::PtBr)
 }
 
 /// Ordena e agrupa tempos a até `tol` uns dos outros (fica o primeiro).

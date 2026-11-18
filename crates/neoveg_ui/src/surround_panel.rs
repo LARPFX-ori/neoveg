@@ -7,6 +7,7 @@ use super::App;
 use crate::model::{ChannelLayout, Id, SurroundPan, TrackKind};
 use eframe::egui;
 use egui::{pos2, vec2, Align2, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
+use neoveg_common::{tr, tr_args};
 
 /// Origem do sinal posicionada no pad.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,15 +48,16 @@ pub(crate) fn pad_to_pan(p: Pos2, center: Pos2, radius: f32, base: SurroundPan) 
 
 impl App {
     pub(crate) fn surround_panner_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let layout = self.project.settings.channel_layout;
         ui.horizontal(|ui| {
-            ui.label("Modo do Master:");
+            ui.label(tr(lang, "Modo do Master:"));
             let mut sel = layout;
             egui::ComboBox::from_id_salt("surround_layout")
-                .selected_text(sel.name())
+                .selected_text(sel.name_in(lang))
                 .show_ui(ui, |ui| {
                     for l in ChannelLayout::ALL {
-                        ui.selectable_value(&mut sel, l, l.name());
+                        ui.selectable_value(&mut sel, l, l.name_in(lang));
                     }
                 });
             if sel != layout {
@@ -66,10 +68,11 @@ impl App {
         });
         if self.project.settings.channel_layout != ChannelLayout::Surround51 {
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(tr(
+                    lang,
                     "O projeto está em estéreo. Escolha 5.1 Surround no modo do Master \
                      para posicionar trilhas e barramentos na sala.",
-                )
+                ))
                 .small()
                 .color(self.theme.text_muted),
             );
@@ -88,10 +91,15 @@ impl App {
                 .audio_buses
                 .iter()
                 .filter(|b| b.output_bus.is_none())
-                .map(|b| (SurroundTarget::Bus(b.id), format!("Barramento: {}", b.name))),
+                .map(|b| {
+                    (
+                        SurroundTarget::Bus(b.id),
+                        tr_args(lang, "Barramento: {name}", &[("name", &b.name)]),
+                    )
+                }),
         );
         let Some(&(first, _)) = choices.first() else {
-            ui.label("Não há trilhas de áudio para posicionar.");
+            ui.label(tr(lang, "Não há trilhas de áudio para posicionar."));
             return;
         };
         let key = egui::Id::new("surround_panner_target");
@@ -105,7 +113,7 @@ impl App {
             .map(|(_, n)| n.clone())
             .unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.label("Origem:");
+            ui.label(tr(lang, "Origem:"));
             egui::ComboBox::from_id_salt("surround_target")
                 .selected_text(sel_name)
                 .show_ui(ui, |ui| {
@@ -136,17 +144,23 @@ impl App {
                     pan = pad_to_pan(p, center, radius, pan);
                 }
             }
-            resp.on_hover_text("Arraste para posicionar a origem na sala (frente no topo)");
+            resp.on_hover_text(tr(
+                lang,
+                "Arraste para posicionar a origem na sala (frente no topo)",
+            ));
 
             ui.vertical(|ui| {
                 if ui
-                    .checkbox(&mut pan.use_center, "Usar canal central")
-                    .on_hover_text("Sem o central, a frente vira uma imagem fantasma entre L e R")
+                    .checkbox(&mut pan.use_center, tr(lang, "Usar canal central"))
+                    .on_hover_text(tr(
+                        lang,
+                        "Sem o central, a frente vira uma imagem fantasma entre L e R",
+                    ))
                     .changed()
                 {
                     want_checkpoint = true;
                 }
-                ui.label("LFE:");
+                ui.label(tr(lang, "LFE:"));
                 let lfe = ui.add(egui::Slider::new(&mut pan.lfe, 0.0..=1.0).fixed_decimals(2));
                 if lfe.drag_started() || (lfe.changed() && !lfe.dragged()) {
                     want_checkpoint = true;
@@ -157,7 +171,7 @@ impl App {
                         .monospace()
                         .color(self.theme.text_muted),
                 );
-                if ui.button("Frente central").clicked() {
+                if ui.button(tr(lang, "Frente central")).clicked() {
                     want_checkpoint = true;
                     pan = SurroundPan {
                         use_center: pan.use_center,

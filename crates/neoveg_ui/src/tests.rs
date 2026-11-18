@@ -72,6 +72,7 @@ fn make_avi() -> PathBuf {
 #[test]
 fn ui_smoke() {
     struct PrefsGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         path: std::path::PathBuf,
         prev: Option<Vec<u8>>,
     }
@@ -87,11 +88,13 @@ fn ui_smoke() {
             }
         }
     }
+    let lock = crate::kittest_tests::lock_test_prefs();
     let _prefs_lock = PREFS_LOCK
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let prefs_path = crate::Preferences::file_path();
     let _prefs_guard = PrefsGuard {
+        _lock: lock,
         prev: std::fs::read(&prefs_path).ok(),
         path: prefs_path,
     };

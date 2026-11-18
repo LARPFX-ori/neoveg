@@ -34,15 +34,20 @@ impl PresetCategory {
         Self::Custom,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
             Self::Web => "Web e Redes Sociais",
             Self::Broadcast => "Transmissão e Produção",
             Self::MobileAndGif => "Dispositivos e GIF",
             Self::ImageSequence => "Sequências de Imagem",
             Self::Audio => "Áudio",
             Self::Custom => "Predefinições do Usuário",
-        }
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
     }
 }
 

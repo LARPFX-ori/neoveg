@@ -8,7 +8,7 @@ use crate::media::MediaCache;
 use crate::model::{EnvKind, GenSpec, Id, MarkerKind, TextSpec, TrackKind};
 use crate::session::EditorSession;
 use crate::time::Ticks;
-use neoveg_common::LayoutType;
+use neoveg_common::{tr, tr_args, tr_menu_path, Language, LayoutType};
 use std::collections::HashMap;
 
 /// Tecla portátil (independente de biblioteca de UI).
@@ -73,7 +73,35 @@ pub enum ShortcutKey {
 }
 
 impl ShortcutKey {
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let raw = self.canonical_label();
+        match self {
+            ShortcutKey::Space
+            | ShortcutKey::ArrowLeft
+            | ShortcutKey::ArrowRight
+            | ShortcutKey::ArrowUp
+            | ShortcutKey::ArrowDown => tr(lang, raw),
+            _ => raw,
+        }
+    }
+
     pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
+    }
+
+    /// Token neutro para salvar atalhos em `preferencias.json` independente do idioma ativo.
+    pub const fn canonical_token(self) -> &'static str {
+        match self {
+            ShortcutKey::Space => "Space",
+            ShortcutKey::ArrowLeft => "Left",
+            ShortcutKey::ArrowRight => "Right",
+            ShortcutKey::ArrowUp => "Up",
+            ShortcutKey::ArrowDown => "Down",
+            _ => self.canonical_label(),
+        }
+    }
+
+    const fn canonical_label(self) -> &'static str {
         match self {
             ShortcutKey::A => "A",
             ShortcutKey::B => "B",
@@ -243,7 +271,7 @@ impl Shortcut {
         Self::new(false, true, true, key)
     }
 
-    pub fn format(self) -> String {
+    pub fn format_in(self, lang: Language) -> String {
         let mut parts = Vec::with_capacity(4);
         if self.ctrl {
             parts.push("Ctrl");
@@ -254,7 +282,27 @@ impl Shortcut {
         if self.alt {
             parts.push("Alt");
         }
-        parts.push(self.key.label());
+        parts.push(self.key.label_in(lang));
+        parts.join("+")
+    }
+
+    pub fn format(self) -> String {
+        self.format_in(Language::PtBr)
+    }
+
+    /// Representação independente de idioma para gravar em configurações.
+    pub fn format_canonical(self) -> String {
+        let mut parts = Vec::with_capacity(4);
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        parts.push(self.key.canonical_token());
         parts.join("+")
     }
 
@@ -331,8 +379,8 @@ impl DockPanel {
         DockPanel::Encoder,
     ];
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name_in(self, lang: Language) -> &'static str {
+        let pt = match self {
             DockPanel::ProjectMedia => "Mídia do Projeto",
             DockPanel::Explorer => "Explorer",
             DockPanel::Trimmer => "Trimmer",
@@ -350,7 +398,12 @@ impl DockPanel {
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
             DockPanel::Encoder => "Neoveg Encoder",
-        }
+        };
+        tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(Language::PtBr)
     }
 
     pub fn command_id(self) -> &'static str {
@@ -519,8 +572,11 @@ impl CommandHost for HeadlessHost {
     }
 
     fn dispatch_ui(&mut self, action: UiAction) -> Result<(), String> {
-        Err(format!(
-            "ação '{action:?}' requer interface gráfica ativa e não pode rodar em modo headless"
+        let act = format!("{action:?}");
+        Err(tr_args(
+            neoveg_common::active_language(),
+            "ação '{action}' requer interface gráfica ativa e não pode rodar em modo headless",
+            &[("action", &act)],
         ))
     }
 
@@ -572,6 +628,16 @@ pub struct CommandDef {
     pub needs_ui: bool,
     pub enabled: fn(&EditorSession, &dyn CommandHost) -> bool,
     pub run: fn(&mut EditorSession, &mut dyn CommandHost) -> Result<CommandOutcome, String>,
+}
+
+impl CommandDef {
+    pub fn label_in(&self, lang: Language) -> &'static str {
+        tr(lang, self.label)
+    }
+
+    pub fn menu_path_in(&self, lang: Language) -> String {
+        tr_menu_path(lang, self.menu_path)
+    }
 }
 
 fn always_enabled(_s: &EditorSession, _h: &dyn CommandHost) -> bool {
@@ -691,8 +757,10 @@ fn export_or_ui(
         writer(s, &out_path).map_err(|e| format!("{e}"))?;
         Ok(CommandOutcome::Executed)
     } else {
-        Err(format!(
-            "projeto ainda não tem caminho definido para exportar {label} sem diálogo"
+        Err(tr_args(
+            s.lang,
+            "projeto ainda não tem caminho definido para exportar {label} sem diálogo",
+            &[("label", &label)],
         ))
     }
 }
@@ -748,7 +816,11 @@ pub static COMMANDS: &[CommandDef] = &[
                 s.dirty = false;
                 Ok(CommandOutcome::Executed)
             } else {
-                Err("projeto ainda não tem caminho definido para salvar sem diálogo".into())
+                Err(tr(
+                    s.lang,
+                    "projeto ainda não tem caminho definido para salvar sem diálogo",
+                )
+                .into())
             }
         },
     },
@@ -2296,7 +2368,7 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: |s, _| s.project.audio_buses.len() < crate::model::MAX_AUDIO_BUSES,
         run: |s, h| {
             if s.add_audio_bus().is_none() {
-                return Err("limite de 26 barramentos auxiliares atingido".into());
+                return Err(tr(s.lang, "limite de 26 barramentos auxiliares atingido").into());
             }
             ok_mutated(s, h)
         },
@@ -3621,11 +3693,13 @@ pub fn run_command(
     session: &mut EditorSession,
     host: &mut dyn CommandHost,
 ) -> Result<CommandOutcome, String> {
-    let cmd = find_command(id).ok_or_else(|| format!("comando desconhecido: '{id}'"))?;
+    let cmd = find_command(id)
+        .ok_or_else(|| tr_args(session.lang, "comando desconhecido: '{id}'", &[("id", &id)]))?;
     if !(cmd.enabled)(session, host) {
-        return Err(format!(
-            "comando '{}' não está habilitado no momento",
-            cmd.id
+        return Err(tr_args(
+            session.lang,
+            "comando '{id}' não está habilitado no momento",
+            &[("id", &cmd.id)],
         ));
     }
     (cmd.run)(session, host)
@@ -3643,20 +3717,38 @@ pub fn resolved_shortcut(
     }
 }
 
-pub fn shortcut_label(id: &str, overrides: &HashMap<String, Option<String>>) -> Option<String> {
+pub fn shortcut_label_in(
+    id: &str,
+    overrides: &HashMap<String, Option<String>>,
+    lang: Language,
+) -> Option<String> {
     let cmd = find_command(id)?;
-    resolved_shortcut(cmd, overrides).map(Shortcut::format)
+    resolved_shortcut(cmd, overrides).map(|sc| sc.format_in(lang))
+}
+
+pub fn shortcut_label(id: &str, overrides: &HashMap<String, Option<String>>) -> Option<String> {
+    shortcut_label_in(id, overrides, Language::PtBr)
 }
 
 /// Rótulo formatado para item de menu com atalho à direita (se configurado).
-pub fn menu_label(id: &str, overrides: &HashMap<String, Option<String>>) -> String {
+pub fn menu_label_in(
+    id: &str,
+    overrides: &HashMap<String, Option<String>>,
+    lang: Language,
+) -> String {
     let Some(cmd) = find_command(id) else {
         return id.to_string();
     };
+    let lbl = cmd.label_in(lang);
     match resolved_shortcut(cmd, overrides) {
-        Some(sc) => format!("{}   {}", cmd.label, sc.format()),
-        None => cmd.label.to_string(),
+        Some(sc) => format!("{lbl}   {}", sc.format_in(lang)),
+        None => lbl.to_string(),
     }
+}
+
+/// Rótulo formatado em português (compatibilidade com testes legados).
+pub fn menu_label(id: &str, overrides: &HashMap<String, Option<String>>) -> String {
+    menu_label_in(id, overrides, Language::PtBr)
 }
 
 #[cfg(test)]
@@ -3782,6 +3874,53 @@ mod tests {
         assert_eq!(shortcut_label("edit.split", &map), None);
         map.insert("edit.split".to_string(), Some("???".to_string()));
         assert_eq!(shortcut_label("edit.split", &map).as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn todos_comandos_e_paineis_possuem_traducoes_nos_seis_idiomas() {
+        let same_in_ja = [
+            "Color Grading",
+            "Explorer",
+            "Master Bus",
+            "Mixer",
+            "Plug-In Manager",
+            "Surround Panner",
+            "Take",
+            "Trimmer",
+            "Zoom",
+        ];
+        for cmd in COMMANDS {
+            assert!(
+                neoveg_common::i18n::has_key(cmd.label) || same_in_ja.contains(&cmd.label),
+                "rótulo '{}' do comando '{}' ausente no catálogo i18n",
+                cmd.label,
+                cmd.id
+            );
+            for lang in Language::ALL {
+                assert!(!cmd.label_in(lang).is_empty());
+                assert!(!cmd.menu_path_in(lang).is_empty());
+            }
+            for seg in neoveg_common::i18n::split_menu_path(cmd.menu_path) {
+                assert!(
+                    neoveg_common::i18n::has_key(seg) || same_in_ja.contains(&seg),
+                    "segmento {:?} de '{}' ({}) ausente no catálogo i18n",
+                    seg,
+                    cmd.id,
+                    cmd.menu_path
+                );
+            }
+        }
+        for panel in DockPanel::ALL {
+            for lang in Language::ALL {
+                assert!(!panel.name_in(lang).is_empty());
+            }
+        }
+        assert_eq!(ShortcutKey::Space.label_in(Language::Ja), "スペース");
+        assert_eq!(
+            DockPanel::ProjectMedia.name_in(Language::De),
+            "Projektmedien"
+        );
+        assert_eq!(DockPanel::Notes.name_in(Language::Fr), "Notes");
     }
 
     #[test]

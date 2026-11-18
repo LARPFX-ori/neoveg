@@ -1,6 +1,6 @@
 # Neoveg
 
-Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa em português (`eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
+Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa multilíngue (`pt-BR` padrão, `en`, `es`, `fr`, `de` e `ja`; `eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
 
 ## Imagens
 
@@ -172,7 +172,11 @@ python tools/check_licenses.py
 python build_portable.py
 ```
 
-O script `build_portable.py` gera o pacote portátil em `<target-dir>/portable/neoveg-portable/` (a pasta de build do cargo, que respeita `CARGO_TARGET_DIR`) sem dependência de instalador, fontes proprietárias ou binários externos.
+O script `build_portable.py` gera o pacote portátil em `<target-dir>/portable/neoveg-portable/` (a pasta de build do cargo, que respeita `CARGO_TARGET_DIR`) com os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos.
+
+### Idiomas (`i18n/*.json`)
+
+O Neoveg suporta **português do Brasil (`pt-BR`, padrão)**, **inglês (`en`)**, **espanhol (`es`)**, **francês (`fr`)**, **alemão (`de`)** e **japonês (`ja`)** a partir dos catálogos JSON na pasta `i18n/`. A troca de idioma pode ser feita ao vivo em **Preferências → Geral**, na tela inicial (**Boas-vindas**) ou na inicialização via `--lang <código>` / `NEOVEG_LANG`. Em japonês, glifos CJK são carregados das fontes instaladas no sistema operacional em tempo de execução.
 
 ## Acompanhamento de Paridade
 

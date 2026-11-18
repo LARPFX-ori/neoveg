@@ -6,11 +6,12 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
+    let _lock = lock_test_prefs();
     let mut app = {
         let _prefs_read = crate::tests::PREFS_LOCK
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        App::new(cc, None)
+        App::with_context_in(&cc.egui_ctx, None, Some(neoveg_common::Language::PtBr))
     };
     app.splash.active = false;
     app.pending_welcome_after_splash = false;
@@ -838,9 +839,10 @@ fn kittest_neoveg_encoder_fluxo_completo() {
 /// vídeo; as de áudio continuam com os seus.
 #[test]
 fn kittest_conjunto_de_botoes_visiveis_do_cabecalho() {
+    let _prefs_guard = I18nPrefsGuard::new();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1500.0, 920.0))
-        .build_eframe(build_ready_app);
+        .build_eframe(|cc| build_ready_app_lang(cc, neoveg_common::Language::PtBr));
     // o OK grava as preferências em arquivo: começa do padrão, sem depender
     // do que uma rodada anterior gravou
     harness.state_mut().prefs.track_header = Default::default();
@@ -1002,6 +1004,270 @@ fn kittest_navegador_de_geradores_de_midia() {
         )
     });
     assert!(radial, "inseriu o preset Gradiente radial");
+}
+
+static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn lock_test_prefs() -> std::sync::MutexGuard<'static, ()> {
+    I18N_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct I18nPrefsGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prefs_path: std::path::PathBuf,
+    prev_prefs: Option<Vec<u8>>,
+    prev_lang: neoveg_common::Language,
+}
+
+impl I18nPrefsGuard {
+    fn new() -> Self {
+        let lock = lock_test_prefs();
+        let prefs_path = crate::Preferences::file_path();
+        Self {
+            _lock: lock,
+            prev_prefs: std::fs::read(&prefs_path).ok(),
+            prefs_path,
+            prev_lang: neoveg_common::active_language(),
+        }
+    }
+}
+
+impl Drop for I18nPrefsGuard {
+    fn drop(&mut self) {
+        neoveg_common::set_active_language(self.prev_lang);
+        match &self.prev_prefs {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.prefs_path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.prefs_path);
+            }
+        }
+    }
+}
+
+fn build_ready_app_lang(cc: &eframe::CreationContext<'_>, lang: neoveg_common::Language) -> App {
+    let mut app = App::with_context_in(&cc.egui_ctx, None, Some(lang));
+    app.splash.active = false;
+    app.pending_welcome_after_splash = false;
+    app.dismiss_welcome();
+    app.select_layout_type(Some(&cc.egui_ctx), LayoutType::Magix, false);
+    app
+}
+
+#[test]
+fn kittest_i18n_troca_ao_vivo_todos_os_idiomas() {
+    use neoveg_common::{tr, Language};
+
+    let _guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(|cc| build_ready_app_lang(cc, Language::PtBr));
+    harness.run_steps(2);
+
+    let expected_menus: [(Language, &str, &str, &str); 6] = [
+        (
+            Language::PtBr,
+            "Arquivo",
+            "Mídia do Projeto",
+            "Novo Projeto",
+        ),
+        (Language::En, "File", "Project Media", "New Project"),
+        (
+            Language::Es,
+            "Archivo",
+            "Medios del proyecto",
+            "Nuevo proyecto",
+        ),
+        (Language::Fr, "Fichier", "Média de projet", "Nouveau projet"),
+        (Language::De, "Datei", "Projektmedien", "Neues Projekt"),
+        (
+            Language::Ja,
+            "ファイル",
+            "プロジェクト メディア",
+            "新規プロジェクト",
+        ),
+    ];
+
+    for (lang, menu_file, tab_media, welcome_new) in expected_menus {
+        let ctx = harness.ctx.clone();
+        {
+            let app = harness.state_mut();
+            app.dismiss_welcome();
+            app.apply_language(Some(&ctx), lang, false);
+        }
+        harness.run_steps(3);
+        assert_eq!(harness.state().lang(), lang);
+        assert_eq!(tr(lang, "Arquivo"), menu_file);
+        assert!(
+            harness.query_by_label(menu_file).is_some(),
+            "menu '{menu_file}' deve estar visível no idioma {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tr(lang, "Editar")).is_some(),
+            "menu Editar deve atualizar em {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tab_media).is_some(),
+            "aba '{tab_media}' deve estar visível em {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tr(lang, "Transições")).is_some(),
+            "aba Transições deve atualizar em {}",
+            lang.code()
+        );
+
+        harness.state_mut().open_welcome();
+        harness.run_steps(3);
+        assert!(
+            harness.query_by_label(welcome_new).is_some(),
+            "Welcome '{welcome_new}' deve estar visível em {}",
+            lang.code()
+        );
+        assert!(
+            harness.query_by_label(tr(lang, "Criar Projeto")).is_some(),
+            "botão Criar Projeto na Welcome deve estar visível em {}",
+            lang.code()
+        );
+    }
+}
+
+#[test]
+fn kittest_i18n_preferencias_combo_e_cancelar_reverte() {
+    use neoveg_common::{active_language, Language};
+
+    let _guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(|cc| build_ready_app_lang(cc, Language::PtBr));
+    harness.run_steps(2);
+
+    let ctx = harness.ctx.clone();
+    harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+    harness.run_steps(2);
+    assert!(harness.state().dlg.prefs_open);
+
+    // Abre o seletor de idioma em Preferências > Geral (o ComboBox na linha de "Idioma ativo:")
+    // e escolhe Japonês.
+    let lang_label_rect = harness
+        .get_by_label("Idioma ativo:")
+        .raw_bounds()
+        .expect("rótulo Idioma ativo: deve ter bounds");
+    let lang_cy = (lang_label_rect.y0 + lang_label_rect.y1) * 0.5;
+    harness
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .min_by(|a, b| {
+            let da = a
+                .raw_bounds()
+                .map_or(f64::MAX, |r| ((r.y0 + r.y1) * 0.5 - lang_cy).abs());
+            let db = b
+                .raw_bounds()
+                .map_or(f64::MAX, |r| ((r.y0 + r.y1) * 0.5 - lang_cy).abs());
+            da.total_cmp(&db)
+        })
+        .expect("ComboBox de idioma em Preferências")
+        .click();
+    harness.run_steps(2);
+    let ja_opt = Language::Ja.display_option(Language::PtBr);
+    harness.get_by_label(&ja_opt).click();
+    harness.run_steps(3);
+
+    // Prévia ao vivo aplicada imediatamente antes mesmo de OK/Aplicar.
+    assert_eq!(harness.state().lang(), Language::Ja);
+    assert_eq!(harness.state().prefs.lang(), Language::Ja);
+    assert_eq!(harness.state().session.lang, Language::Ja);
+    assert_eq!(active_language(), Language::Ja);
+    assert!(harness.query_by_label("初期設定に戻す").is_some());
+    assert!(harness.query_by_label("適用").is_some());
+    assert!(harness.query_by_label("キャンセル").is_some());
+
+    // Cancelar deve reverter completamente para o idioma original (pt-BR).
+    harness.get_by_label("キャンセル").click();
+    harness.run_steps(3);
+    assert!(!harness.state().dlg.prefs_open);
+    assert_eq!(harness.state().lang(), Language::PtBr);
+    assert_eq!(harness.state().prefs.lang(), Language::PtBr);
+    assert_eq!(harness.state().session.lang, Language::PtBr);
+    assert_eq!(active_language(), Language::PtBr);
+}
+
+#[test]
+fn kittest_i18n_preferencias_compacto_de_ja_sem_recorte() {
+    use neoveg_common::Language;
+
+    let _guard = I18nPrefsGuard::new();
+    for (lang, buttons) in [
+        (
+            Language::De,
+            ["Standard wiederherstellen", "Abbrechen", "Übernehmen", "OK"],
+        ),
+        (Language::Ja, ["初期設定に戻す", "キャンセル", "適用", "OK"]),
+    ] {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(760.0, 520.0))
+            .build_eframe(move |cc| build_ready_app_lang(cc, lang));
+        harness.run_steps(2);
+
+        let ctx = harness.ctx.clone();
+        harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+        harness.run_steps(3);
+        assert!(harness.state().dlg.prefs_open);
+
+        for btn in buttons {
+            let b = harness
+                .query_by_label(btn)
+                .unwrap_or_else(|| panic!("botão '{btn}' deve existir em {:?}", lang))
+                .raw_bounds()
+                .unwrap_or_else(|| panic!("botão '{btn}' deve ter bounds em {:?}", lang));
+            assert!(
+                b.x0 >= -0.5 && b.y0 >= -0.5 && b.x1 <= 760.0 + 1.5 && b.y1 <= 520.0 + 1.5,
+                "botão '{btn}' recortado em 760x520 ({lang:?}): bounds={b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kittest_i18n_welcome_combo_idioma_e_criar_projeto_ja() {
+    use neoveg_common::Language;
+
+    let _guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 760.0))
+        .build_eframe(|cc| {
+            let mut app = App::with_context_in(&cc.egui_ctx, None, Some(Language::PtBr));
+            app.splash.active = false;
+            app.pending_welcome_after_splash = false;
+            app.open_welcome();
+            app
+        });
+    harness.run_steps(2);
+    assert!(harness.state().is_welcome_open());
+
+    // O seletor de idioma da Welcome Screen é o primeiro ComboBox dentro de `neoveg_welcome_card`.
+    harness
+        .get_by_label("neoveg_welcome_card")
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("ComboBox de idioma na Welcome Screen")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label(Language::Ja.native_name()).click();
+    harness.run_steps(3);
+
+    assert_eq!(harness.state().lang(), Language::Ja);
+    assert!(harness.query_by_label("新規プロジェクト").is_some());
+    assert!(harness.query_by_label("プロジェクト作成").is_some());
+
+    harness.get_by_label("プロジェクト作成").click();
+    harness.run_steps(3);
+    assert!(!harness.state().is_welcome_open());
+    assert_eq!(harness.state().lang(), Language::Ja);
 }
 
 #[test]

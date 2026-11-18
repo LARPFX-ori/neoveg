@@ -29,12 +29,16 @@ pub enum DockPane {
 }
 
 impl DockPane {
-    pub fn title(self) -> &'static str {
+    pub fn title_in(self, lang: neoveg_common::Language) -> &'static str {
         match self {
-            DockPane::Tab(t) => t.name(),
-            DockPane::Preview => "Prévia de Vídeo",
-            DockPane::MasterBus => "Master",
+            DockPane::Tab(t) => t.name_in(lang),
+            DockPane::Preview => neoveg_common::tr(lang, "Prévia de Vídeo"),
+            DockPane::MasterBus => neoveg_common::tr(lang, "Master"),
         }
+    }
+
+    pub fn title(self) -> &'static str {
+        self.title_in(neoveg_common::Language::PtBr)
     }
 
     pub fn icon(self) -> Icon {
@@ -351,11 +355,15 @@ struct NeovegTileBehavior<'a> {
 
 impl NeovegTileBehavior<'_> {
     fn queue_pane_context_menu(&mut self, ui: &mut Ui, pane: DockPane) {
-        let detach_label = match pane {
-            DockPane::Preview => "Destacar Prévia em janela do Windows",
-            DockPane::MasterBus => "Destacar Master Bus em janela do Windows",
-            DockPane::Tab(_) => "Destacar em janela do Windows",
-        };
+        let lang = self.app.lang();
+        let detach_label = neoveg_common::tr(
+            lang,
+            match pane {
+                DockPane::Preview => "Destacar Prévia em janela do Windows",
+                DockPane::MasterBus => "Destacar Master Bus em janela do Windows",
+                DockPane::Tab(_) => "Destacar em janela do Windows",
+            },
+        );
         if ui.button(detach_label).clicked() {
             self.pending_detach.push(pane);
             ui.close_menu();
@@ -370,32 +378,44 @@ impl NeovegTileBehavior<'_> {
         }
         match pane {
             DockPane::Tab(_) => {
-                if ui.button("Destacar todas as abas").clicked() {
+                if ui
+                    .button(neoveg_common::tr(lang, "Destacar todas as abas"))
+                    .clicked()
+                {
                     self.pending_detach_all = true;
                     ui.close_menu();
                 }
                 ui.separator();
-                let pv_label = if self.app.preview_detached {
-                    "Acoplar Prévia de Vídeo"
-                } else {
-                    "Destacar Prévia de Vídeo em janela do Windows"
-                };
+                let pv_label = neoveg_common::tr(
+                    lang,
+                    if self.app.preview_detached {
+                        "Acoplar Prévia de Vídeo"
+                    } else {
+                        "Destacar Prévia de Vídeo em janela do Windows"
+                    },
+                );
                 if ui.button(pv_label).clicked() {
                     self.pending_toggle_preview = true;
                     ui.close_menu();
                 }
-                let mb_label = if self.app.master_bus_detached {
-                    "Acoplar Master Bus"
-                } else {
-                    "Destacar Master Bus em janela do Windows"
-                };
+                let mb_label = neoveg_common::tr(
+                    lang,
+                    if self.app.master_bus_detached {
+                        "Acoplar Master Bus"
+                    } else {
+                        "Destacar Master Bus em janela do Windows"
+                    },
+                );
                 if ui.button(mb_label).clicked() {
                     self.pending_toggle_master = true;
                     ui.close_menu();
                 }
             }
             DockPane::Preview | DockPane::MasterBus => {
-                if ui.button("Fechar painel").clicked() {
+                if ui
+                    .button(neoveg_common::tr(lang, "Fechar painel"))
+                    .clicked()
+                {
                     self.pending_close.push(pane);
                     ui.close_menu();
                 }
@@ -420,12 +440,15 @@ impl NeovegTileBehavior<'_> {
         let item_sp = ui.spacing().item_spacing;
         let text_fg = self.app.theme.text_primary;
 
+        let lang = self.app.lang();
         let mut tabs_est_w = 0.0_f32;
         let mut btn_h = 20.0_f32;
         for (idx, (_, sib_pane, _)) in snapshot.siblings.iter().enumerate() {
-            let g =
-                ui.painter()
-                    .layout_no_wrap(sib_pane.title().to_owned(), font_id.clone(), text_fg);
+            let g = ui.painter().layout_no_wrap(
+                sib_pane.title_in(lang).to_owned(),
+                font_id.clone(),
+                text_fg,
+            );
             let item_w = (6.0 + 13.0 + g.size().x + 8.0).max(24.0);
             btn_h = btn_h.max((4.0 + g.size().y.max(13.0)).max(19.0));
             if idx > 0 {
@@ -435,13 +458,14 @@ impl NeovegTileBehavior<'_> {
         }
 
         let has_close = matches!(pane, DockPane::Preview | DockPane::MasterBus);
+        let detach_txt = neoveg_common::tr(lang, "Destacar");
         let action_w = if has_close {
             // [PopOut] + [CloseX]
             22.0 + item_sp.x + 22.0
         } else {
             let g = ui
                 .painter()
-                .layout_no_wrap("Destacar".to_owned(), font_id, text_fg);
+                .layout_no_wrap(detach_txt.to_owned(), font_id, text_fg);
             btn_h = btn_h.max((4.0 + g.size().y.max(13.0)).max(19.0));
             (6.0 + 13.0 + g.size().x + 8.0).max(24.0)
         };
@@ -524,13 +548,14 @@ impl NeovegTileBehavior<'_> {
                         let resp = icons::small_icon_drag_button(
                             ui,
                             sib_pane.icon(),
-                            Some(sib_pane.title()),
+                            Some(sib_pane.title_in(lang)),
                             active,
                             &self.app.theme,
                         )
-                        .on_hover_text(
+                        .on_hover_text(neoveg_common::tr(
+                            lang,
                             "Clique para selecionar; arraste para os alvos para acoplar ou para fora da área para destacar; duplo clique maximiza",
-                        );
+                        ));
                         if active && active_changed {
                             resp.scroll_to_me(Some(egui::Align::Center));
                         }
@@ -569,18 +594,21 @@ impl NeovegTileBehavior<'_> {
             if icons::small_icon_button(
                 ui,
                 Icon::PopOut,
-                (!has_close).then_some("Destacar"),
+                (!has_close).then_some(detach_txt),
                 false,
                 &self.app.theme,
             )
-            .on_hover_text("Destacar em janela normal do Windows")
+            .on_hover_text(neoveg_common::tr(
+                lang,
+                "Destacar em janela normal do Windows",
+            ))
             .clicked()
             {
                 self.pending_detach.push(active_sib.1);
             }
             if has_close
                 && icons::small_icon_button(ui, Icon::CloseX, None, false, &self.app.theme)
-                    .on_hover_text("Fechar painel")
+                    .on_hover_text(neoveg_common::tr(lang, "Fechar painel"))
                     .clicked()
             {
                 self.pending_close.push(active_sib.1);
@@ -607,8 +635,8 @@ impl NeovegTileBehavior<'_> {
                 crate::scrollbars::Axis::Horizontal,
                 tab_range,
                 step,
-                "Rolar abas para a esquerda",
-                "Rolar abas para a direita",
+                neoveg_common::tr(lang, "Rolar abas para a esquerda"),
+                neoveg_common::tr(lang, "Rolar abas para a direita"),
                 &self.app.theme,
             );
             if outcome.new_offset.is_some() {
@@ -649,11 +677,13 @@ impl NeovegTileBehavior<'_> {
         match pane {
             DockPane::Tab(tab) => {
                 let theme = self.app.theme.clone();
+                let lang = self.app.lang();
                 crate::scrollbars::arrow_scroll_area(
                     ui,
                     egui::Id::new(("dock_tab_scroll", tab.command_id())),
                     &theme,
                     true,
+                    lang,
                     |ui| self.app.show_dock_tab_contents(ui, tab),
                 );
             }
@@ -682,7 +712,7 @@ impl Behavior<DockPane> for NeovegTileBehavior<'_> {
     }
 
     fn tab_title_for_pane(&mut self, pane: &DockPane) -> WidgetText {
-        pane.title().into()
+        pane.title_in(self.app.lang()).into()
     }
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
@@ -812,7 +842,7 @@ impl Behavior<DockPane> for NeovegTileBehavior<'_> {
             let (_, rect) = ui.allocate_space(vec2(64.0, ui.available_height()));
             return ui.interact(rect, id, Sense::click_and_drag());
         };
-        let label = pane.title();
+        let label = pane.title_in(self.app.lang());
         let font_id = egui::TextStyle::Button.resolve(ui.style());
         let text_color = self.tab_text_color(ui.visuals(), tiles, tile_id, state);
         let galley = ui
@@ -905,15 +935,19 @@ impl Behavior<DockPane> for NeovegTileBehavior<'_> {
         let Some(&Tile::Pane(pane)) = tiles.get(active_id) else {
             return;
         };
+        let lang = self.app.lang();
         if matches!(pane, DockPane::Preview | DockPane::MasterBus)
             && icons::small_icon_button(ui, Icon::CloseX, None, false, &self.app.theme)
-                .on_hover_text("Fechar painel")
+                .on_hover_text(neoveg_common::tr(lang, "Fechar painel"))
                 .clicked()
         {
             self.pending_close.push(pane);
         }
         if icons::small_icon_button(ui, Icon::PopOut, None, false, &self.app.theme)
-            .on_hover_text("Destacar em janela normal do Windows")
+            .on_hover_text(neoveg_common::tr(
+                lang,
+                "Destacar em janela normal do Windows",
+            ))
             .clicked()
         {
             self.pending_detach.push(pane);
@@ -947,12 +981,14 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
             &mut visited,
         );
         if !any_visible {
+            let lang = app.lang();
             crate::dock_drop::end(ui.ctx());
             app.dock_tree = tree;
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(neoveg_common::tr(
+                    lang,
                     "Todas as abas estão destacadas em janelas flutuantes (clique em Acoplar ou use Exibir/Layouts).",
-                )
+                ))
                 .weak(),
             );
             return;

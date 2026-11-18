@@ -212,6 +212,10 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
     ]
 }
 
+pub fn localized_preset_name(name: &str, lang: neoveg_common::Language) -> &str {
+    neoveg_common::tr(lang, name)
+}
+
 pub fn sanitize_layout_filename(name: &str) -> String {
     let mut out: String = name
         .chars()

@@ -10,9 +10,10 @@ pub use neoveg_common::prefs::{
     EditLayoutPrefs, LayoutType, PlaybackScrollMode, Preferences, PreviewQuality,
     TimelineMouseScroll,
 };
+use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::commands::{
-    self, is_command_enabled, menu_label, resolved_shortcut, run_command, CommandHost, DockPanel,
-    ShortcutKey, UiAction, COMMANDS,
+    self, is_command_enabled, menu_label_in, resolved_shortcut, run_command, CommandHost,
+    DockPanel, ShortcutKey, UiAction, COMMANDS,
 };
 use neoveg_engine::engine::loudness::{LoudnessReport, LoudnessSnapshot, LoudnessTarget};
 use neoveg_engine::media::{self, MediaCache};
@@ -366,7 +367,21 @@ impl App {
     }
 
     pub fn with_context(egui_ctx: &egui::Context, open: Option<PathBuf>) -> Self {
+        Self::with_context_in(egui_ctx, open, None)
+    }
+
+    pub fn with_context_in(
+        egui_ctx: &egui::Context,
+        open: Option<PathBuf>,
+        lang_override: Option<Language>,
+    ) -> Self {
         let mut prefs = Preferences::load_or_default();
+        if let Some(ov) = lang_override {
+            prefs.set_lang(ov);
+        }
+        let lang = prefs.lang();
+        neoveg_common::set_active_language(lang);
+        crate::fonts::configure_fonts(egui_ctx);
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
         let loaded_layout = prefs
@@ -392,7 +407,7 @@ impl App {
         let saved_layouts = layout::list_saved_layouts();
         let mut initial_project = Project::new_default();
         initial_project.settings.sample_rate = prefs.default_sample_rate;
-        let mut session = EditorSession::new(initial_project);
+        let mut session = EditorSession::new_in(initial_project, lang);
         apply_pref_defaults(&mut session.opts, &prefs);
         let media = Arc::new(MediaCache::default());
         media.configure_limits(prefs.frame_cache_cap, prefs.ram_preview_mb);
@@ -508,7 +523,12 @@ impl App {
             app.set_status(e);
         }
         if let Some(e) = &app.audio.error {
-            app.set_status(format!("Áudio: {e} (reprodução sem som)"));
+            let err_s = e.to_string();
+            app.set_status(tr_args(
+                lang,
+                "Áudio: {err} (reprodução sem som)",
+                &[("err", &err_s)],
+            ));
         }
         if let Some(p) = open {
             if is_project_file(&p) {
@@ -518,6 +538,36 @@ impl App {
             }
         }
         app
+    }
+
+    /// Idioma ativo na interface e na sessão de edição.
+    pub fn lang(&self) -> Language {
+        self.prefs.lang()
+    }
+
+    /// Altera o idioma da interface em tempo real e opcionalmente grava nas preferências.
+    pub(crate) fn apply_language(
+        &mut self,
+        ctx: Option<&egui::Context>,
+        lang: Language,
+        save_prefs: bool,
+    ) {
+        self.prefs.set_lang(lang);
+        self.session.lang = lang;
+        neoveg_common::set_active_language(lang);
+        if save_prefs {
+            if let Err(e) = self.prefs.save() {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Aviso ao salvar preferência: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
+        }
+        if let Some(c) = ctx {
+            c.request_repaint();
+        }
     }
 
     // -----------------------------------------------------------------
@@ -543,7 +593,16 @@ impl App {
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.session.set_status(s);
         self.status_at = Instant::now();
-        if self.session.status.starts_with("Erro") || self.session.status.contains("falh") {
+        let st = &self.session.status;
+        let is_err = st.starts_with("Erro")
+            || st.starts_with("Error")
+            || st.starts_with("Erreur")
+            || st.starts_with("Fehler")
+            || st.starts_with("エラー")
+            || st.contains("falh")
+            || st.contains("fail")
+            || st.contains("失敗");
+        if is_err {
             util::log_error(&self.session.status);
         }
     }
@@ -636,7 +695,12 @@ impl App {
         }
         self.last_autosave = Instant::now();
         if let Err(e) = recovery::write_recovery(&self.project) {
-            self.set_status(format!("Falha no salvamento automático: {e}"));
+            let err_s = e.to_string();
+            self.set_status(tr_args(
+                self.lang(),
+                "Falha no salvamento automático: {err}",
+                &[("err", &err_s)],
+            ));
         }
     }
 
@@ -645,18 +709,23 @@ impl App {
         if !self.recovery_offer || !self.crash_reports.is_empty() {
             return;
         }
+        let lang = self.lang();
         let mut choice = None;
-        egui::Window::new("Recuperar projeto")
+        egui::Window::new(tr(lang, "Recuperar projeto"))
+            .id(egui::Id::new("recovery_offer_win"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Foi encontrado um projeto salvo automaticamente de uma sessão anterior que não terminou normalmente.");
+                ui.label(tr(
+                    lang,
+                    "Foi encontrado um projeto salvo automaticamente de uma sessão anterior que não terminou normalmente.",
+                ));
                 ui.horizontal(|ui| {
-                    if ui.button("Recuperar").clicked() {
+                    if ui.button(tr(lang, "Recuperar")).clicked() {
                         choice = Some(true);
                     }
-                    if ui.button("Descartar").clicked() {
+                    if ui.button(tr(lang, "Descartar")).clicked() {
                         choice = Some(false);
                     }
                 });
@@ -669,13 +738,14 @@ impl App {
     /// Recupera (`true`) ou descarta (`false`) a cópia automática da sessão
     /// anterior.
     pub(crate) fn resolve_recovery(&mut self, recover: bool) {
+        let lang = self.lang();
         self.recovery_offer = false;
         if recover {
             if let Some(p) = recovery::find_existing_recovery() {
                 self.open_project_path(p);
                 self.path = None;
                 self.dirty = true;
-                self.set_status("Projeto recuperado. Salve-o com Salvar como...");
+                self.set_status(tr(lang, "Projeto recuperado. Salve-o com Salvar como..."));
             }
         } else {
             recovery::clear_recovery();
@@ -896,12 +966,13 @@ impl App {
         apply_pref_defaults(&mut self.session.opts, &self.prefs);
         self.thumbs.clear();
         self.project_media.clear_thumbs();
-        self.set_status("Novo projeto");
+        self.set_status(tr(self.lang(), "Novo projeto"));
     }
 
     pub fn open_project_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Projeto Neoveg", &["neoveg", "nvp"])
+            .add_filter(tr(lang, "Projeto Neoveg"), &["neoveg", "nvp"])
             .pick_file()
         {
             self.open_project_path(p);
@@ -964,6 +1035,7 @@ impl App {
             }
         }
         // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
+        let lang = self.lang();
         let res = Project::load_file(&path);
         match res {
             Ok((p, fixes)) => {
@@ -973,17 +1045,34 @@ impl App {
                 }
                 self.session.reset_project(p, Some(path.clone()));
                 self.reload_all_media();
+                let path_s = path.display().to_string();
                 if fixes.is_empty() {
-                    self.set_status(format!("Projeto aberto: {}", path.display()));
+                    self.set_status(tr_args(
+                        lang,
+                        "Projeto aberto: {path}",
+                        &[("path", &path_s)],
+                    ));
                 } else {
-                    self.set_status(format!("Projeto aberto com {} correção(ões) de dados inválidos (veja logs/neoveg.log)", fixes.len()));
+                    let fixes_s = fixes.len().to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "Projeto aberto com {n} correção(ões) de dados inválidos (veja logs/neoveg.log)",
+                        &[("n", &fixes_s)],
+                    ));
                 }
                 if path != recovery::recovery_path() && path != recovery::legacy_recovery_path() {
                     self.prefs.record_recent_project(&path);
                     let _ = self.prefs.save();
                 }
             }
-            Err(e) => self.set_status(format!("Erro ao abrir projeto: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao abrir projeto: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -993,6 +1082,8 @@ impl App {
         path: &std::path::Path,
         res: Result<(Project, Vec<String>), neoveg_common::error::NeovegError>,
     ) {
+        let lang = self.lang();
+        let path_s = path.display().to_string();
         match res {
             Ok((p, warnings)) => {
                 self.stop(false);
@@ -1002,16 +1093,28 @@ impl App {
                 self.session.reset_project(p, None);
                 self.reload_all_media();
                 if warnings.is_empty() {
-                    self.set_status(format!("{label} importado: {}", path.display()));
+                    self.set_status(tr_args(
+                        lang,
+                        "{label} importado: {path}",
+                        &[("label", &label), ("path", &path_s)],
+                    ));
                 } else {
-                    self.set_status(format!(
-                        "{label} importado com {} aviso(s): {}",
-                        warnings.len(),
-                        path.display()
+                    let n_s = warnings.len().to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "{label} importado com {n} aviso(s): {path}",
+                        &[("label", &label), ("n", &n_s), ("path", &path_s)],
                     ));
                 }
             }
-            Err(e) => self.set_status(format!("Erro ao importar {label}: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao importar {label}: {err}",
+                    &[("label", &label), ("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -1039,6 +1142,7 @@ impl App {
     }
 
     pub fn export_otio_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("otio");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("OpenTimelineIO", &["otio"])
@@ -1049,14 +1153,25 @@ impl App {
         };
         self.session.project.sort_events();
         match otio::export_otio_file(&self.session.project, &p) {
-            Ok(()) => self.set_status(format!("OTIO exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar OTIO: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(lang, "OTIO exportado: {path}", &[("path", &p_s)]));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar OTIO: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn import_subtitles_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Legendas", &["srt", "vtt"])
+            .add_filter(tr(lang, "Legendas"), &["srt", "vtt"])
             .pick_file()
         {
             self.import_subtitles_path(&p);
@@ -1064,19 +1179,25 @@ impl App {
     }
 
     pub fn import_subtitles_path(&mut self, path: &std::path::Path) {
+        let lang = self.lang();
+        let path_s = path.display().to_string();
         match neoveg_engine::subtitles::import_subtitles_file(path) {
             Ok((fmt, cues, warnings)) => {
                 for w in &warnings {
                     util::log_warn(&format!("Legendas: {w}"));
                 }
                 if cues.is_empty() {
-                    self.set_status(format!("Nenhuma legenda encontrada em {}", path.display()));
+                    self.set_status(tr_args(
+                        lang,
+                        "Nenhuma legenda encontrada em {path}",
+                        &[("path", &path_s)],
+                    ));
                     return;
                 }
                 self.checkpoint();
                 let label = match fmt {
-                    neoveg_engine::subtitles::SubtitleFormat::Srt => "Legendas (SRT)",
-                    neoveg_engine::subtitles::SubtitleFormat::Vtt => "Legendas (WebVTT)",
+                    neoveg_engine::subtitles::SubtitleFormat::Srt => tr(lang, "Legendas (SRT)"),
+                    neoveg_engine::subtitles::SubtitleFormat::Vtt => tr(lang, "Legendas (WebVTT)"),
                 };
                 let added = neoveg_engine::subtitles::import_subtitles_into_project(
                     &mut self.session.project,
@@ -1084,20 +1205,31 @@ impl App {
                     label,
                 );
                 self.changed();
-                self.set_status(format!(
-                    "{added} legenda(s) importada(s) de {}",
-                    path.display()
+                let added_s = added.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "{added} legenda(s) importada(s) de {path}",
+                    &[("added", &added_s), ("path", &path_s)],
                 ));
             }
-            Err(e) => self.set_status(format!("Erro ao importar legendas: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao importar legendas: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn export_subtitles_dialog(&mut self, fmt: neoveg_engine::subtitles::SubtitleFormat) {
-        let (label, ext) = match fmt {
+        let lang = self.lang();
+        let (label_key, ext) = match fmt {
             neoveg_engine::subtitles::SubtitleFormat::Srt => ("Legendas SubRip", "srt"),
             neoveg_engine::subtitles::SubtitleFormat::Vtt => ("Legendas WebVTT", "vtt"),
         };
+        let label = tr(lang, label_key);
         let default_name = self.export_interchange_path(ext);
         let Some(p) = rfd::FileDialog::new()
             .add_filter(label, &[ext])
@@ -1116,11 +1248,23 @@ impl App {
             }
         };
         match res {
-            Ok(n) => self.set_status(format!(
-                "{label} exportado ({n} legenda(s)): {}",
-                p.display()
-            )),
-            Err(e) => self.set_status(format!("Erro ao exportar {label}: {e}")),
+            Ok(n) => {
+                let n_s = n.to_string();
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "{label} exportado ({n} legenda(s)): {path}",
+                    &[("label", &label), ("n", &n_s), ("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar {label}: {err}",
+                    &[("label", &label), ("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -1140,6 +1284,7 @@ impl App {
     }
 
     pub fn export_edl_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("edl");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("CMX 3600 EDL", &["edl"])
@@ -1150,8 +1295,22 @@ impl App {
         };
         self.session.project.sort_events();
         match neoveg_engine::edl::export_edl_file(&self.session.project, &p, None) {
-            Ok(()) => self.set_status(format!("EDL CMX 3600 exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar EDL: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "EDL CMX 3600 exportado: {path}",
+                    &[("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar EDL: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
@@ -1232,6 +1391,7 @@ impl App {
     }
 
     pub fn export_fcp7_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("xml");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro 7 XML", &["xml"])
@@ -1242,12 +1402,27 @@ impl App {
         };
         self.session.project.sort_events();
         match neoveg_engine::fcp7xml::export_fcp7_file(&self.session.project, &p, None) {
-            Ok(()) => self.set_status(format!("FCP7 XML exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar FCP7 XML: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "FCP7 XML exportado: {path}",
+                    &[("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar FCP7 XML: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn export_fcpxml_dialog(&mut self) {
+        let lang = self.lang();
         let default_name = self.export_interchange_path("fcpxml");
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Final Cut Pro XML", &["fcpxml"])
@@ -1258,16 +1433,27 @@ impl App {
         };
         self.session.project.sort_events();
         match neoveg_engine::fcpxml::export_fcpxml_file(&self.session.project, &p, None) {
-            Ok(()) => self.set_status(format!("FCPXML exportado: {}", p.display())),
-            Err(e) => self.set_status(format!("Erro ao exportar FCPXML: {e}")),
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(lang, "FCPXML exportado: {path}", &[("path", &p_s)]));
+            }
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar FCPXML: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn save_project(&mut self, save_as: bool) -> bool {
+        let lang = self.lang();
         let path = if save_as || self.path.is_none() {
             match rfd::FileDialog::new()
-                .add_filter("Projeto Neoveg", &["neoveg"])
-                .add_filter("Projeto legado (NVP)", &["nvp"])
+                .add_filter(tr(lang, "Projeto Neoveg"), &["neoveg"])
+                .add_filter(tr(lang, "Projeto legado (NVP)"), &["nvp"])
                 .set_file_name("projeto.neoveg")
                 .save_file()
             {
@@ -1284,6 +1470,7 @@ impl App {
     }
 
     pub(crate) fn write_project(&mut self, path: &std::path::Path) -> bool {
+        let lang = self.lang();
         self.session.project.sort_events();
         match self.session.project.save_file(path) {
             Ok(()) => {
@@ -1292,11 +1479,13 @@ impl App {
                 recovery::clear_recovery();
                 self.prefs.record_recent_project(path);
                 let _ = self.prefs.save();
-                self.set_status(format!("Projeto salvo: {}", path.display()));
+                let p_s = path.display().to_string();
+                self.set_status(tr_args(lang, "Projeto salvo: {path}", &[("path", &p_s)]));
                 true
             }
             Err(e) => {
-                self.set_status(format!("Erro ao salvar: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(lang, "Erro ao salvar: {err}", &[("err", &err_s)]));
                 false
             }
         }
@@ -1328,16 +1517,17 @@ impl App {
     }
 
     pub fn import_dialog(&mut self) {
+        let lang = self.lang();
         let mut all: Vec<&str> = Vec::new();
         all.extend_from_slice(media::IMAGE_EXTS);
         all.extend_from_slice(media::VIDEO_EXTS);
         all.extend_from_slice(media::AUDIO_EXTS);
         all.extend_from_slice(media::SYSTEM_CONTAINER_EXTS);
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter("Mídia suportada", &all)
-            .add_filter("Imagens", media::IMAGE_EXTS)
-            .add_filter("Áudio", media::AUDIO_EXTS)
-            .add_filter("Todos os arquivos", &["*"])
+            .add_filter(tr(lang, "Mídia suportada"), &all)
+            .add_filter(tr(lang, "Imagens"), media::IMAGE_EXTS)
+            .add_filter(tr(lang, "Áudio"), media::AUDIO_EXTS)
+            .add_filter(tr(lang, "Todos os arquivos"), &["*"])
             .pick_files()
         {
             self.import_paths(files, None);
@@ -1345,8 +1535,9 @@ impl App {
     }
 
     pub fn import_sequence_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(f) = rfd::FileDialog::new()
-            .add_filter("Imagens", media::IMAGE_EXTS)
+            .add_filter(tr(lang, "Imagens"), media::IMAGE_EXTS)
             .pick_file()
         {
             let fps = self.project.settings.fps;
@@ -1371,15 +1562,18 @@ impl App {
 
     /// Importa arquivos em segundo plano. `place_at` = adiciona à timeline.
     pub fn import_paths(&mut self, paths: Vec<PathBuf>, place_at: Option<Ticks>) {
+        let lang = self.lang();
         let mut t = place_at.map(PlaceTarget::At);
         for p in paths {
             if !media::is_supported(&p) {
                 // o formato não é aberto diretamente: oferece converter
-                self.set_status(format!(
-                    "Formato não suportado diretamente: {}",
-                    p.display()
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Formato não suportado diretamente: {name}",
+                    &[("name", &p_s)],
                 ));
-                self.offer_conversion(p, t, "formato não suportado diretamente");
+                self.offer_conversion(p, t, tr(lang, "formato não suportado diretamente"));
                 continue;
             }
             self.spawn_import(p, t);
@@ -1424,11 +1618,16 @@ impl App {
             self.loading = self.loading.saturating_sub(1);
             match msg {
                 LoadMsg::Imported(imp, place) => {
+                    let lang = self.lang();
                     let id = imp.item.id;
                     if let Some(w) = &imp.warning {
                         self.set_status(w.clone());
                     } else {
-                        self.set_status(format!("Importado: {}", imp.item.name));
+                        self.set_status(tr_args(
+                            lang,
+                            "Importado: {name}",
+                            &[("name", &imp.item.name)],
+                        ));
                     }
                     let sr = imp.entry.audio.as_ref().map(|a| a.sample_rate);
                     self.media.insert(id, imp.entry);
@@ -1459,23 +1658,45 @@ impl App {
                         self.project_media.invalidate_media(id);
                         self.generation += 1;
                     }
-                    Err(e) => self.set_status(format!("Mídia offline: {e}")),
+                    Err(e) => {
+                        let lang = self.lang();
+                        self.set_status(tr_args(lang, "Mídia offline: {err}", &[("err", &e)]));
+                    }
                 },
                 LoadMsg::Replaced(id, r) => match r {
                     Ok(imp) => self.replace_media_with_imported(id, imp),
-                    Err(e) => self.set_status(format!("Erro ao substituir mídia: {e}")),
-                },
-                LoadMsg::ProxyBuilt(id, res) => match res {
-                    Ok(p) => {
-                        if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
-                            m.proxy_path = Some(p.to_string_lossy().to_string());
-                        }
-                        self.dirty = true;
-                        self.generation += 1;
-                        self.set_status(format!("Proxy pronto: {}", p.display()));
+                    Err(e) => {
+                        let lang = self.lang();
+                        self.set_status(tr_args(
+                            lang,
+                            "Erro ao substituir mídia: {err}",
+                            &[("err", &e)],
+                        ));
                     }
-                    Err(e) => self.set_status(format!("Erro ao gerar proxy: {e}")),
                 },
+                LoadMsg::ProxyBuilt(id, res) => {
+                    let lang = self.lang();
+                    match res {
+                        Ok(p) => {
+                            if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
+                                m.proxy_path = Some(p.to_string_lossy().to_string());
+                            }
+                            self.dirty = true;
+                            self.generation += 1;
+                            let p_s = p.display().to_string();
+                            self.set_status(tr_args(
+                                lang,
+                                "Proxy pronto: {path}",
+                                &[("path", &p_s)],
+                            ));
+                        }
+                        Err(e) => self.set_status(tr_args(
+                            lang,
+                            "Erro ao gerar proxy: {err}",
+                            &[("err", &e)],
+                        )),
+                    }
+                }
                 LoadMsg::RamPreviewFrame {
                     gen,
                     frame_idx,
@@ -1490,51 +1711,80 @@ impl App {
                         self.ram_preview_job = None;
                         if gen == self.generation {
                             let n = self.ram_preview.frames.len();
-                            let mb = self.ram_preview.mb_used();
-                            self.set_status(format!(
-                                "Prévia em RAM pronta: {n} quadros ({mb:.1} MB)."
+                            let mb = format!("{:.1}", self.ram_preview.mb_used());
+                            self.set_status(tr_args(
+                                self.lang(),
+                                "Prévia em RAM pronta: {n} quadros ({mb} MB).",
+                                &[("n", &n), ("mb", &mb)],
                             ));
                         }
                     }
                 }
                 LoadMsg::PrerenderDone { start, end, result } => {
+                    let lang = self.lang();
                     self.prerender_job = None;
                     match result {
                         Ok(p) => {
                             self.session.record_prerendered_range(start, end);
-                            self.set_status(format!("Pré-renderização concluída: {}", p.display()));
+                            let p_s = p.display().to_string();
+                            self.set_status(tr_args(
+                                lang,
+                                "Pré-renderização concluída: {path}",
+                                &[("path", &p_s)],
+                            ));
                         }
-                        Err(e) => self.set_status(format!("Erro na pré-renderização: {e}")),
+                        Err(e) => self.set_status(tr_args(
+                            lang,
+                            "Erro na pré-renderização: {err}",
+                            &[("err", &e)],
+                        )),
                     }
                 }
                 LoadMsg::LoudnessAnalyzed(result) => {
+                    let lang = self.lang();
                     self.loudness_job = None;
                     match result {
                         Ok(rep) => {
-                            let summary = format!(
-                                "Loudness analisado: {} (LRA {:.1} LU)",
-                                neoveg_engine::engine::loudness::format_lufs(
-                                    rep.snapshot.integrated_lufs
-                                ),
-                                rep.snapshot.loudness_range_lu
+                            let lufs_s = neoveg_engine::engine::loudness::format_lufs(
+                                rep.snapshot.integrated_lufs,
+                            );
+                            let lra_s = format!("{:.1}", rep.snapshot.loudness_range_lu);
+                            let summary = tr_args(
+                                lang,
+                                "Loudness analisado: {lufs} (LRA {lra} LU)",
+                                &[("lufs", &lufs_s), ("lra", &lra_s)],
                             );
                             self.loudness_report = Some(rep);
                             self.set_status(summary);
                         }
-                        Err(e) => self.set_status(format!("Análise de loudness: {e}")),
+                        Err(e) => self.set_status(tr_args(
+                            lang,
+                            "Análise de loudness: {err}",
+                            &[("err", &e)],
+                        )),
                     }
                 }
                 LoadMsg::ImportFailed { path, error, place } => {
-                    self.set_status(format!("Erro de importação: {}: {error}", path.display()));
+                    let lang = self.lang();
+                    let p_s = path.display().to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "Erro de importação: {name}: {err}",
+                        &[("name", &p_s), ("err", &error)],
+                    ));
                     // um arquivo que existe mas não abriu pode ter um decodificador no sistema
                     if path.is_file() {
-                        self.offer_conversion(path, place, format!("não abriu: {error}"));
+                        let reason = tr_args(lang, "não abriu: {err}", &[("err", &error)]);
+                        self.offer_conversion(path, place, reason);
                     }
                 }
                 LoadMsg::Converted { src, result, place } => {
                     self.on_converted(&src, result, place);
                 }
-                LoadMsg::Error(e) => self.set_status(format!("Erro de importação: {e}")),
+                LoadMsg::Error(e) => {
+                    let lang = self.lang();
+                    self.set_status(tr_args(lang, "Erro de importação: {err}", &[("err", &e)]));
+                }
             }
         }
     }
@@ -2084,8 +2334,9 @@ impl App {
                 .open_render(&self.session.project, self.session.path.as_deref()),
             UiAction::SendToEncoder => self.send_timeline_to_encoder(),
             UiAction::EncoderStartQueue => {
+                let lang = self.lang();
                 self.encoder.start_queue(&self.media);
-                self.set_status("Fila do Neoveg Encoder iniciada");
+                self.set_status(tr(lang, "Fila do Neoveg Encoder iniciada"));
             }
             UiAction::EncoderPauseQueue => {
                 self.encoder.runtime.toggle_pause();
@@ -2505,7 +2756,7 @@ impl App {
     // -----------------------------------------------------------------
 
     pub(crate) fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
-        let label = menu_label(id, &self.prefs.shortcuts);
+        let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
         if ui
             .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
             .clicked()
@@ -2523,11 +2774,16 @@ impl App {
         (sel_start, sel_end, sel_len): (Ticks, Ticks, Ticks),
         avail_w: f32,
     ) {
+        let lang = self.lang();
         if avail_w < 430.0 {
-            let label = if self.time_sel.is_some() { "In" } else { "Pos" };
-            ui.label(format!("{label}: {}", self.fmt_time(sel_start)));
-            ui.label(format!("Fim: {}", self.fmt_time(sel_end)));
-            ui.label(format!("Tam: {}", self.fmt_time(sel_len)));
+            let label = if self.time_sel.is_some() {
+                tr(lang, "In:")
+            } else {
+                tr(lang, "Pos:")
+            };
+            ui.label(format!("{label} {}", self.fmt_time(sel_start)));
+            ui.label(format!("{} {}", tr(lang, "Fim:"), self.fmt_time(sel_end)));
+            ui.label(format!("{} {}", tr(lang, "Tam:"), self.fmt_time(sel_len)));
             ui.separator();
         }
         for group in MORE_TOOLS_COMMANDS {
@@ -2539,15 +2795,17 @@ impl App {
     }
 
     pub(crate) fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
-        let label = menu_label(id, &self.prefs.shortcuts);
+        let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
         if ui.checkbox(&mut value, label).changed() {
             self.exec_cmd(Some(ui.ctx()), id);
         }
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
+        let mut pick_lang: Option<Language> = None;
         egui::menu::bar(ui, |ui| {
-            ui.menu_button("Arquivo", |ui| {
+            ui.menu_button(tr(lang, "Arquivo"), |ui| {
                 self.cmd_menu_btn(ui, "file.new");
                 self.cmd_menu_btn(ui, "file.open");
                 self.cmd_menu_btn(ui, "file.save");
@@ -2559,7 +2817,7 @@ impl App {
                 self.cmd_menu_btn(ui, "file.convert_media");
                 self.cmd_menu_btn(ui, "file.import_otio");
                 self.cmd_menu_btn(ui, "file.export_otio");
-                ui.menu_button("Intercâmbio & Legendas", |ui| {
+                ui.menu_button(tr(lang, "Intercâmbio & Legendas"), |ui| {
                     self.cmd_menu_btn(ui, "file.import_fcpxml");
                     self.cmd_menu_btn(ui, "file.export_fcpxml");
                     self.cmd_menu_btn(ui, "file.import_fcp7");
@@ -2583,7 +2841,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.exit");
             });
-            ui.menu_button("Editar", |ui| {
+            ui.menu_button(tr(lang, "Editar"), |ui| {
                 self.cmd_menu_btn(ui, "edit.undo");
                 self.cmd_menu_btn(ui, "edit.redo");
                 ui.separator();
@@ -2605,7 +2863,7 @@ impl App {
                     self.cmd_menu_btn(ui, "edit.expanded_nudge_left");
                     self.cmd_menu_btn(ui, "edit.expanded_nudge_right");
                 }
-                ui.menu_button("Take", |ui| {
+                ui.menu_button(tr(lang, "Take"), |ui| {
                     self.cmd_menu_btn(ui, "event.take_chooser");
                     ui.separator();
                     self.cmd_menu_btn(ui, "event.next_take");
@@ -2663,11 +2921,15 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.goto");
                 ui.separator();
-                ui.menu_button("Propriedades", |ui| {
-                    ui.menu_button("Layout", |ui| {
+                ui.menu_button(tr(lang, "Propriedades"), |ui| {
+                    ui.menu_button(tr(lang, "Layout"), |ui| {
                         self.cmd_menu_btn(ui, "edit.properties.layout");
                         ui.separator();
-                        ui.label(egui::RichText::new("Tipos de layout").small().weak());
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Tipos de layout"))
+                                .small()
+                                .weak(),
+                        );
                         for (cmd_id, lt) in [
                             (
                                 "edit.properties.layout.sonic_foundry",
@@ -2677,7 +2939,7 @@ impl App {
                             ("edit.properties.layout.magix", LayoutType::Magix),
                         ] {
                             let selected = self.prefs.edit_layout.layout_type == lt;
-                            let label = menu_label(cmd_id, &self.prefs.shortcuts);
+                            let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
                             if ui.selectable_label(selected, label).clicked() {
                                 self.exec_cmd(Some(ui.ctx()), cmd_id);
                                 ui.close_menu();
@@ -2686,13 +2948,17 @@ impl App {
                     });
                 });
             });
-            ui.menu_button("Exibir", |ui| {
+            ui.menu_button(tr(lang, "Exibir"), |ui| {
                 for tab in DockPanel::ALL {
                     let open = self.is_panel_open(tab);
                     let suffix = if self.detached_tabs.contains(&tab) {
-                        format!("{} (flutuante)", tab.name())
+                        tr_args(
+                            lang,
+                            "{panel} (flutuante)",
+                            &[("panel", &tab.name_in(lang))],
+                        )
                     } else {
-                        tab.name().to_string()
+                        tab.name_in(lang).to_string()
                     };
                     if ui.selectable_label(open, suffix).clicked() {
                         self.exec_cmd(Some(ui.ctx()), tab.command_id());
@@ -2703,9 +2969,9 @@ impl App {
                 let pv_open = (self.dock_visible && self.preview_visible && !self.preview_detached)
                     || self.preview_detached;
                 let pv_label = if self.preview_detached {
-                    "Prévia de Vídeo (flutuante)"
+                    tr(lang, "Prévia de Vídeo (flutuante)")
                 } else {
-                    "Prévia de Vídeo"
+                    tr(lang, "Prévia de Vídeo")
                 };
                 if ui.selectable_label(pv_open, pv_label).clicked() {
                     self.exec_cmd(Some(ui.ctx()), "view.preview");
@@ -2715,16 +2981,19 @@ impl App {
                     (self.dock_visible && self.master_bus_visible && !self.master_bus_detached)
                         || self.master_bus_detached;
                 let mb_label = if self.master_bus_detached {
-                    "Master Bus (flutuante)"
+                    tr(lang, "Master Bus (flutuante)")
                 } else {
-                    "Master Bus"
+                    tr(lang, "Master Bus")
                 };
                 if ui.selectable_label(mb_open, mb_label).clicked() {
                     self.exec_cmd(Some(ui.ctx()), "view.master_bus");
                     ui.close_menu();
                 }
                 if ui
-                    .selectable_label(self.preview_detached, "Prévia de Vídeo em janela separada")
+                    .selectable_label(
+                        self.preview_detached,
+                        tr(lang, "Prévia de Vídeo em janela separada"),
+                    )
                     .clicked()
                 {
                     self.preview_detached = !self.preview_detached;
@@ -2734,7 +3003,10 @@ impl App {
                     ui.close_menu();
                 }
                 if ui
-                    .selectable_label(self.master_bus_detached, "Master Bus em janela separada")
+                    .selectable_label(
+                        self.master_bus_detached,
+                        tr(lang, "Master Bus em janela separada"),
+                    )
                     .clicked()
                 {
                     self.master_bus_detached = !self.master_bus_detached;
@@ -2749,7 +3021,7 @@ impl App {
                     ("view.toggle_track_list", !self.tl.header_collapsed()),
                     ("view.maximize_timeline", self.timeline_restore.is_some()),
                 ] {
-                    let label = menu_label(cmd_id, &self.prefs.shortcuts);
+                    let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
                     if ui.selectable_label(on, label).clicked() {
                         self.exec_cmd(Some(ui.ctx()), cmd_id);
                         ui.close_menu();
@@ -2757,7 +3029,9 @@ impl App {
                 }
                 if self.dock_visible
                     && !self.detached_tabs.contains(&self.dock_tab)
-                    && ui.button("Destacar janela da aba atual").clicked()
+                    && ui
+                        .button(tr(lang, "Destacar janela da aba atual"))
+                        .clicked()
                 {
                     self.detach_dock_tab(self.dock_tab);
                     ui.close_menu();
@@ -2765,7 +3039,9 @@ impl App {
                 if (!self.detached_tabs.is_empty()
                     || self.preview_detached
                     || self.master_bus_detached)
-                    && ui.button("Acoplar todas as janelas flutuantes").clicked()
+                    && ui
+                        .button(tr(lang, "Acoplar todas as janelas flutuantes"))
+                        .clicked()
                 {
                     if self.preview_detached {
                         self.preview_visible = true;
@@ -2779,9 +3055,9 @@ impl App {
                     self.dock_visible = true;
                     ui.close_menu();
                 }
-                ui.menu_button("Layouts de janela", |ui| {
+                ui.menu_button(tr(lang, "Layouts de janela"), |ui| {
                     for preset in layout::builtin_presets() {
-                        let label = preset.name.clone();
+                        let label = layout::localized_preset_name(&preset.name, lang);
                         if ui.button(label).clicked() {
                             self.apply_window_layout(preset);
                             ui.close_menu();
@@ -2799,7 +3075,14 @@ impl App {
                                             Some(path.to_string_lossy().to_string());
                                         let _ = self.prefs.save();
                                     }
-                                    Err(e) => self.set_status(format!("Erro no layout: {e}")),
+                                    Err(e) => {
+                                        let err_s = e.to_string();
+                                        self.set_status(tr_args(
+                                            lang,
+                                            "Erro no layout: {err}",
+                                            &[("err", &err_s)],
+                                        ));
+                                    }
                                 }
                                 ui.close_menu();
                             }
@@ -2807,16 +3090,19 @@ impl App {
                     }
                     ui.separator();
                     if ui
-                        .button("Salvar layout atual (.neoveglayout)...")
+                        .button(tr(lang, "Salvar layout atual (.neoveglayout)..."))
                         .clicked()
                     {
-                        self.dlg.save_layout_name = "Meu Layout".into();
+                        self.dlg.save_layout_name = tr(lang, "Meu Layout").into();
                         self.dlg.save_layout_open = true;
                         ui.close_menu();
                     }
-                    if ui.button("Carregar arquivo .neoveglayout...").clicked() {
+                    if ui
+                        .button(tr(lang, "Carregar arquivo .neoveglayout..."))
+                        .clicked()
+                    {
                         if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("Layout Neoveg", &["neoveglayout", "json"])
+                            .add_filter(tr(lang, "Layout Neoveg"), &["neoveglayout", "json"])
                             .pick_file()
                         {
                             match layout::load_layout_file(&p) {
@@ -2826,15 +3112,25 @@ impl App {
                                         Some(p.to_string_lossy().to_string());
                                     let _ = self.prefs.save();
                                 }
-                                Err(e) => self.set_status(format!("Erro no layout: {e}")),
+                                Err(e) => {
+                                    let err_s = e.to_string();
+                                    self.set_status(tr_args(
+                                        lang,
+                                        "Erro no layout: {err}",
+                                        &[("err", &err_s)],
+                                    ));
+                                }
                             }
                         }
                         ui.close_menu();
                     }
                 });
-                ui.menu_button("Tema", |ui| {
+                ui.menu_button(tr(lang, "Tema"), |ui| {
                     for t in ThemeId::ALL {
-                        if ui.selectable_label(self.theme_id == t, t.label()).clicked() {
+                        if ui
+                            .selectable_label(self.theme_id == t, t.label_in(lang))
+                            .clicked()
+                        {
                             self.set_theme(ui.ctx(), t, true);
                             ui.close_menu();
                         }
@@ -2867,12 +3163,12 @@ impl App {
                     self.cmd_menu_chk(ui, self.external_monitor, "preview.external_monitor");
                 });
                 ui.separator();
-                ui.label("Formato de tempo:");
+                ui.label(tr(lang, "Formato de tempo:"));
                 for fmt in TimeFormat::ALL {
-                    ui.radio_value(&mut self.opts.time_format, fmt, fmt.name());
+                    ui.radio_value(&mut self.opts.time_format, fmt, fmt.name_in(lang));
                 }
             });
-            ui.menu_button("Inserir", |ui| {
+            ui.menu_button(tr(lang, "Inserir"), |ui| {
                 self.cmd_menu_btn(ui, "insert.track_video");
                 self.cmd_menu_btn(ui, "insert.track_audio");
                 self.cmd_menu_btn(ui, "insert.track_adjustment");
@@ -2893,11 +3189,11 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.empty_event");
                 self.cmd_menu_btn(ui, "media.insert_storyboard");
                 ui.separator();
-                ui.label("Envelopes da trilha selecionada:");
+                ui.label(tr(lang, "Envelopes da trilha selecionada:"));
                 self.cmd_menu_btn(ui, "insert.env_volume");
                 self.cmd_menu_btn(ui, "insert.env_pan");
             });
-            ui.menu_button("Ferramentas", |ui| {
+            ui.menu_button(tr(lang, "Ferramentas"), |ui| {
                 self.cmd_menu_btn(ui, "tools.fx_master_audio");
                 self.cmd_menu_btn(ui, "tools.fx_master_video");
                 ui.menu_button("Mídia do Projeto", |ui| {
@@ -2922,7 +3218,7 @@ impl App {
                 self.cmd_menu_btn(ui, "tools.prerender");
                 self.cmd_menu_btn(ui, "track.render_to_new_track");
                 self.cmd_menu_btn(ui, "track.set_defaults");
-                ui.menu_button("Multicâmera", |ui| {
+                ui.menu_button(tr(lang, "Multicâmera"), |ui| {
                     self.cmd_menu_btn(ui, "tools.multicam_create");
                     self.cmd_menu_chk(ui, self.opts.multicam_mode, "tools.multicam_mode");
                     ui.separator();
@@ -2931,7 +3227,7 @@ impl App {
                     self.cmd_menu_btn(ui, "tools.multicam_cut_3");
                     self.cmd_menu_btn(ui, "tools.multicam_cut_4");
                 });
-                ui.menu_button("Composição de trilhas (Pai/Filho)", |ui| {
+                ui.menu_button(tr(lang, "Composição de trilhas (Pai/Filho)"), |ui| {
                     self.cmd_menu_btn(ui, "track.toggle_folder");
                     self.cmd_menu_btn(ui, "track.make_child");
                     self.cmd_menu_btn(ui, "track.unmake_child");
@@ -2939,7 +3235,7 @@ impl App {
                 });
                 self.cmd_menu_btn(ui, "preview.ram_build");
                 self.cmd_menu_btn(ui, "preview.ram_clear");
-                ui.menu_button("Neoveg Encoder", |ui| {
+                ui.menu_button(tr(lang, "Neoveg Encoder"), |ui| {
                     self.cmd_menu_btn(ui, "view.tab.encoder");
                     self.cmd_menu_btn(ui, "file.send_to_encoder");
                     ui.separator();
@@ -2965,7 +3261,7 @@ impl App {
                     self.cmd_menu_btn(ui, "tools.blender_import_camera");
                 });
             });
-            ui.menu_button("Opções", |ui| {
+            ui.menu_button(tr(lang, "Opções"), |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
                 self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
                 ui.menu_button("Grade da régua", |ui| {
@@ -2992,27 +3288,48 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "options.customize_toolbar");
                 ui.separator();
-                ui.label(format!(
-                    "Dispositivo de áudio: {} ({} Hz)",
-                    self.audio.device_name, self.audio.sr
+                let sr_s = self.audio.sr.to_string();
+                ui.label(tr_args(
+                    lang,
+                    "Dispositivo de áudio: {dev} ({sr} Hz)",
+                    &[("dev", &self.audio.device_name), ("sr", &sr_s)],
                 ));
+                ui.separator();
+                ui.menu_button(tr(lang, "Idioma"), |ui| {
+                    for candidate in Language::ALL {
+                        if ui
+                            .selectable_label(lang == candidate, candidate.display_option(lang))
+                            .clicked()
+                        {
+                            pick_lang = Some(candidate);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "options.prefs");
             });
-            ui.menu_button("Ajuda", |ui| {
+            ui.menu_button(tr(lang, "Ajuda"), |ui| {
                 self.cmd_menu_btn(ui, "help.welcome");
                 self.cmd_menu_btn(ui, "help.splash");
                 self.cmd_menu_btn(ui, "help.shortcuts");
                 self.cmd_menu_btn(ui, "help.about");
             });
         });
+        if let Some(new_lang) = pick_lang {
+            self.apply_language(Some(ui.ctx()), new_lang, true);
+        }
     }
 
     fn cmd_hover_text(&self, id: &str, fallback: Option<&str>) -> String {
+        let lang = self.lang();
         commands::find_command(id)
-            .map(|c| match resolved_shortcut(c, &self.prefs.shortcuts) {
-                Some(sc) => format!("{} ({})", c.label, sc.format()),
-                None => c.label.to_string(),
+            .map(|c| {
+                let lbl = c.label_in(lang);
+                match resolved_shortcut(c, &self.prefs.shortcuts) {
+                    Some(sc) => format!("{lbl} ({})", sc.format_in(lang)),
+                    None => lbl.to_string(),
+                }
             })
             .unwrap_or_else(|| fallback.unwrap_or(id).to_string())
     }
@@ -3108,6 +3425,7 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let items = self.prefs.toolbar_buttons.clone();
         let resp = ui.horizontal_wrapped(|ui| {
             for id in &items {
@@ -3125,16 +3443,17 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("⋮")
-                    .on_hover_text("Personalizar barra de ferramentas...")
+                    .on_hover_text(tr(lang, "Personalizar barra de ferramentas..."))
                     .clicked()
                 {
                     self.open_customize_toolbar();
                 }
             });
             if self.loading > 0 {
+                let n_s = self.loading.to_string();
                 ui.separator();
                 crate::splash::spinner_inline(ui, 15.0, ui.ctx().input(|i| i.time), &self.theme);
-                ui.label(format!("carregando {}...", self.loading));
+                ui.label(tr_args(lang, "carregando {n}...", &[("n", &n_s)]));
             }
         });
         resp.response.context_menu(|ui| {
@@ -3237,7 +3556,7 @@ impl App {
                     let id = mode.command_id();
                     let on =
                         tool == neoveg_engine::session::EditTool::Normal && active_mode == mode;
-                    let label = menu_label(id, &self.prefs.shortcuts);
+                    let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
                     if ui.selectable_label(on, label).clicked() {
                         self.exec_cmd(Some(ui.ctx()), id);
                         ui.close_menu();
@@ -3381,8 +3700,12 @@ impl App {
             );
             self.cmd_tool_btn(ui, Icon::PanCrop, None, "tools.pan_crop");
 
+            let lang = self.lang();
             if self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
-                ui.label(egui::RichText::new(format!("Shuttle {:+.2}x", self.shuttle)).small());
+                let x_s = format!("{:+.2}", self.shuttle);
+                ui.label(
+                    egui::RichText::new(tr_args(lang, "Shuttle {x}x", &[("x", &x_s)])).small(),
+                );
             }
 
             // Bloco 3 (direita): Zoom horizontal + Selection Start/End/Length boxes (Manual p. 73)
@@ -3399,44 +3722,50 @@ impl App {
                         self.more_tools_menu(ui, (sel_start, sel_end, sel_len), avail_w);
                     })
                     .response
-                    .on_hover_text("Mais ferramentas de edição (More)");
+                    .on_hover_text(tr(lang, "Mais ferramentas de edição (More)"));
+                    let tam_lbl = tr(lang, "Tam:");
+                    let fim_lbl = tr(lang, "Fim:");
+                    let pos_lbl = if self.time_sel.is_some() {
+                        tr(lang, "In:")
+                    } else {
+                        tr(lang, "Pos:")
+                    };
                     if avail_w >= 430.0 {
                         self.time_readout_chip(
                             ui,
-                            "Tam:",
+                            tam_lbl,
                             sel_len,
-                            "Duração da seleção (Selection Length)",
+                            tr(lang, "Duração da seleção (Selection Length)"),
                         );
                         self.time_readout_chip(
                             ui,
-                            "Fim:",
+                            fim_lbl,
                             sel_end,
-                            "Fim da seleção (Selection End)",
+                            tr(lang, "Fim da seleção (Selection End)"),
                         );
                         self.time_readout_chip(
                             ui,
-                            if self.time_sel.is_some() {
-                                "In:"
-                            } else {
-                                "Pos:"
-                            },
+                            pos_lbl,
                             sel_start,
-                            "Início da seleção / posição do cursor",
+                            tr(lang, "Início da seleção / posição do cursor"),
                         );
                         ui.separator();
                     } else if avail_w >= 260.0 {
                         self.time_readout_chip(
                             ui,
-                            "Tam:",
+                            tam_lbl,
                             sel_len,
-                            "Duração da seleção (Selection Length)",
+                            tr(lang, "Duração da seleção (Selection Length)"),
                         );
                         ui.separator();
                     }
                     if ui
                         .small_button("+")
                         .on_hover_text(
-                            self.cmd_hover_text("timeline.zoom_in", Some("Aproximar zoom")),
+                            self.cmd_hover_text(
+                                "timeline.zoom_in",
+                                Some(tr(lang, "Aproximar zoom")),
+                            ),
                         )
                         .clicked()
                     {
@@ -3453,7 +3782,7 @@ impl App {
                             )
                             .show_value(false),
                         )
-                        .on_hover_text("Zoom horizontal (↑/↓, roda do mouse)")
+                        .on_hover_text(tr(lang, "Zoom horizontal (↑/↓, roda do mouse)"))
                         .changed()
                     {
                         self.tl.px_per_sec = crate::timeline::TimelineState::clamp_pps(z.exp());
@@ -3461,7 +3790,10 @@ impl App {
                     if ui
                         .small_button("-")
                         .on_hover_text(
-                            self.cmd_hover_text("timeline.zoom_out", Some("Afastar zoom")),
+                            self.cmd_hover_text(
+                                "timeline.zoom_out",
+                                Some(tr(lang, "Afastar zoom")),
+                            ),
                         )
                         .clicked()
                     {
@@ -3476,20 +3808,24 @@ impl App {
     /// Controle compartilhado de velocidade de reprodução (Playback Rate) usado na barra de transporte
     /// e no rodapé da lista de trilhas.
     pub(crate) fn playback_rate_control(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let lang = self.lang();
         let mut rate_changed = false;
         let playing = self.is_playing();
         if compact {
             ui.label(
-                egui::RichText::new("Taxa:")
+                egui::RichText::new(tr(lang, "Taxa:"))
                     .small()
                     .color(self.theme.text_muted),
             );
         } else {
-            icons::icon_label(ui, Icon::SpeedGauge, 14.0, "Taxa:", &self.theme);
+            icons::icon_label(ui, Icon::SpeedGauge, 14.0, tr(lang, "Taxa:"), &self.theme);
         }
         if ui
             .small_button(format!("{:.2}×", self.playback_rate))
-            .on_hover_text("Taxa de reprodução contínua — clique para restaurar 1,00×")
+            .on_hover_text(tr(
+                lang,
+                "Taxa de reprodução contínua — clique para restaurar 1,00×",
+            ))
             .clicked()
         {
             self.playback_rate = 1.0;
@@ -3507,7 +3843,7 @@ impl App {
                     .logarithmic(true)
                     .show_value(false),
             )
-            .on_hover_text("Taxa de reprodução contínua (Playback Rate)")
+            .on_hover_text(tr(lang, "Taxa de reprodução contínua (Playback Rate)"))
             .changed();
         if rate_changed && playing {
             self.shuttle = self.playback_rate;
@@ -3519,16 +3855,22 @@ impl App {
             s.speed = self.playback_rate;
         }
         if !compact && self.shuttle != 0.0 && (self.shuttle - 1.0).abs() > 1e-6 && playing {
-            ui.label(format!("Shuttle {:+.2}x", self.shuttle));
+            let x_s = format!("{:+.2}", self.shuttle);
+            ui.label(tr_args(lang, "Shuttle {x}x", &[("x", &x_s)]));
         }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         ui.horizontal(|ui| {
             if self.status_at.elapsed().as_secs() < 20 && !self.status.is_empty() {
                 ui.label(&self.status);
             } else {
-                ui.label(egui::RichText::new("Pronto").small().color(self.theme.text_muted));
+                ui.label(
+                    egui::RichText::new(tr(lang, "Pronto"))
+                        .small()
+                        .color(self.theme.text_muted),
+                );
             }
             let dur_str = self.fmt_time(self.project.duration());
             let wide = ui.available_width() >= 680.0;
@@ -3539,24 +3881,51 @@ impl App {
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "(sem título)".into());
+                    .unwrap_or_else(|| tr(lang, "(sem título)").into());
                 let ch_label = if self.master_mono {
-                    "Mono (1 ch)"
+                    tr(lang, "Mono (1 ch)")
                 } else {
-                    "Estéreo (2 ch)"
+                    tr(lang, "Estéreo (2 ch)")
                 };
+                let sr_s = s.sample_rate.to_string();
+                let w_s = s.width.to_string();
+                let h_s = s.height.to_string();
+                let fps_s = s.fps.label_in(lang);
+                let ms_s = format!("{:.0}", self.preview_ms);
                 let info_text = if wide {
-                    format!(
-                        "{ch_label} | {} Hz | {}x{} {} qps | prévia {:.0} ms | Duração: {dur_str} | {file_name}",
-                        s.sample_rate, s.width, s.height, s.fps.label(), self.preview_ms,
+                    tr_args(
+                        lang,
+                        "{ch} | {sr} Hz | {w}x{h} {fps} | prévia {ms} ms | Duração: {dur} | {file}",
+                        &[
+                            ("ch", &ch_label),
+                            ("sr", &sr_s),
+                            ("w", &w_s),
+                            ("h", &h_s),
+                            ("fps", &fps_s),
+                            ("ms", &ms_s),
+                            ("dur", &dur_str),
+                            ("file", &file_name),
+                        ],
                     )
                 } else {
-                    format!(
-                        "{ch_label} | {}x{} {} qps | {} Hz | {file_name}",
-                        s.width, s.height, s.fps.label(), s.sample_rate
+                    tr_args(
+                        lang,
+                        "{ch} | {w}x{h} {fps} | {sr} Hz | {file}",
+                        &[
+                            ("ch", &ch_label),
+                            ("sr", &sr_s),
+                            ("w", &w_s),
+                            ("h", &h_s),
+                            ("fps", &fps_s),
+                            ("file", &file_name),
+                        ],
                     )
                 };
-                ui.label(egui::RichText::new(info_text).small().color(self.theme.text_muted));
+                ui.label(
+                    egui::RichText::new(info_text)
+                        .small()
+                        .color(self.theme.text_muted),
+                );
                 if let Some(job) = &self.render_job {
                     crate::splash::spinner_inline(
                         ui,
@@ -3569,7 +3938,7 @@ impl App {
                             .desired_width(140.0)
                             .show_percentage(),
                     );
-                    ui.label("Renderizando:");
+                    ui.label(tr(lang, "Renderizando:"));
                 } else if let Some((_, _, prog)) = &self.prerender_job {
                     crate::splash::spinner_inline(
                         ui,
@@ -3582,7 +3951,7 @@ impl App {
                             .desired_width(130.0)
                             .show_percentage(),
                     );
-                    ui.label("Pré-renderizando:");
+                    ui.label(tr(lang, "Pré-renderizando:"));
                 } else if self.loading > 0 {
                     crate::splash::spinner_inline(
                         ui,
@@ -3590,14 +3959,17 @@ impl App {
                         ui.ctx().input(|i| i.time),
                         &self.theme,
                     );
-                    ui.label(format!("Carregando ({})...", self.loading));
+                    let n_s = self.loading.to_string();
+                    ui.label(tr_args(lang, "Carregando ({n})...", &[("n", &n_s)]));
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(40));
                 } else if !self.session.prerendered_ranges.is_empty() {
+                    let n_s = self.session.prerendered_ranges.len().to_string();
                     ui.label(
-                        egui::RichText::new(format!(
-                            "Pré-render: {} trecho(s)",
-                            self.session.prerendered_ranges.len()
+                        egui::RichText::new(tr_args(
+                            lang,
+                            "Pré-render: {n} trecho(s)",
+                            &[("n", &n_s)],
                         ))
                         .small()
                         .color(self.theme.tl_marker),
@@ -3608,9 +3980,10 @@ impl App {
     }
 
     pub(crate) fn snapshot_dialog(&mut self) {
+        let lang = self.lang();
         if let Some(p) = rfd::FileDialog::new()
             .add_filter(
-                "Imagem",
+                tr(lang, "Imagem"),
                 &[
                     "png", "jpg", "tiff", "tga", "bmp", "webp", "dpx", "exr", "qoi", "ppm", "cin",
                     "wbmp", "xbm", "xpm", "ico",
@@ -3620,19 +3993,26 @@ impl App {
             .save_file()
         {
             match crate::render::save_snapshot(&self.project, &self.media, self.cursor, &p) {
-                Ok(_) => self.set_status(format!("Quadro salvo em {}", p.display())),
-                Err(e) => self.set_status(format!("Erro: {e:#}")),
+                Ok(_) => {
+                    let p_s = p.display().to_string();
+                    self.set_status(tr_args(lang, "Quadro salvo em {path}", &[("path", &p_s)]));
+                }
+                Err(e) => {
+                    let err_s = format!("{e:#}");
+                    self.set_status(tr_args(lang, "Erro: {err}", &[("err", &err_s)]));
+                }
             }
         }
     }
 
     pub(crate) fn run_script_dialog(&mut self) {
+        let lang = self.lang();
         if self.script_job.is_some() {
-            self.set_status("Já há um script em execução.");
+            self.set_status(tr(lang, "Já há um script em execução."));
             return;
         }
         let Some(p) = rfd::FileDialog::new()
-            .add_filter("Scripts VEGAS / .NET", &["cs", "dll"])
+            .add_filter(tr(lang, "Scripts VEGAS / .NET"), &["cs", "dll"])
             .pick_file()
         else {
             return;
@@ -3666,7 +4046,12 @@ impl App {
         });
         match spawned {
             Ok(()) => {
-                self.set_status(format!("Executando script: {}", p.display()));
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Executando script: {name}",
+                    &[("name", &p_s)],
+                ));
                 self.script_job = Some(ScriptJob {
                     path: p,
                     started: std::time::Instant::now(),
@@ -3676,13 +4061,21 @@ impl App {
                     active: None,
                 });
             }
-            Err(e) => self.set_status(format!("Erro ao iniciar o script: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao iniciar o script: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     /// Acompanha o script em segundo plano: enquanto roda, mostra o aviso
     /// modal; ao terminar, aplica a sessão do script (ou só o erro).
     fn poll_script_job(&mut self, ctx: &egui::Context) {
+        let lang = self.lang();
         let theme = self.theme.clone();
         let Some(job) = &mut self.script_job else {
             return;
@@ -3708,14 +4101,15 @@ impl App {
                 egui::Modal::new(egui::Id::new("script_em_execucao")).show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         crate::splash::spinner_inline(ui, 20.0, el, &theme);
-                        ui.strong("Executando script...");
+                        ui.strong(tr(lang, "Executando script..."));
                     });
                     ui.label(path);
                     ui.label(
-                        egui::RichText::new(
+                        egui::RichText::new(tr(
+                            lang,
                             "A edição volta quando o script terminar. Se o script abriu uma \
                              janela, ela pode estar atrás do Neoveg.",
-                        )
+                        ))
                         .small()
                         .weak(),
                     );
@@ -3725,7 +4119,7 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.script_job = None;
-                self.set_status("Erro interno: o script terminou sem resposta.");
+                self.set_status(tr(lang, "Erro interno: o script terminou sem resposta."));
                 return;
             }
         };
@@ -3751,15 +4145,18 @@ impl App {
                     self.spawn_media_load(m);
                 }
                 if let Some(last) = msgs.last() {
-                    self.set_status(format!("Script executado: {last}"));
+                    self.set_status(tr_args(lang, "Script executado: {val}", &[("val", last)]));
                 } else {
-                    self.set_status(format!("Script executado: {}", job.path.display()));
+                    let p_s = job.path.display().to_string();
+                    self.set_status(tr_args(lang, "Script executado: {val}", &[("val", &p_s)]));
                 }
             }
             // a sessão da interface não foi tocada: nada a desfazer
-            ScriptOutcome::Done(Err(e)) => self.set_status(format!("Erro no script: {e}")),
+            ScriptOutcome::Done(Err(e)) => {
+                self.set_status(tr_args(lang, "Erro no script: {err}", &[("err", &e)]))
+            }
             ScriptOutcome::Panicked => {
-                self.set_status("Erro interno isolado ao executar script .NET/C#.")
+                self.set_status(tr(lang, "Erro interno isolado ao executar script .NET/C#."));
             }
         }
     }
@@ -3816,12 +4213,13 @@ impl App {
     }
 
     fn update_title(&self, ctx: &egui::Context) {
+        let lang = self.lang();
         let name = self
             .path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Sem título".into());
+            .unwrap_or_else(|| tr(lang, "Sem título").into());
         let title = format!("{}{} - Neoveg", name, if self.dirty { "*" } else { "" });
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
@@ -3865,12 +4263,17 @@ impl App {
                     .elapsed
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let lang = self.lang();
+                let p_s = job.settings.path.display().to_string();
+                let secs_s = format!("{secs:.1}");
                 match err {
-                    Some(e) => self.set_status(format!("Renderização falhou: {e}")),
-                    None => self.set_status(format!(
-                        "Renderização concluída em {:.1} s: {}",
-                        secs,
-                        job.settings.path.display()
+                    Some(e) => {
+                        self.set_status(tr_args(lang, "Renderização falhou: {err}", &[("err", &e)]))
+                    }
+                    None => self.set_status(tr_args(
+                        lang,
+                        "Renderização concluída em {secs} s: {path}",
+                        &[("secs", &secs_s), ("path", &p_s)],
                     )),
                 }
                 self.dlg.render_done = Some(self.status.clone());
@@ -3914,7 +4317,8 @@ impl App {
         self.poll_integrations();
         self.poll_script_job(ctx);
         self.poll_render();
-        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media) {
+        let lang = self.lang();
+        if let Some(msg) = self.encoder.tick(ctx, dt, &self.media, lang) {
             self.set_status(msg);
         }
         self.handle_dropped_files(ctx);
@@ -3997,27 +4401,32 @@ impl App {
         self.update_title(ctx);
 
         // confirmação ao fechar com alterações não salvas
+        let lang = self.lang();
         if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_close = true;
         }
         if self.confirm_close {
-            egui::Window::new("Alterações não salvas")
+            egui::Window::new(tr(lang, "Alterações não salvas"))
+                .id(egui::Id::new("confirm_close_win"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("O projeto tem alterações não salvas. Deseja salvar antes de sair?");
+                    ui.label(tr(
+                        lang,
+                        "O projeto tem alterações não salvas. Deseja salvar antes de sair?",
+                    ));
                     ui.horizontal(|ui| {
-                        if ui.button("Salvar").clicked() && self.save_project(false) {
+                        if ui.button(tr(lang, "Salvar")).clicked() && self.save_project(false) {
                             self.allow_close = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui.button("Descartar").clicked() {
+                        if ui.button(tr(lang, "Descartar")).clicked() {
                             self.allow_close = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr(lang, "Cancelar")).clicked() {
                             self.confirm_close = false;
                         }
                     });
@@ -4036,6 +4445,7 @@ impl App {
             }
             return;
         }
+        let lang = self.lang();
         let workers = self.prefs.effective_worker_threads();
         let notice = self
             .preview
@@ -4043,6 +4453,7 @@ impl App {
             .as_deref()
             .or(self.audio.error.as_deref());
         let snap = crate::splash::SplashSnapshot {
+            lang,
             theme_id: self.theme_id,
             theme: &self.theme,
             layout_type: self.prefs.edit_layout.layout_type,
@@ -4063,8 +4474,11 @@ impl App {
         );
         if out.pref_changed {
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!(
-                    "Aviso ao salvar preferência da tela de abertura: {e}"
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Aviso ao salvar preferência da tela de abertura: {err}",
+                    &[("err", &err_s)],
                 ));
             }
         }
@@ -4139,7 +4553,12 @@ impl App {
         }
         if save_prefs {
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!("Aviso ao salvar layout: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    self.lang(),
+                    "Aviso ao salvar layout: {err}",
+                    &[("err", &err_s)],
+                ));
             }
         }
     }
@@ -4150,10 +4569,15 @@ impl App {
         lt: LayoutType,
         save_prefs: bool,
     ) {
+        let lang = self.lang();
         let mut next = self.prefs.edit_layout.clone();
         next.apply_type(lt);
         self.apply_edit_layout(ctx, next, true, save_prefs);
-        self.set_status(format!("Layout {} aplicado ({})", lt.label(), lt.era()));
+        self.set_status(tr_args(
+            lang,
+            "Layout {name} aplicado ({era})",
+            &[("name", &lt.label_in(lang)), ("era", &lt.era_in(lang))],
+        ));
     }
 
     pub fn set_theme(&mut self, ctx: &egui::Context, id: ThemeId, save_prefs: bool) {
@@ -4162,7 +4586,12 @@ impl App {
         self.prefs.theme = id.id().to_string();
         if save_prefs {
             if let Err(e) = self.prefs.save() {
-                self.set_status(format!("Aviso ao salvar tema: {e}"));
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    self.lang(),
+                    "Aviso ao salvar tema: {err}",
+                    &[("err", &err_s)],
+                ));
             }
         }
     }
@@ -4232,11 +4661,18 @@ impl App {
                 self.prefs.edit_layout.preview_on_left,
             )
         });
+        let lang = self.lang();
         self.pending_dock_focus = Some(self.dock_tab);
-        self.set_status(format!("Layout aplicado: {}", l.name));
+        let lname = layout::localized_preset_name(&l.name, lang);
+        self.set_status(tr_args(
+            lang,
+            "Layout aplicado: {name}",
+            &[("name", &lname)],
+        ));
     }
 
     pub fn save_named_layout(&mut self, name: &str) {
+        let lang = self.lang();
         let layout = self.current_window_layout(name);
         let fname = format!("{}.neoveglayout", layout::sanitize_layout_filename(name));
         let path = Preferences::layouts_dir().join(fname);
@@ -4245,23 +4681,32 @@ impl App {
                 self.prefs.window_layout = Some(path.to_string_lossy().to_string());
                 let _ = self.prefs.save();
                 self.saved_layouts = layout::list_saved_layouts();
-                self.set_status(format!("Layout salvo em {}", path.display()));
+                let p_s = path.display().to_string();
+                self.set_status(tr_args(lang, "Layout salvo em {path}", &[("path", &p_s)]));
             }
-            Err(e) => self.set_status(format!("Erro ao salvar layout: {e}")),
+            Err(e) => {
+                let err_s = e.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao salvar layout: {err}",
+                    &[("err", &err_s)],
+                ));
+            }
         }
     }
 
     pub fn build_proxy_for_media(&mut self, media_id: Id) {
+        let lang = self.lang();
         let Some(item) = self.project.media(media_id).cloned() else {
-            self.set_status("Mídia não encontrada no projeto.");
+            self.set_status(tr(lang, "Mídia não encontrada no projeto."));
             return;
         };
         if !item.has_video {
-            self.set_status("Proxies aplicam-se apenas a clipes de vídeo.");
+            self.set_status(tr(lang, "Proxies aplicam-se apenas a clipes de vídeo."));
             return;
         }
         if !self.media.contains(media_id) {
-            self.set_status("Mídia offline: não foi possível gerar proxy.");
+            self.set_status(tr(lang, "Mídia offline: não foi possível gerar proxy."));
             return;
         }
         let dir = neoveg_common::util::base_dir().join("proxies");
@@ -4269,7 +4714,11 @@ impl App {
         let media = self.media.clone();
         let tx = self.loader_tx.clone();
         self.loading += 1;
-        self.set_status(format!("Gerando proxy de '{}'...", item.name));
+        self.set_status(tr_args(
+            lang,
+            "Gerando proxy de '{name}'...",
+            &[("name", &item.name)],
+        ));
         if let Err(e) = util::spawn("gerar-proxy", move || {
             let res = media
                 .create_proxy_avi(&item, &out)
@@ -4283,6 +4732,7 @@ impl App {
     }
 
     pub fn build_proxy_selected(&mut self) {
+        let lang = self.lang();
         let mut media_ids: Vec<Id> = Vec::new();
         for eid in &self.sel_events {
             if let Some(ev) = self.project.event(*eid) {
@@ -4298,7 +4748,10 @@ impl App {
             }
         }
         if media_ids.is_empty() {
-            self.set_status("Selecione pelo menos um evento de vídeo para gerar proxy.");
+            self.set_status(tr(
+                lang,
+                "Selecione pelo menos um evento de vídeo para gerar proxy.",
+            ));
             return;
         }
         for mid in media_ids {
@@ -4307,6 +4760,7 @@ impl App {
     }
 
     pub fn prerender_region(&mut self) {
+        let lang = self.lang();
         let (start, end) = if let Some((a, b)) = self.time_sel.filter(|(a, b)| b > a) {
             (a, b)
         } else if let Some((a, b)) = self.project.loop_region.filter(|(a, b)| b > a) {
@@ -4322,7 +4776,7 @@ impl App {
             (a, b)
         };
         if end <= start {
-            self.set_status("Região vazia para pré-renderizar.");
+            self.set_status(tr(lang, "Região vazia para pré-renderizar."));
             return;
         }
         self.sync_snapshot();
@@ -4351,7 +4805,7 @@ impl App {
         let prog_bg = prog.clone();
         self.loading += 1;
         self.prerender_job = Some((start, end, prog));
-        self.set_status("Pré-renderizando região selecionada...");
+        self.set_status(tr(lang, "Pré-renderizando região selecionada..."));
         if let Err(e) = util::spawn("prerender-regiao", move || {
             let result = crate::render::run(&proj, &media, &settings, &prog_bg)
                 .map(|()| out)

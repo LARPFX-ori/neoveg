@@ -15,6 +15,7 @@
 
 pub mod curve;
 pub mod error;
+pub mod i18n;
 pub mod prefs;
 pub mod session_marker;
 pub mod time;
@@ -22,6 +23,7 @@ pub mod util;
 
 pub use curve::{bump_ids, new_id, peek_next_id, Curve, Fade, Id, Keyframe, Keyframes, Lerp};
 pub use error::{NeovegError, Result};
+pub use i18n::{active_language, set_active_language, tr, tr_args, tr_menu_path, Language};
 pub use prefs::{
     recommended_worker_threads, EditLayoutPrefs, LayoutType, Preferences, PreviewQuality,
 };
