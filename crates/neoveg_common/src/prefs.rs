@@ -483,6 +483,10 @@ pub struct Preferences {
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
+    /// Usa as fontes do sistema na interface (Segoe UI no Windows, como o
+    /// VEGAS Pro); desligado, usa as fontes embutidas.
+    #[serde(default = "default_system_ui_font")]
+    pub system_ui_font: bool,
     /// Exibe a tela de boas-vindas com ações rápidas e projetos recentes ao iniciar.
     #[serde(default = "default_show_welcome")]
     pub show_welcome: bool,
@@ -963,6 +967,10 @@ fn default_show_splash() -> bool {
     true
 }
 
+fn default_system_ui_font() -> bool {
+    true
+}
+
 fn default_show_welcome() -> bool {
     true
 }
@@ -1054,6 +1062,7 @@ impl Default for Preferences {
             edit_layout: EditLayoutPrefs::default(),
             track_header: TrackHeaderPrefs::default(),
             show_splash: default_show_splash(),
+            system_ui_font: default_system_ui_font(),
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
@@ -1342,6 +1351,8 @@ mod tests {
         let p_no_splash: Preferences =
             serde_json::from_str(r#"{"show_splash":false,"show_welcome":false}"#).unwrap();
         assert!(!p_no_splash.show_splash);
+        // preferências antigas, sem o campo: fontes do sistema ligadas
+        assert!(p_no_splash.system_ui_font);
         assert!(!p_no_splash.show_welcome);
 
         let mut p_rec = Preferences {

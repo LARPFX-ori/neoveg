@@ -388,7 +388,9 @@ impl App {
         // Ctrl+= / Ctrl+- / Ctrl+0 são atalhos do VEGAS (tom em oitavas);
         // o zoom da interface do egui não pode tomar essas teclas.
         egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        crate::fonts::configure_fonts(egui_ctx);
+        // nos testes fica a fonte embutida, para as medidas de layout serem
+        // as mesmas em qualquer máquina
+        crate::fonts::configure_fonts(egui_ctx, prefs.system_ui_font && !cfg!(test));
         let theme_id = ThemeId::from_pref(&prefs.theme);
         let theme = theme::apply_theme(egui_ctx, theme_id);
         let loaded_layout = prefs

@@ -176,7 +176,7 @@ O script `build_portable.py` compila em modo release e gera o pacote portátil e
 
 ### Idiomas (`i18n/*.json`)
 
-O Neoveg suporta **português do Brasil (`pt-BR`, padrão)**, **inglês (`en`)**, **espanhol (`es`)**, **francês (`fr`)**, **alemão (`de`)** e **japonês (`ja`)** a partir dos catálogos JSON na pasta `i18n/`. A troca de idioma pode ser feita ao vivo em **Preferências → Geral**, na tela inicial (**Boas-vindas**) ou na inicialização via `--lang <código>` / `NEOVEG_LANG`. Em japonês, glifos CJK são carregados das fontes instaladas no sistema operacional em tempo de execução.
+O Neoveg suporta **português do Brasil (`pt-BR`, padrão)**, **inglês (`en`)**, **espanhol (`es`)**, **francês (`fr`)**, **alemão (`de`)** e **japonês (`ja`)** a partir dos catálogos JSON na pasta `i18n/`. A troca de idioma pode ser feita ao vivo em **Preferências → Geral**, na tela inicial (**Boas-vindas**) ou na inicialização via `--lang <código>` / `NEOVEG_LANG`. Em japonês, glifos CJK são carregados das fontes instaladas no sistema operacional em tempo de execução. A interface usa as fontes do sistema, como o VEGAS Pro: Segoe UI no Windows (Tahoma como alternativa; Noto Sans, Liberation Sans ou DejaVu Sans no Linux) e Consolas ou Cascadia Mono nos campos monoespaçados, lidas da pasta de fontes do sistema e nunca distribuídas; **Preferências → Geral** volta para as fontes embutidas.
 
 ## Acompanhamento de Paridade
 
