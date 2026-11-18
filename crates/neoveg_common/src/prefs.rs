@@ -525,6 +525,15 @@ pub struct Preferences {
     /// Intervalo do salvamento automático em segundos (`15..=600`).
     #[serde(default = "default_autosave_secs")]
     pub autosave_secs: u64,
+    /// Quantidade de cópias de salvamento automático mantidas na rotação (`1..=10`).
+    #[serde(default = "default_autosave_history_copies")]
+    pub autosave_history_copies: usize,
+    /// Cria arquivo de backup (.bak) ao salvar manualmente o projeto.
+    #[serde(default = "default_true")]
+    pub project_backup_enabled: bool,
+    /// Quantidade de cópias históricas de backup mantidas na rotação (`1..=10`).
+    #[serde(default = "default_backup_copies")]
+    pub project_backup_copies: usize,
     /// Duração padrão ao inserir imagem estática ou mídia gerada na timeline (`0.5..=60.0 s`).
     #[serde(default = "default_still_image_secs")]
     pub still_image_secs: f32,
@@ -1044,6 +1053,14 @@ fn default_autosave_secs() -> u64 {
     60
 }
 
+fn default_autosave_history_copies() -> usize {
+    3
+}
+
+fn default_backup_copies() -> usize {
+    3
+}
+
 fn default_still_image_secs() -> f32 {
     5.0
 }
@@ -1129,6 +1146,9 @@ impl Default for Preferences {
             max_recent_projects: default_max_recent_projects(),
             autosave_enabled: true,
             autosave_secs: default_autosave_secs(),
+            autosave_history_copies: default_autosave_history_copies(),
+            project_backup_enabled: true,
+            project_backup_copies: default_backup_copies(),
             still_image_secs: default_still_image_secs(),
             playback_scroll: PlaybackScrollMode::Page,
             timeline_mouse_scroll: TimelineMouseScroll::ZoomDefault,
@@ -1219,6 +1239,8 @@ impl Preferences {
         self.worker_threads = self.worker_threads.min(16);
         self.max_recent_projects = self.max_recent_projects.clamp(1, MAX_RECENT_PROJECTS);
         self.autosave_secs = self.autosave_secs.clamp(15, 600);
+        self.autosave_history_copies = self.autosave_history_copies.clamp(1, 10);
+        self.project_backup_copies = self.project_backup_copies.clamp(1, 10);
         if !self.still_image_secs.is_finite() {
             self.still_image_secs = default_still_image_secs();
         }
@@ -1437,6 +1459,8 @@ mod tests {
         let mut p_ext = Preferences {
             max_recent_projects: 999,
             autosave_secs: 1,
+            autosave_history_copies: 99,
+            project_backup_copies: 0,
             still_image_secs: f32::NAN,
             default_sample_rate: 12345,
             action_safe_pct: 72,
@@ -1446,6 +1470,8 @@ mod tests {
         p_ext.sanitize();
         assert_eq!(p_ext.max_recent_projects, MAX_RECENT_PROJECTS);
         assert_eq!(p_ext.autosave_secs, 15);
+        assert_eq!(p_ext.autosave_history_copies, 10);
+        assert_eq!(p_ext.project_backup_copies, 1);
         assert!((p_ext.still_image_secs - 5.0).abs() < f32::EPSILON);
         assert_eq!(p_ext.default_sample_rate, 48000);
         assert_eq!(p_ext.action_safe_pct, 72);

@@ -6688,6 +6688,20 @@ fn prefs_autosave(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Pref
                     );
                     ui.label(tr(lang, "segundos  (15–600 s)"));
                 });
+                prefs_row(
+                    ui,
+                    inner_lw,
+                    tr(lang, "Histórico de recuperação:"),
+                    |ui| {
+                        ui.add_sized(
+                            [72.0, 20.0],
+                            egui::DragValue::new(&mut draft.autosave_history_copies)
+                                .range(1..=10)
+                                .speed(1),
+                        );
+                        ui.label(tr(lang, "versões mantidas"));
+                    },
+                );
             });
 
             let summary = if draft.autosave_enabled {
@@ -6723,6 +6737,40 @@ fn prefs_autosave(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Pref
                 cx.pref_path,
                 true,
             );
+        },
+    );
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        tr(lang, "Cópia de Segurança do Projeto (.bak)"),
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.project_backup_enabled,
+                    tr(
+                        lang,
+                        "Criar cópia de segurança (.bak) ao salvar manualmente o projeto",
+                    ),
+                );
+            });
+
+            ui.add_enabled_ui(draft.project_backup_enabled, |ui| {
+                prefs_row(
+                    ui,
+                    inner_lw,
+                    tr(lang, "Cópias históricas mantidas:"),
+                    |ui| {
+                        ui.add_sized(
+                            [72.0, 20.0],
+                            egui::DragValue::new(&mut draft.project_backup_copies)
+                                .range(1..=10)
+                                .speed(1),
+                        );
+                        ui.label(tr(lang, "cópias (.bak, .bak1, .bak2...)"));
+                    },
+                );
+            });
         },
     );
 }

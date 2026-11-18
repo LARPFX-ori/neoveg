@@ -727,7 +727,9 @@ impl App {
             return;
         }
         self.last_autosave = Instant::now();
-        if let Err(e) = recovery::write_recovery(&self.project) {
+        if let Err(e) =
+            recovery::write_recovery_with_history(&self.project, self.prefs.autosave_history_copies)
+        {
             let err_s = e.to_string();
             self.set_status(tr_args(
                 self.lang(),
@@ -1534,7 +1536,11 @@ impl App {
     pub(crate) fn write_project(&mut self, path: &std::path::Path) -> bool {
         let lang = self.lang();
         self.session.project.sort_events();
-        match self.session.project.save_file(path) {
+        match self.session.project.save_file_with_backup(
+            path,
+            self.prefs.project_backup_enabled,
+            self.prefs.project_backup_copies,
+        ) {
             Ok(()) => {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;

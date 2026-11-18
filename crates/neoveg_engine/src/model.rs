@@ -1213,15 +1213,76 @@ impl Project {
         Self::from_json(&txt)
     }
 
-    /// Salva o projeto em disco gravando em arquivo temporário e renomeando atomicamente.
+    /// Salva o projeto em disco com rotação de backup padrão (ativo, 3 cópias).
     pub fn save_file(&self, path: &std::path::Path) -> Result<(), String> {
+        self.save_file_with_backup(path, true, 3)
+    }
+
+    /// Salva o projeto em disco gravando em arquivo temporário, rotacionando cópias
+    /// de segurança existentes (.bak, .bak1, .bak2) e renomeando atomicamente.
+    pub fn save_file_with_backup(
+        &self,
+        path: &std::path::Path,
+        backup_enabled: bool,
+        backup_copies: usize,
+    ) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("erro ao serializar projeto: {e}"))?;
         let tmp = path.with_extension("neoveg.tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("erro ao gravar {}: {e}", tmp.display()))?;
+
+        if backup_enabled && path.exists() {
+            if let Err(e) = rotate_project_backups(path, backup_copies) {
+                // Em caso de falha na rotação (ex.: permissão temporária de leitura),
+                // não aborta o salvamento do projeto atual.
+                eprintln!("falha ao rotacionar backups de {}: {e}", path.display());
+            }
+        }
+
         std::fs::rename(&tmp, path)
             .map_err(|e| format!("erro ao finalizar {}: {e}", path.display()))
     }
+}
+
+/// Gera o caminho para a cópia de backup do projeto no índice `idx` (0-indexado).
+///
+/// O primeiro backup (índice 0) recebe a extensão canônica `.bak` (ex.: `projeto.neoveg.bak`).
+/// Os backups históricos subsequentes recebem sufixos numerados `.bak1`, `.bak2`, etc.
+pub fn backup_path_for(path: &std::path::Path, idx: usize) -> std::path::PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|f| f.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("projeto.neoveg"));
+    let suffix = if idx == 0 {
+        format!("{file_name}.bak")
+    } else {
+        format!("{file_name}.bak{idx}")
+    };
+    path.with_file_name(suffix)
+}
+
+/// Rotaciona as cópias de segurança existentes preservando até `copies` arquivos de backup.
+pub fn rotate_project_backups(path: &std::path::Path, copies: usize) -> Result<(), String> {
+    if copies == 0 || !path.exists() {
+        return Ok(());
+    }
+    let max_idx = copies.saturating_sub(1);
+    let oldest = backup_path_for(path, max_idx);
+    if oldest.exists() {
+        let _ = std::fs::remove_file(&oldest);
+    }
+    for i in (1..=max_idx).rev() {
+        let prev = backup_path_for(path, i - 1);
+        let curr = backup_path_for(path, i);
+        if prev.exists() {
+            let _ = std::fs::rename(&prev, &curr)
+                .or_else(|_| std::fs::copy(&prev, &curr).and_then(|_| std::fs::remove_file(&prev)));
+        }
+    }
+    let first = backup_path_for(path, 0);
+    std::fs::copy(path, &first)
+        .map_err(|e| format!("erro ao criar cópia de backup {}: {e}", first.display()))?;
+    Ok(())
 }
 
 /// Extensões reconhecidas para arquivos de projeto do Neoveg (`.neoveg` padrão + `.nvp` legado).
@@ -3884,5 +3945,73 @@ mod tests {
 
         let order = p.topological_bus_order();
         assert_eq!(order.len(), MAX_AUDIO_BUSES);
+    }
+
+    #[test]
+    fn rotacao_de_backups_do_projeto_ao_salvar() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_dir = std::env::temp_dir().join(format!("neoveg_test_bak_{nanos}"));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("meu_projeto.neoveg");
+
+        let mut p = Project::new_default();
+        p.notes = "v1".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v1");
+        assert!(path.exists());
+        assert!(!backup_path_for(&path, 0).exists());
+
+        // Salva v2: v1 vai para .bak
+        p.notes = "v2".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v2");
+        assert!(path.exists());
+        assert!(backup_path_for(&path, 0).exists());
+        let (bak0, _) = Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0.notes, "v1");
+        let (cur, _) = Project::load_file(&path).expect("abre cur");
+        assert_eq!(cur.notes, "v2");
+
+        // Salva v3: v2 vai para .bak, v1 para .bak1
+        p.notes = "v3".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v3");
+        assert!(backup_path_for(&path, 1).exists());
+        let (bak0, _) = Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0.notes, "v2");
+        let (bak1, _) = Project::load_file(&backup_path_for(&path, 1)).expect("abre bak1");
+        assert_eq!(bak1.notes, "v1");
+
+        // Salva v4: v3 -> .bak, v2 -> .bak1, v1 -> .bak2
+        p.notes = "v4".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v4");
+        assert!(backup_path_for(&path, 2).exists());
+        let (bak2, _) = Project::load_file(&backup_path_for(&path, 2)).expect("abre bak2");
+        assert_eq!(bak2.notes, "v1");
+
+        // Salva v5: rotação mantém no máximo 3 cópias (.bak, .bak1, .bak2)
+        p.notes = "v5".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v5");
+        assert!(!backup_path_for(&path, 3).exists());
+        let (bak0, _) = Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0.notes, "v4");
+        let (bak2, _) = Project::load_file(&backup_path_for(&path, 2)).expect("abre bak2");
+        assert_eq!(bak2.notes, "v2");
+
+        // Salva sem backup ativado
+        p.notes = "v6".to_string();
+        p.save_file_with_backup(&path, false, 3)
+            .expect("salva v6 sem backup");
+        let (bak0_unchanged, _) =
+            Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0_unchanged.notes, "v4"); // mantido
+        let (cur, _) = Project::load_file(&path).expect("abre cur");
+        assert_eq!(cur.notes, "v6");
+
+        // Entrada hostil de caminho não entra em pânico
+        let hostile = std::path::Path::new("");
+        assert!(p.save_file_with_backup(hostile, true, 3).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
