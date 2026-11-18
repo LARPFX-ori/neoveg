@@ -11,11 +11,19 @@ pub mod convert;
 #[forbid(unsafe_code)]
 pub mod demux;
 #[forbid(unsafe_code)]
+pub mod ffv1;
+#[forbid(unsafe_code)]
+pub mod flac;
+#[forbid(unsafe_code)]
 pub mod generate;
 #[forbid(unsafe_code)]
 pub mod img_extra;
 #[cfg(windows)]
 pub(crate) mod mf;
+#[forbid(unsafe_code)]
+pub mod mkv;
+#[forbid(unsafe_code)]
+pub mod mov;
 #[forbid(unsafe_code)]
 mod system;
 #[forbid(unsafe_code)]
