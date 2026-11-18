@@ -172,7 +172,7 @@ python tools/check_licenses.py
 python build_portable.py
 ```
 
-O script `build_portable.py` gera o pacote portátil em `<target-dir>/portable/neoveg-portable/` (a pasta de build do cargo, que respeita `CARGO_TARGET_DIR`) com os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos.
+O script `build_portable.py` compila em modo release e gera o pacote portátil em `dist/` na raiz do repositório, com os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos. Depois de confirmar a cópia, ele apaga a pasta de build do cargo (`target/` ou `CARGO_TARGET_DIR`); se a compilação ou a cópia falhar, a pasta é mantida e o erro é informado. Use `--keep-target` para manter a pasta de build e `--out` para gravar o pacote em outro lugar. `dist/` e `target/` ficam no `.gitignore`.
 
 ### Idiomas (`i18n/*.json`)
 
