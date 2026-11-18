@@ -1937,12 +1937,15 @@ impl App {
             return;
         }
         let target_ids: Vec<Id> = armed.iter().map(|(_, id)| *id).collect();
-        let dir = self
-            .path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("Neoveg Recordings"))
-            .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"));
+        let dir = if !self.prefs.audio_device.default_record_dir.trim().is_empty() {
+            PathBuf::from(self.prefs.audio_device.default_record_dir.trim())
+        } else {
+            self.path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("Neoveg Recordings"))
+                .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"))
+        };
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -2098,6 +2101,17 @@ impl App {
             UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
             UiAction::OpenMotionTrackDialog => self.open_motion_track_dialog(),
             UiAction::ApplyAudioFxNonRealtime => self.apply_audio_fx_non_realtime(),
+            UiAction::OpenCustomizeToolbar => self.open_customize_toolbar(),
+            UiAction::OpenCommandMarkerDialog => {
+                self.dlg.cmd_marker_open = true;
+                if self.dlg.cmd_marker_type.trim().is_empty() {
+                    self.dlg.cmd_marker_type = "TEXT".into();
+                }
+            }
+            UiAction::SetRulerGrid(g) => {
+                self.opts.ruler_grid = g;
+                self.set_status(format!("Grade da régua: {}", g.label()));
+            }
             UiAction::OpenGoto => self.dlg.goto_open = true,
             UiAction::OpenEditLayoutProps => {
                 self.dlg
@@ -2825,6 +2839,9 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.nested_timeline");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.marker");
+                self.cmd_menu_btn(ui, "insert.marker_cd_track");
+                self.cmd_menu_btn(ui, "insert.marker_cd_index");
+                self.cmd_menu_btn(ui, "insert.marker_command");
                 self.cmd_menu_btn(ui, "insert.region");
                 self.cmd_menu_btn(ui, "insert.subtitles_from_regions");
                 ui.separator();
@@ -2907,6 +2924,16 @@ impl App {
             });
             ui.menu_button("Opções", |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
+                self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
+                ui.menu_button("Grade da régua", |ui| {
+                    for g in neoveg_engine::session::RulerGridSpacing::ALL {
+                        if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
+                            self.opts.ruler_grid = g;
+                            self.set_status(format!("Grade da régua: {}", g.label()));
+                            ui.close_menu();
+                        }
+                    }
+                });
                 self.cmd_menu_chk(ui, self.opts.quantize, "options.quantize");
                 self.cmd_menu_chk(ui, self.opts.auto_ripple, "options.auto_ripple");
                 self.cmd_menu_chk(ui, self.opts.ignore_grouping, "options.ignore_grouping");
@@ -2919,6 +2946,8 @@ impl App {
                     self.opts.bypass_all_audio_fx,
                     "options.bypass_all_audio_fx",
                 );
+                ui.separator();
+                self.cmd_menu_btn(ui, "options.customize_toolbar");
                 ui.separator();
                 ui.label(format!(
                     "Dispositivo de áudio: {} ({} Hz)",
@@ -2980,59 +3009,100 @@ impl App {
         }
     }
 
+    pub(crate) fn open_customize_toolbar(&mut self) {
+        self.dlg.customize_toolbar_open = true;
+        self.dlg.customize_toolbar_draft = Some(self.prefs.toolbar_buttons.clone());
+    }
+
+    fn toolbar_button_visual(&self, id: &str) -> (Icon, Option<&'static str>, Option<bool>) {
+        match id {
+            "file.new" => (Icon::NewFile, None, None),
+            "file.open" => (Icon::OpenFolder, None, None),
+            "file.save" => (Icon::SaveDisk, None, None),
+            "file.render" => (Icon::RenderClapper, None, None),
+            "view.tab.encoder" => (Icon::EncoderQueue, Some("Encoder"), None),
+            "file.project_props" => (Icon::GearProps, None, None),
+            "file.import_media" => (Icon::ImportMedia, None, None),
+            "edit.cut" => (Icon::Cut, None, None),
+            "edit.copy" => (Icon::Copy, None, None),
+            "edit.paste" => (Icon::Paste, None, None),
+            "edit.undo" => (Icon::Undo, None, None),
+            "edit.redo" => (Icon::Redo, None, None),
+            "options.snapping" => (Icon::MagnetSnap, None, Some(self.opts.snapping)),
+            "options.snap_to_grid" => (Icon::TimelineGrid, None, Some(self.opts.snap_to_grid)),
+            "options.auto_ripple" => (Icon::AutoRipple, None, Some(self.opts.auto_ripple)),
+            "view.envelopes" => (Icon::Envelopes, None, Some(self.opts.show_envelopes)),
+            "options.ignore_grouping" => {
+                (Icon::IgnoreGrouping, None, Some(self.opts.ignore_grouping))
+            }
+            "options.loop_playback" => (Icon::LoopPlayback, None, Some(self.opts.loop_playback)),
+            "options.bypass_all_audio_fx" => (
+                Icon::FxAudio,
+                Some("Bypass"),
+                Some(self.opts.bypass_all_audio_fx),
+            ),
+            "preview.mute_audio" => (Icon::MuteAudio, None, Some(self.opts.preview_mute_audio)),
+            "preview.mute_video" => (Icon::MuteVideo, None, Some(self.opts.preview_mute_video)),
+            "preview.split_toggle" => (
+                Icon::SplitPreview,
+                None,
+                Some(!matches!(
+                    self.opts.preview_split_mode,
+                    neoveg_engine::playback::PreviewSplitMode::Off
+                )),
+            ),
+            "edit.properties.layout" => (Icon::LayoutWindow, None, None),
+            "tools.integrations" => (Icon::ExternalApps, None, None),
+            "insert.marker" => (Icon::InsertMarker, Some("M"), None),
+            "insert.marker_cd_track" => (Icon::AudioTrack, Some("CD"), None),
+            "insert.marker_command" => (Icon::FxSparkle, Some("CMD"), None),
+            "track.cycle_automation" => (Icon::Envelopes, Some("Auto"), None),
+            other => {
+                let lbl = commands::find_command(other).map(|c| c.label);
+                (Icon::GearProps, lbl, None)
+            }
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            self.cmd_tool_btn(ui, Icon::NewFile, None, "file.new");
-            self.cmd_tool_btn(ui, Icon::OpenFolder, None, "file.open");
-            self.cmd_tool_btn(ui, Icon::SaveDisk, None, "file.save");
-            self.cmd_tool_btn(ui, Icon::RenderClapper, None, "file.render");
-            self.cmd_tool_btn(ui, Icon::EncoderQueue, Some("Encoder"), "view.tab.encoder");
-            self.cmd_tool_btn(ui, Icon::GearProps, None, "file.project_props");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::ImportMedia, None, "file.import_media");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::Cut, None, "edit.cut");
-            self.cmd_tool_btn(ui, Icon::Copy, None, "edit.copy");
-            self.cmd_tool_btn(ui, Icon::Paste, None, "edit.paste");
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::Undo, None, "edit.undo");
-            self.cmd_tool_btn(ui, Icon::Redo, None, "edit.redo");
-            ui.separator();
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.snapping,
-                Icon::MagnetSnap,
-                None,
-                "options.snapping",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.auto_ripple,
-                Icon::AutoRipple,
-                None,
-                "options.auto_ripple",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.show_envelopes,
-                Icon::Envelopes,
-                None,
-                "view.envelopes",
-            );
-            self.cmd_tool_toggle(
-                ui,
-                self.opts.ignore_grouping,
-                Icon::IgnoreGrouping,
-                None,
-                "options.ignore_grouping",
-            );
-            ui.separator();
-            self.cmd_tool_btn(ui, Icon::LayoutWindow, None, "edit.properties.layout");
-            self.cmd_tool_btn(ui, Icon::ExternalApps, None, "tools.integrations");
+        let items = self.prefs.toolbar_buttons.clone();
+        let resp = ui.horizontal_wrapped(|ui| {
+            for id in &items {
+                if id == "|" {
+                    ui.separator();
+                    continue;
+                }
+                let (icon, text, toggle) = self.toolbar_button_visual(id);
+                if let Some(active) = toggle {
+                    self.cmd_tool_toggle(ui, active, icon, text, id);
+                } else {
+                    self.cmd_tool_btn(ui, icon, text, id);
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("⋮")
+                    .on_hover_text("Personalizar barra de ferramentas...")
+                    .clicked()
+                {
+                    self.open_customize_toolbar();
+                }
+            });
             if self.loading > 0 {
                 ui.separator();
                 crate::splash::spinner_inline(ui, 15.0, ui.ctx().input(|i| i.time), &self.theme);
                 ui.label(format!("carregando {}...", self.loading));
+            }
+        });
+        resp.response.context_menu(|ui| {
+            if ui.button("Personalizar barra de ferramentas...").clicked() {
+                self.open_customize_toolbar();
+                ui.close_menu();
+            }
+            if ui.button("Restaurar barra padrão").clicked() {
+                self.prefs.toolbar_buttons = neoveg_common::prefs::default_toolbar_buttons();
+                let _ = self.prefs.save();
+                ui.close_menu();
             }
         });
     }

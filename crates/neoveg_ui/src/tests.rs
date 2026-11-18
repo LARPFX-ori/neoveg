@@ -735,9 +735,9 @@ fn assert_vegas21_ui_upgrades(app: &mut App) {
     assert!(app.dlg.prefs_open);
     for (idx, cat) in crate::dialogs::PrefsCategory::ALL.iter().enumerate() {
         app.dlg.prefs_tab = *cat;
-        let t0 = 4.0 + idx as f64 * 0.1;
+        let t0 = 4.0 + idx as f64 * 0.04;
         let _ = ctx.run(small_raw(t0), |c| app.frame_ui(c));
-        let out = ctx.run(small_raw(t0 + 0.05), |c| app.frame_ui(c));
+        let out = ctx.run(small_raw(t0 + 0.02), |c| app.frame_ui(c));
         let mut texts = Vec::new();
         for clipped in &out.shapes {
             collect_galley_shapes(&clipped.shape, clipped.clip_rect, &mut texts);

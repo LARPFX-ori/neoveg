@@ -492,6 +492,7 @@ pub fn import_edl_str(text: &str, fps: FrameRate) -> Result<(Project, Vec<String
             id: new_id(),
             t: (t - base_offset).clamp_safe(Ticks::ZERO, Ticks::from_raw(MAX_TICKS)),
             label,
+            ..Default::default()
         });
     }
 

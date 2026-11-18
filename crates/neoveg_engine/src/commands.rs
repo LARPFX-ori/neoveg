@@ -5,7 +5,7 @@
 //! caminho de menu, atalho padrão (regravável), `enabled()` e `run()`.
 
 use crate::media::MediaCache;
-use crate::model::{EnvKind, GenSpec, Id, TextSpec, TrackKind};
+use crate::model::{EnvKind, GenSpec, Id, MarkerKind, TextSpec, TrackKind};
 use crate::session::EditorSession;
 use crate::time::Ticks;
 use neoveg_common::LayoutType;
@@ -458,6 +458,9 @@ pub enum UiAction {
     CycleStereo3dMode,
     OpenMotionTrackDialog,
     ApplyAudioFxNonRealtime,
+    OpenCustomizeToolbar,
+    OpenCommandMarkerDialog,
+    SetRulerGrid(crate::session::RulerGridSpacing),
 }
 
 /// Resultado de execução de um comando.
@@ -2267,6 +2270,39 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "insert.marker_cd_track",
+        label: "Marcador de faixa de CD",
+        menu_path: "Inserir/Marcador de faixa de CD",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::N)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_marker_kind(MarkerKind::CdTrack, "", "", "");
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.marker_cd_index",
+        label: "Marcador de índice de CD",
+        menu_path: "Inserir/Marcador de índice de CD",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_marker_kind(MarkerKind::CdIndex, "", "", "");
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.marker_command",
+        label: "Marcador de comando...",
+        menu_path: "Inserir/Marcador de comando...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenCommandMarkerDialog, h),
+    },
+    CommandDef {
         id: "insert.region",
         label: "Região",
         menu_path: "Inserir/Região",
@@ -3044,6 +3080,58 @@ pub static COMMANDS: &[CommandDef] = &[
             s.opts.snapping = !s.opts.snapping;
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "options.snap_to_grid",
+        label: "Encaixar na grade",
+        menu_path: "Opções/Encaixar na grade",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::F8)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.snap_to_grid = !s.opts.snap_to_grid;
+            s.set_status(if s.opts.snap_to_grid {
+                "Encaixe na grade da régua ativado."
+            } else {
+                "Encaixe na grade da régua desativado."
+            });
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.grid_cycle",
+        label: "Grade da régua: próximo espaçamento",
+        menu_path: "Opções/Grade da régua/Próximo espaçamento",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.cycle_ruler_grid();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.cycle_automation",
+        label: "Alternar modo de automação da trilha",
+        menu_path: "Trilha/Automação (Off / Read / Touch / Latch)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.sel_track.is_some(),
+        run: |s, h| {
+            if let Some(ti) = s.sel_track {
+                s.cycle_track_automation_mode(ti);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.customize_toolbar",
+        label: "Personalizar barra de ferramentas...",
+        menu_path: "Opções/Personalizar barra de ferramentas...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenCustomizeToolbar, h),
     },
     CommandDef {
         id: "options.quantize",

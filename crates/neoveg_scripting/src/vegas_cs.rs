@@ -2524,6 +2524,7 @@ fn rebuild_markers(old: &[Marker], out: Vec<ScriptMarkerOut>) -> Result<Vec<Mark
                 id: neoveg_engine::model::new_id(),
                 t: marker_ticks(m.ticks.unwrap_or(0))?,
                 label: marker_label(m.label.as_deref().unwrap_or("")),
+                ..Default::default()
             }),
         }
     }

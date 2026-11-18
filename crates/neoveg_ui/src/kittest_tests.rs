@@ -1599,3 +1599,115 @@ fn kittest_efeitos_cadeias_lut_curvas_legendas_e_bypass_audio() {
             >= 2
     );
 }
+
+#[test]
+fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+
+    // 1. Barra de ferramentas personalizável.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.customize_toolbar");
+    harness.run_steps(2);
+    let before_tb = harness.state().prefs.toolbar_buttons.len();
+    harness.get_by_label("＋ Separador (|)").click();
+    harness.run_steps(1);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().prefs.toolbar_buttons.len(), before_tb + 1);
+
+    // 2. Grade da régua e Encaixar na grade.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.snap_to_grid");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "options.grid_cycle");
+    harness.run_steps(2);
+    assert!(harness.state().opts.snap_to_grid);
+    assert_ne!(
+        harness.state().opts.ruler_grid,
+        neoveg_engine::session::RulerGridSpacing::Auto
+    );
+
+    // 3. Marcadores de CD (faixa/índice) e Marcador de Comando.
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_track");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_cd_index");
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "insert.marker_command");
+    harness.run_steps(2);
+    harness.get_by_label("Inserir marcador").click();
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdTrack));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::CdIndex));
+    assert!(harness
+        .state()
+        .project
+        .markers
+        .iter()
+        .any(|m| m.kind == crate::model::MarkerKind::Command));
+
+    // 4. Modos de automação (Off / Read / Touch / Latch).
+    harness.state_mut().session.sel_track = Some(0);
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "track.cycle_automation");
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().project.tracks[0].automation_mode,
+        crate::model::AutomationMode::Touch
+    );
+
+    // 5. Divisor de largura do cabeçalho de trilha recolhe progressivamente e restaura (p. 69).
+    assert!(harness
+        .query_by_label("Divisor de largura dos cabeçalhos")
+        .is_some());
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w < 100.0);
+    harness.state_mut().tl.toggle_header_collapse();
+    harness.run_steps(2);
+    assert!(harness.state().tl.header_w >= 180.0);
+
+    // 6. Novas abas de Preferências (Dispositivo de Prévia, Dispositivo de Áudio, MIDI/Sync, File I/O).
+    harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
+    harness.run_steps(2);
+    for (tab_lbl, expected_txt) in [
+        (
+            "Dispositivo de Prévia",
+            "Dispositivo de Prévia Secundário (p. 1061)",
+        ),
+        ("Dispositivo de Áudio", "Compensação de gravação:"),
+        (
+            "MIDI / Sync / Controle",
+            "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+        ),
+        ("E/S de Arquivos (File I/O)", "FPS de sequências de imagem:"),
+    ] {
+        harness.get_by_label(tab_lbl).click();
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label(expected_txt).is_some(),
+            "aba '{tab_lbl}' não exibiu '{expected_txt}'"
+        );
+    }
+}

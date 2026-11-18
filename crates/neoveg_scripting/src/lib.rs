@@ -633,6 +633,7 @@ public class EntryPoint
                 id: neoveg_engine::model::new_id(),
                 t: neoveg_engine::time::Ticks::from_secs_i64(i + 1),
                 label: format!("M{i}"),
+                ..Default::default()
             })
             .collect();
         p

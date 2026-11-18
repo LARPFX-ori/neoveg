@@ -485,29 +485,87 @@ impl App {
             return;
         }
         let mut rename: Option<(usize, String)> = None;
+        let mut rekind: Option<(usize, MarkerKind)> = None;
+        let mut recmd: Option<(usize, String, String)> = None;
         let mut retime: Option<(usize, Ticks)> = None;
         let mut remove: Option<usize> = None;
         let mut jump: Option<Ticks> = None;
+        let has_cd = self
+            .project
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::CdTrack | MarkerKind::CdIndex));
+
+        if has_cd && ui.small_button("Exportar CUE Sheet (.cue)...").clicked() {
+            let cue = self.session.export_cd_cue_sheet("audio.wav");
+            if let Some(p) = rfd::FileDialog::new()
+                .add_filter("CD Cue Sheet", &["cue"])
+                .set_file_name("disco.cue")
+                .save_file()
+            {
+                match std::fs::write(&p, cue.as_bytes()) {
+                    Ok(()) => self.set_status("CUE Sheet exportado."),
+                    Err(e) => self.set_status(format!("Erro gravando CUE: {e}")),
+                }
+            }
+        }
 
         egui::Grid::new("ed_markers_grid")
             .striped(true)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                for h in ["#", "Rótulo", "Tempo", "Ir", "×"] {
+                for h in ["#", "Tipo", "Rótulo", "Comando", "Tempo", "Ir", "×"] {
                     ui.label(egui::RichText::new(h).strong().small());
                 }
                 ui.end_row();
                 for (row_idx, (i, m)) in items.iter_mut().enumerate() {
                     ui.label(format!("{}", row_idx + 1));
+                    let prev_kind = m.kind;
+                    egui::ComboBox::from_id_salt(("mk_kind", m.id))
+                        .selected_text(m.kind.label())
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            for k in MarkerKind::ALL {
+                                ui.selectable_value(&mut m.kind, k, k.label());
+                            }
+                        });
+                    if m.kind != prev_kind {
+                        rekind = Some((*i, m.kind));
+                    }
                     if ui
                         .add(
                             egui::TextEdit::singleline(&mut m.label)
-                                .desired_width(160.0)
+                                .desired_width(140.0)
                                 .font(egui::TextStyle::Small),
                         )
                         .changed()
                     {
                         rename = Some((*i, m.label.clone()));
+                    }
+                    if m.kind == MarkerKind::Command {
+                        ui.horizontal(|ui| {
+                            let c1 = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut m.command_type)
+                                        .hint_text("TEXT/URL")
+                                        .desired_width(58.0)
+                                        .font(egui::TextStyle::Small),
+                                )
+                                .changed();
+                            let c2 = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut m.command_arg)
+                                        .hint_text("parâmetro")
+                                        .desired_width(90.0)
+                                        .font(egui::TextStyle::Small),
+                                )
+                                .changed();
+                            if c1 || c2 {
+                                recmd = Some((*i, m.command_type.clone(), m.command_arg.clone()));
+                            }
+                        });
+                    } else {
+                        ui.label(egui::RichText::new("—").small().weak());
                     }
                     if let Some(nt) = time_cell_editor(
                         ui,
@@ -529,6 +587,21 @@ impl App {
                     ui.end_row();
                 }
             });
+
+        if let Some((i, k)) = rekind {
+            self.checkpoint();
+            if let Some(m) = self.project.markers.get_mut(i) {
+                m.kind = k;
+                self.changed();
+            }
+        }
+        if let Some((i, ctype, carg)) = recmd {
+            if let Some(m) = self.project.markers.get_mut(i) {
+                m.command_type = ctype;
+                m.command_arg = carg;
+                self.dirty = true;
+            }
+        }
 
         if let Some((i, lbl)) = rename {
             if let Some(m) = self.project.markers.get_mut(i) {

@@ -33,6 +33,13 @@ pub struct ProjectSettings {
     /// Modo de visualização/renderização 3D estereoscópica (manual p. 426).
     #[serde(default)]
     pub stereo_3d: Stereo3dMode,
+    /// Tempo musical em batidas por minuto para régua e grade de compassos (p. 232).
+    #[serde(default = "default_bpm")]
+    pub bpm: f64,
+}
+
+fn default_bpm() -> f64 {
+    120.0
 }
 
 /// Modo 3D estereoscópico do projeto (*Project Properties → Video → Stereoscopic 3D mode*).
@@ -233,6 +240,7 @@ impl Default for ProjectSettings {
             manually_configured: false,
             channel_layout: ChannelLayout::Stereo,
             stereo_3d: Stereo3dMode::Off,
+            bpm: default_bpm(),
         }
     }
 }
@@ -699,6 +707,9 @@ impl Project {
         for c in &mut s.background {
             *c = clampf(fin32(*c, 0.0), 0.0, 1.0);
         }
+        if !s.bpm.is_finite() || s.bpm < 20.0 || s.bpm > 300.0 {
+            s.bpm = default_bpm();
+        }
 
         // mídia
         let mut seen_media = std::collections::HashSet::new();
@@ -935,6 +946,20 @@ impl Project {
         }
         for m in &mut self.markers {
             m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            m.label = m.label.chars().filter(|&c| c != '\0').take(256).collect();
+            m.command_type = m
+                .command_type
+                .trim()
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(64)
+                .collect();
+            m.command_arg = m
+                .command_arg
+                .chars()
+                .filter(|&c| c != '\0')
+                .take(512)
+                .collect();
         }
         for r in &mut self.regions {
             if r.end < r.start {
@@ -1802,6 +1827,26 @@ impl Envelope {
     pub fn sort(&mut self) {
         self.points.sort_by_key(|p| p.t);
     }
+
+    pub fn set_point(&mut self, t: Ticks, v: f32, tol: Ticks) {
+        let (lo, hi) = self.kind.range();
+        let v = if v.is_finite() {
+            crate::util::clampf(v, lo, hi)
+        } else {
+            self.kind.default_value()
+        };
+        let t = t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+        if let Some(p) = self.points.iter_mut().find(|p| p.t.abs_diff(t) <= tol) {
+            p.v = v;
+        } else {
+            self.points.push(EnvPoint {
+                t,
+                v,
+                curve: Curve::Linear,
+            });
+            self.sort();
+        }
+    }
 }
 
 /// Track Motion (movimento 2D da trilha inteira).
@@ -1949,6 +1994,54 @@ pub struct Track {
     /// Trilha marcada como multicâmera (angles em takes).
     #[serde(default, skip_serializing_if = "is_false")]
     pub multicam: bool,
+    /// Modo de automação dos envelopes da faixa (Desligado / Ler / Touch / Latch, p. 1008).
+    #[serde(default)]
+    pub automation_mode: AutomationMode,
+}
+
+/// Modo de automação de envelopes por trilha ou barramento (manual VEGAS Pro 21, p. 1008).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AutomationMode {
+    /// Ignora os envelopes durante a reprodução/mixagem.
+    Off,
+    /// Apenas lê a curva de automação existente (padrão).
+    #[default]
+    Read,
+    /// Grava pontos ao arrastar durante a reprodução e retorna ao liberar.
+    Touch,
+    /// Grava pontos e mantém o último valor enquanto a reprodução continua.
+    Latch,
+}
+
+impl AutomationMode {
+    pub const ALL: [AutomationMode; 4] = [
+        AutomationMode::Off,
+        AutomationMode::Read,
+        AutomationMode::Touch,
+        AutomationMode::Latch,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Automação desligada (Off)",
+            AutomationMode::Read => "Automação: Ler (Read)",
+            AutomationMode::Touch => "Automação: Touch (Gravar ao tocar)",
+            AutomationMode::Latch => "Automação: Latch (Gravar e reter)",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Off",
+            AutomationMode::Read => "Read",
+            AutomationMode::Touch => "Touch",
+            AutomationMode::Latch => "Latch",
+        }
+    }
+
+    pub fn is_write(self) -> bool {
+        matches!(self, AutomationMode::Touch | AutomationMode::Latch)
+    }
 }
 
 /// Máximo de barramentos auxiliares de áudio (Bus A..Bus Z + Master, AGENTS.md §3.2).
@@ -1987,6 +2080,8 @@ pub struct AudioBus {
     pub fx: Vec<FxInstance>,
     #[serde(default)]
     pub envelopes: Vec<Envelope>,
+    #[serde(default)]
+    pub automation_mode: AutomationMode,
 }
 
 impl AudioBus {
@@ -2002,11 +2097,18 @@ impl AudioBus {
             output_bus: None,
             fx: vec![],
             envelopes: vec![],
+            automation_mode: AutomationMode::Read,
         }
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
         self.envelopes.iter().find(|e| e.kind == kind)
+    }
+
+    pub fn active_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        (self.automation_mode != AutomationMode::Off)
+            .then(|| self.envelope(kind))
+            .flatten()
     }
 
     pub fn is_audible(&self, any_bus_solo: bool) -> bool {
@@ -2064,6 +2166,7 @@ impl Track {
             mask_mode: TrackMaskMode::None,
             parent_motion: Keyframes::default(),
             multicam: false,
+            automation_mode: AutomationMode::Read,
         }
     }
 
@@ -2087,8 +2190,14 @@ impl Track {
         self.envelopes.iter().find(|e| e.kind == kind)
     }
 
+    pub fn active_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        (self.automation_mode != AutomationMode::Off)
+            .then(|| self.envelope(kind))
+            .flatten()
+    }
+
     pub fn env_value(&self, kind: EnvKind, t: Ticks) -> f32 {
-        self.envelope(kind)
+        self.active_envelope(kind)
             .map(|e| e.eval(t))
             .unwrap_or(kind.default_value())
     }
@@ -3396,11 +3505,67 @@ pub struct MasterBus {
     pub video_fx: Vec<FxInstance>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Tipo de marcador na timeline (padrão, faixa/índice de CD ou comando, pp. 131, 495, 725).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MarkerKind {
+    #[default]
+    Standard,
+    CdTrack,
+    CdIndex,
+    Command,
+}
+
+impl MarkerKind {
+    pub const ALL: [MarkerKind; 4] = [
+        MarkerKind::Standard,
+        MarkerKind::CdTrack,
+        MarkerKind::CdIndex,
+        MarkerKind::Command,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkerKind::Standard => "Marcador padrão",
+            MarkerKind::CdTrack => "Faixa de CD de áudio",
+            MarkerKind::CdIndex => "Índice de CD de áudio",
+            MarkerKind::Command => "Marcador de comando",
+        }
+    }
+
+    pub fn short_prefix(self) -> &'static str {
+        match self {
+            MarkerKind::Standard => "",
+            MarkerKind::CdTrack => "CD",
+            MarkerKind::CdIndex => "IDX",
+            MarkerKind::Command => "CMD",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Marker {
     pub id: Id,
     pub t: Ticks,
     pub label: String,
+    pub kind: MarkerKind,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub command_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub command_arg: String,
+}
+
+impl Marker {
+    pub fn new(t: Ticks, kind: MarkerKind, label: impl Into<String>) -> Self {
+        Self {
+            id: new_id(),
+            t,
+            label: label.into(),
+            kind,
+            command_type: String::new(),
+            command_arg: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -235,6 +235,11 @@ pub struct TimelineState {
     /// Área das faixas e posição de cada trilha no último quadro.
     pub(crate) last_lanes: Rect,
     pub(crate) last_rows: Vec<(f32, f32)>,
+    /// Largura atual e anterior do painel esquerdo de cabeçalhos de trilha (p. 69).
+    pub header_w: f32,
+    pub header_prev_w: f32,
+    /// Valor fixado em automação *Latch* enquanto a reprodução continua.
+    latch_hold: Option<(usize, EnvKind, f32)>,
 }
 
 impl Default for TimelineState {
@@ -253,6 +258,9 @@ impl Default for TimelineState {
             box_cur: None,
             last_lanes: Rect::NOTHING,
             last_rows: Vec::new(),
+            header_w: HEADER_W,
+            header_prev_w: HEADER_W,
+            latch_hold: None,
         }
     }
 }
@@ -264,6 +272,27 @@ impl TimelineState {
     /// Zoom máximo (aproximado): cerca de 4 ticks por pixel, onde o tempo
     /// exato ainda separa cada pixel; bem além de uma amostra por pixel.
     pub const MAX_PX_PER_SEC: f32 = (neoveg_engine::time::TICKS_PER_SEC / 4) as f32;
+
+    pub const MIN_HEADER_W: f32 = 48.0;
+    pub const COLLAPSED_HEADER_W: f32 = 72.0;
+    pub const MAX_HEADER_W: f32 = 420.0;
+
+    /// Ajusta a largura dos cabeçalhos de trilha dentro dos limites seguros (§0.4).
+    pub fn set_header_w(&mut self, w: f32) {
+        if w.is_finite() {
+            self.header_w = w.clamp(Self::MIN_HEADER_W, Self::MAX_HEADER_W);
+        }
+    }
+
+    /// Duplo clique na borda do cabeçalho alterna entre largura recolhida e expandida (p. 69).
+    pub fn toggle_header_collapse(&mut self) {
+        if self.header_w <= 104.0 {
+            self.header_w = self.header_prev_w.clamp(180.0, Self::MAX_HEADER_W);
+        } else {
+            self.header_prev_w = self.header_w;
+            self.header_w = Self::COLLAPSED_HEADER_W;
+        }
+    }
 
     /// Zoom dentro dos limites; valor inválido (NaN, infinito, <= 0) volta ao
     /// padrão (§0.4).
@@ -378,6 +407,28 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
         s = s.saturating_mul(2);
     }
     (s, s.div_i64(6).max(f1))
+}
+
+fn effective_grid_step(
+    grid: neoveg_engine::session::RulerGridSpacing,
+    pps: f32,
+    settings: &ProjectSettings,
+    width_px: f32,
+) -> (Ticks, Ticks) {
+    if let Some(mut step) = grid.step_ticks(settings) {
+        let view_secs = (f64::from(width_px.max(200.0))
+            / f64::from(pps.max(TimelineState::MIN_PX_PER_SEC)))
+        .min(neoveg_engine::time::MAX_SECONDS as f64);
+        let max_marks = f64::from(MAX_RULER_MARKS / 2);
+        while view_secs / step.as_secs_f64().max(1e-6) > max_marks {
+            step = step.saturating_mul(2);
+            if step >= Ticks::MAX.div_i64(2) {
+                break;
+            }
+        }
+        return (step, step);
+    }
+    nice_step(pps, settings.fps)
 }
 
 const BUS_TRACK_H: f32 = 58.0;
@@ -612,6 +663,19 @@ impl App {
                     }
                 }
             }
+            if self.opts.snap_to_grid {
+                let (_, gminor) = effective_grid_step(
+                    self.opts.ruler_grid,
+                    self.tl.px_per_sec,
+                    &self.project.settings,
+                    self.tl.width,
+                );
+                let gstep = gminor.0.max(1);
+                let g0 = (t.0 / gstep).saturating_mul(gstep);
+                let g1 = g0.saturating_add(gstep);
+                consider(Ticks::from_raw(g0));
+                consider(Ticks::from_raw(g1));
+            }
             if let Some((_, c)) = best {
                 self.tl.snap_line = Some(c);
                 return c;
@@ -626,8 +690,11 @@ impl App {
     pub fn timeline_ui(&mut self, ui: &mut egui::Ui) {
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
-        let left = full.left() + HEADER_W;
-        let show_h_col = full.width() > HEADER_W + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
+        let max_hdr =
+            (full.width() - 96.0).clamp(TimelineState::MIN_HEADER_W, TimelineState::MAX_HEADER_W);
+        let hdr_w = self.tl.header_w.clamp(TimelineState::MIN_HEADER_W, max_hdr);
+        let left = full.left() + hdr_w;
+        let show_h_col = full.width() > hdr_w + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
         let show_footer = full.height() > TOP_H + BOTTOM_BARS_H + 40.0;
         let bottom_h = if show_footer { BOTTOM_BARS_H } else { 0.0 };
         let show_v_col = show_h_col && full.height() > TOP_H + bottom_h + 60.0;
@@ -696,6 +763,63 @@ impl App {
         self.draw_keyframe_rows(ui, lanes, &rows);
         self.headers_ui(ui, headers, &rows);
         self.draw_keyframe_labels(ui, headers, &rows);
+
+        // Divisor interativo da largura dos cabeçalhos de trilha (p. 69):
+        // arrastar oculta progressivamente botões; duplo clique alterna largura.
+        let edge_r = Rect::from_min_max(
+            pos2(left - 3.0, full.top()),
+            pos2(left + 3.0, lanes.bottom()),
+        );
+        let edge_resp = ui.interact(
+            edge_r,
+            ui.id().with("tl_header_edge"),
+            Sense::click_and_drag(),
+        );
+        edge_resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                "Divisor de largura dos cabeçalhos",
+            )
+        });
+        if edge_resp.hovered() || edge_resp.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            ui.painter().line_segment(
+                [pos2(left, full.top()), pos2(left, lanes.bottom())],
+                Stroke::new(2.0_f32, self.theme.accent),
+            );
+        }
+        if edge_resp.dragged() {
+            let dx = edge_resp.drag_delta().x;
+            self.tl.set_header_w(self.tl.header_w + dx);
+        }
+        if edge_resp.double_clicked() {
+            self.tl.toggle_header_collapse();
+        }
+        edge_resp.on_hover_text(
+            "Arraste para redimensionar os cabeçalhos (duplo clique para recolher/expandir)",
+        );
+
+        // Automação Latch: sustenta o último valor gravado durante a reprodução.
+        if self.is_playing() {
+            if let Some((lti, lkind, lval)) = self.tl.latch_hold {
+                let is_latch = self
+                    .project
+                    .tracks
+                    .get(lti)
+                    .is_some_and(|t| t.automation_mode == AutomationMode::Latch);
+                if is_latch {
+                    let pt = self.play_pos();
+                    let tol = self.project.settings.frame_dur().div_i64(2);
+                    self.session
+                        .record_automation_point(lti, lkind, pt, lval, tol);
+                } else {
+                    self.tl.latch_hold = None;
+                }
+            }
+        } else {
+            self.tl.latch_hold = None;
+        }
 
         if show_v_col {
             let v_col = Rect::from_min_max(
@@ -1370,7 +1494,6 @@ impl App {
         painter.rect_filled(marker_r, 0.0, self.theme.tl_marker_bar);
         painter.rect_filled(ruler_r, 0.0, self.theme.tl_ruler_bg);
         let left = r.left();
-        let fps = self.project.settings.fps;
 
         // região de loop
         if let Some((a, b)) = self.project.loop_region {
@@ -1409,7 +1532,12 @@ impl App {
                 self.theme.accent,
             );
         }
-        let (major, minor) = nice_step(self.tl.px_per_sec, fps);
+        let (major, minor) = effective_grid_step(
+            self.opts.ruler_grid,
+            self.tl.px_per_sec,
+            &self.project.settings,
+            r.width(),
+        );
         let step = minor.0.max(1);
         let maj = major.0.max(step);
         let half_minor = step / 4;
@@ -1479,25 +1607,47 @@ impl App {
         }
         let mut sorted: Vec<&Marker> = self.project.markers.iter().collect();
         sorted.sort_by_key(|a| a.t);
-        for (i, m) in sorted.iter().enumerate() {
+        let mut std_n = 0usize;
+        let mut cd_tr_n = 0usize;
+        let mut cd_ix_n = 0usize;
+        for m in &sorted {
             let x = self.tl.t2x(m.t, left);
-            let col = self.theme.tl_region;
+            let (col, badge, tag_w) = match m.kind {
+                MarkerKind::Standard => {
+                    std_n += 1;
+                    (self.theme.tl_region, format!("{}", std_n % 10), 14.0)
+                }
+                MarkerKind::CdTrack => {
+                    cd_tr_n += 1;
+                    (Color32::from_rgb(56, 152, 226), format!("T{cd_tr_n}"), 22.0)
+                }
+                MarkerKind::CdIndex => {
+                    cd_ix_n += 1;
+                    (Color32::from_rgb(76, 176, 108), format!("I{cd_ix_n}"), 20.0)
+                }
+                MarkerKind::Command => (Color32::from_rgb(168, 92, 212), "CMD".to_string(), 28.0),
+            };
             painter.rect_filled(
-                Rect::from_min_size(pos2(x, marker_r.top()), vec2(14.0, MARKER_H - 2.0)),
+                Rect::from_min_size(pos2(x, marker_r.top()), vec2(tag_w, MARKER_H - 2.0)),
                 1.0,
                 col,
             );
             painter.text(
-                pos2(x + 3.0, marker_r.top() + 2.0),
+                pos2(x + 2.0, marker_r.top() + 2.0),
                 Align2::LEFT_TOP,
-                format!("{}", (i + 1) % 10),
-                FontId::proportional(11.0),
+                badge,
+                FontId::proportional(10.0),
                 crate::theme::contrast_on(col),
             );
+            let display_lbl = if m.kind == MarkerKind::Command && !m.command_type.is_empty() {
+                format!("{} [{}]", m.label, m.command_type)
+            } else {
+                m.label.clone()
+            };
             painter.text(
-                pos2(x + 17.0, marker_r.top() + 2.0),
+                pos2(x + tag_w + 3.0, marker_r.top() + 2.0),
                 Align2::LEFT_TOP,
-                &m.label,
+                display_lbl,
                 FontId::proportional(11.0),
                 self.theme.tl_region_band,
             );
@@ -1681,6 +1831,25 @@ impl App {
         }
         resp.context_menu(|ui| match self.tl.ctx_target.clone() {
             CtxTarget::Marker(id) => {
+                ui.menu_button("Tipo de marcador", |ui| {
+                    let cur_kind = self
+                        .project
+                        .markers
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.kind)
+                        .unwrap_or_default();
+                    for k in MarkerKind::ALL {
+                        if ui.radio(cur_kind == k, k.label()).clicked() {
+                            self.checkpoint();
+                            if let Some(m) = self.project.markers.iter_mut().find(|m| m.id == id) {
+                                m.kind = k;
+                            }
+                            self.changed();
+                            ui.close_menu();
+                        }
+                    }
+                });
                 if ui.button("Renomear marcador").clicked() {
                     let label = self
                         .project
@@ -1753,10 +1922,39 @@ impl App {
                     self.insert_marker();
                     ui.close_menu();
                 }
+                if ui.button("Inserir marcador de faixa de CD (N)").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "insert.marker_cd_track");
+                    ui.close_menu();
+                }
+                if ui.button("Inserir marcador de índice de CD").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "insert.marker_cd_index");
+                    ui.close_menu();
+                }
+                if ui.button("Inserir marcador de comando...").clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "insert.marker_command");
+                    ui.close_menu();
+                }
                 if ui.button("Inserir região da seleção (R)").clicked() {
                     self.insert_region();
                     ui.close_menu();
                 }
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.opts.snap_to_grid, "Encaixar na grade (Ctrl+F8)")
+                    .clicked()
+                {
+                    ui.close_menu();
+                }
+                ui.menu_button("Grade da régua", |ui| {
+                    for g in neoveg_engine::session::RulerGridSpacing::ALL {
+                        if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
+                            self.opts.ruler_grid = g;
+                            self.set_status(format!("Grade da régua: {}", g.label()));
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.separator();
                 if ui.button("Limpar região de loop").clicked() {
                     self.project.loop_region = None;
                     self.time_sel = None;
@@ -1821,13 +2019,25 @@ impl App {
                 self.tl.scroll_y = (self.tl.scroll_y - d).max(0.0);
             }
         }
+        let hdr_w = area.width().max(TimelineState::MIN_HEADER_W);
+        let show_name = hdr_w >= 100.0;
+        let show_btns = hdr_w >= 155.0;
+        let show_sliders = hdr_w >= 170.0;
+        let show_auto_badge = hdr_w >= 210.0;
+        let playing_now = self.is_playing();
+        let play_t_now = if playing_now {
+            self.play_pos()
+        } else {
+            Ticks::ZERO
+        };
+        let auto_tol = self.project.settings.frame_dur().div_i64(2);
         let n = self.project.tracks.len();
         for ti in 0..n {
             let (y0, h) = rows.track_rects[ti];
             if h <= 0.0 {
                 continue;
             }
-            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(hdr_w, h));
             if r.bottom() < area.top() || r.top() > area.bottom() {
                 continue;
             }
@@ -1906,9 +2116,9 @@ impl App {
                 // todos os botões do cabeçalho, inclusive os ocultos. O manual
                 // o põe acima do número; aqui fica ao lado, para não aumentar
                 // a altura do cabeçalho.
-                let (cur_mute, cur_solo) = {
+                let (cur_mute, cur_solo, cur_auto) = {
                     let t = &self.project.tracks[ti];
-                    (t.mute, t.solo)
+                    (t.mute, t.solo, t.automation_mode)
                 };
                 let adj = self.project.tracks[ti].is_adjustment();
                 ui.menu_button(egui::RichText::new("…").small(), |ui| {
@@ -1930,6 +2140,16 @@ impl App {
                     {
                         more = Some(HeaderAction::TrackMotion);
                         ui.close_menu();
+                    }
+                    if !is_folder {
+                        ui.menu_button(format!("Automação ({})", cur_auto.short_label()), |ui| {
+                            for m in AutomationMode::ALL {
+                                if ui.radio(cur_auto == m, m.label()).clicked() {
+                                    more = Some(HeaderAction::SetAutomation(m));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                     }
                     ui.separator();
                     if ui.button("Editar conjunto de botões visíveis...").clicked() {
@@ -2036,18 +2256,19 @@ impl App {
                         .on_hover_text("Filha vinculada à trilha/pasta pai");
                 }
                 let t = &mut self.project.tracks[ti];
-                let r = ui.add(
-                    // 56 px: o botão Mais ocupa o resto da largura fixa do
-                    // cabeçalho, e com 78 px o último ícone (Track Motion)
-                    // ficava cortado
-                    egui::TextEdit::singleline(&mut t.name)
-                        .desired_width(56.0)
-                        .font(egui::TextStyle::Small),
-                );
-                if r.changed() {
-                    changed_track = true;
+                if show_name {
+                    let name_w = (hdr_w - 194.0).clamp(40.0, 72.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut t.name)
+                            .desired_width(name_w)
+                            .font(egui::TextStyle::Small),
+                    );
+                    if r.changed() {
+                        changed_track = true;
+                    }
                 }
-                if btns.mute
+                if show_btns
+                    && btns.mute
                     && ui
                         .selectable_label(t.mute, "M")
                         .on_hover_text("Mudo (Z)")
@@ -2055,7 +2276,8 @@ impl App {
                 {
                     more = Some(HeaderAction::Mute);
                 }
-                if btns.solo
+                if show_btns
+                    && btns.solo
                     && !is_folder
                     && ui
                         .selectable_label(t.solo, "S")
@@ -2065,7 +2287,8 @@ impl App {
                     more = Some(HeaderAction::Solo);
                 }
                 let fxlabel = if t.fx.is_empty() { "fx" } else { "FX" };
-                if btns.fx
+                if show_btns
+                    && btns.fx
                     && !is_folder
                     && ui
                         .small_button(fxlabel)
@@ -2074,7 +2297,29 @@ impl App {
                 {
                     more = Some(HeaderAction::Fx);
                 }
-                if kind == TrackKind::Video
+                if show_auto_badge && !is_folder {
+                    let auto_mode = t.automation_mode;
+                    let badge_txt = if auto_mode.is_write() {
+                        egui::RichText::new(auto_mode.short_label())
+                            .small()
+                            .strong()
+                            .color(self.theme.offline_fg)
+                    } else {
+                        egui::RichText::new(auto_mode.short_label()).small()
+                    };
+                    if ui
+                        .selectable_label(auto_mode.is_write(), badge_txt)
+                        .on_hover_text(format!(
+                            "{} — clique para alternar (Off / Read / Touch / Latch)",
+                            auto_mode.label()
+                        ))
+                        .clicked()
+                    {
+                        more = Some(HeaderAction::CycleAutomation);
+                    }
+                }
+                if show_btns
+                    && kind == TrackKind::Video
                     && btns.track_motion
                     && !is_adjustment
                     && !is_folder
@@ -2084,7 +2329,7 @@ impl App {
                 {
                     self.dlg.track_motion = Some(tid);
                 }
-                if kind == TrackKind::Audio && !is_folder {
+                if show_btns && kind == TrackKind::Audio && !is_folder {
                     let (rec_armed, rec_locked) = {
                         let tk = &self.project.tracks[ti];
                         (tk.record_armed, tk.locked)
@@ -2142,14 +2387,25 @@ impl App {
                 }
                 Some(HeaderAction::Fx) => self.dlg.fx_target = Some(FxTarget::Track(tid)),
                 Some(HeaderAction::TrackMotion) => self.dlg.track_motion = Some(tid),
+                Some(HeaderAction::SetAutomation(mode)) => {
+                    self.session.set_track_automation_mode(ti, mode);
+                    self.sync_status_from_session();
+                }
+                Some(HeaderAction::CycleAutomation) => {
+                    self.session.cycle_track_automation_mode(ti);
+                    self.sync_status_from_session();
+                }
                 Some(HeaderAction::EditButtons) => {
                     self.dlg.header_buttons = Some((is_video, btns));
                 }
                 None => {}
             }
-            if h >= 50.0 {
+            let mut auto_record: Option<(EnvKind, f32)> = None;
+            let mut auto_released = false;
+            if h >= 50.0 && show_sliders {
                 child.horizontal(|ui| {
                     let t = &mut self.project.tracks[ti];
+                    let am = t.automation_mode;
                     if kind == TrackKind::Audio {
                         ui.label(egui::RichText::new("Vol").small());
                         let r = ui.add(
@@ -2164,6 +2420,15 @@ impl App {
                         }
                         if r.double_clicked() {
                             t.volume_db = 0.0;
+                        }
+                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                            auto_record = Some((
+                                EnvKind::Volume,
+                                crate::model::db_to_lin(t.volume_db).clamp(0.0, 2.0),
+                            ));
+                        }
+                        if r.drag_stopped() {
+                            auto_released = true;
                         }
                         changed_track |= r.changed() || r.double_clicked();
                     } else {
@@ -2182,13 +2447,20 @@ impl App {
                             t.opacity = pct / 100.0;
                             changed_track = true;
                         }
+                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                            auto_record = Some((EnvKind::Opacity, t.opacity.clamp(0.0, 1.0)));
+                        }
+                        if r.drag_stopped() {
+                            auto_released = true;
+                        }
                     }
                 });
             }
-            if h >= 72.0 {
+            if h >= 72.0 && show_sliders {
                 child.horizontal(|ui| {
                     if kind == TrackKind::Audio {
                         let t = &mut self.project.tracks[ti];
+                        let am = t.automation_mode;
                         ui.label(egui::RichText::new("Pan").small());
                         let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
                         if r.drag_started() {
@@ -2196,6 +2468,12 @@ impl App {
                         }
                         if r.double_clicked() {
                             t.pan = 0.0;
+                        }
+                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                            auto_record = Some((EnvKind::Pan, t.pan.clamp(-1.0, 1.0)));
+                        }
+                        if r.drag_stopped() {
+                            auto_released = true;
                         }
                         changed_track |= r.changed() || r.double_clicked();
                         ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
@@ -2268,6 +2546,18 @@ impl App {
             if changed_track {
                 self.changed();
             }
+            if let Some((ekind, eval)) = auto_record {
+                let am = self.project.tracks[ti].automation_mode;
+                self.session
+                    .record_automation_point(ti, ekind, play_t_now, eval, auto_tol);
+                if am == AutomationMode::Latch {
+                    self.tl.latch_hold = Some((ti, ekind, eval));
+                }
+            } else if auto_released
+                && self.project.tracks[ti].automation_mode == AutomationMode::Touch
+            {
+                self.tl.latch_hold = None;
+            }
             // medidor de nível (áudio / entrada armada durante gravação)
             if kind == TrackKind::Audio {
                 let rec_lv = if self.project.tracks[ti].record_armed {
@@ -2319,7 +2609,7 @@ impl App {
                 break;
             }
             let (y0, h) = rows.bus_rects[bi];
-            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(HEADER_W, h));
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(hdr_w, h));
             if r.bottom() < area.top() || r.top() > area.bottom() {
                 continue;
             }
@@ -2539,6 +2829,18 @@ impl App {
                     if ui.selectable_label(cur_mask == m, m.label()).clicked() {
                         self.session.set_track_mask_mode(ti, m);
                         self.sync_after_session();
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        if !is_folder {
+            ui.menu_button("Modo de automação", |ui| {
+                let cur_auto = self.project.tracks[ti].automation_mode;
+                for m in AutomationMode::ALL {
+                    if ui.radio(cur_auto == m, m.label()).clicked() {
+                        self.session.set_track_automation_mode(ti, m);
+                        self.sync_status_from_session();
                         ui.close_menu();
                     }
                 }
@@ -4355,7 +4657,12 @@ impl App {
         let pps = self.tl.px_per_sec;
         let ctx = ui.ctx().clone();
         // grade
-        let (major, _) = nice_step(pps, self.project.settings.fps);
+        let (major, _) = effective_grid_step(
+            self.opts.ruler_grid,
+            pps,
+            &self.project.settings,
+            lanes.width(),
+        );
         let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
         let mut idx = self.tl.scroll_x.0 / step;
@@ -5093,6 +5400,34 @@ mod zoom_tests {
         let px = (longe - tl.scroll_x).as_secs_f64() * f64::from(tl.px_per_sec);
         assert!((px - 500.0).abs() < 1.0, "agulha em {px} px");
     }
+
+    #[test]
+    fn largura_cabecalho_e_grade_personalizada_protegem_limites_e_teto_de_marcas() {
+        let mut tl = TimelineState::default();
+        tl.set_header_w(f32::NAN);
+        assert_eq!(tl.header_w, HEADER_W);
+        tl.set_header_w(1.0);
+        assert_eq!(tl.header_w, TimelineState::MIN_HEADER_W);
+        tl.set_header_w(9999.0);
+        assert_eq!(tl.header_w, TimelineState::MAX_HEADER_W);
+        tl.set_header_w(260.0);
+        tl.toggle_header_collapse();
+        assert_eq!(tl.header_w, TimelineState::COLLAPSED_HEADER_W);
+        tl.toggle_header_collapse();
+        assert!((tl.header_w - 260.0).abs() < 0.01);
+
+        let settings = ProjectSettings::default();
+        for g in neoveg_engine::session::RulerGridSpacing::ALL {
+            for pps in [TimelineState::MIN_PX_PER_SEC, 0.5, 60.0, 5000.0] {
+                let (maj, min) = effective_grid_step(g, pps, &settings, 2000.0);
+                assert!(min.0 > 0 && maj >= min);
+                let view_secs =
+                    (2000.0 / f64::from(pps)).min(neoveg_engine::time::MAX_SECONDS as f64);
+                let marks = view_secs / min.as_secs_f64();
+                assert!(marks <= f64::from(MAX_RULER_MARKS), "{g:?} {pps}: {marks}");
+            }
+        }
+    }
 }
 
 /// Ação pedida por um botão do cabeçalho de faixa ou pelo menu do botão Mais.
@@ -5102,5 +5437,7 @@ enum HeaderAction {
     Solo,
     Fx,
     TrackMotion,
+    SetAutomation(AutomationMode),
+    CycleAutomation,
     EditButtons,
 }
