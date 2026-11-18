@@ -1415,6 +1415,42 @@ fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
     assert!(cmds.contains(&egui::ViewportCommand::Resizable(true)));
 }
 
+/// Exibir > Escala da interface: o comando muda a preferência e o quadro
+/// seguinte aplica o fator no egui; os limites seguram cliques repetidos.
+#[test]
+fn escala_da_interface_pelo_menu_aplica_no_proximo_quadro() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.prefs.ui_scale_pct = 100;
+    let raw = |t: f64| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        time: Some(t),
+        ..Default::default()
+    };
+    app.exec_cmd(Some(&ctx), "view.ui_scale_up");
+    assert_eq!(app.prefs.ui_scale_pct, 110);
+    // o egui aplica o zoom novo no começo do quadro seguinte
+    let _ = ctx.run(raw(0.0), |c| app.frame_ui(c));
+    let _ = ctx.run(raw(0.05), |c| app.frame_ui(c));
+    assert!((ctx.zoom_factor() - 1.1).abs() < 0.001);
+
+    for _ in 0..40 {
+        app.exec_cmd(Some(&ctx), "view.ui_scale_down");
+    }
+    assert_eq!(app.prefs.ui_scale_pct, neoveg_common::prefs::UI_SCALE_MIN);
+    app.exec_cmd(Some(&ctx), "view.ui_scale_reset");
+    assert_eq!(app.prefs.ui_scale_pct, 100);
+    let _ = ctx.run(raw(0.1), |c| app.frame_ui(c));
+    let _ = ctx.run(raw(0.15), |c| app.frame_ui(c));
+    assert!((ctx.zoom_factor() - 1.0).abs() < 0.001);
+}
+
 /// Prévia de Vídeo (manual do VEGAS Pro 21, p. 197-209): zoom em passos de
 /// 5%, Ignorar zoom alterna e volta, e o isolamento de canal só vale com as
 /// Sobreposições ligadas (e muda a imagem enviada à textura).

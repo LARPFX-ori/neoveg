@@ -525,6 +525,8 @@ pub enum UiAction {
     PreviewZoomStep(i32),
     /// Alterna entre o zoom atual e o zoom de ajuste (*Bypass Zoom*).
     PreviewZoomBypass,
+    /// Escala da interface: `Some(n)` muda `n` passos, `None` volta a 100%.
+    UiScale(Option<i32>),
     PreviewToggleExternalMonitor,
     InsertNestedTimelineDialog,
     RenderToNewTrack,
@@ -2208,6 +2210,33 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PreviewRamClear, h),
+    },
+    CommandDef {
+        id: "view.ui_scale_up",
+        label: "Aumentar a escala da interface",
+        menu_path: "Exibir/Escala da interface/Aumentar",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::UiScale(Some(1)), h),
+    },
+    CommandDef {
+        id: "view.ui_scale_down",
+        label: "Diminuir a escala da interface",
+        menu_path: "Exibir/Escala da interface/Diminuir",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::UiScale(Some(-1)), h),
+    },
+    CommandDef {
+        id: "view.ui_scale_reset",
+        label: "Escala da interface em 100%",
+        menu_path: "Exibir/Escala da interface/100%",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::UiScale(None), h),
     },
     CommandDef {
         id: "preview.zoom_fit",

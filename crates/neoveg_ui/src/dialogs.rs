@@ -5791,6 +5791,22 @@ fn prefs_general(
             &mut draft.show_splash,
             tr(lang, "Exibir tela de abertura (Splash) ao iniciar"),
         );
+        ui.horizontal(|ui| {
+            ui.label(tr(lang, "Escala da interface:"));
+            ui.add(
+                egui::DragValue::new(&mut draft.ui_scale_pct)
+                    .range(neoveg_common::prefs::UI_SCALE_MIN..=neoveg_common::prefs::UI_SCALE_MAX)
+                    .speed(1.0)
+                    .suffix(" %"),
+            )
+            .on_hover_text(tr(
+                lang,
+                "Aumenta ou diminui textos, botões e painéis (também em Exibir > Escala da interface)",
+            ));
+            if ui.small_button("100%").clicked() {
+                draft.ui_scale_pct = 100;
+            }
+        });
         ui.checkbox(
             &mut draft.system_ui_font,
             tr(
