@@ -119,6 +119,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Efeitos, cor e legendas
 
+- **Miniaturas na janela Transições** (cada transição entre dois quadros de amostra no meio do progresso, animando de 0 a 100% ao passar o mouse) e **prévia dos efeitos OFX de terceiros** na categoria *Terceiros* de Efeitos de Vídeo, renderizada no host isolado sob demanda, uma de cada vez, com "sem prévia" quando o plug-in falha (`fx_preview.rs`, `fx_browser.rs`).
 - **Pacotes e cadeias de efeitos salvos** para reutilizar (salvar/carregar/exportar `.neovegfxchain`, p. 514) implementado.
 - **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56) implementados.
 - **Rastreamento de movimento** planar quadro a quadro para *Pan/Crop* ou *Track Motion* (`tools.motion_track`, p. 713) implementado.
