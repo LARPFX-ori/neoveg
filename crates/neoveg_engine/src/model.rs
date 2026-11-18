@@ -1075,6 +1075,13 @@ fn sanitize_fx(f: &mut FxInstance) {
     } else {
         f.vst3 = None;
     }
+    if let Some(cg) = f.color_grade.as_mut() {
+        if f.kind == FxKind::ColorCorrector {
+            cg.sanitize();
+        } else {
+            f.color_grade = None;
+        }
+    }
     let specs = f.kind.params();
     f.params.truncate(specs.len());
     while f.params.len() < specs.len() {
@@ -2833,6 +2840,51 @@ impl FxKind {
         self == FxKind::Vst3 || Self::AUDIO.contains(&self)
     }
 
+    pub fn id(self) -> &'static str {
+        match self {
+            FxKind::BrightnessContrast => "BrightnessContrast",
+            FxKind::HslAdjust => "HslAdjust",
+            FxKind::ColorCorrector => "ColorCorrector",
+            FxKind::Levels => "Levels",
+            FxKind::BlackWhite => "BlackWhite",
+            FxKind::Sepia => "Sepia",
+            FxKind::Invert => "Invert",
+            FxKind::GaussianBlur => "GaussianBlur",
+            FxKind::Sharpen => "Sharpen",
+            FxKind::Vignette => "Vignette",
+            FxKind::ChromaKeyer => "ChromaKeyer",
+            FxKind::Pixelate => "Pixelate",
+            FxKind::Mirror => "Mirror",
+            FxKind::Glow => "Glow",
+            FxKind::FilmGrain => "FilmGrain",
+            FxKind::Emboss => "Emboss",
+            FxKind::Posterize => "Posterize",
+            FxKind::Colorize => "Colorize",
+            FxKind::Stabilization => "Stabilization",
+            FxKind::Gain => "Gain",
+            FxKind::ParametricEq => "ParametricEq",
+            FxKind::HighPass => "HighPass",
+            FxKind::LowPass => "LowPass",
+            FxKind::Compressor => "Compressor",
+            FxKind::NoiseGate => "NoiseGate",
+            FxKind::Delay => "Delay",
+            FxKind::Reverb => "Reverb",
+            FxKind::Chorus => "Chorus",
+            FxKind::Distortion => "Distortion",
+            FxKind::Limiter => "Limiter",
+            FxKind::Ofx => "Ofx",
+            FxKind::Vst3 => "Vst3",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        Self::VIDEO
+            .into_iter()
+            .chain(Self::AUDIO)
+            .find(|&k| k.id() == trimmed)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             FxKind::BrightnessContrast => "Brilho e Contraste",
@@ -3107,6 +3159,127 @@ impl AnimParam {
     }
 }
 
+/// Curvas RGB, bandas HSL e LUT (.cube ou predefinida) para Color Grading (pp. 769–781).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorGradeCurves {
+    /// Caminho para arquivo `.cube` externo ou `"builtin:<nome>"` (`"builtin:rec709"`, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lut_path: Option<String>,
+    /// Intensidade de mistura da LUT (`0.0..=1.0`).
+    pub lut_strength: f32,
+    /// Curva Master (luminância), pontos `(x, y)` em `[0..1]`. Vazio = identidade.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub master: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub green: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blue: Vec<[f32; 2]>,
+    /// 6 setores HSL (Vermelho, Amarelo, Verde, Ciano, Azul, Magenta): `[matiz (-0.5..0.5), sat (-1..1), lum (-1..1)]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hsl_bands: Vec<[f32; 3]>,
+}
+
+impl Default for ColorGradeCurves {
+    fn default() -> Self {
+        Self {
+            lut_path: None,
+            lut_strength: 1.0,
+            master: Vec::new(),
+            red: Vec::new(),
+            green: Vec::new(),
+            blue: Vec::new(),
+            hsl_bands: Vec::new(),
+        }
+    }
+}
+
+impl ColorGradeCurves {
+    pub const BUILTIN_LUTS: [(&'static str, &'static str); 4] = [
+        ("builtin:rec709", "Câmera: Log -> Rec.709"),
+        ("builtin:teal_orange", "Look: Cinema Teal & Orange"),
+        ("builtin:film_cool", "Look: Película Fria"),
+        ("builtin:mono_film", "Look: P&B Contraste Fílmico"),
+    ];
+
+    pub const HSL_BAND_NAMES: [&'static str; 6] =
+        ["Vermelho", "Amarelo", "Verde", "Ciano", "Azul", "Magenta"];
+
+    pub fn default_curve() -> Vec<[f32; 2]> {
+        vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]
+    }
+
+    pub fn default_hsl_bands() -> Vec<[f32; 3]> {
+        vec![[0.0, 0.0, 0.0]; 6]
+    }
+
+    pub fn sanitize(&mut self) {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        self.lut_strength = fin(self.lut_strength, 1.0).clamp(0.0, 1.0);
+        if self
+            .lut_path
+            .as_ref()
+            .is_some_and(|p| p.trim().is_empty() || p.len() > 1024 || p.contains('\0'))
+        {
+            self.lut_path = None;
+        }
+        let clean_curve = |pts: &mut Vec<[f32; 2]>| {
+            pts.truncate(32);
+            for pt in pts.iter_mut() {
+                pt[0] = fin(pt[0], 0.0).clamp(0.0, 1.0);
+                pt[1] = fin(pt[1], 0.0).clamp(0.0, 1.0);
+            }
+            pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        };
+        clean_curve(&mut self.master);
+        clean_curve(&mut self.red);
+        clean_curve(&mut self.green);
+        clean_curve(&mut self.blue);
+        self.hsl_bands.truncate(6);
+        for b in &mut self.hsl_bands {
+            b[0] = fin(b[0], 0.0).clamp(-0.5, 0.5);
+            b[1] = fin(b[1], 0.0).clamp(-1.0, 1.0);
+            b[2] = fin(b[2], 0.0).clamp(-1.0, 1.0);
+        }
+    }
+
+    /// Avalia uma curva linear por partes em `x in [0..1]`; curva vazia devolve `x`.
+    pub fn eval_curve(pts: &[[f32; 2]], x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        if pts.is_empty() {
+            return x;
+        }
+        if pts.len() == 1 {
+            return pts[0][1].clamp(0.0, 1.0);
+        }
+        if x <= pts[0][0] {
+            return pts[0][1].clamp(0.0, 1.0);
+        }
+        for w in pts.windows(2) {
+            if x <= w[1][0] {
+                let span = (w[1][0] - w[0][0]).max(1e-5);
+                let t = ((x - w[0][0]) / span).clamp(0.0, 1.0);
+                return (w[0][1] + (w[1][1] - w[0][1]) * t).clamp(0.0, 1.0);
+            }
+        }
+        pts.last().map(|p| p[1].clamp(0.0, 1.0)).unwrap_or(x)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.lut_path.is_none()
+            && self.master.is_empty()
+            && self.red.is_empty()
+            && self.green.is_empty()
+            && self.blue.is_empty()
+            && self
+                .hsl_bands
+                .iter()
+                .all(|b| b[0].abs() < 1e-4 && b[1].abs() < 1e-4 && b[2].abs() < 1e-4)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FxInstance {
     pub id: Id,
@@ -3120,6 +3293,9 @@ pub struct FxInstance {
     /// Só em `FxKind::Vst3`: o plug-in VST3 e os valores dos parâmetros dele.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vst3: Option<Vst3FxRef>,
+    /// Curvas RGB/HSL e LUT (.cube) para `FxKind::ColorCorrector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_grade: Option<Box<ColorGradeCurves>>,
 }
 
 impl FxInstance {
@@ -3138,6 +3314,7 @@ impl FxInstance {
                 .collect(),
             ofx: None,
             vst3: None,
+            color_grade: None,
         }
     }
 

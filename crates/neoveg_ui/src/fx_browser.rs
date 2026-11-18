@@ -6,8 +6,8 @@
 
 use crate::app::{App, DndPayload};
 use eframe::egui;
-use neoveg_engine::engine::fx_preview::{render_preview, THUMB_H, THUMB_W};
-use neoveg_engine::model::{FxCategory, FxInstance, FxKind};
+use neoveg_engine::engine::fx_preview::{render_preview, render_preview_at, THUMB_H, THUMB_W};
+use neoveg_engine::model::{FrameRate, FxCategory, FxInstance, FxKind, Ticks};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -39,22 +39,51 @@ pub(crate) fn category_row<C: Copy + PartialEq>(
     });
 }
 
+struct FxHoverAnim {
+    kind: FxKind,
+    preset_idx: usize,
+    tex: egui::TextureHandle,
+    started: std::time::Instant,
+    bucket: u64,
+}
+
 /// Estado da janela Efeitos de Vídeo.
 #[derive(Default)]
 pub(crate) struct FxBrowser {
     pub(crate) cat: BrowserCat<FxCategory>,
     pub(crate) search: String,
     pub(crate) selected: Option<FxKind>,
+    pub(crate) selected_preset: Option<usize>,
     /// Miniaturas já carregadas (uma textura por efeito, criada uma vez).
     thumbs: HashMap<FxKind, egui::TextureHandle>,
+    user_thumbs: HashMap<(String, String), egui::TextureHandle>,
+    hover_anim: Option<FxHoverAnim>,
     rx: Option<Receiver<(FxKind, egui::ColorImage)>>,
     started: bool,
 }
 
-/// Presets de um efeito. Por enquanto um por efeito, com os valores padrão;
-/// a lista deixa espaço para presets próprios do Neoveg depois.
+/// Presets de um efeito (padrão + presets salvos pelo usuário nas Preferências).
 pub(crate) fn presets(k: FxKind) -> Vec<(&'static str, FxInstance)> {
     vec![("Padrão", FxInstance::new(k))]
+}
+
+fn combined_presets(
+    k: FxKind,
+    user: &[neoveg_common::prefs::UserFxPresetPref],
+) -> Vec<(String, FxInstance, bool)> {
+    let mut out: Vec<(String, FxInstance, bool)> = presets(k)
+        .into_iter()
+        .map(|(n, fx)| (n.to_string(), fx, false))
+        .collect();
+    let kind_id = k.id();
+    for p in user {
+        if p.fx_kind == kind_id {
+            let inst =
+                neoveg_engine::session::EditorSession::instantiate_fx_with_preset(k, &p.values);
+            out.push((p.name.clone(), inst, true));
+        }
+    }
+    out
 }
 
 /// Id estável do efeito na lista de favoritos das Preferências.
@@ -216,41 +245,177 @@ impl App {
                 let Some(k) = self.fx_browser.selected else {
                     return;
                 };
+                let all_presets = combined_presets(k, &self.prefs.user_fx_presets);
+                let chosen_idx = self
+                    .fx_browser
+                    .selected_preset
+                    .filter(|&i| i < all_presets.len())
+                    .unwrap_or(0);
+                let (widget_bg, accent) = (self.theme.widget_bg, self.theme.accent);
+                let mut pick_preset: Option<usize> = None;
+                let mut del_user_preset: Option<String> = None;
+                let mut any_hovered = false;
                 ui.strong(format!("Presets: {}", k.name()));
                 ui.horizontal_wrapped(|ui| {
-                    for (i, (name, _fx)) in presets(k).into_iter().enumerate() {
-                        let thumb = self.fx_browser.thumbs.get(&k).cloned();
-                        ui.dnd_drag_source(
-                            egui::Id::new(("fxb_preset", k as u32, i)),
-                            DndPayload::Fx(k),
-                            |ui| {
-                                ui.vertical(|ui| {
-                                    let size = egui::vec2(THUMB_W as f32, THUMB_H as f32);
-                                    match &thumb {
-                                        Some(t) => {
-                                            ui.add(egui::Image::new((t.id(), size)));
+                    for (i, (name, fx, is_user)) in all_presets.iter().enumerate() {
+                        let cache_key = (k.id().to_string(), name.clone());
+                        if *is_user && !self.fx_browser.user_thumbs.contains_key(&cache_key) {
+                            let f = render_preview(fx, THUMB_W, THUMB_H);
+                            let img =
+                                egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8());
+                            let tex = ui.ctx().load_texture(
+                                format!("fx_user_thumb_{}_{}", k.id(), name),
+                                img,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.fx_browser.user_thumbs.insert(cache_key.clone(), tex);
+                        }
+                        let chosen = chosen_idx == i;
+                        let r = ui
+                            .dnd_drag_source(
+                                egui::Id::new(("fxb_preset", k as u32, i)),
+                                DndPayload::FxPreset(fx.clone()),
+                                |ui| {
+                                    ui.vertical(|ui| {
+                                        let size = egui::vec2(THUMB_W as f32, THUMB_H as f32);
+                                        let (rect, _) =
+                                            ui.allocate_exact_size(size, egui::Sense::hover());
+                                        let hovered = ui.rect_contains_pointer(rect);
+                                        let tex = if hovered {
+                                            any_hovered = true;
+                                            let needs_new =
+                                                self.fx_browser.hover_anim.as_ref().is_none_or(
+                                                    |h| h.kind != k || h.preset_idx != i,
+                                                );
+                                            if needs_new {
+                                                let f = render_preview_at(
+                                                    fx,
+                                                    Ticks::ZERO,
+                                                    FrameRate::FPS_30,
+                                                    THUMB_W,
+                                                    THUMB_H,
+                                                );
+                                                let img = egui::ColorImage::from_rgba_unmultiplied(
+                                                    [f.w, f.h],
+                                                    &f.to_rgba8(),
+                                                );
+                                                let tex = ui.ctx().load_texture(
+                                                    format!("fx_hover_anim_{}_{i}", k.id()),
+                                                    img,
+                                                    egui::TextureOptions::LINEAR,
+                                                );
+                                                self.fx_browser.hover_anim = Some(FxHoverAnim {
+                                                    kind: k,
+                                                    preset_idx: i,
+                                                    tex,
+                                                    started: std::time::Instant::now(),
+                                                    bucket: 0,
+                                                });
+                                            }
+                                            if let Some(h) = self.fx_browser.hover_anim.as_mut() {
+                                                let bucket =
+                                                    (h.started.elapsed().as_millis() / 80) as u64;
+                                                if bucket != h.bucket {
+                                                    h.bucket = bucket;
+                                                    let ms = ((bucket % 50) * 80) as i64;
+                                                    let f = render_preview_at(
+                                                        fx,
+                                                        Ticks::from_millis_i64(ms),
+                                                        FrameRate::FPS_30,
+                                                        THUMB_W,
+                                                        THUMB_H,
+                                                    );
+                                                    let img =
+                                                        egui::ColorImage::from_rgba_unmultiplied(
+                                                            [f.w, f.h],
+                                                            &f.to_rgba8(),
+                                                        );
+                                                    h.tex.set(img, egui::TextureOptions::LINEAR);
+                                                }
+                                                ui.ctx().request_repaint_after(
+                                                    std::time::Duration::from_millis(80),
+                                                );
+                                                Some(h.tex.clone())
+                                            } else {
+                                                None
+                                            }
+                                        } else if *is_user {
+                                            self.fx_browser.user_thumbs.get(&cache_key).cloned()
+                                        } else {
+                                            self.fx_browser.thumbs.get(&k).cloned()
+                                        };
+                                        match &tex {
+                                            Some(t) => {
+                                                egui::Image::new((t.id(), size)).paint_at(ui, rect);
+                                            }
+                                            None => {
+                                                ui.painter().rect_filled(rect, 2.0, widget_bg);
+                                            }
                                         }
-                                        None => {
-                                            let (r, _) =
-                                                ui.allocate_exact_size(size, egui::Sense::hover());
-                                            ui.painter().rect_filled(r, 2.0, self.theme.widget_bg);
+                                        if chosen {
+                                            ui.painter().rect_stroke(
+                                                rect,
+                                                2.0,
+                                                egui::Stroke::new(2.0_f32, accent),
+                                                egui::StrokeKind::Outside,
+                                            );
                                         }
-                                    }
-                                    ui.label(egui::RichText::new(name).small());
-                                });
-                            },
-                        )
-                        .response
-                        .on_hover_text("Arraste para um evento ou trilha de vídeo");
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    chosen,
+                                                    egui::RichText::new(name).small(),
+                                                )
+                                                .clicked()
+                                            {
+                                                pick_preset = Some(i);
+                                            }
+                                            if *is_user
+                                                && ui
+                                                    .small_button("×")
+                                                    .on_hover_text("Excluir preset salvo")
+                                                    .clicked()
+                                            {
+                                                del_user_preset = Some(name.clone());
+                                            }
+                                        });
+                                    });
+                                },
+                            )
+                            .response
+                            .on_hover_text("Arraste para um evento ou trilha de vídeo");
+                        let _ = r;
                     }
                 });
+                if !any_hovered {
+                    self.fx_browser.hover_anim = None;
+                }
+                if let Some(i) = pick_preset {
+                    self.fx_browser.selected_preset = Some(i);
+                }
+                if let Some(del_name) = del_user_preset {
+                    let kind_id = k.id();
+                    self.prefs
+                        .user_fx_presets
+                        .retain(|p| !(p.fx_kind == kind_id && p.name == del_name));
+                    self.fx_browser
+                        .user_thumbs
+                        .remove(&(kind_id.to_string(), del_name));
+                    self.fx_browser.selected_preset = Some(0);
+                    let _ = self.prefs.save();
+                }
                 ui.separator();
                 ui.label(egui::RichText::new("Aplicar a:").small().weak());
-                ui.horizontal(|ui| self.fx_apply_buttons(ui, k, false));
+                let active_fx = all_presets
+                    .get(chosen_idx)
+                    .map(|(_, fx, _)| fx.clone())
+                    .unwrap_or_else(|| FxInstance::new(k));
+                ui.horizontal(|ui| self.fx_apply_instance_buttons(ui, active_fx, false));
             });
         });
         if let Some(k) = select {
             self.fx_browser.selected = Some(k);
+            self.fx_browser.selected_preset = Some(0);
         }
         if let Some(k) = toggle_fav {
             let id = fav_id(k);

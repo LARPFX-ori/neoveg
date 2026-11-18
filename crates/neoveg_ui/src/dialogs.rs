@@ -14,6 +14,7 @@ use eframe::egui;
 use egui::{pos2, vec2, Color32, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
 use neoveg_common::recommended_worker_threads;
 use neoveg_engine::commands::{resolved_shortcut, Shortcut, ShortcutKey, COMMANDS};
+use neoveg_engine::session::EditorSession;
 use std::path::{Path, PathBuf};
 
 pub struct RenderDialogState {
@@ -647,6 +648,16 @@ pub struct Dialogs {
     /// *Editar conjunto de botões visíveis* (botão Mais do cabeçalho de
     /// faixa): `true` = faixas de vídeo, e o rascunho dos botões.
     pub header_buttons: Option<(bool, neoveg_common::prefs::HeaderButtons)>,
+    pub motion_track_src: Option<Id>,
+    pub motion_track_target_is_track: bool,
+    pub motion_track_target_event: Option<Id>,
+    pub motion_track_target_track: Option<Id>,
+    pub motion_track_invert: bool,
+    pub motion_track_step: usize,
+    save_preset_for: Option<(FxTarget, usize)>,
+    save_preset_name: String,
+    save_chain_target: Option<FxTarget>,
+    save_chain_name: String,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -824,6 +835,7 @@ impl App {
         self.paste_attributes_window(ctx);
         self.take_chooser_window(ctx);
         self.scene_detect_window(ctx);
+        self.motion_track_window(ctx);
         self.render_window(ctx);
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
@@ -1559,6 +1571,153 @@ impl App {
                 job.cancel.store(true, Ordering::Relaxed);
             }
             self.dlg.scene_detect = None;
+        }
+    }
+
+    fn motion_track_window(&mut self, ctx: &egui::Context) {
+        let Some(src_id) = self.dlg.motion_track_src else {
+            return;
+        };
+        let Some((src_ti, src_ei)) = self.project.find_event(src_id) else {
+            self.dlg.motion_track_src = None;
+            return;
+        };
+        let src_name = self.project.tracks[src_ti].events[src_ei].name.clone();
+        let video_events: Vec<(Id, String)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+            .flat_map(|t| t.events.iter().map(|e| (e.id, e.name.clone())))
+            .collect();
+        let video_tracks: Vec<(Id, String)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video && !t.is_folder)
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+
+        if self.dlg.motion_track_target_event.is_none() {
+            self.dlg.motion_track_target_event = Some(src_id);
+        }
+        if self.dlg.motion_track_target_track.is_none() {
+            self.dlg.motion_track_target_track = video_tracks.first().map(|t| t.0);
+        }
+        if self.dlg.motion_track_step == 0 {
+            self.dlg.motion_track_step = 1;
+        }
+
+        let mut open = true;
+        let mut run_track = false;
+        let mut close = false;
+        egui::Window::new(format!("Rastreamento de Movimento — {src_name}"))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(390.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Rastreia o deslocamento planar quadro a quadro no evento de vídeo selecionado e gera quadros-chave (Planar / Pan/Crop / Track Motion).");
+                ui.separator();
+                ui.label("Destino dos quadros-chave:");
+                ui.radio_value(
+                    &mut self.dlg.motion_track_target_is_track,
+                    false,
+                    "Pan/Crop de evento de vídeo",
+                );
+                if !self.dlg.motion_track_target_is_track {
+                    let sel_ev_label = self
+                        .dlg
+                        .motion_track_target_event
+                        .and_then(|id| video_events.iter().find(|e| e.0 == id))
+                        .map(|e| e.1.clone())
+                        .unwrap_or_else(|| src_name.clone());
+                    egui::ComboBox::from_id_salt("mt_target_event")
+                        .selected_text(sel_ev_label)
+                        .show_ui(ui, |ui| {
+                            for (eid, ename) in &video_events {
+                                ui.selectable_value(
+                                    &mut self.dlg.motion_track_target_event,
+                                    Some(*eid),
+                                    ename,
+                                );
+                            }
+                        });
+                }
+                ui.radio_value(
+                    &mut self.dlg.motion_track_target_is_track,
+                    true,
+                    "Movimento da trilha (Track Motion)",
+                );
+                if self.dlg.motion_track_target_is_track {
+                    let sel_tr_label = self
+                        .dlg
+                        .motion_track_target_track
+                        .and_then(|id| video_tracks.iter().find(|t| t.0 == id))
+                        .map(|t| t.1.clone())
+                        .unwrap_or_else(|| "Selecionar trilha".into());
+                    egui::ComboBox::from_id_salt("mt_target_track")
+                        .selected_text(sel_tr_label)
+                        .show_ui(ui, |ui| {
+                            for (tid, tname) in &video_tracks {
+                                ui.selectable_value(
+                                    &mut self.dlg.motion_track_target_track,
+                                    Some(*tid),
+                                    tname,
+                                );
+                            }
+                        });
+                }
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut self.dlg.motion_track_invert,
+                    "Inverter movimento (estabilizar / travar ponto)",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Amostragem (quadros)");
+                    ui.add(
+                        egui::DragValue::new(&mut self.dlg.motion_track_step)
+                            .range(1..=30)
+                            .suffix(" q"),
+                    );
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Rastrear e aplicar keyframes").clicked() {
+                        run_track = true;
+                    }
+                    if ui.button("Fechar").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if run_track {
+            let dst_ev = (!self.dlg.motion_track_target_is_track)
+                .then_some(self.dlg.motion_track_target_event.unwrap_or(src_id));
+            let dst_tr = self
+                .dlg
+                .motion_track_target_is_track
+                .then_some(self.dlg.motion_track_target_track)
+                .flatten();
+            match self.session.track_event_motion(
+                &self.media,
+                src_id,
+                dst_ev,
+                dst_tr,
+                self.dlg.motion_track_invert,
+                self.dlg.motion_track_step,
+            ) {
+                Ok(_) => {
+                    self.sync_after_session();
+                    self.dlg.motion_track_src = None;
+                }
+                Err(e) => self.set_status(format!("Rastreamento de movimento: {e}")),
+            }
+        }
+        if !open || close {
+            self.dlg.motion_track_src = None;
         }
     }
 
@@ -2697,15 +2856,23 @@ impl App {
         let mut changed = false;
         let mut add: Option<FxKind> = None;
         let mut op: Option<(usize, &str)> = None;
+        let mut apply_saved_chain: Option<usize> = None;
+        let mut delete_saved_chain: Option<usize> = None;
+        let mut export_chain_file = false;
+        let mut import_chain_file = false;
+        let mut confirm_save_chain: Option<String> = None;
+        let mut confirm_save_preset: Option<(FxInstance, String)> = None;
+        let mut open_color_grading = false;
+        let saved_chains_snapshot = self.prefs.fx_chains.clone();
         let Some(chain) = self.fx_chain_mut(target) else {
             return;
         };
         let mut chain_copy = chain.clone();
         egui::Window::new(title)
             .open(&mut open)
-            .default_width(420.0)
+            .default_width(440.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     egui::ComboBox::from_id_salt("fx_add")
                         .selected_text("+ Adicionar efeito...")
                         .show_ui(ui, |ui| {
@@ -2720,8 +2887,76 @@ impl App {
                                 }
                             }
                         });
+                    egui::ComboBox::from_id_salt("fx_saved_chains")
+                        .selected_text("Cadeias salvas...")
+                        .show_ui(ui, |ui| {
+                            let mut any_match = false;
+                            for (ci, c) in saved_chains_snapshot.iter().enumerate() {
+                                if c.audio != audio {
+                                    continue;
+                                }
+                                any_match = true;
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            false,
+                                            format!("{} ({})", c.name, c.items.len()),
+                                        )
+                                        .clicked()
+                                    {
+                                        apply_saved_chain = Some(ci);
+                                    }
+                                    if ui.small_button("×").on_hover_text("Excluir cadeia").clicked() {
+                                        delete_saved_chain = Some(ci);
+                                    }
+                                });
+                            }
+                            if !any_match {
+                                ui.label(egui::RichText::new("Nenhuma cadeia salva ainda.").small().weak());
+                            }
+                            ui.separator();
+                            if ui.button("Exportar cadeia (.neovegfxchain)...").clicked() {
+                                export_chain_file = true;
+                            }
+                            if ui.button("Importar cadeia (.neovegfxchain)...").clicked() {
+                                import_chain_file = true;
+                            }
+                        });
+                    let has_saveable = chain_copy
+                        .iter()
+                        .any(|fx| !matches!(fx.kind, FxKind::Ofx | FxKind::Vst3));
+                    if ui
+                        .add_enabled(has_saveable, egui::Button::new("Salvar cadeia..."))
+                        .on_hover_text("Salvar esta sequência de efeitos como pacote reutilizável (Filter Package)")
+                        .clicked()
+                    {
+                        self.dlg.save_chain_target = Some(target);
+                        if self.dlg.save_chain_name.trim().is_empty() {
+                            self.dlg.save_chain_name = if audio {
+                                "Cadeia de áudio".into()
+                            } else {
+                                "Cadeia de vídeo".into()
+                            };
+                        }
+                    }
                     ui.label(egui::RichText::new(format!("tempo local: {fmt_local}")).small());
                 });
+                if self.dlg.save_chain_target == Some(target) {
+                    ui.horizontal(|ui| {
+                        ui.label("Nome da cadeia:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dlg.save_chain_name)
+                                .desired_width(160.0),
+                        );
+                        let valid = !self.dlg.save_chain_name.trim().is_empty();
+                        if ui.add_enabled(valid, egui::Button::new("Salvar")).clicked() {
+                            confirm_save_chain = Some(self.dlg.save_chain_name.trim().to_string());
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            self.dlg.save_chain_target = None;
+                        }
+                    });
+                }
                 ui.separator();
                 if chain_copy.is_empty() {
                     ui.label("Nenhum efeito na cadeia.");
@@ -2791,9 +3026,50 @@ impl App {
                                             {
                                                 op = Some((i, "reset"));
                                             }
+                                            if !matches!(fx.kind, FxKind::Ofx | FxKind::Vst3)
+                                                && ui
+                                                    .small_button("Salvar preset")
+                                                    .on_hover_text("Salvar parâmetros atuais como preset próprio no navegador")
+                                                    .clicked()
+                                            {
+                                                self.dlg.save_preset_for = Some((target, i));
+                                                self.dlg.save_preset_name =
+                                                    format!("{} personalizado", fx.kind.name());
+                                            }
                                         },
                                     );
                                 });
+                                if self.dlg.save_preset_for == Some((target, i)) {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Preset:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(
+                                                &mut self.dlg.save_preset_name,
+                                            )
+                                            .desired_width(150.0),
+                                        );
+                                        let valid = !self.dlg.save_preset_name.trim().is_empty();
+                                        if ui.add_enabled(valid, egui::Button::new("Salvar")).clicked()
+                                        {
+                                            confirm_save_preset = Some((
+                                                fx.clone(),
+                                                self.dlg.save_preset_name.trim().to_string(),
+                                            ));
+                                        }
+                                        if ui.button("Cancelar").clicked() {
+                                            self.dlg.save_preset_for = None;
+                                        }
+                                    });
+                                }
+                                if fx.kind == FxKind::ColorCorrector
+                                    && ui
+                                        .small_button(
+                                            "Editar LUT (.cube) e Curvas RGB/HSL no Color Grading",
+                                        )
+                                        .clicked()
+                                {
+                                    open_color_grading = true;
+                                }
                                 if fx.kind == FxKind::Ofx {
                                     changed |= crate::plugin_manager::ofx_params_editor(
                                         ui,
@@ -2928,6 +3204,112 @@ impl App {
                 _ => {}
             }
             changed = true;
+        }
+        if let Some(ci) = apply_saved_chain {
+            if let Some(saved) = self.prefs.fx_chains.get(ci).cloned() {
+                let items = EditorSession::instantiate_saved_fx_chain(&saved);
+                if !items.is_empty() {
+                    self.checkpoint();
+                    chain_copy.extend(items);
+                    changed = true;
+                    self.set_status(format!("Cadeia \"{}\" aplicada.", saved.name));
+                }
+            }
+        }
+        if let Some(ci) = delete_saved_chain {
+            if ci < self.prefs.fx_chains.len() {
+                self.prefs.fx_chains.remove(ci);
+                let _ = self.prefs.save();
+            }
+        }
+        if let Some(name) = confirm_save_chain {
+            if let Some(chain_pref) =
+                EditorSession::capture_saved_fx_chain(&name, audio, &chain_copy)
+            {
+                self.prefs
+                    .fx_chains
+                    .retain(|c| !(c.audio == audio && c.name == chain_pref.name));
+                self.prefs.fx_chains.push(chain_pref);
+                self.prefs.sanitize();
+                let _ = self.prefs.save();
+                self.dlg.save_chain_target = None;
+                self.set_status(format!("Cadeia \"{name}\" salva nas Preferências."));
+            }
+        }
+        if let Some((fx, name)) = confirm_save_preset {
+            let mut preset = neoveg_common::prefs::UserFxPresetPref {
+                name: name.clone(),
+                fx_kind: fx.kind.id().to_string(),
+                values: fx.values(local_t),
+            };
+            if preset.sanitize() {
+                self.prefs
+                    .user_fx_presets
+                    .retain(|p| !(p.fx_kind == preset.fx_kind && p.name == preset.name));
+                self.prefs.user_fx_presets.push(preset);
+                self.prefs.sanitize();
+                let _ = self.prefs.save();
+                self.dlg.save_preset_for = None;
+                self.set_status(format!("Preset \"{name}\" salvo para {}.", fx.kind.name()));
+            }
+        }
+        if export_chain_file {
+            if let Some(chain_pref) =
+                EditorSession::capture_saved_fx_chain("Cadeia exportada", audio, &chain_copy)
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Cadeia Neoveg FX", &["neovegfxchain", "json"])
+                    .set_file_name("cadeia.neovegfxchain")
+                    .save_file()
+                {
+                    match serde_json::to_string_pretty(&chain_pref) {
+                        Ok(json) => {
+                            if let Err(e) = std::fs::write(&path, json) {
+                                self.set_status(format!("Erro exportando cadeia: {e}"));
+                            } else {
+                                self.set_status("Cadeia de efeitos exportada.");
+                            }
+                        }
+                        Err(e) => self.set_status(format!("Erro serializando cadeia: {e}")),
+                    }
+                }
+            }
+        }
+        if import_chain_file {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Cadeia Neoveg FX", &["neovegfxchain", "json"])
+                .pick_file()
+            {
+                match std::fs::read_to_string(&path).ok().and_then(|s| {
+                    serde_json::from_str::<neoveg_common::prefs::SavedFxChainPref>(&s).ok()
+                }) {
+                    Some(mut pref) => {
+                        if pref.sanitize() && pref.audio == audio {
+                            let items = EditorSession::instantiate_saved_fx_chain(&pref);
+                            if !items.is_empty() {
+                                self.checkpoint();
+                                chain_copy.extend(items);
+                                changed = true;
+                                self.prefs
+                                    .fx_chains
+                                    .retain(|c| !(c.audio == audio && c.name == pref.name));
+                                self.prefs.fx_chains.push(pref);
+                                self.prefs.sanitize();
+                                let _ = self.prefs.save();
+                                self.set_status("Cadeia de efeitos importada e aplicada.");
+                            }
+                        } else {
+                            self.set_status(
+                                "Arquivo de cadeia incompatível (áudio/vídeo) ou inválido.",
+                            );
+                        }
+                    }
+                    None => self.set_status("Não foi possível ler a cadeia .neovegfxchain."),
+                }
+            }
+        }
+        if open_color_grading {
+            self.exec_cmd(Some(ctx), "view.tab.color_grading");
         }
         if changed {
             if let Some(chain) = self.fx_chain_mut(target) {

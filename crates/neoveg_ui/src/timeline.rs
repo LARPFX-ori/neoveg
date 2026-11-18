@@ -3741,33 +3741,11 @@ impl App {
                 self.add_media_to_timeline(id, t, track);
             }
             DndPayload::Fx(kind) => {
-                let want_audio = kind.is_audio();
-                if let Some(eid) = event {
-                    let Some((ti, _)) = self.project.find_event(eid) else {
-                        return;
-                    };
-                    if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
-                        self.checkpoint();
-                        if let Some(ev) = self.project.event_mut(eid) {
-                            ev.fx.push(FxInstance::new(kind));
-                        }
-                        self.dlg.fx_target = Some(FxTarget::Event(eid));
-                        self.changed();
-                        return;
-                    }
-                }
-                if let Some(ti) = track {
-                    if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
-                        self.checkpoint();
-                        self.project.tracks[ti].fx.push(FxInstance::new(kind));
-                        self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[ti].id));
-                        self.changed();
-                        return;
-                    }
-                }
-                self.set_status(
-                    "Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio",
-                );
+                self.drop_fx_instance(FxInstance::new(kind), event, track);
+            }
+            DndPayload::FxPreset(mut fx) => {
+                fx.id = new_id();
+                self.drop_fx_instance(fx, event, track);
             }
             DndPayload::Transition(kind) => {
                 if let Some(eid) = event {
@@ -3775,6 +3753,34 @@ impl App {
                 }
             }
         }
+    }
+
+    fn drop_fx_instance(&mut self, fx: FxInstance, event: Option<Id>, track: Option<usize>) {
+        let want_audio = fx.kind.is_audio();
+        if let Some(eid) = event {
+            let Some((ti, _)) = self.project.find_event(eid) else {
+                return;
+            };
+            if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
+                self.checkpoint();
+                if let Some(ev) = self.project.event_mut(eid) {
+                    ev.fx.push(fx);
+                }
+                self.dlg.fx_target = Some(FxTarget::Event(eid));
+                self.changed();
+                return;
+            }
+        }
+        if let Some(ti) = track {
+            if (self.project.tracks[ti].kind == TrackKind::Audio) == want_audio {
+                self.checkpoint();
+                self.project.tracks[ti].fx.push(fx);
+                self.dlg.fx_target = Some(FxTarget::Track(self.project.tracks[ti].id));
+                self.changed();
+                return;
+            }
+        }
+        self.set_status("Solte efeitos de vídeo em eventos/trilhas de vídeo e de áudio em áudio");
     }
 
     pub fn apply_transition(&mut self, eid: Id, kind: TransitionKind) {

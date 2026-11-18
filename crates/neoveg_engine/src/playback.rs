@@ -156,6 +156,12 @@ impl AudioOut {
         s.loudness_snapshot = s.loudness.snapshot();
     }
 
+    /// Ignora ou reativa todos os efeitos de áudio (eventos, trilhas, barramentos e master).
+    pub fn set_bypass_audio_fx(&self, bypass: bool) {
+        let mut s = crate::util::lock(&self.shared);
+        s.mixer.bypass_fx = bypass;
+    }
+
     /// Avança o relógio quando não há dispositivo de áudio.
     pub fn tick_without_device(&self, dt: f64) {
         if self.has_device() {

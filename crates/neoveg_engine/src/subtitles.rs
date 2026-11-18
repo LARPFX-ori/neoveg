@@ -545,6 +545,29 @@ pub fn import_subtitles_into_project(
     inserted
 }
 
+/// Converte todas as regiões nomeadas do projeto (`project.regions`) em eventos de
+/// legenda (`GenSpec::Text`) no terço inferior de uma nova trilha de vídeo (p. 722).
+pub fn regions_to_subtitles(project: &mut Project, track_prefix: &str) -> usize {
+    let cues: Vec<SubtitleCue> = project
+        .regions
+        .iter()
+        .filter(|r| r.end > r.start)
+        .map(|r| SubtitleCue {
+            id: Some(r.id.to_string()),
+            start: r.start,
+            end: r.end,
+            text: if r.label.trim().is_empty() {
+                "Legenda".to_string()
+            } else {
+                r.label.clone()
+            },
+            align: TextAlign::Center,
+            y_norm: Some(0.84),
+        })
+        .collect();
+    import_subtitles_into_project(project, &cues, track_prefix)
+}
+
 /// Coleta todas as deixas a partir dos eventos `GenSpec::Text` do projeto, em ordem temporal.
 pub fn export_project_subtitles(project: &Project) -> Vec<SubtitleCue> {
     let mut rows: Vec<(Ticks, u64, SubtitleCue)> = Vec::new();
@@ -710,5 +733,34 @@ mod tests {
     #[test]
     fn vtt_without_header_returns_error_not_panic() {
         assert!(parse_vtt("00:00:01.000 --> 00:00:02.000\nSem cabeçalho").is_err());
+    }
+
+    #[test]
+    fn regions_to_subtitles_converte_regioes_validas_em_track_e_exporta_srt() {
+        let mut p = Project::new_default();
+        p.regions.push(crate::model::Region {
+            id: 1,
+            start: Ticks::from_secs_i64(1),
+            end: Ticks::from_secs_i64(3),
+            label: "Introdução".into(),
+        });
+        p.regions.push(crate::model::Region {
+            id: 2,
+            start: Ticks::from_secs_i64(5),
+            end: Ticks::from_secs_i64(4), // invertida -> ignorada
+            label: "Inválida".into(),
+        });
+        p.regions.push(crate::model::Region {
+            id: 3,
+            start: Ticks::from_secs_i64(4),
+            end: Ticks::from_secs_i64(7),
+            label: "Segunda fala".into(),
+        });
+        let added = regions_to_subtitles(&mut p, "Legendas");
+        assert_eq!(added, 2);
+        let srt = export_srt_string(&p);
+        assert!(srt.contains("Introdução"));
+        assert!(srt.contains("Segunda fala"));
+        assert!(!srt.contains("Inválida"));
     }
 }

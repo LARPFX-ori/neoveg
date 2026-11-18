@@ -5,8 +5,200 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::{luma, smoothstep, Frame};
-use crate::model::{FrameRate, FxInstance, FxKind};
+use crate::model::{ColorGradeCurves, FrameRate, FxInstance, FxKind};
 use rayon::prelude::*;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+fn load_cached_cube(path: &str) -> Option<Arc<crate::encoder::effects::CubeLut>> {
+    static CUBE_CACHE: OnceLock<
+        Mutex<HashMap<PathBuf, Option<Arc<crate::encoder::effects::CubeLut>>>>,
+    > = OnceLock::new();
+    let cache = CUBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = PathBuf::from(path);
+    {
+        let g = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(found) = g.get(&key) {
+            return found.clone();
+        }
+    }
+    let loaded = crate::encoder::effects::CubeLut::load_file(Path::new(path))
+        .ok()
+        .map(Arc::new);
+    let mut g = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if g.len() >= 32 {
+        g.clear();
+    }
+    g.insert(key, loaded.clone());
+    loaded
+}
+
+fn rgb_to_hsl(c: [f32; 3]) -> (f32, f32, f32) {
+    let r = c[0].clamp(0.0, 1.0);
+    let g = c[1].clamp(0.0, 1.0);
+    let b = c[2].clamp(0.0, 1.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d <= 1e-5 {
+        return (0.0, 0.0, l);
+    }
+    let s = if l > 0.5 {
+        d / (2.0 - max - min).max(1e-5)
+    } else {
+        d / (max + min).max(1e-5)
+    };
+    let mut h = if (max - r).abs() < 1e-6 {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if (max - g).abs() < 1e-6 {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h /= 6.0;
+    (h.rem_euclid(1.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    if s <= 1e-5 {
+        return [l, l, l];
+    }
+    let hue2rgb = |p: f32, q: f32, mut t: f32| -> f32 {
+        t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    [
+        hue2rgb(p, q, h + 1.0 / 3.0),
+        hue2rgb(p, q, h),
+        hue2rgb(p, q, h - 1.0 / 3.0),
+    ]
+}
+
+fn eval_builtin_lut(kind: &str, rgb: [f32; 3]) -> [f32; 3] {
+    let s_curve = |v: f32, strg: f32| -> f32 {
+        let x = v.clamp(0.0, 1.0);
+        let s = x * x * (3.0 - 2.0 * x);
+        x + (s - x) * strg
+    };
+    match kind {
+        "builtin:rec709" => saturate(
+            [
+                s_curve((rgb[0] * 1.12 - 0.06).clamp(0.0, 1.0), 0.75),
+                s_curve((rgb[1] * 1.12 - 0.06).clamp(0.0, 1.0), 0.75),
+                s_curve((rgb[2] * 1.12 - 0.06).clamp(0.0, 1.0), 0.75),
+            ],
+            1.15,
+        ),
+        "builtin:teal_orange" => {
+            let l = luma(rgb);
+            let hi = smoothstep(0.35, 0.85, l);
+            let sh = 1.0 - hi;
+            [
+                s_curve((rgb[0] + hi * 0.08 - sh * 0.07).clamp(0.0, 1.0), 0.45),
+                s_curve((rgb[1] + hi * 0.02 + sh * 0.02).clamp(0.0, 1.0), 0.45),
+                s_curve((rgb[2] - hi * 0.09 + sh * 0.08).clamp(0.0, 1.0), 0.45),
+            ]
+        }
+        "builtin:film_cool" => [
+            (s_curve(rgb[0], 0.35) * 0.94 + 0.02).clamp(0.0, 1.0),
+            (s_curve(rgb[1], 0.35) * 0.98 + 0.03).clamp(0.0, 1.0),
+            (s_curve(rgb[2], 0.35) * 1.04 + 0.05).clamp(0.0, 1.0),
+        ],
+        "builtin:mono_film" => {
+            let y = s_curve(
+                (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]).clamp(0.0, 1.0),
+                0.65,
+            );
+            [y, y, y]
+        }
+        _ => rgb,
+    }
+}
+
+fn apply_color_grade_curves(
+    mut c: [f32; 3],
+    cg: &ColorGradeCurves,
+    lut: Option<&crate::encoder::effects::CubeLut>,
+) -> [f32; 3] {
+    if !cg.master.is_empty() {
+        c[0] = ColorGradeCurves::eval_curve(&cg.master, c[0]);
+        c[1] = ColorGradeCurves::eval_curve(&cg.master, c[1]);
+        c[2] = ColorGradeCurves::eval_curve(&cg.master, c[2]);
+    }
+    if !cg.red.is_empty() {
+        c[0] = ColorGradeCurves::eval_curve(&cg.red, c[0]);
+    }
+    if !cg.green.is_empty() {
+        c[1] = ColorGradeCurves::eval_curve(&cg.green, c[1]);
+    }
+    if !cg.blue.is_empty() {
+        c[2] = ColorGradeCurves::eval_curve(&cg.blue, c[2]);
+    }
+    if !cg.hsl_bands.is_empty() {
+        let (mut h, mut s, mut l) = rgb_to_hsl(c);
+        if s > 1e-3 {
+            let mut dh = 0.0f32;
+            let mut ds = 0.0f32;
+            let mut dl = 0.0f32;
+            for (bi, b) in cg.hsl_bands.iter().take(6).enumerate() {
+                let center = bi as f32 / 6.0;
+                let mut dist = (h - center).abs();
+                if dist > 0.5 {
+                    dist = 1.0 - dist;
+                }
+                let w = (1.0 - dist * 6.0).max(0.0);
+                if w > 0.0 {
+                    dh += b[0] * w;
+                    ds += b[1] * w;
+                    dl += b[2] * w;
+                }
+            }
+            if dh.abs() > 1e-4 || ds.abs() > 1e-4 || dl.abs() > 1e-4 {
+                h = (h + dh).rem_euclid(1.0);
+                s = (s * (1.0 + ds)).clamp(0.0, 1.0);
+                l = (l + dl * 0.5).clamp(0.0, 1.0);
+                c = hsl_to_rgb(h, s, l);
+            }
+        }
+    }
+    let strg = if cg.lut_strength.is_finite() {
+        cg.lut_strength.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    if strg > 1e-4 {
+        if let Some(lut_ref) = lut {
+            let mapped = lut_ref.sample(c);
+            c = mix3(c, mapped, strg);
+        } else if let Some(path) = cg.lut_path.as_deref() {
+            if path.starts_with("builtin:") {
+                let mapped = eval_builtin_lut(path, c);
+                c = mix3(c, mapped, strg);
+            }
+        }
+    }
+    [
+        c[0].clamp(0.0, 1.0),
+        c[1].clamp(0.0, 1.0),
+        c[2].clamp(0.0, 1.0),
+    ]
+}
 
 /// Aplica uma função de cor (em RGB não pré-multiplicado) a todos os pixels.
 fn map_color<F: Fn([f32; 3]) -> [f32; 3] + Sync>(f: &mut Frame, func: F) {
@@ -241,6 +433,11 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameR
         FxKind::ColorCorrector => {
             let (lift, gamma, gain, temp, tint, sat) = (v[0], v[1], v[2], v[3], v[4], v[5]);
             let ig = 1.0 / gamma.max(0.01);
+            let cg = fx.color_grade.as_deref();
+            let cube = cg
+                .and_then(|g| g.lut_path.as_deref())
+                .filter(|p| !p.starts_with("builtin:"))
+                .and_then(load_cached_cube);
             map_color(f, |x| {
                 let mut c = [0.0; 3];
                 for k in 0..3 {
@@ -250,7 +447,11 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameR
                 c[0] += temp * 0.1;
                 c[2] -= temp * 0.1;
                 c[1] += tint * 0.1;
-                saturate(c, sat)
+                c = saturate(c, sat);
+                if let Some(g) = cg {
+                    c = apply_color_grade_curves(c, g, cube.as_deref());
+                }
+                c
             });
         }
         FxKind::Levels => {
@@ -644,5 +845,60 @@ mod tests {
             .all(|p| p.iter().all(|c| c.is_finite() && *c > 0.0)));
         // Entradas extremas/NaN não entram em pânico
         apply_stabilization_transform(&mut frame, f32::NAN, f32::INFINITY, -99.0, 0.0);
+    }
+
+    #[test]
+    fn color_grading_curvas_rgb_hsl_e_lut_transformam_quadro_e_ignoram_entrada_hostil() {
+        let mut fx = FxInstance::new(FxKind::ColorCorrector);
+        let mut hsl = crate::model::ColorGradeCurves::default_hsl_bands();
+        hsl[0] = [0.25, -0.5, 0.2];
+        let cg = crate::model::ColorGradeCurves {
+            red: vec![[0.0, 0.25], [1.0, 1.0]],
+            hsl_bands: hsl,
+            lut_path: Some("builtin:mono_film".into()),
+            lut_strength: 1.0,
+            ..Default::default()
+        };
+        fx.color_grade = Some(Box::new(cg));
+
+        let mut frame = Frame::filled(4, 4, [0.8, 0.2, 0.1, 1.0]);
+        apply(&fx, &mut frame, Ticks::ZERO, FrameRate::FPS_30);
+        let p = frame.px[0];
+        assert!(p.iter().all(|c| c.is_finite()));
+        // Mono LUT produz cinza equilibrado com forte proximidade entre R, G e B.
+        assert!((p[0] - p[1]).abs() < 1e-4 && (p[1] - p[2]).abs() < 1e-4);
+
+        // Arquivo .cube 3D 2x2x2 que troca vermelho <-> azul.
+        let tmp = std::env::temp_dir().join(format!("neoveg_cg_{}.cube", crate::model::new_id()));
+        let cube = "LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n";
+        std::fs::write(&tmp, cube).expect("write cube");
+        let mut fx_cube = FxInstance::new(FxKind::ColorCorrector);
+        let cg2 = crate::model::ColorGradeCurves {
+            lut_path: Some(tmp.display().to_string()),
+            lut_strength: 1.0,
+            ..Default::default()
+        };
+        fx_cube.color_grade = Some(Box::new(cg2));
+        let mut f2 = Frame::filled(2, 2, [0.9, 0.1, 0.0, 1.0]);
+        apply(&fx_cube, &mut f2, Ticks::ZERO, FrameRate::FPS_30);
+        assert!(
+            f2.px[0][2] > f2.px[0][0],
+            "LUT deve inverter R e B: {:?}",
+            f2.px[0]
+        );
+        let _ = std::fs::remove_file(&tmp);
+
+        // Entrada hostil: caminho inexistente + NaN não geram pânico.
+        let mut fx_bad = FxInstance::new(FxKind::ColorCorrector);
+        let cg_bad = crate::model::ColorGradeCurves {
+            lut_path: Some("/caminho/inexistente/nao_existe.cube".into()),
+            lut_strength: f32::NAN,
+            master: vec![[f32::NAN, f32::INFINITY]],
+            ..Default::default()
+        };
+        fx_bad.color_grade = Some(Box::new(cg_bad));
+        let mut f_bad = Frame::filled(2, 2, [0.5, 0.4, 0.3, 1.0]);
+        apply(&fx_bad, &mut f_bad, Ticks::ZERO, FrameRate::FPS_30);
+        assert!(f_bad.px[0].iter().all(|c| c.is_finite()));
     }
 }
