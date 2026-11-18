@@ -4088,6 +4088,19 @@ impl App {
                         ui.label(tr(lang, "Espaçamento de linha"));
                         ui.add(egui::Slider::new(&mut t.line_spacing, 0.6..=3.0));
                         ui.end_row();
+                        ui.label(tr(lang, "Espaçamento de caracteres (Tracking)"));
+                        ui.add(egui::Slider::new(&mut t.tracking, -0.2..=1.0).speed(0.01));
+                        ui.end_row();
+                        ui.label(tr(lang, "Quebra automática de linha"));
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut t.wrap, "");
+                            if t.wrap {
+                                ui.add(
+                                    egui::Slider::new(&mut t.wrap_width, 10.0..=100.0).suffix("%"),
+                                );
+                            }
+                        });
+                        ui.end_row();
                         ui.label(tr(lang, "Animação"));
                         egui::ComboBox::from_id_salt("anim")
                             .selected_text(t.anim.name_in(lang))

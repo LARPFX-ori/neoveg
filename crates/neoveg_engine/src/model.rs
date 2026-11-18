@@ -1617,6 +1617,19 @@ pub struct TextSpec {
     /// Duração de referência para animações (segundos).
     pub anim_duration: f32,
     pub line_spacing: f32,
+    /// Espaçamento entre caracteres (tracking/kerning manual, em fração do tamanho da fonte).
+    #[serde(default)]
+    pub tracking: f32,
+    /// Quebra automática de linha baseada na largura da caixa.
+    #[serde(default)]
+    pub wrap: bool,
+    /// Largura máxima para quebra automática de linha (% da largura do quadro).
+    #[serde(default = "default_wrap_width")]
+    pub wrap_width: f32,
+}
+
+fn default_wrap_width() -> f32 {
+    80.0
 }
 
 impl Default for TextSpec {
@@ -1636,6 +1649,9 @@ impl Default for TextSpec {
             anim: TextAnim::None,
             anim_duration: 5.0,
             line_spacing: 1.2,
+            tracking: 0.0,
+            wrap: false,
+            wrap_width: default_wrap_width(),
         }
     }
 }
