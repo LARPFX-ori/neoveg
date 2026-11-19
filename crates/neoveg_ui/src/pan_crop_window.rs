@@ -44,6 +44,14 @@ pub(crate) struct PanCropUi {
     pub local: Ticks,
     pub ws: Workspace,
     pub preset: usize,
+    /// Linha ativa na trilha de quadros-chave: `false` = Posição, `true` = Máscara.
+    pub mask_mode: bool,
+    /// Modo compacto da janela (arranjo sem linha de predefinições/título extra).
+    pub compact_header: bool,
+    /// Nome digitado para salvar nova predefinição própria.
+    pub preset_name_draft: String,
+    /// Índice de vértice Bézier atualmente arrastado na máscara.
+    drag_mask_vertex: Option<usize>,
     drag: Option<PcDrag>,
 }
 
@@ -60,6 +68,10 @@ impl Default for PanCropUi {
             local: Ticks::ZERO,
             ws: Workspace::default(),
             preset: 0,
+            mask_mode: false,
+            compact_header: false,
+            preset_name_draft: String::new(),
+            drag_mask_vertex: None,
             drag: None,
         }
     }
@@ -83,11 +95,21 @@ enum PcAction {
     MatchOutput,
     MatchSource,
     Preset(usize),
+    ApplyUserPreset(usize),
+    SaveUserPreset(String),
+    DeleteUserPreset(usize),
+    OpenEventFx,
     Nav(KfNav),
     MoveKey(usize, Ticks),
     DeleteKey(usize),
     SetCurve(usize, Curve),
     MaintainAspect(bool),
+    StretchToFill(bool),
+    ToggleMaskEnabled(bool),
+    UpdateMask(neoveg_engine::mask::BezierMaskData),
+    AddMaskKey,
+    DeleteMaskKey(usize),
+    MoveMaskKey(usize, Ticks),
 }
 
 /// Contorno da letra "F" no espaço do retângulo (−1..1 nos dois eixos),
@@ -139,7 +161,8 @@ impl App {
         let local = st.local.clamp_safe(Ticks::ZERO, ev.length);
         self.load_pan_crop_texture(ctx, id, &ev, &m, local);
         let lang = self.lang();
-        let cur = ev.pan_crop.eval(local);
+        let cur = neoveg_engine::model::eval_pan_crop_smooth(&ev.pan_crop, local);
+        let user_presets = self.prefs.pan_crop_presets.clone();
         let mut open = true;
         let mut new_key: Option<PanCropKey> = None;
         let mut actions: Vec<PcAction> = Vec::new();
@@ -162,29 +185,116 @@ impl App {
         .min_size([640.0, 420.0])
         .resizable(true)
         .show(ctx, |ui| {
-            // linha de predefinição
+            // Cabeçalho com cadeia em pílulas `o—[Pan/Crop]—[FX]—o` e 3 arranjos de janela
             ui.horizontal(|ui| {
                 icons::paint_inline(ui, Icon::PanCrop, 14.0, &theme);
-                ui.label(egui::RichText::new(tr(lang, "Pan/Crop do evento:")).strong());
+                ui.label(egui::RichText::new("○—").weak());
+                let _ = ui.selectable_label(true, tr(lang, "Pan/Crop"));
+                ui.label(egui::RichText::new("—").weak());
+                let fx_lbl = if ev.fx.is_empty() {
+                    tr(lang, "FX").to_string()
+                } else {
+                    format!("FX ({})", ev.fx.len())
+                };
+                if ui
+                    .selectable_label(false, fx_lbl)
+                    .on_hover_text(tr(lang, "Abrir cadeia de efeitos do evento"))
+                    .clicked()
+                {
+                    actions.push(PcAction::OpenEventFx);
+                }
+                ui.label(egui::RichText::new("—○").weak());
+                ui.separator();
                 ui.label(&ev.name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .selectable_label(st.compact_header, "▪")
+                        .on_hover_text(tr(lang, "Arranjo compacto"))
+                        .clicked()
+                    {
+                        st.compact_header = !st.compact_header;
+                    }
+                    if ui
+                        .selectable_label(!st.show_props && !st.compact_header, "□")
+                        .on_hover_text(tr(lang, "Somente área de trabalho"))
+                        .clicked()
+                    {
+                        st.show_props = false;
+                        st.compact_header = false;
+                    }
+                    if ui
+                        .selectable_label(st.show_props && !st.compact_header, "◧")
+                        .on_hover_text(tr(lang, "Propriedades e área de trabalho"))
+                        .clicked()
+                    {
+                        st.show_props = true;
+                        st.compact_header = false;
+                    }
+                });
             });
-            ui.horizontal(|ui| {
-                ui.label(tr(lang, "Predefinição:"));
-                let sel = PRESETS.get(st.preset).copied().unwrap_or(PRESETS[0]);
-                egui::ComboBox::from_id_salt("pc_preset")
-                    .width(ui.available_width() - 8.0)
-                    .selected_text(tr(lang, sel))
-                    .show_ui(ui, |ui| {
-                        for (i, p) in PRESETS.iter().enumerate() {
-                            if ui.selectable_label(st.preset == i, tr(lang, p)).clicked() {
-                                st.preset = i;
-                                actions.push(PcAction::Preset(i));
+            if !st.compact_header {
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Predefinição:"));
+                    let sel_text = if st.preset < PRESETS.len() {
+                        tr(lang, PRESETS[st.preset]).to_string()
+                    } else {
+                        user_presets
+                            .get(st.preset - PRESETS.len())
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| tr(lang, PRESETS[0]).to_string())
+                    };
+                    egui::ComboBox::from_id_salt("pc_preset")
+                        .width((ui.available_width() - 250.0).max(140.0))
+                        .selected_text(sel_text)
+                        .show_ui(ui, |ui| {
+                            for (i, p) in PRESETS.iter().enumerate() {
+                                if ui.selectable_label(st.preset == i, tr(lang, p)).clicked() {
+                                    st.preset = i;
+                                    actions.push(PcAction::Preset(i));
+                                }
                             }
+                            if !user_presets.is_empty() {
+                                ui.separator();
+                                for (ui_i, up) in user_presets.iter().enumerate() {
+                                    let idx = PRESETS.len() + ui_i;
+                                    if ui.selectable_label(st.preset == idx, &up.name).clicked() {
+                                        st.preset = idx;
+                                        actions.push(PcAction::ApplyUserPreset(ui_i));
+                                    }
+                                }
+                            }
+                        });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut st.preset_name_draft)
+                            .desired_width(120.0)
+                            .hint_text(tr(lang, "Nome da predefinição")),
+                    );
+                    if ui
+                        .button(tr(lang, "Salvar"))
+                        .on_hover_text(tr(lang, "Salvar predefinição própria de Pan/Crop"))
+                        .clicked()
+                    {
+                        let n = st.preset_name_draft.trim().to_string();
+                        if !n.is_empty() {
+                            actions.push(PcAction::SaveUserPreset(n));
+                            st.preset_name_draft.clear();
                         }
-                    });
-            });
+                    }
+                    if st.preset >= PRESETS.len() {
+                        let ui_i = st.preset - PRESETS.len();
+                        if ui
+                            .button("×")
+                            .on_hover_text(tr(lang, "Excluir predefinição selecionada"))
+                            .clicked()
+                        {
+                            actions.push(PcAction::DeleteUserPreset(ui_i));
+                            st.preset = 0;
+                        }
+                    }
+                });
+            }
             ui.separator();
-            let strip_h = 150.0;
+            let strip_h = 156.0;
             let top_h = (ui.available_height() - strip_h).max(200.0);
             let top_w = ui.available_width();
             ui.allocate_ui(vec2(top_w, top_h), |ui| {
@@ -226,6 +336,7 @@ impl App {
                         &cur,
                         frame,
                         src_size,
+                        local,
                         &mut st,
                         &mut actions,
                         lang,
@@ -235,10 +346,30 @@ impl App {
                 });
             });
             ui.add_space(2.0);
-            let rows = [KfRow {
-                label: tr(lang, "Posição"),
-                keys: ev.pan_crop.keys.iter().map(|k| (k.t, k.curve)).collect(),
-            }];
+            let mask_keys: Vec<(Ticks, Curve)> = ev
+                .pan_crop_mask
+                .as_deref()
+                .map(|m| {
+                    m.keyframes
+                        .iter()
+                        .map(|k| (k.time, Curve::Linear))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let rows = [
+                KfRow {
+                    label: tr(lang, "Posição"),
+                    keys: ev.pan_crop.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    checked: None,
+                    selected: !st.mask_mode,
+                },
+                KfRow {
+                    label: tr(lang, "Máscara"),
+                    keys: mask_keys,
+                    checked: Some(ev.pan_crop_mask_enabled),
+                    selected: st.mask_mode,
+                },
+            ];
             let mut sync = st.sync_cursor;
             let fmt = |t: Ticks| self.fmt_time(t);
             let out = kf_window::keyframe_strip(
@@ -252,6 +383,13 @@ impl App {
                 &theme,
                 lang,
             );
+            if let Some(ri) = out.select_row {
+                st.mask_mode = ri == 1;
+            }
+            if out.toggle_row == Some(1) {
+                actions.push(PcAction::ToggleMaskEnabled(!ev.pan_crop_mask_enabled));
+                st.mask_mode = true;
+            }
             if sync != st.sync_cursor {
                 st.sync_cursor = sync;
                 if sync {
@@ -262,16 +400,28 @@ impl App {
                 seek = Some(t);
             }
             if let Some(n) = out.nav {
-                actions.push(PcAction::Nav(n));
+                if st.mask_mode && n == KfNav::Add {
+                    actions.push(PcAction::AddMaskKey);
+                } else {
+                    actions.push(PcAction::Nav(n));
+                }
             }
-            if let Some((_, ki, t)) = out.move_key {
-                actions.push(PcAction::MoveKey(ki, t));
+            if let Some((ri, ki, t)) = out.move_key {
+                if ri == 1 {
+                    actions.push(PcAction::MoveMaskKey(ki, t));
+                } else {
+                    actions.push(PcAction::MoveKey(ki, t));
+                }
             }
-            if let Some((_, ki, c)) = out.set_curve {
+            if let Some((0, ki, c)) = out.set_curve {
                 actions.push(PcAction::SetCurve(ki, c));
             }
-            if let Some((_, ki)) = out.delete_key {
-                actions.push(PcAction::DeleteKey(ki));
+            if let Some((ri, ki)) = out.delete_key {
+                if ri == 1 {
+                    actions.push(PcAction::DeleteMaskKey(ki));
+                } else {
+                    actions.push(PcAction::DeleteKey(ki));
+                }
             }
         });
 
@@ -499,6 +649,13 @@ impl App {
                         actions.push(PcAction::SetCurve(key_idx, c));
                     }
                 });
+                let mut sm = cur.smoothness_safe();
+                if kf_window::prop_num(ui, tr(lang, "Suavidade:"), &mut sm, 1.0, 0, 0.0..=100.0) {
+                    out = Some(PanCropKey {
+                        smoothness: sm,
+                        ..out.clone().unwrap_or_else(|| cur.clone())
+                    });
+                }
             },
         );
         kf_window::prop_section(ui, sec("src"), tr(lang, "Origem"), false, th, |ui| {
@@ -508,7 +665,115 @@ impl App {
                     actions.push(PcAction::MaintainAspect(v));
                 }
             });
+            kf_window::prop_row(ui, tr(lang, "Esticar para preencher:"), |ui| {
+                let mut v = ev.pan_crop_stretch_to_fill;
+                if ui.checkbox(&mut v, "").changed() {
+                    actions.push(PcAction::StretchToFill(v));
+                }
+            });
         });
+        if st.mask_mode || ev.pan_crop_mask_enabled {
+            kf_window::prop_section(
+                ui,
+                sec("mask"),
+                tr(lang, "Máscara Bézier"),
+                true,
+                th,
+                |ui| {
+                    let mut mask_on = ev.pan_crop_mask_enabled;
+                    kf_window::prop_row(ui, tr(lang, "Ativar máscara:"), |ui| {
+                        if ui.checkbox(&mut mask_on, "").changed() {
+                            actions.push(PcAction::ToggleMaskEnabled(mask_on));
+                        }
+                    });
+                    let mut md = ev.pan_crop_mask.as_deref().cloned().unwrap_or_default();
+                    let mut m_changed = false;
+                    kf_window::prop_row(ui, tr(lang, "Modo:"), |ui| {
+                        let lbl = if md.invert {
+                            tr(lang, "Negativa (recorte)")
+                        } else {
+                            tr(lang, "Positiva (manter interior)")
+                        };
+                        egui::ComboBox::from_id_salt("pc_mask_inv")
+                            .selected_text(lbl)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        !md.invert,
+                                        tr(lang, "Positiva (manter interior)"),
+                                    )
+                                    .clicked()
+                                {
+                                    md.invert = false;
+                                    m_changed = true;
+                                }
+                                if ui
+                                    .selectable_label(md.invert, tr(lang, "Negativa (recorte)"))
+                                    .clicked()
+                                {
+                                    md.invert = true;
+                                    m_changed = true;
+                                }
+                            });
+                    });
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Suavização:"),
+                        &mut md.feather,
+                        0.5,
+                        1,
+                        0.0..=100.0,
+                    ) {
+                        m_changed = true;
+                    }
+                    let mut op_pct = md.opacity * 100.0;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Opacidade (%):"),
+                        &mut op_pct,
+                        1.0,
+                        0,
+                        0.0..=100.0,
+                    ) {
+                        md.opacity = (op_pct * 0.01).clamp(0.0, 1.0);
+                        m_changed = true;
+                    }
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Expansão:"),
+                        &mut md.expansion,
+                        0.5,
+                        1,
+                        -100.0..=100.0,
+                    ) {
+                        m_changed = true;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button(tr(lang, "Retângulo")).clicked() {
+                            md.default_path =
+                                neoveg_engine::mask::MaskPath::rect([0.2, 0.2], [0.8, 0.8]);
+                            m_changed = true;
+                        }
+                        if ui.small_button(tr(lang, "Elipse")).clicked() {
+                            md.default_path =
+                                neoveg_engine::mask::MaskPath::ellipse([0.5, 0.5], [0.35, 0.30]);
+                            m_changed = true;
+                        }
+                        if ui.small_button(tr(lang, "Arredondado")).clicked() {
+                            md.default_path = neoveg_engine::mask::MaskPath::rounded_rect(
+                                [0.2, 0.2],
+                                [0.8, 0.8],
+                                0.08,
+                            );
+                            m_changed = true;
+                        }
+                    });
+                    if m_changed {
+                        actions.push(PcAction::UpdateMask(md));
+                    }
+                },
+            );
+        }
         kf_window::prop_section(
             ui,
             sec("ws"),
@@ -567,6 +832,7 @@ impl App {
         cur: &PanCropKey,
         frame: Vec2,
         src_size: Vec2,
+        local: Ticks,
         st: &mut PanCropUi,
         actions: &mut Vec<PcAction>,
         lang: Language,
@@ -643,12 +909,107 @@ impl App {
             painter.rect_stroke(h, 0.0, thin, egui::StrokeKind::Inside);
         }
 
+        // contorno da máscara Bézier (desenhado quando habilitada ou em modo Máscara)
+        if ev.pan_crop_mask_enabled || st.mask_mode {
+            let mask_data = ev.pan_crop_mask.as_deref().cloned().unwrap_or_default();
+            let (mpath, _, _, _) = mask_data.evaluate_at(local);
+            let poly = mpath.flatten(16);
+            if poly.len() >= 2 {
+                let pts: Vec<Pos2> = poly
+                    .iter()
+                    .map(|p| sc(vec2(p[0] * frame.x, p[1] * frame.y)))
+                    .collect();
+                let mcol = if self.theme.high_contrast {
+                    self.theme.accent
+                } else {
+                    Color32::from_rgb(240, 175, 40)
+                };
+                dashed_closed(&painter, &pts, Stroke::new(1.5_f32, mcol));
+            }
+            if st.mask_mode {
+                let vcol = Color32::from_rgb(255, 200, 60);
+                for v in &mpath.vertices {
+                    let sp = sc(vec2(v.point[0] * frame.x, v.point[1] * frame.y));
+                    let vr = Rect::from_center_size(sp, vec2(8.0, 8.0));
+                    painter.rect_filled(vr, 1.0, vcol);
+                    painter.rect_stroke(vr, 1.0, thin, egui::StrokeKind::Inside);
+                }
+            }
+        }
+
         // interação
         let ptr = resp
             .hover_pos()
             .or_else(|| resp.interact_pointer_pos())
             .map(|p| ws.to_frame(rect, frame, p));
         let tol = ws.frame_len(6.0);
+        if st.mask_mode {
+            let mut md = ev.pan_crop_mask.as_deref().cloned().unwrap_or_default();
+            let shift = ui.input(|i| i.modifiers.shift);
+            let hit_v = ptr.and_then(|p| {
+                md.default_path
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, v)| {
+                        let vp = vec2(v.point[0] * frame.x, v.point[1] * frame.y);
+                        ((vp - p).length() <= tol * 1.6).then_some(i)
+                    })
+            });
+            if resp.hovered() || st.drag_mask_vertex.is_some() {
+                let cur = if st.drag_mask_vertex.is_some() {
+                    crate::cursors::NeovegCursor::MaskVertex
+                } else if hit_v.is_some() && shift {
+                    crate::cursors::NeovegCursor::MaskPenDel
+                } else if hit_v.is_some() {
+                    crate::cursors::NeovegCursor::MaskVertex
+                } else {
+                    crate::cursors::NeovegCursor::MaskPenAdd
+                };
+                crate::cursors::render_cursor(
+                    ui.ctx(),
+                    cur,
+                    &self.theme,
+                    self.prefs.custom_cursors,
+                );
+            }
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                st.drag_mask_vertex = hit_v;
+            }
+            if resp.dragged_by(egui::PointerButton::Primary) {
+                if let (Some(vi), Some(p)) = (st.drag_mask_vertex, ptr) {
+                    if let Some(v) = md.default_path.vertices.get_mut(vi) {
+                        v.point = [
+                            (p.x / frame.x.max(1.0)).clamp(0.0, 1.0),
+                            (p.y / frame.y.max(1.0)).clamp(0.0, 1.0),
+                        ];
+                        actions.push(PcAction::UpdateMask(md.clone()));
+                    }
+                }
+            }
+            if resp.drag_stopped() {
+                st.drag_mask_vertex = None;
+            }
+            if resp.clicked() {
+                if let Some(vi) = hit_v.filter(|_| shift && md.default_path.vertices.len() > 3) {
+                    md.default_path.vertices.remove(vi);
+                    actions.push(PcAction::UpdateMask(md));
+                } else if hit_v.is_none() {
+                    if let Some(p) = ptr {
+                        if md.default_path.vertices.len() < 128 {
+                            md.default_path
+                                .vertices
+                                .push(neoveg_engine::mask::MaskVertex::corner([
+                                    (p.x / frame.x.max(1.0)).clamp(0.0, 1.0),
+                                    (p.y / frame.y.max(1.0)).clamp(0.0, 1.0),
+                                ]));
+                            actions.push(PcAction::UpdateMask(md));
+                        }
+                    }
+                }
+            }
+            return None;
+        }
         if let (Some(p), PcTool::Normal) = (ptr, st.tool) {
             let cur = match st.drag.map(|d| d.hit).unwrap_or_else(|| g.hit(p, tol)) {
                 Hit::Inside => match st.move_mode {
@@ -926,8 +1287,125 @@ impl App {
                     k.curve = *c;
                 }
                 PcAction::MaintainAspect(v) => e.maintain_aspect = *v,
+                PcAction::StretchToFill(v) => e.pan_crop_stretch_to_fill = *v,
+                PcAction::ToggleMaskEnabled(v) => {
+                    e.pan_crop_mask_enabled = *v;
+                    if *v && e.pan_crop_mask.is_none() {
+                        e.pan_crop_mask =
+                            Some(Box::new(neoveg_engine::mask::BezierMaskData::default()));
+                    }
+                }
+                PcAction::UpdateMask(md) => {
+                    e.pan_crop_mask = Some(Box::new(md.clone()));
+                    e.pan_crop_mask_enabled = true;
+                }
+                PcAction::AddMaskKey => {
+                    let md = e.pan_crop_mask.get_or_insert_with(|| {
+                        Box::new(neoveg_engine::mask::BezierMaskData::default())
+                    });
+                    let (path, feather, opacity, expansion) = md.evaluate_at(local);
+                    md.keyframes.retain(|k| k.time.abs_diff(local) > tol);
+                    md.keyframes.push(neoveg_engine::mask::MaskKeyframe {
+                        time: local,
+                        path,
+                        feather,
+                        opacity,
+                        expansion,
+                    });
+                    md.keyframes.sort_by_key(|k| k.time);
+                    e.pan_crop_mask_enabled = true;
+                }
+                PcAction::DeleteMaskKey(ki) => {
+                    if let Some(md) = e.pan_crop_mask.as_deref_mut() {
+                        if *ki < md.keyframes.len() {
+                            md.keyframes.remove(*ki);
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                PcAction::MoveMaskKey(ki, t) => {
+                    if let Some(md) = e.pan_crop_mask.as_deref_mut() {
+                        if let Some(k) = md.keyframes.get_mut(*ki) {
+                            k.time = (*t).clamp_safe(Ticks::ZERO, len);
+                            md.keyframes.sort_by_key(|k| k.time);
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                PcAction::ApplyUserPreset(_)
+                | PcAction::SaveUserPreset(_)
+                | PcAction::DeleteUserPreset(_)
+                | PcAction::OpenEventFx => continue,
             }
             changed = true;
+        }
+        // Ações de preferências/navegação aplicadas fora do empréstimo mutável de `project`.
+        for a in actions {
+            match a {
+                PcAction::ApplyUserPreset(ui_i) => {
+                    if let Some(up) = self.prefs.pan_crop_presets.get(*ui_i).cloned() {
+                        if let Some(e) = self.project.event_mut(id) {
+                            e.pan_crop_stretch_to_fill = up.stretch_to_fill;
+                            e.pan_crop.set(
+                                local,
+                                PanCropKey {
+                                    cx: up.cx,
+                                    cy: up.cy,
+                                    size: up.size,
+                                    rot: up.rot,
+                                    ratio: up.ratio,
+                                    flip_h: up.flip_h,
+                                    flip_v: up.flip_v,
+                                    smoothness: up.smoothness,
+                                },
+                                tol,
+                            );
+                            changed = true;
+                        }
+                    }
+                }
+                PcAction::SaveUserPreset(name) => {
+                    if let Some(e) = self.project.event(id) {
+                        let k = neoveg_engine::model::eval_pan_crop_smooth(&e.pan_crop, local);
+                        let mut preset = neoveg_common::prefs::SavedPanCropPreset {
+                            name: name.clone(),
+                            cx: k.cx,
+                            cy: k.cy,
+                            size: k.size,
+                            rot: k.rot,
+                            ratio: k.ratio_safe(),
+                            flip_h: k.flip_h,
+                            flip_v: k.flip_v,
+                            smoothness: k.smoothness_safe(),
+                            stretch_to_fill: e.pan_crop_stretch_to_fill,
+                        };
+                        if preset.sanitize() {
+                            self.prefs
+                                .pan_crop_presets
+                                .retain(|p| p.name != preset.name);
+                            self.prefs.pan_crop_presets.push(preset);
+                            self.prefs.sanitize();
+                            let _ = self.prefs.save();
+                        }
+                    }
+                }
+                PcAction::DeleteUserPreset(ui_i) => {
+                    if *ui_i < self.prefs.pan_crop_presets.len() {
+                        self.prefs.pan_crop_presets.remove(*ui_i);
+                        let _ = self.prefs.save();
+                    }
+                }
+                PcAction::OpenEventFx => {
+                    self.dlg.fx_target = Some(crate::FxTarget::Event(id));
+                }
+                _ => {}
+            }
         }
         changed
     }

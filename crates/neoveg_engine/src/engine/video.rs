@@ -19,6 +19,20 @@ pub fn draw_source(
     key: &PanCropKey,
     maintain_aspect: bool,
 ) -> Frame {
+    draw_source_ex(src, w, h, key, maintain_aspect, true)
+}
+
+/// Variante completa de [`draw_source`] suportando *Esticar para preencher o
+/// quadro* (`stretch_to_fill = false` mantém o tamanho nativo da imagem de
+/// origem centralizada no quadro de saída sem esticar).
+pub fn draw_source_ex(
+    src: &RgbaImage,
+    w: usize,
+    h: usize,
+    key: &PanCropKey,
+    maintain_aspect: bool,
+    stretch_to_fill: bool,
+) -> Frame {
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     let (wf, hf) = (w as f32, h as f32);
     let ratio = key.ratio_safe();
@@ -49,7 +63,9 @@ pub fn draw_source(
             .for_each(|(i, p)| *p = to_f(i * 4));
         return out;
     }
-    let (fw, fh) = if maintain_aspect {
+    let (fw, fh) = if !stretch_to_fill {
+        (sw.max(1.0), sh.max(1.0))
+    } else if maintain_aspect {
         let s = (wf / sw).min(hf / sh);
         (sw * s, sh * s)
     } else {
@@ -126,28 +142,161 @@ pub fn draw_source(
     out
 }
 
-/// No modo 2D os campos de 3D não contam.
+/// No modo 2D os campos de Z/X/Y de 3D não contam; rotação soma `rot + orient_z`.
 fn motion_2d_is_identity(m: &MotionKey) -> bool {
-    m.x == 0.0 && m.y == 0.0 && m.scale_x == 1.0 && m.scale_y == 1.0 && m.rot == 0.0
+    m.x == 0.0 && m.y == 0.0 && m.scale_x == 1.0 && m.scale_y == 1.0 && (m.rot + m.orient_z) == 0.0
 }
 
-/// Aplica Track Motion (posição, escala, rotação) a uma camada.
+/// Aplica Track Motion 2D (posição, escala, pivô e rotação + orientação Z) a uma camada.
 fn apply_motion(f: &Frame, m: &MotionKey) -> Frame {
     let (w, h) = (f.w, f.h);
     let (wf, hf) = (w as f32, h as f32);
-    let (sn, cs) = (-m.rot.to_radians()).sin_cos();
-    let (sx, sy) = (m.scale_x.max(0.001), m.scale_y.max(0.001));
+    let angle = if (m.rot + m.orient_z).is_finite() {
+        m.rot + m.orient_z
+    } else {
+        0.0
+    };
+    let (sn, cs) = (-angle.to_radians()).sin_cos();
+    let sx = if m.scale_x.is_finite() {
+        m.scale_x.max(0.001)
+    } else {
+        1.0
+    };
+    let sy = if m.scale_y.is_finite() {
+        m.scale_y.max(0.001)
+    } else {
+        1.0
+    };
+    let px = if m.pivot_x.is_finite() {
+        m.pivot_x * wf
+    } else {
+        0.0
+    };
+    let py = if m.pivot_y.is_finite() {
+        m.pivot_y * hf
+    } else {
+        0.0
+    };
+    let tx = if m.x.is_finite() { m.x * wf } else { 0.0 };
+    let ty = if m.y.is_finite() { m.y * hf } else { 0.0 };
     let mut out = Frame::new(w, h);
     out.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, p) in row.iter_mut().enumerate() {
-            let dx = x as f32 + 0.5 - wf / 2.0 - m.x * wf;
-            let dy = y as f32 + 0.5 - hf / 2.0 - m.y * hf;
-            let rx = dx * cs - dy * sn;
-            let ry = dx * sn + dy * cs;
+            // Inversa de T(pos + pivot) * R(angle) * T(-pivot) * S(sx, sy)
+            let dx = x as f32 + 0.5 - wf / 2.0 - tx - px;
+            let dy = y as f32 + 0.5 - hf / 2.0 - ty - py;
+            let rx = dx * cs - dy * sn + px;
+            let ry = dx * sn + dy * cs + py;
             let lx = rx / sx + wf / 2.0;
             let ly = ry / sy + hf / 2.0;
             *p = f.sample(lx, ly);
         }
+    });
+    out
+}
+
+/// Aplica *Sombra 2D* ou *Brilho 2D* do Movimento da Trilha (VEGAS Pro p. 412)
+/// desfocando o canal alfa da camada, deslocando-o e compondo-o atrás dela.
+pub fn apply_shadow_glow_2d(layer: &Frame, key: &ShadowGlowKey) -> Frame {
+    let (w, h) = (layer.w, layer.h);
+    if w == 0 || h == 0 {
+        return layer.clone();
+    }
+    let intensity = if key.intensity.is_finite() {
+        key.intensity.clamp(0.0, 2.0)
+    } else {
+        0.0
+    };
+    if intensity <= 1e-4 || key.color[3] <= 1e-4 {
+        return layer.clone();
+    }
+    let ox = if key.offset_x.is_finite() {
+        (key.offset_x * w as f32).round() as isize
+    } else {
+        0
+    };
+    let oy = if key.offset_y.is_finite() {
+        (key.offset_y * h as f32).round() as isize
+    } else {
+        0
+    };
+    let mut alpha = vec![0.0f32; w * h];
+    for y in 0..h {
+        let sy = y as isize - oy;
+        if sy < 0 || sy >= h as isize {
+            continue;
+        }
+        let s_row = sy as usize * w;
+        let d_row = y * w;
+        for x in 0..w {
+            let sx = x as isize - ox;
+            if sx >= 0 && sx < w as isize {
+                alpha[d_row + x] = layer.px[s_row + sx as usize][3];
+            }
+        }
+    }
+    let blur_n = if key.blur.is_finite() {
+        key.blur.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let radius = ((blur_n * (w.min(h) as f32) * 0.08).round() as usize).min(48);
+    if radius > 0 {
+        // Duas passadas de desfoque em caixa separável (aproximação gaussiana rápida).
+        let mut tmp = vec![0.0f32; w * h];
+        for _ in 0..2 {
+            // horizontal
+            let win = (radius * 2 + 1) as f32;
+            for y in 0..h {
+                let row = &alpha[y * w..(y + 1) * w];
+                let dst = &mut tmp[y * w..(y + 1) * w];
+                let mut sum = 0.0f32;
+                for dx in -(radius as isize)..=(radius as isize) {
+                    let ix = dx.clamp(0, w as isize - 1) as usize;
+                    sum += row[ix];
+                }
+                for (x, d) in dst.iter_mut().enumerate().take(w) {
+                    *d = sum / win;
+                    let sub_x = (x as isize - radius as isize).clamp(0, w as isize - 1) as usize;
+                    let add_x =
+                        (x as isize + radius as isize + 1).clamp(0, w as isize - 1) as usize;
+                    sum += row[add_x] - row[sub_x];
+                }
+            }
+            // vertical
+            for x in 0..w {
+                let mut sum = 0.0f32;
+                for dy in -(radius as isize)..=(radius as isize) {
+                    let iy = dy.clamp(0, h as isize - 1) as usize;
+                    sum += tmp[iy * w + x];
+                }
+                for y in 0..h {
+                    alpha[y * w + x] = sum / win;
+                    let sub_y = (y as isize - radius as isize).clamp(0, h as isize - 1) as usize;
+                    let add_y =
+                        (y as isize + radius as isize + 1).clamp(0, h as isize - 1) as usize;
+                    sum += tmp[add_y * w + x] - tmp[sub_y * w + x];
+                }
+            }
+        }
+    }
+
+    let cr = key.color[0].clamp(0.0, 1.0);
+    let cg = key.color[1].clamp(0.0, 1.0);
+    let cb = key.color[2].clamp(0.0, 1.0);
+    let ca = key.color[3].clamp(0.0, 1.0) * intensity;
+    let mut out = Frame::new(w, h);
+    out.px.par_iter_mut().enumerate().for_each(|(i, dst)| {
+        let sa = (alpha[i] * ca).clamp(0.0, 1.0);
+        let bg = [cr * sa, cg * sa, cb * sa, sa];
+        let fg = layer.px[i];
+        let ia = 1.0 - fg[3];
+        *dst = [
+            fg[0] + bg[0] * ia,
+            fg[1] + bg[1] * ia,
+            fg[2] + bg[2] * ia,
+            fg[3] + bg[3] * ia,
+        ];
     });
     out
 }
@@ -431,8 +580,32 @@ fn event_layer_eye(
     let eye_img = extract_stereo_eye(&src, &e.stereo_3d, eye);
     let src_ref: &RgbaImage = eye_img.as_ref().unwrap_or(&src);
     let local = t - e.start;
-    let key = e.pan_crop.eval(local);
-    let mut f = draw_source(src_ref, w, h, &key, e.maintain_aspect);
+    let key = eval_pan_crop_smooth(&e.pan_crop, local);
+    let mut f = draw_source_ex(
+        src_ref,
+        w,
+        h,
+        &key,
+        e.maintain_aspect,
+        e.pan_crop_stretch_to_fill,
+    );
+    if e.pan_crop_mask_enabled {
+        if let Some(mask_data) = e.pan_crop_mask.as_deref() {
+            let (path, feather, opacity, expansion) = mask_data.evaluate_at(local);
+            let poly = path.flatten(16);
+            let mut mask = crate::mask::rasterize_mask(&poly, f.w, f.h, expansion);
+            if feather > 0.5 {
+                crate::mask::apply_feather(&mut mask, f.w, f.h, feather);
+            }
+            crate::mask::apply_mask_to_frame(
+                &mut f,
+                &mask,
+                mask_data.mode,
+                opacity,
+                mask_data.invert,
+            );
+        }
+    }
     if eye != StereoEye::Center && e.stereo_3d.horizontal_offset.abs() > 1e-6 {
         let sign = if eye == StereoEye::Left { -0.5 } else { 0.5 };
         f = shift_frame_horizontal(&f, e.stereo_3d.horizontal_offset * (w as f32) * sign);
@@ -681,6 +854,26 @@ pub fn render_frame_preview(
     )
 }
 
+fn stereo_camera_params(p: &Project, w: usize, eye: StereoEye) -> (f32, f32) {
+    let wf = w as f32;
+    let inter = if p.settings.stereo_3d_interocular.is_finite() {
+        p.settings.stereo_3d_interocular.clamp(0.0, 0.25)
+    } else {
+        0.035
+    };
+    let conv = if p.settings.stereo_3d_convergence.is_finite() {
+        p.settings.stereo_3d_convergence.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let cam_x = match eye {
+        StereoEye::Center => 0.0,
+        StereoEye::Left => -inter * 0.5 * wf,
+        StereoEye::Right => inter * 0.5 * wf,
+    };
+    (cam_x, conv * wf)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_track_processed(
     p: &Project,
@@ -691,6 +884,7 @@ fn render_track_processed(
     h: usize,
     opts: VideoRenderOpts,
     eye: StereoEye,
+    parent_3d: Option<&super::motion3d::Mat4>,
 ) -> Option<Frame> {
     let mut layer = render_track_eye(p, media, track, t, w, h, opts, eye)?;
     if !opts.bypass_fx {
@@ -709,14 +903,71 @@ fn render_track_processed(
         });
     }
     let mk = track.motion.eval(t);
-    if track.motion_3d {
-        if !super::motion3d::is_identity(&mk) {
-            layer = super::motion3d::apply_motion_3d(&layer, &mk);
+    let (cam_x, conv_z) = stereo_camera_params(p, w, eye);
+    if track.motion_3d || parent_3d.is_some() {
+        let local_mat = super::motion3d::motion_to_mat4(&mk, w as f32, h as f32);
+        let world_mat = match parent_3d {
+            Some(pm) => super::motion3d::mat4_mul(pm, &local_mat),
+            None => local_mat,
+        };
+        let needs_3d =
+            parent_3d.is_some() || !super::motion3d::is_identity(&mk) || cam_x.abs() > 1e-5;
+        if needs_3d {
+            layer = super::motion3d::apply_motion_3d_mat(&layer, &world_mat, cam_x, conv_z);
         }
     } else if !motion_2d_is_identity(&mk) {
         layer = apply_motion(&layer, &mk);
     }
+    if track.glow_2d_enabled {
+        let gk = track.glow_2d.eval(t);
+        layer = apply_shadow_glow_2d(&layer, &gk);
+    }
+    if track.shadow_2d_enabled {
+        let sk = track.shadow_2d.eval(t);
+        layer = apply_shadow_glow_2d(&layer, &sk);
+    }
     Some(layer)
+}
+
+/// Ordena faixas 3D contíguas por profundidade Z do mundo (mais distantes atrás,
+/// mais próximas na frente) preservando a ordem relativa de faixas 2D/máscaras.
+fn sort_sibling_3d_runs<'a>(
+    list: Vec<&'a Track>,
+    t: Ticks,
+    w: usize,
+    h: usize,
+    parent_3d: Option<&super::motion3d::Mat4>,
+) -> Vec<&'a Track> {
+    let mut out = Vec::with_capacity(list.len());
+    let mut run: Vec<(&'a Track, f32)> = Vec::new();
+    let flush = |run: &mut Vec<(&'a Track, f32)>, out: &mut Vec<&'a Track>| {
+        if run.len() > 1 {
+            // Z menor (mais negativo) fica atrás e é composto primeiro.
+            run.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+        out.extend(run.drain(..).map(|(tr, _)| tr));
+    };
+    for tr in list {
+        if tr.kind == TrackKind::Video
+            && tr.motion_3d
+            && !tr.is_folder
+            && !tr.is_adjustment()
+            && tr.mask_mode == TrackMaskMode::None
+        {
+            let mk = tr.motion.eval(t);
+            let lm = super::motion3d::motion_to_mat4(&mk, w as f32, h as f32);
+            let wm = match parent_3d {
+                Some(pm) => super::motion3d::mat4_mul(pm, &lm),
+                None => lm,
+            };
+            run.push((tr, super::motion3d::world_center_z(&wm)));
+        } else {
+            flush(&mut run, &mut out);
+            out.push(tr);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -732,6 +983,7 @@ fn compose_subtree(
     any_solo: bool,
     out: &mut Frame,
     depth: usize,
+    parent_3d: Option<&super::motion3d::Mat4>,
 ) {
     if depth > MAX_TRACK_DEPTH {
         return;
@@ -748,7 +1000,14 @@ fn compose_subtree(
         })
         .collect();
     if track.is_folder {
-        for child in video_children.into_iter().rev() {
+        let ordered = sort_sibling_3d_runs(
+            video_children.into_iter().rev().collect(),
+            t,
+            w,
+            h,
+            parent_3d,
+        );
+        for child in ordered {
             compose_subtree(
                 p,
                 media,
@@ -761,6 +1020,7 @@ fn compose_subtree(
                 any_solo,
                 out,
                 depth + 1,
+                parent_3d,
             );
         }
         return;
@@ -779,7 +1039,8 @@ fn compose_subtree(
         if !track_active {
             return;
         }
-        let Some(layer) = render_track_processed(p, media, track, t, w, h, opts, eye) else {
+        let Some(layer) = render_track_processed(p, media, track, t, w, h, opts, eye, parent_3d)
+        else {
             return;
         };
         if track.mask_mode != TrackMaskMode::None {
@@ -791,12 +1052,31 @@ fn compose_subtree(
         return;
     }
 
-    // Subárvore Pai/Filho (composição em grupo com máscara e movimento pai, VEGAS Pro p. 740).
+    // Subárvore Pai/Filho (composição em grupo com máscara e movimento pai 2D ou 3D, VEGAS Pro pp. 740, 754).
+    let pmk = track.parent_motion.eval(t);
+    let own_parent_3d = track.parent_motion_3d.then(|| {
+        let pm = super::motion3d::motion_to_mat4(&pmk, w as f32, h as f32);
+        match parent_3d {
+            Some(anc) => super::motion3d::mat4_mul(anc, &pm),
+            None => pm,
+        }
+    });
+    let child_parent_3d = own_parent_3d.as_ref().or(parent_3d);
+
     let mut group = Frame::new(w, h);
-    for child in video_children.into_iter().rev() {
+    let ordered_children = sort_sibling_3d_runs(
+        video_children.into_iter().rev().collect(),
+        t,
+        w,
+        h,
+        child_parent_3d,
+    );
+    for child in ordered_children {
         if !p.is_track_effectively_muted(child.id) && child.mask_mode != TrackMaskMode::None {
             if !any_solo || child.solo {
-                if let Some(mask) = render_track_processed(p, media, child, t, w, h, opts, eye) {
+                if let Some(mask) =
+                    render_track_processed(p, media, child, t, w, h, opts, eye, child_parent_3d)
+                {
                     apply_track_mask(&mut group, &mask, child.mask_mode);
                 }
             }
@@ -813,11 +1093,14 @@ fn compose_subtree(
                 any_solo,
                 &mut group,
                 depth + 1,
+                child_parent_3d,
             );
         }
     }
     if track_active {
-        if let Some(layer) = render_track_processed(p, media, track, t, w, h, opts, eye) {
+        if let Some(layer) =
+            render_track_processed(p, media, track, t, w, h, opts, eye, child_parent_3d)
+        {
             if track.mask_mode != TrackMaskMode::None {
                 apply_track_mask(&mut group, &layer, track.mask_mode);
             } else {
@@ -825,8 +1108,7 @@ fn compose_subtree(
             }
         }
     }
-    let pmk = track.parent_motion.eval(t);
-    if !motion_2d_is_identity(&pmk) {
+    if !track.parent_motion_3d && !motion_2d_is_identity(&pmk) {
         group = apply_motion(&group, &pmk);
     }
     let op = track.opacity * track.env_value(EnvKind::Opacity, t);
@@ -846,15 +1128,21 @@ fn render_frame_eye(
     let mut out = Frame::filled(w, h, [bg[0], bg[1], bg[2], 1.0]);
     let any_solo = p.any_solo(TrackKind::Video);
     let track_ids: std::collections::HashSet<Id> = p.tracks.iter().map(|t| t.id).collect();
-    for track in p.tracks.iter().rev() {
-        // Trilhas com pai válido são compostas dentro de `compose_subtree` do ancestral.
-        let has_valid_parent = track
-            .parent_track_id
-            .is_some_and(|pid| pid != track.id && track_ids.contains(&pid));
-        if has_valid_parent {
-            continue;
-        }
-        compose_subtree(p, media, track, t, w, h, opts, eye, any_solo, &mut out, 0);
+    let top_level: Vec<&Track> = p
+        .tracks
+        .iter()
+        .rev()
+        .filter(|track| {
+            !track
+                .parent_track_id
+                .is_some_and(|pid| pid != track.id && track_ids.contains(&pid))
+        })
+        .collect();
+    let ordered = sort_sibling_3d_runs(top_level, t, w, h, None);
+    for track in ordered {
+        compose_subtree(
+            p, media, track, t, w, h, opts, eye, any_solo, &mut out, 0, None,
+        );
     }
     if !opts.bypass_fx {
         for fx in &p.master.video_fx {
@@ -1271,5 +1559,88 @@ mod pan_crop_tests {
         assert_eq!(k.ratio, 1.0);
         assert!(!k.flip_h && !k.flip_v);
         assert_eq!(k.size, 0.5);
+        assert_eq!(k.smoothness, 0.0);
+    }
+
+    #[test]
+    fn stretch_to_fill_false_mantem_pixels_nativos_sem_esticar() {
+        let mut small = RgbaImage::new(4, 4);
+        for px in small.pixels_mut() {
+            *px = image::Rgba([255, 0, 0, 255]);
+        }
+        let f = draw_source_ex(&small, 16, 16, &PanCropKey::default(), true, false);
+        // Centro tem vermelho opaco; borda permanece transparente porque não esticou 4x4 para 16x16
+        assert!(f.px[8 * 16 + 8][0] > 0.9);
+        assert!(f.px[0][3] < 0.05);
+    }
+
+    #[test]
+    fn sombra_2d_desenha_halo_fora_do_bloco_central() {
+        let mut layer = Frame::new(24, 24);
+        for y in 8..16 {
+            for x in 8..16 {
+                layer.px[y * 24 + x] = [1.0, 1.0, 1.0, 1.0];
+            }
+        }
+        let sk = ShadowGlowKey {
+            offset_x: 0.12,
+            offset_y: 0.12,
+            blur: 0.4,
+            intensity: 0.9,
+            color: [0.0, 0.0, 1.0, 1.0],
+        };
+        let out = apply_shadow_glow_2d(&layer, &sk);
+        // Pixel deslocado fora do quadrado central deve receber alfa azul da sombra
+        assert!(out.px[17 * 24 + 17][3] > 0.05);
+        assert!(out.px[17 * 24 + 17][2] > 0.02);
+        // Centro continua branco opaco na frente da sombra
+        assert!(out.px[12 * 24 + 12][0] > 0.95);
+    }
+
+    #[test]
+    fn ordenacao_z_entre_trilhas_3d_traz_mais_proxima_a_frente() {
+        let mut p = Project::new_default();
+        p.tracks.clear();
+        let imp_r = crate::media::import_generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        });
+        let imp_b = crate::media::import_generated(GenSpec::SolidColor {
+            color: [0.0, 0.0, 1.0, 1.0],
+        });
+        let media = MediaCache::default();
+        media.insert(imp_r.item.id, imp_r.entry);
+        media.insert(imp_b.item.id, imp_b.entry);
+        p.media.push(imp_r.item.clone());
+        p.media.push(imp_b.item.clone());
+
+        // Trilha superior (índice 0) está mais LONGE (Z = -0.3, vermelha)
+        let mut t_top = Track::new(TrackKind::Video, "Longe");
+        t_top.motion_3d = true;
+        t_top.motion.keys[0].value.z = -0.3;
+        t_top.events.push(Event::new(
+            &imp_r.item,
+            Ticks::ZERO,
+            Ticks::from_secs_i64(2),
+        ));
+
+        // Trilha inferior (índice 1) está mais PERTO (Z = +0.2, azul)
+        let mut t_bot = Track::new(TrackKind::Video, "Perto");
+        t_bot.motion_3d = true;
+        t_bot.motion.keys[0].value.z = 0.2;
+        t_bot.events.push(Event::new(
+            &imp_b.item,
+            Ticks::ZERO,
+            Ticks::from_secs_i64(2),
+        ));
+
+        p.tracks.push(t_top);
+        p.tracks.push(t_bot);
+
+        let frame = render_frame(&p, &media, Ticks::ZERO, 16, 16);
+        let center = frame.px[8 * 16 + 8];
+        assert!(
+            center[2] > 0.9 && center[0] < 0.1,
+            "trilha 3D mais próxima deve ficar à frente: {center:?}"
+        );
     }
 }

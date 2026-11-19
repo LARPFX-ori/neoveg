@@ -903,6 +903,10 @@ pub struct Dialogs {
     pub pan_crop: Option<Id>,
     pub track_motion: Option<Id>,
     pub fx_target: Option<FxTarget>,
+    fx_chooser_open: bool,
+    fx_chooser_cat: usize,
+    fx_chooser_filter: String,
+    fx_selected_slot: Option<usize>,
     pub gen_editor: Option<Id>,
     pub paste_attrs_open: bool,
     pub paste_attrs_mask: neoveg_engine::session::PasteAttributesMask,
@@ -2462,6 +2466,28 @@ impl App {
                             }
                         });
                     ui.end_row();
+                    if s.stereo_3d != Stereo3dMode::Off {
+                        ui.label(tr(lang, "Distância interocular 3D"));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut s.stereo_3d_interocular)
+                                    .range(0.0..=0.25)
+                                    .speed(0.002)
+                                    .fixed_decimals(3),
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label(tr(lang, "Convergência 3D (Z)"));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut s.stereo_3d_convergence)
+                                    .range(-1.0..=1.0)
+                                    .speed(0.01)
+                                    .fixed_decimals(3),
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
                     ui.label(tr(lang, "Tempo musical (BPM)"));
                     changed |= ui
                         .add(
@@ -2911,6 +2937,7 @@ impl App {
         let mut open = true;
         let mut changed = false;
         let mut add: Option<FxKind> = None;
+        let mut replace_slot: Option<(usize, FxKind)> = None;
         let mut op: Option<(usize, &str)> = None;
         let mut apply_saved_chain: Option<usize> = None;
         let mut delete_saved_chain: Option<usize> = None;
@@ -2924,12 +2951,46 @@ impl App {
             return;
         };
         let mut chain_copy = chain.clone();
+        let mut chooser_open = self.dlg.fx_chooser_open;
+        let mut chooser_cat = self.dlg.fx_chooser_cat;
+        let mut chooser_filter = self.dlg.fx_chooser_filter.clone();
+        let mut sel_slot = self.dlg.fx_selected_slot;
         crate::dialog_window::DialogWindow::new(title)
             .id(egui::Id::new("fx_chain_win"))
             .open(&mut open)
-            .default_width(440.0)
+            .default_width(if chooser_open { 640.0 } else { 480.0 })
             .show(ctx, |ui| {
+                if !chain_copy.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("○").weak());
+                        for (i, fx) in chain_copy.iter_mut().enumerate() {
+                            ui.label(egui::RichText::new("—").weak());
+                            let is_sel = sel_slot == Some(i);
+                            if ui.checkbox(&mut fx.enabled, "").changed() {
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(is_sel, fx.display_name())
+                                .clicked()
+                            {
+                                sel_slot = Some(i);
+                            }
+                        }
+                        ui.label(egui::RichText::new("—○").weak());
+                    });
+                    ui.separator();
+                }
                 ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .selectable_label(chooser_open, tr(lang, "Escolher plug-in..."))
+                        .on_hover_text(tr(
+                            lang,
+                            "Abrir seletor de plug-ins em 2 colunas (árvore e lista)",
+                        ))
+                        .clicked()
+                    {
+                        chooser_open = !chooser_open;
+                    }
                     egui::ComboBox::from_id_salt("fx_add")
                         .selected_text(tr(lang, "+ Adicionar efeito..."))
                         .show_ui(ui, |ui| {
@@ -3018,6 +3079,83 @@ impl App {
                         }
                         if ui.button("Cancelar").clicked() {
                             self.dlg.save_chain_target = None;
+                        }
+                    });
+                }
+                if chooser_open {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.strong(tr(lang, "Escolha de Plug-in"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut chooser_filter)
+                                .desired_width(200.0)
+                                .hint_text(tr(lang, "Filtrar plug-ins...")),
+                        );
+                    });
+                    let q = chooser_filter.trim().to_lowercase();
+                    let list: &[FxKind] = if audio {
+                        &FxKind::AUDIO
+                    } else {
+                        &FxKind::VIDEO
+                    };
+                    let cats: [&str; 3] = [
+                        tr(lang, "Todos"),
+                        tr(lang, "Favoritos"),
+                        tr(lang, "Nativos"),
+                    ];
+                    let favs = &self.prefs.fx_favorites;
+                    ui.columns(2, |cols| {
+                        cols[0].strong(tr(lang, "Pastas"));
+                        for (ci, cname) in cats.iter().enumerate() {
+                            if cols[0]
+                                .selectable_label(chooser_cat == ci, *cname)
+                                .clicked()
+                            {
+                                chooser_cat = ci;
+                            }
+                        }
+                        cols[1].strong(tr(lang, "Plug-ins disponíveis"));
+                        egui::ScrollArea::vertical()
+                            .id_salt("fx_chooser_list")
+                            .max_height(150.0)
+                            .show(&mut cols[1], |ui| {
+                                for &k in list {
+                                    let kname = k.name_in(lang);
+                                    if !q.is_empty() && !kname.to_lowercase().contains(&q) {
+                                        continue;
+                                    }
+                                    if chooser_cat == 1
+                                        && !favs.iter().any(|f| f == &format!("{k:?}"))
+                                    {
+                                        continue;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label(kname);
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.small_button(tr(lang, "Adicionar")).clicked() {
+                                                    add = Some(k);
+                                                }
+                                                if let Some(slot) =
+                                                    sel_slot.filter(|&s| s < chain_copy.len())
+                                                {
+                                                    if ui
+                                                        .small_button(tr(lang, "Substituir"))
+                                                        .clicked()
+                                                    {
+                                                        replace_slot = Some((slot, k));
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button(tr(lang, "Fechar seletor")).clicked() {
+                            chooser_open = false;
                         }
                     });
                 }
@@ -3245,6 +3383,16 @@ impl App {
                         }
                     });
             });
+        self.dlg.fx_chooser_open = chooser_open;
+        self.dlg.fx_chooser_cat = chooser_cat;
+        self.dlg.fx_chooser_filter = chooser_filter;
+        self.dlg.fx_selected_slot = sel_slot;
+        if let Some((slot, k)) = replace_slot {
+            if slot < chain_copy.len() {
+                chain_copy[slot] = FxInstance::new(k);
+                changed = true;
+            }
+        }
         if let Some(k) = add {
             chain_copy.push(FxInstance::new(k));
             changed = true;

@@ -15,7 +15,7 @@ use eframe::egui::{self, vec2, Color32, CursorIcon, Pos2, Sense, Stroke, Vec2};
 use neoveg_common::curve::{Curve, Id, Keyframes};
 use neoveg_common::i18n::{tr, tr_args, Language};
 use neoveg_common::time::Ticks;
-use neoveg_engine::model::{BlendMode, MotionKey};
+use neoveg_engine::model::{BlendMode, MotionKey, ShadowGlowKey};
 
 /// Maior escala aceita (a mesma faixa da janela antiga, com folga).
 const MAX_SCALE: f32 = 100.0;
@@ -54,6 +54,8 @@ pub(crate) struct TrackMotionUi {
     pub snap_rotation: f32,
     /// Editando o movimento Pai/Filho do grupo em vez do da trilha.
     pub parent_mode: bool,
+    /// Linha ativa na trilha de quadros-chave: 0 = Posição, 1 = Sombra 2D, 2 = Brilho 2D.
+    pub active_row: usize,
     pub preset: usize,
     pub ws: Workspace,
     drag: Option<TmDrag>,
@@ -78,6 +80,7 @@ impl Default for TrackMotionUi {
             local: Ticks::ZERO,
             snap_rotation: 5.0,
             parent_mode: false,
+            active_row: 0,
             preset: 0,
             ws: Workspace {
                 grid: 10.0,
@@ -186,12 +189,16 @@ enum TmAction {
     MatchOutput,
     Preset(usize),
     Nav(KfNav),
-    MoveKey(usize, Ticks),
-    DeleteKey(usize),
-    SetCurve(usize, Curve),
+    MoveKey(usize, usize, Ticks),
+    DeleteKey(usize, usize),
+    SetCurve(usize, usize, Curve),
     Blend(BlendMode),
-    /// *Alfa da origem 3D* ligado/desligado.
+    /// *Alfa da origem 3D* ligado/desligado (vale para trilha e para Pai/Filho 3D).
     Mode3d(bool),
+    ToggleShadow(bool),
+    ToggleGlow(bool),
+    UpdateShadow(ShadowGlowKey),
+    UpdateGlow(ShadowGlowKey),
 }
 
 fn finite_or(v: f32, d: f32) -> f32 {
@@ -316,8 +323,17 @@ impl App {
             track.motion.clone()
         };
         let blend = track.blend;
-        // o 3D vale para o movimento da trilha; o Pai/Filho segue 2D
-        let is_3d = track.motion_3d && !st.parent_mode;
+        let is_3d = if st.parent_mode {
+            track.parent_motion_3d
+        } else {
+            track.motion_3d
+        };
+        let shadow_enabled = track.shadow_2d_enabled;
+        let shadow_kf = track.shadow_2d.clone();
+        let glow_enabled = track.glow_2d_enabled;
+        let glow_kf = track.glow_2d.clone();
+        let cur_shadow = shadow_kf.eval(t);
+        let cur_glow = glow_kf.eval(t);
         let name = track.name.clone();
         let cur = motion.eval(t);
         let length = self
@@ -388,6 +404,10 @@ impl App {
                                         key_idx,
                                         frame,
                                         is_3d,
+                                        shadow_enabled,
+                                        &cur_shadow,
+                                        glow_enabled,
+                                        &cur_glow,
                                         &mut st,
                                         &mut actions,
                                         lang,
@@ -409,10 +429,26 @@ impl App {
                 });
             });
             ui.add_space(2.0);
-            let rows = [KfRow {
-                label: tr(lang, "Posição"),
-                keys: motion.keys.iter().map(|k| (k.t, k.curve)).collect(),
-            }];
+            let rows = [
+                KfRow {
+                    label: tr(lang, "Posição"),
+                    keys: motion.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    checked: None,
+                    selected: st.active_row == 0,
+                },
+                KfRow {
+                    label: tr(lang, "Sombra 2D"),
+                    keys: shadow_kf.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    checked: Some(shadow_enabled),
+                    selected: st.active_row == 1,
+                },
+                KfRow {
+                    label: tr(lang, "Brilho 2D"),
+                    keys: glow_kf.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    checked: Some(glow_enabled),
+                    selected: st.active_row == 2,
+                },
+            ];
             let mut sync = st.sync_cursor;
             let fmt = |x: Ticks| self.fmt_time(x);
             let out = kf_window::keyframe_strip(
@@ -426,6 +462,16 @@ impl App {
                 &theme,
                 lang,
             );
+            if let Some(ri) = out.select_row {
+                st.active_row = ri;
+            }
+            if let Some(ri) = out.toggle_row {
+                if ri == 1 {
+                    actions.push(TmAction::ToggleShadow(!shadow_enabled));
+                } else if ri == 2 {
+                    actions.push(TmAction::ToggleGlow(!glow_enabled));
+                }
+            }
             if sync != st.sync_cursor {
                 st.sync_cursor = sync;
                 if sync {
@@ -438,20 +484,24 @@ impl App {
             if let Some(n) = out.nav {
                 actions.push(TmAction::Nav(n));
             }
-            if let Some((_, ki, x)) = out.move_key {
-                actions.push(TmAction::MoveKey(ki, x));
+            if let Some((ri, ki, x)) = out.move_key {
+                actions.push(TmAction::MoveKey(ri, ki, x));
             }
-            if let Some((_, ki, c)) = out.set_curve {
-                actions.push(TmAction::SetCurve(ki, c));
+            if let Some((ri, ki, c)) = out.set_curve {
+                actions.push(TmAction::SetCurve(ri, ki, c));
             }
-            if let Some((_, ki)) = out.delete_key {
-                actions.push(TmAction::DeleteKey(ki));
+            if let Some((ri, ki)) = out.delete_key {
+                actions.push(TmAction::DeleteKey(ri, ki));
             }
         });
-        let times: Vec<Ticks> = motion.keys.iter().map(|k| k.t).collect();
+        let active_times: Vec<Ticks> = match st.active_row {
+            1 => shadow_kf.keys.iter().map(|k| k.t).collect(),
+            2 => glow_kf.keys.iter().map(|k| k.t).collect(),
+            _ => motion.keys.iter().map(|k| k.t).collect(),
+        };
         for a in &actions {
             if let TmAction::Nav(n) = a {
-                if let Some(x) = kf_window::nav_target(&times, t, *n) {
+                if let Some(x) = kf_window::nav_target(&active_times, t, *n) {
                     seek = Some(x);
                 }
             }
@@ -464,8 +514,10 @@ impl App {
             }
         }
         let parent = st.parent_mode;
-        let changed =
-            self.apply_track_motion(tid, parent, t, tol, frame, length, new_key, &actions);
+        let active_row = st.active_row;
+        let changed = self.apply_track_motion(
+            tid, parent, active_row, t, tol, frame, length, new_key, &actions,
+        );
         self.dlg.tm = st;
         if changed {
             self.dialog_change();
@@ -494,7 +546,7 @@ impl App {
             egui::ComboBox::from_id_salt("tm_blend")
                 .selected_text(if is_3d { label_3d } else { blend.name_in(lang) })
                 .show_ui(ui, |ui| {
-                    if !st.parent_mode && ui.selectable_label(is_3d, label_3d).clicked() {
+                    if ui.selectable_label(is_3d, label_3d).clicked() {
                         actions.push(TmAction::Mode3d(true));
                     }
                     for b in BlendMode::ALL {
@@ -608,6 +660,10 @@ impl App {
         key_idx: usize,
         frame: Vec2,
         is_3d: bool,
+        shadow_enabled: bool,
+        cur_shadow: &ShadowGlowKey,
+        glow_enabled: bool,
+        cur_glow: &ShadowGlowKey,
         st: &mut TrackMotionUi,
         actions: &mut Vec<TmAction>,
         lang: Language,
@@ -681,7 +737,217 @@ impl App {
                     ..out.clone().unwrap_or_else(|| cur.clone())
                 });
             }
+            let mut px = cur.pivot_x * frame.x;
+            let mut py = cur.pivot_y * frame.y;
+            if kf_window::prop_num(ui, tr(lang, "Pivô X:"), &mut px, 1.0, 1, -big..=big) {
+                out = Some(MotionKey {
+                    pivot_x: px / frame.x.max(1.0),
+                    ..out.clone().unwrap_or_else(|| cur.clone())
+                });
+            }
+            if kf_window::prop_num(ui, tr(lang, "Pivô Y:"), &mut py, 1.0, 1, -big..=big) {
+                out = Some(MotionKey {
+                    pivot_y: py / frame.y.max(1.0),
+                    ..out.clone().unwrap_or_else(|| cur.clone())
+                });
+            }
+            if is_3d {
+                let mut pz = cur.pivot_z * frame.x;
+                if kf_window::prop_num(ui, tr(lang, "Pivô Z:"), &mut pz, 1.0, 1, -big..=big) {
+                    out = Some(MotionKey {
+                        pivot_z: pz / frame.x.max(1.0),
+                        ..out.clone().unwrap_or_else(|| cur.clone())
+                    });
+                }
+            }
         });
+        kf_window::prop_section(
+            ui,
+            sec("orient"),
+            tr(lang, "Orientação"),
+            false,
+            th,
+            |ui| {
+                if is_3d {
+                    let (mut ox, mut oy) = (cur.orient_x, cur.orient_y);
+                    if kf_window::prop_num(ui, "X:", &mut ox, 0.5, 1, -3600.0..=3600.0) {
+                        out = Some(MotionKey {
+                            orient_x: ox,
+                            ..out.clone().unwrap_or_else(|| cur.clone())
+                        });
+                    }
+                    if kf_window::prop_num(ui, "Y:", &mut oy, 0.5, 1, -3600.0..=3600.0) {
+                        out = Some(MotionKey {
+                            orient_y: oy,
+                            ..out.clone().unwrap_or_else(|| cur.clone())
+                        });
+                    }
+                }
+                let mut oz = cur.orient_z;
+                if kf_window::prop_num(ui, "Z:", &mut oz, 0.5, 1, -3600.0..=3600.0) {
+                    out = Some(MotionKey {
+                        orient_z: oz,
+                        ..out.clone().unwrap_or_else(|| cur.clone())
+                    });
+                }
+            },
+        );
+        if st.active_row == 1 || shadow_enabled {
+            kf_window::prop_section(
+                ui,
+                sec("shadow2d"),
+                tr(lang, "Sombra 2D"),
+                st.active_row == 1,
+                th,
+                |ui| {
+                    let mut on = shadow_enabled;
+                    kf_window::prop_row(ui, tr(lang, "Ativar:"), |ui| {
+                        if ui.checkbox(&mut on, "").changed() {
+                            actions.push(TmAction::ToggleShadow(on));
+                        }
+                    });
+                    let mut sk = cur_shadow.clone();
+                    let mut sc = false;
+                    let mut ox = sk.offset_x * frame.x;
+                    let mut oy = sk.offset_y * frame.y;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Deslocamento X:"),
+                        &mut ox,
+                        1.0,
+                        1,
+                        -big..=big,
+                    ) {
+                        sk.offset_x = ox / frame.x.max(1.0);
+                        sc = true;
+                    }
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Deslocamento Y:"),
+                        &mut oy,
+                        1.0,
+                        1,
+                        -big..=big,
+                    ) {
+                        sk.offset_y = oy / frame.y.max(1.0);
+                        sc = true;
+                    }
+                    let mut blur_pct = sk.blur * 100.0;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Desfoque (%):"),
+                        &mut blur_pct,
+                        1.0,
+                        0,
+                        0.0..=100.0,
+                    ) {
+                        sk.blur = (blur_pct * 0.01).clamp(0.0, 1.0);
+                        sc = true;
+                    }
+                    let mut int_pct = sk.intensity * 100.0;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Intensidade (%):"),
+                        &mut int_pct,
+                        1.0,
+                        0,
+                        0.0..=100.0,
+                    ) {
+                        sk.intensity = (int_pct * 0.01).clamp(0.0, 2.0);
+                        sc = true;
+                    }
+                    kf_window::prop_row(ui, tr(lang, "Cor:"), |ui| {
+                        if ui
+                            .color_edit_button_rgba_unmultiplied(&mut sk.color)
+                            .changed()
+                        {
+                            sc = true;
+                        }
+                    });
+                    if sc {
+                        actions.push(TmAction::UpdateShadow(sk));
+                    }
+                },
+            );
+        }
+        if st.active_row == 2 || glow_enabled {
+            kf_window::prop_section(
+                ui,
+                sec("glow2d"),
+                tr(lang, "Brilho 2D"),
+                st.active_row == 2,
+                th,
+                |ui| {
+                    let mut on = glow_enabled;
+                    kf_window::prop_row(ui, tr(lang, "Ativar:"), |ui| {
+                        if ui.checkbox(&mut on, "").changed() {
+                            actions.push(TmAction::ToggleGlow(on));
+                        }
+                    });
+                    let mut gk = cur_glow.clone();
+                    let mut gc = false;
+                    let mut ox = gk.offset_x * frame.x;
+                    let mut oy = gk.offset_y * frame.y;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Deslocamento X:"),
+                        &mut ox,
+                        1.0,
+                        1,
+                        -big..=big,
+                    ) {
+                        gk.offset_x = ox / frame.x.max(1.0);
+                        gc = true;
+                    }
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Deslocamento Y:"),
+                        &mut oy,
+                        1.0,
+                        1,
+                        -big..=big,
+                    ) {
+                        gk.offset_y = oy / frame.y.max(1.0);
+                        gc = true;
+                    }
+                    let mut blur_pct = gk.blur * 100.0;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Desfoque (%):"),
+                        &mut blur_pct,
+                        1.0,
+                        0,
+                        0.0..=100.0,
+                    ) {
+                        gk.blur = (blur_pct * 0.01).clamp(0.0, 1.0);
+                        gc = true;
+                    }
+                    let mut int_pct = gk.intensity * 100.0;
+                    if kf_window::prop_num(
+                        ui,
+                        tr(lang, "Intensidade (%):"),
+                        &mut int_pct,
+                        1.0,
+                        0,
+                        0.0..=100.0,
+                    ) {
+                        gk.intensity = (int_pct * 0.01).clamp(0.0, 2.0);
+                        gc = true;
+                    }
+                    kf_window::prop_row(ui, tr(lang, "Cor:"), |ui| {
+                        if ui
+                            .color_edit_button_rgba_unmultiplied(&mut gk.color)
+                            .changed()
+                        {
+                            gc = true;
+                        }
+                    });
+                    if gc {
+                        actions.push(TmAction::UpdateGlow(gk));
+                    }
+                },
+            );
+        }
         kf_window::prop_section(ui, sec("kf"), tr(lang, "Quadro-chave"), true, th, |ui| {
             kf_window::prop_row(ui, tr(lang, "Tipo:"), |ui| {
                 let current = motion.keys.get(key_idx).map(|k| k.curve);
@@ -694,7 +960,7 @@ impl App {
                         }
                     });
                 if current.is_some() && Some(c) != current {
-                    actions.push(TmAction::SetCurve(key_idx, c));
+                    actions.push(TmAction::SetCurve(0, key_idx, c));
                 }
             });
         });
@@ -798,10 +1064,17 @@ impl App {
             Stroke::new(stroke_w, frame_stroke_col),
             egui::StrokeKind::Middle,
         );
-        // camada: retângulo, círculo e eixos X/Y do objeto
+        // camada: retângulo, círculo, pivô e eixos X/Y do objeto
         let g = motion_to_geom(cur, frame);
         let corners: Vec<Pos2> = g.corners().iter().map(|p| sc(*p)).collect();
         painter.add(egui::Shape::closed_line(corners, thin));
+        if cur.pivot_x.abs() > 1e-4 || cur.pivot_y.abs() > 1e-4 {
+            let piv = sc(g.center + vec2(cur.pivot_x * frame.x, cur.pivot_y * frame.y));
+            let p_st = Stroke::new(1.2_f32, self.theme.accent);
+            painter.circle_stroke(piv, 5.0, p_st);
+            painter.line_segment([piv - vec2(7.0, 0.0), piv + vec2(7.0, 0.0)], p_st);
+            painter.line_segment([piv - vec2(0.0, 7.0), piv + vec2(0.0, 7.0)], p_st);
+        }
         let r = (g.half.x.min(g.half.y) * 0.5).max(1.0);
         let ring: Vec<Pos2> = (0..72)
             .map(|i| {
@@ -1143,6 +1416,7 @@ impl App {
         &mut self,
         tid: Id,
         parent: bool,
+        active_row: usize,
         t: Ticks,
         tol: Ticks,
         frame: Vec2,
@@ -1169,28 +1443,161 @@ impl App {
             } else {
                 &mut track.motion
             };
-            // como no VEGAS Pro: editar fora de um quadro-chave cria um novo
             m.set(t, k, tol);
             changed = true;
         }
         for a in actions {
-            if let TmAction::Blend(b) = a {
-                if track.blend != *b || track.motion_3d {
-                    track.blend = *b;
-                    track.motion_3d = false;
-                    changed = true;
+            match a {
+                TmAction::Blend(b) => {
+                    if track.blend != *b
+                        || (!parent && track.motion_3d)
+                        || (parent && track.parent_motion_3d)
+                    {
+                        track.blend = *b;
+                        if parent {
+                            track.parent_motion_3d = false;
+                        } else {
+                            track.motion_3d = false;
+                        }
+                        changed = true;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if let TmAction::Mode3d(on) = a {
-                if track.motion_3d != *on {
-                    track.motion_3d = *on;
-                    if *on {
-                        track.blend = BlendMode::SourceAlpha;
+                TmAction::Mode3d(on) => {
+                    let flag = if parent {
+                        &mut track.parent_motion_3d
+                    } else {
+                        &mut track.motion_3d
+                    };
+                    if *flag != *on {
+                        *flag = *on;
+                        if *on && !parent {
+                            track.blend = BlendMode::SourceAlpha;
+                        }
+                        changed = true;
+                    }
+                    continue;
+                }
+                TmAction::ToggleShadow(on) => {
+                    track.shadow_2d_enabled = *on;
+                    changed = true;
+                    continue;
+                }
+                TmAction::ToggleGlow(on) => {
+                    track.glow_2d_enabled = *on;
+                    changed = true;
+                    continue;
+                }
+                TmAction::UpdateShadow(sk) => {
+                    track.shadow_2d.set(t, sk.clone(), tol);
+                    track.shadow_2d_enabled = true;
+                    changed = true;
+                    continue;
+                }
+                TmAction::UpdateGlow(gk) => {
+                    track.glow_2d.set(t, gk.clone(), tol);
+                    track.glow_2d_enabled = true;
+                    changed = true;
+                    continue;
+                }
+                TmAction::MoveKey(ri, ki, nt) => {
+                    let nt = (*nt).clamp_safe(Ticks::ZERO, length);
+                    let moved = match *ri {
+                        1 => move_kf(&mut track.shadow_2d, *ki, nt, tol),
+                        2 => move_kf(&mut track.glow_2d, *ki, nt, tol),
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            move_kf(m, *ki, nt, tol)
+                        }
+                    };
+                    if moved {
+                        changed = true;
+                    }
+                    continue;
+                }
+                TmAction::DeleteKey(ri, ki) => {
+                    let removed = match *ri {
+                        1 => remove_kf(&mut track.shadow_2d, *ki),
+                        2 => remove_kf(&mut track.glow_2d, *ki),
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            remove_kf(m, *ki)
+                        }
+                    };
+                    if removed {
+                        changed = true;
+                    }
+                    continue;
+                }
+                TmAction::SetCurve(ri, ki, c) => {
+                    let ok = match *ri {
+                        1 => set_kf_curve(&mut track.shadow_2d, *ki, *c),
+                        2 => set_kf_curve(&mut track.glow_2d, *ki, *c),
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            set_kf_curve(m, *ki, *c)
+                        }
+                    };
+                    if ok {
+                        changed = true;
+                    }
+                    continue;
+                }
+                TmAction::Nav(KfNav::Add) => {
+                    match active_row {
+                        1 => {
+                            let v = track.shadow_2d.eval(t);
+                            track.shadow_2d.set(t, v, tol);
+                        }
+                        2 => {
+                            let v = track.glow_2d.eval(t);
+                            track.glow_2d.set(t, v, tol);
+                        }
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            let cur = m.eval(t);
+                            m.set(t, cur, tol);
+                        }
                     }
                     changed = true;
+                    continue;
                 }
-                continue;
+                TmAction::Nav(KfNav::Delete) => {
+                    let del = match active_row {
+                        1 => delete_kf_at(&mut track.shadow_2d, t, tol),
+                        2 => delete_kf_at(&mut track.glow_2d, t, tol),
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            delete_kf_at(m, t, tol)
+                        }
+                    };
+                    if del {
+                        changed = true;
+                    }
+                    continue;
+                }
+                TmAction::Nav(_) => continue,
+                _ => {}
             }
             let m = if parent {
                 &mut track.parent_motion
@@ -1211,7 +1618,6 @@ impl App {
                 ),
                 TmAction::MatchOutput => {
                     let g = motion_to_geom(&cur, frame);
-                    // proporção do quadro, mantendo a largura
                     let ng = BoxGeom {
                         half: vec2(g.half.x, g.half.x * frame.y / frame.x.max(1.0)),
                         ..g
@@ -1230,50 +1636,55 @@ impl App {
                     },
                     tol,
                 ),
-                TmAction::Preset(_) | TmAction::Blend(_) | TmAction::Mode3d(_) => continue,
-                TmAction::Nav(KfNav::Add) => m.set(t, cur, tol),
-                TmAction::Nav(KfNav::Delete) => {
-                    if m.keys.len() > 1 && m.keys.iter().any(|k| k.t.abs_diff(t) <= tol) {
-                        m.keys.retain(|k| k.t.abs_diff(t) > tol);
-                    } else {
-                        continue;
-                    }
-                }
-                TmAction::Nav(_) => continue,
-                TmAction::MoveKey(ki, nt) => {
-                    let nt = (*nt).clamp_safe(Ticks::ZERO, length);
-                    let clash = m
-                        .keys
-                        .iter()
-                        .enumerate()
-                        .any(|(j, k)| j != *ki && k.t.abs_diff(nt) <= tol);
-                    let Some(k) = m.keys.get_mut(*ki) else {
-                        continue;
-                    };
-                    if clash || k.t == nt {
-                        continue;
-                    }
-                    k.t = nt;
-                    m.keys.sort_by_key(|k| k.t);
-                }
-                TmAction::DeleteKey(ki) => {
-                    if m.keys.len() > 1 && *ki < m.keys.len() {
-                        m.keys.remove(*ki);
-                    } else {
-                        continue;
-                    }
-                }
-                TmAction::SetCurve(ki, c) => {
-                    let Some(k) = m.keys.get_mut(*ki) else {
-                        continue;
-                    };
-                    k.curve = *c;
-                }
+                _ => continue,
             }
             changed = true;
         }
         changed
     }
+}
+
+fn move_kf<T>(kf: &mut Keyframes<T>, ki: usize, nt: Ticks, tol: Ticks) -> bool {
+    let clash = kf
+        .keys
+        .iter()
+        .enumerate()
+        .any(|(j, k)| j != ki && k.t.abs_diff(nt) <= tol);
+    let Some(k) = kf.keys.get_mut(ki) else {
+        return false;
+    };
+    if clash || k.t == nt {
+        return false;
+    }
+    k.t = nt;
+    kf.keys.sort_by_key(|k| k.t);
+    true
+}
+
+fn remove_kf<T>(kf: &mut Keyframes<T>, ki: usize) -> bool {
+    if kf.keys.len() > 1 && ki < kf.keys.len() {
+        kf.keys.remove(ki);
+        true
+    } else {
+        false
+    }
+}
+
+fn delete_kf_at<T>(kf: &mut Keyframes<T>, t: Ticks, tol: Ticks) -> bool {
+    if kf.keys.len() > 1 && kf.keys.iter().any(|k| k.t.abs_diff(t) <= tol) {
+        kf.keys.retain(|k| k.t.abs_diff(t) > tol);
+        true
+    } else {
+        false
+    }
+}
+
+fn set_kf_curve<T>(kf: &mut Keyframes<T>, ki: usize, c: Curve) -> bool {
+    let Some(k) = kf.keys.get_mut(ki) else {
+        return false;
+    };
+    k.curve = c;
+    true
 }
 
 #[cfg(test)]
@@ -1400,50 +1811,64 @@ mod tests {
             x: 0.25,
             ..MotionKey::default()
         };
-        assert!(app.apply_track_motion(tid, false, t2, tol, F, len, Some(k), &[]));
+        assert!(app.apply_track_motion(tid, false, 0, t2, tol, F, len, Some(k), &[]));
         assert_eq!(
             motion(&app, tid).keys.len(),
             2,
             "editar fora cria quadro-chave"
         );
-        app.apply_track_motion(tid, false, t2, tol, F, len, None, &[TmAction::Center]);
+        app.apply_track_motion(tid, false, 0, t2, tol, F, len, None, &[TmAction::Center]);
         assert_eq!(motion(&app, tid).eval(t2).x, 0.0);
         app.apply_track_motion(
             tid,
             false,
+            0,
             t2,
             tol,
             F,
             len,
             None,
-            &[TmAction::MoveKey(1, len.saturating_mul(2))],
+            &[TmAction::MoveKey(0, 1, len.saturating_mul(2))],
         );
         assert_eq!(motion(&app, tid).keys[1].t, len);
         assert!(!app.apply_track_motion(
             tid,
             false,
+            0,
             t2,
             tol,
             F,
             len,
             None,
-            &[TmAction::SetCurve(9, Curve::Hold)]
-        ));
-        app.apply_track_motion(tid, false, t2, tol, F, len, None, &[TmAction::DeleteKey(1)]);
-        assert_eq!(motion(&app, tid).keys.len(), 1);
-        assert!(!app.apply_track_motion(
-            tid,
-            false,
-            t2,
-            tol,
-            F,
-            len,
-            None,
-            &[TmAction::DeleteKey(0)]
+            &[TmAction::SetCurve(0, 9, Curve::Hold)]
         ));
         app.apply_track_motion(
             tid,
             false,
+            0,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::DeleteKey(0, 1)],
+        );
+        assert_eq!(motion(&app, tid).keys.len(), 1);
+        assert!(!app.apply_track_motion(
+            tid,
+            false,
+            0,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::DeleteKey(0, 0)]
+        ));
+        app.apply_track_motion(
+            tid,
+            false,
+            0,
             t2,
             tol,
             F,
@@ -1461,6 +1886,7 @@ mod tests {
         assert!(!app.apply_track_motion(
             tid,
             false,
+            0,
             t2,
             tol,
             F,
@@ -1510,6 +1936,7 @@ mod tests {
         app.apply_track_motion(
             tid,
             false,
+            0,
             Ticks::ZERO,
             tol,
             F,
@@ -1520,6 +1947,7 @@ mod tests {
         assert!(app.apply_track_motion(
             tid,
             false,
+            0,
             Ticks::ZERO,
             tol,
             F,
@@ -1533,6 +1961,7 @@ mod tests {
         assert!(!app.apply_track_motion(
             tid,
             false,
+            0,
             Ticks::ZERO,
             tol,
             F,
@@ -1543,6 +1972,7 @@ mod tests {
         app.apply_track_motion(
             tid,
             false,
+            0,
             Ticks::ZERO,
             tol,
             F,
