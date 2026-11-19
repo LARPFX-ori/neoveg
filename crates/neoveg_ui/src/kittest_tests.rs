@@ -2619,3 +2619,24 @@ fn kittest_movimento_da_trilha_grade_e_composicao() {
     harness.run_steps(2);
     assert!(harness.query_by_label("Encaixe").is_none());
 }
+
+/// Propriedades do projeto com as abas do VEGAS Pro (Vídeo, Áudio, Régua,
+/// Resumo, CD de áudio): trocar de aba por clique e a aba fica lembrada.
+#[test]
+fn kittest_propriedades_do_projeto_tem_as_cinco_abas() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    harness.state_mut().dlg.project_props = true;
+    harness.run_steps(2);
+    assert_eq!(harness.state().dlg.project_props_tab, 0);
+    harness.get_by_label("CD de áudio").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().dlg.project_props_tab, 4);
+    harness.get_by_label("Primeira faixa");
+    harness.get_by_label("Resumo").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().dlg.project_props_tab, 3);
+    harness.get_by_label("Comentários");
+}

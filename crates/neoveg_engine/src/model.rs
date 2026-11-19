@@ -54,10 +54,191 @@ pub struct ProjectSettings {
     /// Transformação de visualização na prévia (View Transform).
     #[serde(default)]
     pub view_transform: crate::color::ViewTransform,
+    /// Ordem dos campos (Propriedades do projeto → Vídeo).
+    #[serde(default)]
+    pub field_order: FieldOrder,
+    /// Proporção do pixel (1,0 = quadrado).
+    #[serde(default = "default_pixel_aspect")]
+    pub pixel_aspect: f32,
+    /// Qualidade da renderização em resolução total.
+    #[serde(default)]
+    pub render_quality: RenderQuality,
+    /// Método de desentrelaçamento.
+    #[serde(default)]
+    pub deinterlace: DeinterlaceMethod,
+    /// Ajustar a mídia de origem para combinar melhor com o projeto.
+    #[serde(default = "default_true_setting")]
+    pub adapt_source_media: bool,
+    /// Profundidade de bits do áudio do projeto (16, 24 ou 32).
+    #[serde(default = "default_audio_bit_depth")]
+    pub audio_bit_depth: u16,
+    /// Qualidade da reamostragem e do esticamento de áudio.
+    #[serde(default)]
+    pub resample_quality: RenderQuality,
+    /// Batidas por compasso (Propriedades do projeto → Régua).
+    #[serde(default = "default_beats")]
+    pub beats_per_measure: u32,
+    /// Figura que vale uma batida (2, 4, 8 ou 16).
+    #[serde(default = "default_beats")]
+    pub beat_note: u32,
+    /// Informações do projeto (Propriedades do projeto → Resumo).
+    #[serde(default)]
+    pub summary: ProjectSummary,
+    /// Dados do CD de áudio (Propriedades do projeto → CD de áudio).
+    #[serde(default)]
+    pub audio_cd: AudioCdInfo,
 }
 
 fn default_bpm() -> f64 {
     120.0
+}
+
+fn default_pixel_aspect() -> f32 {
+    1.0
+}
+
+fn default_true_setting() -> bool {
+    true
+}
+
+fn default_audio_bit_depth() -> u16 {
+    16
+}
+
+fn default_beats() -> u32 {
+    4
+}
+
+/// Tamanho máximo de cada campo de texto do Resumo.
+pub const SUMMARY_FIELD_MAX: usize = 4096;
+
+/// Informações textuais do projeto (aba *Resumo*).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub engineer: String,
+    #[serde(default)]
+    pub copyright: String,
+    #[serde(default)]
+    pub comments: String,
+}
+
+/// Dados do CD de áudio (aba *CD de áudio*), usados na exportação `.cue`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioCdInfo {
+    /// Código UPC/EAN do disco (12 ou 13 dígitos; vazio = nenhum).
+    #[serde(default)]
+    pub upc: String,
+    /// Número da primeira faixa (1..99).
+    #[serde(default = "default_first_track")]
+    pub first_track: u32,
+}
+
+fn default_first_track() -> u32 {
+    1
+}
+
+impl Default for AudioCdInfo {
+    fn default() -> Self {
+        AudioCdInfo {
+            upc: String::new(),
+            first_track: 1,
+        }
+    }
+}
+
+impl AudioCdInfo {
+    /// O código para a linha `CATALOG` (13 dígitos), se o UPC for válido.
+    pub fn catalog(&self) -> Option<String> {
+        let digits: String = self.upc.chars().filter(char::is_ascii_digit).collect();
+        match digits.len() {
+            13 => Some(digits),
+            12 => Some(format!("0{digits}")),
+            _ => None,
+        }
+    }
+}
+
+/// Ordem dos campos do vídeo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum FieldOrder {
+    #[default]
+    Progressive,
+    UpperFirst,
+    LowerFirst,
+}
+
+impl FieldOrder {
+    pub const ALL: [FieldOrder; 3] = [
+        FieldOrder::Progressive,
+        FieldOrder::UpperFirst,
+        FieldOrder::LowerFirst,
+    ];
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
+            FieldOrder::Progressive => "Nenhuma (progressivo)",
+            FieldOrder::UpperFirst => "Campo superior primeiro",
+            FieldOrder::LowerFirst => "Campo inferior primeiro",
+        };
+        neoveg_common::tr(lang, pt)
+    }
+}
+
+/// Qualidade de renderização / reamostragem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum RenderQuality {
+    Draft,
+    Preview,
+    #[default]
+    Good,
+    Best,
+}
+
+impl RenderQuality {
+    pub const ALL: [RenderQuality; 4] = [
+        RenderQuality::Draft,
+        RenderQuality::Preview,
+        RenderQuality::Good,
+        RenderQuality::Best,
+    ];
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
+            RenderQuality::Draft => "Rascunho",
+            RenderQuality::Preview => "Prévia",
+            RenderQuality::Good => "Boa",
+            RenderQuality::Best => "Melhor",
+        };
+        neoveg_common::tr(lang, pt)
+    }
+}
+
+/// Método de desentrelaçamento.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum DeinterlaceMethod {
+    #[default]
+    None,
+    BlendFields,
+    Interpolate,
+}
+
+impl DeinterlaceMethod {
+    pub const ALL: [DeinterlaceMethod; 3] = [
+        DeinterlaceMethod::None,
+        DeinterlaceMethod::BlendFields,
+        DeinterlaceMethod::Interpolate,
+    ];
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
+            DeinterlaceMethod::None => "Nenhum",
+            DeinterlaceMethod::BlendFields => "Mesclar campos",
+            DeinterlaceMethod::Interpolate => "Interpolar campos",
+        };
+        neoveg_common::tr(lang, pt)
+    }
 }
 
 fn default_stereo_interocular() -> f32 {
@@ -274,6 +455,17 @@ impl Default for ProjectSettings {
             compositing_gamma: crate::color::CompositingGamma::Gamma2_222,
             color_space: crate::color::ProjectColorSpace::DefaultSrgb,
             view_transform: crate::color::ViewTransform::Off,
+            field_order: FieldOrder::Progressive,
+            pixel_aspect: default_pixel_aspect(),
+            render_quality: RenderQuality::Good,
+            deinterlace: DeinterlaceMethod::None,
+            adapt_source_media: true,
+            audio_bit_depth: default_audio_bit_depth(),
+            resample_quality: RenderQuality::Good,
+            beats_per_measure: default_beats(),
+            beat_note: default_beats(),
+            summary: ProjectSummary::default(),
+            audio_cd: AudioCdInfo::default(),
         }
     }
 }
@@ -1495,6 +1687,37 @@ impl Project {
         }
         for c in &mut s.background {
             *c = clampf(fin32(*c, 0.0), 0.0, 1.0);
+        }
+        s.pixel_aspect = clampf(fin32(s.pixel_aspect, 1.0), 0.1, 4.0);
+        if ![16, 24, 32].contains(&s.audio_bit_depth) {
+            s.audio_bit_depth = default_audio_bit_depth();
+        }
+        s.beats_per_measure = s.beats_per_measure.clamp(1, 32);
+        if ![2, 4, 8, 16].contains(&s.beat_note) {
+            s.beat_note = default_beats();
+        }
+        s.audio_cd.first_track = s.audio_cd.first_track.clamp(1, 99);
+        s.audio_cd.upc = s
+            .audio_cd
+            .upc
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(13)
+            .collect();
+        for f in [
+            &mut s.summary.title,
+            &mut s.summary.artist,
+            &mut s.summary.engineer,
+            &mut s.summary.copyright,
+            &mut s.summary.comments,
+        ] {
+            if f.len() > SUMMARY_FIELD_MAX {
+                let mut cut = SUMMARY_FIELD_MAX;
+                while !f.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                f.truncate(cut);
+            }
         }
         if !s.bpm.is_finite() || s.bpm < 20.0 || s.bpm > 300.0 {
             s.bpm = default_bpm();
