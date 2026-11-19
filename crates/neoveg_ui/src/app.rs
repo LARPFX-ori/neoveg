@@ -138,6 +138,8 @@ pub enum PlaceTarget {
 pub enum LoadMsg {
     Imported(media::Imported, Option<PlaceTarget>),
     Reloaded(Id, Result<media::Imported, String>),
+    /// Projeto aninhado editado em aba, remontado para o projeto principal.
+    NestedRebuilt(Box<crate::doc_tabs::NestedRebuilt>),
     Replaced(Id, Result<media::Imported, String>),
     ProxyBuilt(Id, Result<PathBuf, String>),
     RamPreviewFrame {
@@ -342,6 +344,14 @@ pub struct App {
     pub edit_details: crate::edit_details::EditDetailsState,
     pub(crate) confirm_close: bool,
     pub(crate) allow_close: bool,
+    /// Abas de documento: o projeto principal (0) e os projetos aninhados
+    /// abertos em aba (`doc_tabs`).
+    pub(crate) doc_tabs: Vec<crate::doc_tabs::DocTab>,
+    pub(crate) active_doc: usize,
+    /// Aba de projeto aninhado com alterações esperando a confirmação de fechar.
+    pub(crate) pending_close_doc: Option<usize>,
+    /// Última remontagem aplicada de cada mídia de projeto aninhado.
+    pub(crate) nested_applied: HashMap<Id, u64>,
     pub shuttle: f64,
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
@@ -544,6 +554,10 @@ impl App {
             edit_details: crate::edit_details::EditDetailsState::default(),
             confirm_close: false,
             allow_close: false,
+            doc_tabs: Vec::new(),
+            active_doc: 0,
+            pending_close_doc: None,
+            nested_applied: HashMap::new(),
             shuttle: 0.0,
             gen_fonts: vec![],
             last_autosave: Instant::now(),
@@ -732,15 +746,16 @@ impl App {
     fn autosave(&mut self) {
         if self.recovery_offer
             || !self.prefs.autosave_enabled
-            || !self.dirty
+            || !self.main_session().dirty
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
             return;
         }
         self.last_autosave = Instant::now();
-        if let Err(e) =
-            recovery::write_recovery_with_history(&self.project, self.prefs.autosave_history_copies)
-        {
+        if let Err(e) = recovery::write_recovery_with_history(
+            &self.main_session().project,
+            self.prefs.autosave_history_copies,
+        ) {
             let err_s = e.to_string();
             self.set_status(tr_args(
                 self.lang(),
@@ -868,7 +883,7 @@ impl App {
         self.sync_after_session();
     }
 
-    fn sync_snapshot(&mut self) {
+    pub(crate) fn sync_snapshot(&mut self) {
         if self.session.sent_generation == self.session.generation {
             return;
         }
@@ -1072,6 +1087,9 @@ impl App {
     // -----------------------------------------------------------------
 
     pub fn new_project(&mut self) {
+        if !self.close_nested_tabs_for_reset() {
+            return;
+        }
         self.stop(false);
         let mut proj = Project::new_default();
         proj.settings.sample_rate = self.prefs.default_sample_rate;
@@ -1092,7 +1110,7 @@ impl App {
         }
     }
 
-    fn reload_all_media(&mut self) {
+    pub(crate) fn reload_all_media(&mut self) {
         self.thumbs.clear();
         self.project_media.clear_thumbs();
         let items = self.project.media.clone();
@@ -1104,7 +1122,7 @@ impl App {
 
     /// Abre em segundo plano a mídia de um item do projeto; o resultado
     /// volta como `LoadMsg::Reloaded`.
-    fn spawn_media_load(&mut self, m: MediaItem) {
+    pub(crate) fn spawn_media_load(&mut self, m: MediaItem) {
         {
             let tx = self.loader_tx.clone();
             self.loading += 1;
@@ -1146,6 +1164,9 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        if !self.close_nested_tabs_for_reset() {
+            return;
         }
         // o arquivo de projeto é entrada hostil: é validado e corrigido (§0.4)
         let lang = self.lang();
@@ -1561,7 +1582,21 @@ impl App {
         }
     }
 
+    /// Salvar (`save_as` falso): com projetos aninhados abertos em aba, grava
+    /// o principal e todo aninhado alterado. *Salvar como* vale para o
+    /// projeto principal.
     pub fn save_project(&mut self, save_as: bool) -> bool {
+        if self.has_doc_tabs() {
+            if !save_as {
+                return self.save_all_documents();
+            }
+            self.switch_doc_tab(0);
+        }
+        self.save_project_single(save_as)
+    }
+
+    /// Salva só o documento ativo.
+    pub(crate) fn save_project_single(&mut self, save_as: bool) -> bool {
         let lang = self.lang();
         let path = if save_as || self.path.is_none() {
             match rfd::FileDialog::new()
@@ -1723,6 +1758,23 @@ impl App {
         }
     }
 
+    /// Põe no documento ativo a mídia recarregada `imp` do item `id`.
+    pub(crate) fn apply_reloaded(&mut self, id: Id, imp: media::Imported) {
+        self.media.insert(id, imp.entry);
+        if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
+            m.duration = imp.item.duration;
+            m.width = imp.item.width;
+            m.height = imp.item.height;
+            m.fps = imp.item.fps;
+            m.has_audio = imp.item.has_audio;
+            m.has_video = imp.item.has_video;
+            m.info = imp.item.info.clone();
+        }
+        self.thumbs.remove(&id);
+        self.project_media.invalidate_media(id);
+        self.generation += 1;
+    }
+
     fn poll_loader(&mut self) {
         // Com um script rodando, a sessão que vale no fim é a do script
         // (`poll_script_job` a coloca no lugar desta): o que chegar agora
@@ -1759,22 +1811,9 @@ impl App {
                     }
                     self.changed();
                 }
+                LoadMsg::NestedRebuilt(r) => self.apply_nested_rebuilt(*r),
                 LoadMsg::Reloaded(id, r) => match r {
-                    Ok(imp) => {
-                        self.media.insert(id, imp.entry);
-                        if let Some(m) = self.project.media.iter_mut().find(|m| m.id == id) {
-                            m.duration = imp.item.duration;
-                            m.width = imp.item.width;
-                            m.height = imp.item.height;
-                            m.fps = imp.item.fps;
-                            m.has_audio = imp.item.has_audio;
-                            m.has_video = imp.item.has_video;
-                            m.info = imp.item.info.clone();
-                        }
-                        self.thumbs.remove(&id);
-                        self.project_media.invalidate_media(id);
-                        self.generation += 1;
-                    }
+                    Ok(imp) => self.apply_reloaded(id, imp),
                     Err(e) => {
                         let lang = self.lang();
                         self.set_status(tr_args(lang, "Mídia offline: {err}", &[("err", &e)]));
@@ -2156,6 +2195,7 @@ impl App {
                 split_mode,
                 mute_video,
                 expanded_ab,
+                media: Some(self.media.clone()),
             });
             self.last_req = key;
             self.preview_inflight = true;
@@ -2563,6 +2603,7 @@ impl App {
                 self.set_status(format!("Grade da régua: {}", g.label()));
             }
             UiAction::OpenGoto => self.dlg.goto_open = true,
+            UiAction::OpenNestedProjectTab => self.open_nested_from_selection(),
             UiAction::OpenEditLayoutProps => {
                 self.dlg
                     .open_edit_layout(&self.prefs, self.dock_height, self.preview_ratio);
@@ -4429,7 +4470,22 @@ impl App {
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| tr(lang, "Sem título").into());
-        let title = format!("{}{} - Neoveg", name, if self.dirty { "*" } else { "" });
+        let title = if self.active_doc > 0 {
+            let main = self
+                .main_session()
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| tr(lang, "Sem título").into());
+            format!(
+                "{main} \u{203a} {}{} - Neoveg",
+                name,
+                if self.dirty { "*" } else { "" }
+            )
+        } else {
+            format!("{}{} - Neoveg", name, if self.dirty { "*" } else { "" })
+        };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
@@ -4663,7 +4719,11 @@ impl App {
 
         // confirmação ao fechar com alterações não salvas
         let lang = self.lang();
-        if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.allow_close {
+        self.close_doc_tab_dialog(ctx);
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.any_doc_dirty()
+            && !self.allow_close
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.confirm_close {
                 // a confirmação já está aberta (talvez atrás da janela principal)

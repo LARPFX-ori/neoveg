@@ -982,7 +982,39 @@ fn load_nested_project_entry(
     next_depth: usize,
     warning: &mut Option<String>,
 ) -> Result<MediaEntry> {
-    let (mut sub_proj, _) = crate::model::Project::load_file(p).map_err(anyhow::Error::msg)?;
+    let (sub_proj, _) = crate::model::Project::load_file(p).map_err(anyhow::Error::msg)?;
+    nested_entry_from_project(sub_proj, p, item, stack, next_depth, warning)
+}
+
+/// Monta a mídia de um projeto aninhado a partir do projeto já em memória
+/// (o projeto aberto e editado em aba, ainda sem salvar). `path` é o arquivo
+/// dele: os caminhos relativos da mídia são resolvidos a partir da pasta dele,
+/// numa cópia (o projeto da aba não muda).
+pub fn load_nested_from_project(
+    item: &mut MediaItem,
+    project: crate::model::Project,
+    path: &Path,
+) -> Result<Imported> {
+    let mut stack = std::collections::HashSet::new();
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    stack.insert(canon);
+    let mut warning = None;
+    let entry = nested_entry_from_project(project, path, item, &mut stack, 1, &mut warning)?;
+    Ok(Imported {
+        item: item.clone(),
+        entry,
+        warning,
+    })
+}
+
+fn nested_entry_from_project(
+    mut sub_proj: crate::model::Project,
+    p: &Path,
+    item: &mut MediaItem,
+    stack: &mut std::collections::HashSet<PathBuf>,
+    next_depth: usize,
+    warning: &mut Option<String>,
+) -> Result<MediaEntry> {
     let base_dir = p.parent().unwrap_or_else(|| Path::new("."));
     let sub_cache = Arc::new(MediaCache::default());
     let mut sub_warnings = Vec::new();

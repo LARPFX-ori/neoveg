@@ -18,6 +18,7 @@ mod crash_report;
 mod dialog_window;
 mod dialogs;
 mod dlg_work_folders;
+mod doc_tabs;
 mod dock;
 mod dock_drop;
 mod edit;

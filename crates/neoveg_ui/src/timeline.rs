@@ -1336,6 +1336,131 @@ impl App {
         let mut action_duplicate: Option<Id> = None;
         let mut action_rename: Option<(Id, String)> = None;
 
+        // abas de documento: o projeto principal e os projetos .neoveg
+        // aninhados abertos em aba (doc_tabs), antes das abas de sequência
+        if self.has_doc_tabs() {
+            let lang = self.lang();
+            let mut doc_switch = None;
+            let mut doc_close = None;
+            for (di, dname, dactive, ddirty) in self.doc_tab_labels() {
+                let label = if ddirty { format!("{dname}*") } else { dname };
+                let text_w = ui
+                    .painter()
+                    .layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
+                    .size()
+                    .x;
+                let close_w = if di > 0 { 16.0 } else { 0.0 };
+                let tab_w = (text_w + 22.0 + close_w).clamp(70.0, 200.0);
+                if cur_x + tab_w > rect.right() - 32.0 {
+                    break;
+                }
+                let tab_rect =
+                    Rect::from_min_size(pos2(cur_x, rect.top() + 3.0), vec2(tab_w, tab_h));
+                let resp = ui
+                    .interact(tab_rect, ui.id().with(("doc_tab", di)), Sense::click())
+                    .on_hover_text(if di == 0 {
+                        tr(lang, "Projeto principal")
+                    } else {
+                        tr(lang, "Projeto aninhado aberto em aba (Ctrl+S salva todos)")
+                    });
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label)
+                });
+                let bg = if dactive {
+                    self.theme.tl_header_bg
+                } else if resp.hovered() {
+                    self.theme.widget_hover_bg
+                } else {
+                    self.theme.panel_fill
+                };
+                let radius = egui::CornerRadius {
+                    nw: 3,
+                    ne: 3,
+                    sw: 0,
+                    se: 0,
+                };
+                p.rect_filled(tab_rect, radius, bg);
+                p.rect_stroke(
+                    tab_rect,
+                    radius,
+                    Stroke::new(
+                        1.0_f32,
+                        if dactive {
+                            self.theme.accent
+                        } else {
+                            self.theme.border
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                // marca de documento: faixa à esquerda
+                p.rect_filled(
+                    Rect::from_min_size(
+                        tab_rect.left_top() + vec2(1.0, 3.0),
+                        vec2(3.0, tab_h - 6.0),
+                    ),
+                    egui::CornerRadius::ZERO,
+                    self.theme.accent,
+                );
+                let text_color = if dactive {
+                    self.theme.text_primary
+                } else {
+                    self.theme.text_muted
+                };
+                p.text(
+                    pos2(tab_rect.left() + 9.0, tab_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    &label,
+                    font_id.clone(),
+                    text_color,
+                );
+                let mut closing = false;
+                if di > 0 {
+                    let close_rect = Rect::from_center_size(
+                        pos2(tab_rect.right() - 10.0, tab_rect.center().y),
+                        vec2(12.0, 12.0),
+                    );
+                    let close_resp = ui
+                        .interact(close_rect, ui.id().with(("doc_close", di)), Sense::click())
+                        .on_hover_text(tr(lang, "Fechar a aba"));
+                    p.text(
+                        close_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "×",
+                        FontId::proportional(12.0),
+                        if close_resp.hovered() {
+                            self.theme.offline_fg
+                        } else {
+                            self.theme.text_muted
+                        },
+                    );
+                    if close_resp.clicked() {
+                        doc_close = Some(di);
+                        closing = true;
+                    }
+                }
+                if resp.clicked() && !closing {
+                    doc_switch = Some(di);
+                }
+                cur_x += tab_w + 2.0;
+            }
+            // separa as abas de documento das de sequência
+            cur_x += 4.0;
+            p.line_segment(
+                [
+                    pos2(cur_x, rect.top() + 5.0),
+                    pos2(cur_x, rect.bottom() - 4.0),
+                ],
+                Stroke::new(1.0_f32, self.theme.border),
+            );
+            cur_x += 6.0;
+            if let Some(i) = doc_close {
+                self.request_close_doc_tab(i);
+            } else if let Some(i) = doc_switch {
+                self.switch_doc_tab(i);
+            }
+        }
+
         let tabs = self.project.sequence_tab_info();
         let seq_count = tabs.len();
 
@@ -4893,6 +5018,14 @@ impl App {
         ui.separator();
         if ui.button(tr(lang, "Propriedades...")).clicked() {
             self.dlg.event_props = Some(id);
+            ui.close_menu();
+        }
+        if self.nested_media_path(e.media_id).is_some()
+            && ui
+                .button(tr(lang, "Abrir projeto aninhado em aba"))
+                .clicked()
+        {
+            self.open_nested_media_tab(e.media_id);
             ui.close_menu();
         }
         if is_video && ui.button(tr(lang, "Pan/Crop do evento...")).clicked() {

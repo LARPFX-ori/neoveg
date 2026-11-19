@@ -1808,3 +1808,86 @@ fn compositor_aplicado_aos_eventos_selecionados_com_desfazer() {
     app.apply_event_compositor(&[], Some(BlendMode::Screen));
     assert_eq!(app.session.undo.len(), n);
 }
+
+/// Projeto `.neoveg` aninhado aberto em aba: editar não toca no principal,
+/// trocar de aba não conta como edição, Salvar grava os dois e um arquivo
+/// corrompido não abre aba.
+#[test]
+fn projeto_aninhado_editado_em_aba_e_salvo_junto() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let dir = std::env::temp_dir().join(format!("neoveg_abas_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sub_path = dir.join("Sub.neoveg");
+    let main_path = dir.join("Principal.neoveg");
+    crate::model::Project::new_default()
+        .save_file(&sub_path)
+        .unwrap();
+    app.session.path = Some(main_path.clone());
+    app.prefs.project_backup_enabled = false;
+    let main_tracks = app.project.tracks.len();
+
+    // o próprio projeto principal não abre em aba
+    crate::model::Project::new_default()
+        .save_file(&main_path)
+        .unwrap();
+    app.open_nested_project_tab(&main_path);
+    assert!(!app.has_doc_tabs());
+
+    app.open_nested_project_tab(&sub_path);
+    assert!(app.has_doc_tabs());
+    assert_eq!(app.active_doc, 1);
+    assert_eq!(app.path.as_deref(), Some(sub_path.as_path()));
+    // uma aba por arquivo
+    app.open_nested_project_tab(&sub_path);
+    assert_eq!(app.doc_tabs.len(), 2);
+
+    // editar o aninhado
+    app.checkpoint();
+    app.session.project.tracks.push(crate::model::Track::new(
+        crate::model::TrackKind::Video,
+        "Nova",
+    ));
+    app.changed();
+    assert!(app.dirty);
+
+    // voltar ao principal: ele não mudou e o aninhado continua "não salvo"
+    app.switch_doc_tab(0);
+    assert_eq!(app.active_doc, 0);
+    assert_eq!(app.project.tracks.len(), main_tracks);
+    assert_eq!(app.path.as_deref(), Some(main_path.as_path()));
+    assert!(app.any_doc_dirty());
+    assert_eq!(
+        app.main_session().path.as_deref(),
+        Some(main_path.as_path())
+    );
+
+    // trocar de aba sem editar não muda o contador de edições
+    let edits = app.doc_tabs[1].synced_edits;
+    app.switch_doc_tab(1);
+    app.switch_doc_tab(0);
+    assert_eq!(app.doc_tabs[1].synced_edits, edits);
+
+    // Salvar grava o principal e o aninhado
+    assert!(app.save_project(false));
+    assert!(!app.any_doc_dirty());
+    let (sub, _) = crate::model::Project::load_file(&sub_path).unwrap();
+    assert_eq!(sub.tracks.len(), main_tracks + 1);
+
+    // arquivo corrompido: erro na barra de status, nenhuma aba nova
+    let bad = dir.join("Quebrado.neoveg");
+    std::fs::write(&bad, b"PK\x03\x04lixo").unwrap();
+    app.open_nested_project_tab(&bad);
+    assert_eq!(app.doc_tabs.len(), 2);
+
+    // fechar a aba sem alterações
+    app.request_close_doc_tab(1);
+    assert!(!app.has_doc_tabs());
+    let _ = std::fs::remove_dir_all(&dir);
+}

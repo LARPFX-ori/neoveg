@@ -449,6 +449,14 @@ pub struct EditorSession {
     pub removed_media_ids: Vec<Id>,
     /// Intervalos da timeline pré-renderizados (`Shift+M`), limpos ao editar o projeto.
     pub prerendered_ranges: Vec<(Ticks, Ticks)>,
+    /// Conta só as edições do projeto (`changed`, desfazer e refazer), não
+    /// trocas de aba nem mídia recarregada: decide se um projeto aninhado
+    /// editado em aba precisa ser reconstruído no projeto principal.
+    pub edit_count: u64,
+    /// Esta sessão alimenta o arquivo de recuperação em caso de travamento.
+    /// Falso nas sessões de projetos aninhados abertos em aba: a recuperação
+    /// guarda sempre o projeto principal.
+    pub tracks_recovery: bool,
 }
 
 impl EditorSession {
@@ -456,10 +464,22 @@ impl EditorSession {
         Self::new_in(project, neoveg_common::active_language())
     }
 
-    pub fn new_in(mut project: Project, lang: Language) -> Self {
+    pub fn new_in(project: Project, lang: Language) -> Self {
+        Self::build(project, lang, true)
+    }
+
+    /// Sessão de um projeto aninhado aberto em aba: não substitui o projeto
+    /// principal no arquivo de recuperação.
+    pub fn new_nested(project: Project, lang: Language) -> Self {
+        Self::build(project, lang, false)
+    }
+
+    fn build(mut project: Project, lang: Language, tracks_recovery: bool) -> Self {
         project.ensure_sequences();
         let snapshot = Arc::new(project.clone());
-        crate::recovery::remember_snapshot(snapshot.clone());
+        if tracks_recovery {
+            crate::recovery::remember_snapshot(snapshot.clone());
+        }
         let sel_track = if project.tracks.is_empty() {
             None
         } else {
@@ -497,6 +517,8 @@ impl EditorSession {
             .into(),
             removed_media_ids: Vec::new(),
             prerendered_ranges: Vec::new(),
+            edit_count: 0,
+            tracks_recovery,
         }
     }
 
@@ -544,6 +566,7 @@ impl EditorSession {
     /// Marca o projeto como modificado (incrementa geração para prévia e áudio).
     pub fn changed(&mut self) {
         self.generation += 1;
+        self.edit_count = self.edit_count.wrapping_add(1);
         self.dirty = true;
         self.prerendered_ranges.clear();
     }
@@ -553,7 +576,9 @@ impl EditorSession {
         if self.generation != self.sent_generation {
             self.snapshot = Arc::new(self.project.clone());
             self.sent_generation = self.generation;
-            crate::recovery::remember_snapshot(self.snapshot.clone());
+            if self.tracks_recovery {
+                crate::recovery::remember_snapshot(self.snapshot.clone());
+            }
             true
         } else {
             false
@@ -573,6 +598,7 @@ impl EditorSession {
             return false;
         };
         self.redo.push(std::mem::replace(&mut self.project, p));
+        self.edit_count = self.edit_count.wrapping_add(1);
         self.after_history();
         self.set_status(tr(self.lang, "Desfazer"));
         true
@@ -583,6 +609,7 @@ impl EditorSession {
             return false;
         };
         self.undo.push(std::mem::replace(&mut self.project, p));
+        self.edit_count = self.edit_count.wrapping_add(1);
         self.after_history();
         self.set_status(tr(self.lang, "Refazer"));
         true
