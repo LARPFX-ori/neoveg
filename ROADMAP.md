@@ -94,6 +94,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Edição na linha do tempo
 
+- **Sequências internas em abas (estilo Premiere Pro, item 13 do backlog)**: suporte completo a múltiplas sequências/timelines no mesmo projeto `.neoveg` (pp. 264 e 284 da referência do Premiere Pro). A sequência ativa é mapeada diretamente na timeline e as inativas ficam guardadas em `Project.sequences`, com abas interativas na parte superior da timeline (`crates/neoveg_ui/src/timeline.rs`), comutação rápida preservando cursor e zoom, remapeamento integral de IDs ao duplicar (incluindo hierarquia pai/filho e sync links), proteção estrita de mídias usadas por sequências inativas contra exclusão acidental e saneamento contra payloads hostis (limite de 64 sequências, IDs duplicados ou ausentes e aciclicidade). Comandos integrados na Tabela Única: `sequence.new`, `sequence.rename`, `sequence.duplicate` e `sequence.delete`.
 - **Seletor de ferramenta de edição** na barra de transporte (p. 236):
   - ferramenta **Normal** com os 7 modos na interface e no motor (**Normal**, **Shuffle**, **Slip**, **Slide**, **Stretch**, **Split Trim** e **Roll**), ícone dinâmico no seletor e modificadores diretos (`Alt`, `Ctrl+Alt`, `Ctrl+borda`, `Ctrl+Alt+Shift`);
   - ferramentas **Envelope**, **Seleção** (caixa) e **Zoom** (caixa e clique), além de `D`/`Shift+D` e seletor de **eixo Livre / Horizontal / Vertical** na barra, no menu e no menu de contexto (pp. 239–240).

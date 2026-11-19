@@ -808,6 +808,44 @@ impl App {
         self.session.changed();
     }
 
+    /// Alterna a sequência ativa no app: para reprodução, invalida prévia em RAM,
+    /// fecha diálogos atrelados à timeline antiga e restaura visão da nova sequência.
+    pub fn switch_sequence_app(&mut self, target_id: Id) -> bool {
+        self.stop(false);
+        let Some((target_cursor, target_scroll_x, target_px_per_sec)) = self
+            .session
+            .switch_sequence_with_view(target_id, self.tl.scroll_x, self.tl.px_per_sec)
+        else {
+            return false;
+        };
+        self.session.cursor = target_cursor;
+        self.tl.scroll_x = target_scroll_x;
+        if target_px_per_sec > 0.0 {
+            self.tl.px_per_sec = target_px_per_sec;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.sel_events.clear();
+        self.session.sel_events.clear();
+        self.session.time_sel = None;
+        self.session.expanded_edit = None;
+        self.session.sel_track = if self.project.tracks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.dlg.track_motion = None;
+        self.dlg.pan_crop = None;
+        self.dlg.event_props = None;
+        if matches!(
+            self.dlg.fx_target,
+            Some(FxTarget::Track(_) | FxTarget::Event(_))
+        ) {
+            self.dlg.fx_target = None;
+        }
+        self.changed();
+        true
+    }
+
     pub fn undo(&mut self) {
         if self.session.undo() {
             self.after_history();
