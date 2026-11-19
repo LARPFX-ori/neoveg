@@ -312,6 +312,23 @@ fn fuzz_projeto_json() {
     }
 }
 
+/// Pacote `.neoveg` (ZIP com `.nvegseq`): truncamento, bits invertidos e
+/// tamanhos corrompidos viram erro ou aviso, nunca pânico.
+#[test]
+fn fuzz_pacote_neoveg() {
+    let (p, _) = Project::from_json(PROJECT_JSON).unwrap();
+    let mut p = p;
+    p.create_sequence(None);
+    let base = crate::package::write_package(&p).unwrap();
+    for (i, m) in mutations(&base, 300, 0x5E9).iter().enumerate() {
+        assert_no_panic("pacote", i, || {
+            if let Ok((q, _)) = Project::from_bytes(m) {
+                let _ = crate::package::write_package(&q);
+            }
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Regressões de travamentos corrigidos
 // ---------------------------------------------------------------------------
