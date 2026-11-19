@@ -3766,6 +3766,7 @@ impl App {
             "options.snapping" => (Icon::MagnetSnap, None, Some(self.opts.snapping)),
             "options.snap_to_grid" => (Icon::TimelineGrid, None, Some(self.opts.snap_to_grid)),
             "options.auto_ripple" => (Icon::AutoRipple, None, Some(self.opts.auto_ripple)),
+            "options.lock_envelopes" => (Icon::LockEnvelopes, None, Some(self.opts.lock_envelopes)),
             "view.envelopes" => (Icon::Envelopes, None, Some(self.opts.show_envelopes)),
             "options.ignore_grouping" => {
                 (Icon::IgnoreGrouping, None, Some(self.opts.ignore_grouping))
@@ -3883,10 +3884,36 @@ impl App {
             .on_hover_text(tooltip);
     }
 
+    /// Reproduzir e Pausar como dois botões, como no VEGAS Pro. Os dois usam o
+    /// comando Reproduzir/Pausar da Tabela Única e só agem no estado em que
+    /// fazem sentido: Reproduzir parado, Pausar tocando.
+    pub(crate) fn play_pause_buttons(&mut self, ui: &mut egui::Ui, playing: bool) {
+        let id = "transport.play_toggle";
+        let enabled = self.cmd_enabled(id);
+        let lang = self.lang();
+        let play = icons::icon_button(ui, Icon::Play, None, playing, enabled, &self.theme);
+        if play.on_hover_text(self.cmd_hover_text(id, None)).clicked() && !playing {
+            self.exec_cmd(Some(ui.ctx()), id);
+        }
+        let pause = icons::icon_button(ui, Icon::Pause, None, false, enabled, &self.theme);
+        if pause.on_hover_text(tr(lang, "Pausar")).clicked() && playing {
+            self.exec_cmd(Some(ui.ctx()), id);
+        }
+    }
+
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let playing = self.is_playing();
-            // Bloco 1: Transporte (Manual VEGAS Pro 21 §6)
+            // Bloco 1: Transporte, na ordem da tabela do manual do VEGAS Pro 21
+            // (p. 74): Gravar, Loop, Reproduzir do início, Reproduzir, Pausar,
+            // Parar, Início, Fim, Quadro anterior e Próximo quadro.
+            self.cmd_tool_toggle(
+                ui,
+                self.recorder.is_some(),
+                Icon::RecordDot,
+                None,
+                "transport.record",
+            );
             self.cmd_tool_toggle(
                 ui,
                 self.opts.loop_playback,
@@ -3895,21 +3922,8 @@ impl App {
                 "options.loop_playback",
             );
             self.cmd_tool_btn(ui, Icon::PlayFromStart, None, "transport.play_from_start");
-            self.cmd_tool_toggle(
-                ui,
-                playing,
-                if playing { Icon::Pause } else { Icon::Play },
-                None,
-                "transport.play_toggle",
-            );
+            self.play_pause_buttons(ui, playing);
             self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
-            self.cmd_tool_toggle(
-                ui,
-                self.recorder.is_some(),
-                Icon::RecordDot,
-                None,
-                "transport.record",
-            );
             self.cmd_tool_btn(ui, Icon::GoStart, None, "transport.project_start");
             self.cmd_tool_btn(ui, Icon::GoEnd, None, "transport.project_end");
             self.cmd_tool_btn(ui, Icon::PrevFrame, None, "transport.frame_back");
@@ -4026,7 +4040,8 @@ impl App {
             // Bloco 2: edição, na ordem da tabela do manual do VEGAS Pro 21 (pp. 75–78):
             // Excluir, Aparar, Aparar início, Aparar fim, Dividir, Smart Split,
             // Juntar eventos, Travar, Inserir marcador, Inserir região, Encaixe,
-            // Ripple automático, Ignorar agrupamento e Color Grading.
+            // Ripple automático, Travar envelopes nos eventos, Ignorar agrupamento e
+            // Color Grading.
             for (icon, id) in [
                 (Icon::DeleteTrash, "edit.delete"),
                 (Icon::TrimSelection, "edit.trim_to_selection"),
@@ -4055,6 +4070,13 @@ impl App {
                 Icon::AutoRipple,
                 None,
                 "options.auto_ripple",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.lock_envelopes,
+                Icon::LockEnvelopes,
+                None,
+                "options.lock_envelopes",
             );
             self.cmd_tool_toggle(
                 ui,
