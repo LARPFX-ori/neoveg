@@ -4241,11 +4241,36 @@ mod tests {
 
     #[test]
     fn comando_work_folders_hostil() {
+        struct MockUiHost {
+            last_action: Option<UiAction>,
+        }
+        impl CommandHost for MockUiHost {
+            fn supports_ui(&self) -> bool {
+                true
+            }
+            fn dispatch_ui(&mut self, action: UiAction) -> Result<(), String> {
+                self.last_action = Some(action);
+                Ok(())
+            }
+            fn insert_generated(
+                &mut self,
+                _session: &mut EditorSession,
+                _spec: GenSpec,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
         let mut s = EditorSession::new(Project::new_default());
         let mut h = HeadlessHost;
 
-        // Comando registrado e funcional
-        run_command("file.work_folders", &mut s, &mut h).unwrap();
+        // Em modo headless, comando que requer UI recusa a execução
+        assert!(run_command("file.work_folders", &mut s, &mut h).is_err());
+
+        // Com host de interface gráfica ativo, despacha a ação OpenWorkFolders
+        let mut ui_host = MockUiHost { last_action: None };
+        assert!(run_command("file.work_folders", &mut s, &mut ui_host).is_ok());
+        assert_eq!(ui_host.last_action, Some(UiAction::OpenWorkFolders));
 
         // Parâmetros hostis em set_work_folders
         let hostil = crate::model::WorkFolders {
