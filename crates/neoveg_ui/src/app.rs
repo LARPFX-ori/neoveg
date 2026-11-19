@@ -3892,16 +3892,10 @@ impl App {
         let enabled = self.cmd_enabled(id);
         let lang = self.lang();
         let play = icons::icon_button(ui, Icon::Play, None, playing, enabled, &self.theme);
-        play.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tr(lang, "Reproduzir"))
-        });
         if play.on_hover_text(self.cmd_hover_text(id, None)).clicked() && !playing {
             self.exec_cmd(Some(ui.ctx()), id);
         }
         let pause = icons::icon_button(ui, Icon::Pause, None, false, enabled, &self.theme);
-        pause.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tr(lang, "Pausar"))
-        });
         if pause.on_hover_text(tr(lang, "Pausar")).clicked() && playing {
             self.exec_cmd(Some(ui.ctx()), id);
         }
