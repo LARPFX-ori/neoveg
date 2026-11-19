@@ -31,6 +31,7 @@
   "24 bits": "24 bits",
   "29,970 qps (NTSC)": "29,970 qps (NTSC)",
   "3 painéis no topo, tema escuro": "3 painéis no topo, tema escuro",
+  "3 painéis no topo, tema escuro (até a versão 22)": "3 painéis no topo, tema escuro (até a versão 22)",
   "3. Prévia, Cor e Master Bus": "3. Prévia, Cor e Master Bus",
   "32 bits float": "32 bits float",
   "3GPP 360p (Dispositivos móveis)": "3GPP 360p (Dispositivos móveis)",
@@ -1084,6 +1085,7 @@
   "Mixagem de Áudio": "Mixagem de Áudio",
   "Mixer": "Mixer",
   "Modelo": "Modelo",
+  "Moderno": "Moderno",
   "Modo": "Modo",
   "Modo 3D Estereoscópico": "Modo 3D Estereoscópico",
   "Modo Normal": "Modo Normal",
@@ -1207,6 +1209,7 @@
   "Neutro": "Neutro",
   "Nitidez": "Nitidez",
   "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": assim o plug-in abre sem esperar o download.": "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": assim o plug-in abre sem esperar o download.",
+  "No layout Moderno a timeline fica sempre na parte inferior.": "No layout Moderno a timeline fica sempre na parte inferior.",
   "Noise Gate": "Noise Gate",
   "Nome": "Nome",
   "Nome de origem (sem extensão)": "Nome de origem (sem extensão)",
@@ -1489,6 +1492,7 @@
   "Razão": "Razão",
   "Realimentação": "Realimentação",
   "Reativar": "Reativar",
+  "Recente": "Recente",
   "Recolher / expandir pasta da trilha": "Recolher / expandir pasta da trilha",
   "Recolher ou expandir pasta": "Recolher ou expandir pasta",
   "Recorta para preencher o quadro sem barras": "Recorta para preencher o quadro sem barras",
@@ -1921,6 +1925,7 @@
   "Vintage Suave": "Vintage Suave",
   "Visor de tempo": "Visor de tempo",
   "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)": "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)",
+  "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior (sem a opção de timeline no topo) e barra de transporte/edição no rodapé.": "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior (sem a opção de timeline no topo) e barra de transporte/edição no rodapé.",
   "Visualizar durante a codificação": "Visualizar durante a codificação",
   "Vol": "Vol",
   "Vol_dB": "Vol_dB",
@@ -2032,6 +2037,7 @@
   "timeline no topo, tema claro": "timeline no topo, tema claro",
   "trilha \"{name}\"": "trilha \"{name}\"",
   "uso inválido: {msg}\n{help}": "uso inválido: {msg}\n{help}",
+  "visual renovado, timeline sempre embaixo (versão 23 em diante)": "visual renovado, timeline sempre embaixo (versão 23 em diante)",
   "v{ver} • {n} worker(s)": "v{ver} • {n} worker(s)",
   "zoom out": "zoom out",
   "{added} legenda(s) importada(s) de {path}": "{added} legenda(s) importada(s) de {path}",
@@ -2108,4 +2114,4 @@
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "＋ Barramento",
   "＋ Marcador no Cursor": "＋ Marcador no Cursor"
-}
+}

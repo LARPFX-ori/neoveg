@@ -1887,12 +1887,21 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "edit.properties.layout.magix",
-        label: "Atual",
-        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Atual",
+        label: "Recente",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Recente",
         default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SetLayoutType(LayoutType::Magix), h),
+    },
+    CommandDef {
+        id: "edit.properties.layout.moderno",
+        label: "Moderno",
+        menu_path: "Editar/Propriedades/Layout/Tipos de layout/Moderno",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SetLayoutType(LayoutType::Moderno), h),
     },
     // --- Exibir ---
     CommandDef {

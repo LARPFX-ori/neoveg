@@ -31,6 +31,7 @@
   "24 bits": "24-Bit",
   "29,970 qps (NTSC)": "29,970 fps (NTSC)",
   "3 painéis no topo, tema escuro": "3 Panels oben, dunkles Thema",
+  "3 painéis no topo, tema escuro (até a versão 22)": "3 Bereiche oben, dunkles Design (bis Version 22)",
   "3. Prévia, Cor e Master Bus": "3. Vorschau, Farbe & Master-Bus",
   "32 bits float": "32-Bit Float",
   "3GPP 360p (Dispositivos móveis)": "3GPP 360p (Mobilgeräte)",
@@ -1084,6 +1085,7 @@
   "Mixagem de Áudio": "Audiomischung",
   "Mixer": "Mixer",
   "Modelo": "Vorlage",
+  "Moderno": "Modern",
   "Modo": "Modus",
   "Modo 3D Estereoscópico": "Stereoskopischer 3D-Modus",
   "Modo Normal": "Normal-Modus",
@@ -1207,6 +1209,7 @@
   "Neutro": "Neutral",
   "Nitidez": "Schärfen",
   "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": assim o plug-in abre sem esperar o download.": "Bei Google Drive im Streaming-Modus den Ordner als \"Offline verfügbar\" markieren, damit das Plug-in ohne Warten auf den Download öffnet.",
+  "No layout Moderno a timeline fica sempre na parte inferior.": "Im modernen Layout ist die Timeline immer unten.",
   "Noise Gate": "Noise Gate",
   "Nome": "Name",
   "Nome de origem (sem extensão)": "Quellname (ohne Erweiterung)",
@@ -1489,6 +1492,7 @@
   "Razão": "Verhältnis (Ratio)",
   "Realimentação": "Feedback",
   "Reativar": "Erneut einreihen",
+  "Recente": "Neuer",
   "Recolher / expandir pasta da trilha": "Spurordner ein-/ausklappen",
   "Recolher ou expandir pasta": "Ordner ein- oder ausklappen",
   "Recorta para preencher o quadro sem barras": "Schneidet zu, um Balken zu vermeiden",
@@ -1921,6 +1925,7 @@
   "Vintage Suave": "Sanftes Vintage",
   "Visor de tempo": "Zeitanzeige",
   "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)": "Zeitanzeige (Doppelklick: Gehe zu • Rechtsklick: Zeitformat)",
+  "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior (sem a opção de timeline no topo) e barra de transporte/edição no rodapé.": "Erneuertes Aussehen in Dunkelgrau mit Andockbereichen an allen vier Seiten des Fensters; Tabs, Vorschau und Master Bus oben, Timeline immer in der unteren Hälfte (ohne Option „Timeline oben“) und Transport-/Bearbeitungsleiste unten.",
   "Visualizar durante a codificação": "Vorschau während Kodierung anzeigen",
   "Vol": "Pegel",
   "Vol_dB": "Pegel_dB",
@@ -2032,6 +2037,7 @@
   "timeline no topo, tema claro": "Timeline oben, helles Thema",
   "trilha \"{name}\"": "Spur \"{name}\"",
   "uso inválido: {msg}\n{help}": "ungültige Verwendung: {msg}\n{help}",
+  "visual renovado, timeline sempre embaixo (versão 23 em diante)": "erneuertes Aussehen, Timeline immer unten (ab Version 23)",
   "v{ver} • {n} worker(s)": "v{ver} • {n} Worker",
   "zoom out": "Herauszoomen",
   "{added} legenda(s) importada(s) de {path}": "{added} Untertitel aus {path} importiert",
@@ -2108,4 +2114,4 @@
   "★ Favoritos": "★ Favoriten",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker am Cursor"
-}
+}

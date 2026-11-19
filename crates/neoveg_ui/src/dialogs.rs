@@ -5223,14 +5223,27 @@ fn edit_layout_checkboxes(
     sync_theme: Option<&mut String>,
 ) -> bool {
     let mut changed = false;
+    // a geração "Moderno" não tem timeline no topo: a opção fica travada
+    let top_allowed = cfg.layout_type.allows_timeline_on_top();
+    if !top_allowed && !cfg.timeline_at_bottom {
+        cfg.timeline_at_bottom = true;
+        changed = true;
+    }
     changed |= ui
-        .checkbox(
-            &mut cfg.timeline_at_bottom,
-            tr(
-                lang,
-                "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
+        .add_enabled(
+            top_allowed,
+            egui::Checkbox::new(
+                &mut cfg.timeline_at_bottom,
+                tr(
+                    lang,
+                    "Exibir timeline na parte inferior da janela principal (área acoplável no topo)",
+                ),
             ),
         )
+        .on_disabled_hover_text(tr(
+            lang,
+            "No layout Moderno a timeline fica sempre na parte inferior.",
+        ))
         .changed();
     changed |= ui
         .checkbox(

@@ -31,6 +31,7 @@
   "24 bits": "24-bit",
   "29,970 qps (NTSC)": "29.970 fps (NTSC)",
   "3 painéis no topo, tema escuro": "3 panels at top, dark theme",
+  "3 painéis no topo, tema escuro (até a versão 22)": "3 panels at the top, dark theme (up to version 22)",
   "3. Prévia, Cor e Master Bus": "3. Preview, Color & Master Bus",
   "32 bits float": "32-bit float",
   "3GPP 360p (Dispositivos móveis)": "3GPP 360p (Mobile Devices)",
@@ -1084,6 +1085,7 @@
   "Mixagem de Áudio": "Audio Mixing",
   "Mixer": "Mixer",
   "Modelo": "Template",
+  "Moderno": "Modern",
   "Modo": "Mode",
   "Modo 3D Estereoscópico": "Stereoscopic 3D Mode",
   "Modo Normal": "Normal Mode",
@@ -1207,6 +1209,7 @@
   "Neutro": "Neutral",
   "Nitidez": "Sharpen",
   "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": assim o plug-in abre sem esperar o download.": "With Google Drive in streaming mode, mark the folder as \"Available offline\" so the plug-in opens without waiting for the download.",
+  "No layout Moderno a timeline fica sempre na parte inferior.": "In the Modern layout the timeline is always at the bottom.",
   "Noise Gate": "Noise Gate",
   "Nome": "Name",
   "Nome de origem (sem extensão)": "Source Name (No Extension)",
@@ -1489,6 +1492,7 @@
   "Razão": "Ratio",
   "Realimentação": "Feedback",
   "Reativar": "Reset / Re-queue",
+  "Recente": "Recent",
   "Recolher / expandir pasta da trilha": "Collapse / Expand Track Folder",
   "Recolher ou expandir pasta": "Collapse or Expand Folder",
   "Recorta para preencher o quadro sem barras": "Crops to fill the frame without letterbox bars",
@@ -1921,6 +1925,7 @@
   "Vintage Suave": "Soft Vintage",
   "Visor de tempo": "Time Display",
   "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)": "Time Display (double-click: Go To • right-click: time format)",
+  "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior (sem a opção de timeline no topo) e barra de transporte/edição no rodapé.": "Refreshed dark gray look with docking areas on all four sides of the window; Tabs, Preview and Master Bus at the top, timeline always in the lower half (no timeline-on-top option) and the transport/editing bar at the bottom.",
   "Visualizar durante a codificação": "Show preview during encoding",
   "Vol": "Vol",
   "Vol_dB": "Vol_dB",
@@ -2032,6 +2037,7 @@
   "timeline no topo, tema claro": "timeline at top, light theme",
   "trilha \"{name}\"": "track \"{name}\"",
   "uso inválido: {msg}\n{help}": "invalid usage: {msg}\n{help}",
+  "visual renovado, timeline sempre embaixo (versão 23 em diante)": "refreshed look, timeline always at the bottom (version 23 onward)",
   "v{ver} • {n} worker(s)": "v{ver} • {n} worker(s)",
   "zoom out": "zoom out",
   "{added} legenda(s) importada(s) de {path}": "Imported {added} subtitle(s) from {path}",
@@ -2108,4 +2114,4 @@
   "★ Favoritos": "★ Favorites",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker at Cursor"
-}
+}

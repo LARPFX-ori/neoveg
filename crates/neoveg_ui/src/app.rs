@@ -3179,6 +3179,7 @@ impl App {
                             ),
                             ("edit.properties.layout.sony", LayoutType::Sony),
                             ("edit.properties.layout.magix", LayoutType::Magix),
+                            ("edit.properties.layout.moderno", LayoutType::Moderno),
                         ] {
                             let selected = self.prefs.edit_layout.layout_type == lt;
                             let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
