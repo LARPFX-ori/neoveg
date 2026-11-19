@@ -450,6 +450,7 @@ impl App {
         let initial_tree = initial_layout.tile_tree.clone();
         let initial_tab = initial_layout.active_panel();
         let initial_pv_left = prefs.edit_layout.preview_on_left;
+        let initial_mb_place = prefs.edit_layout.master_bus_placement;
         let saved_layouts = layout::list_saved_layouts();
         let mut initial_project = Project::new_default();
         initial_project.settings.sample_rate = prefs.default_sample_rate;
@@ -518,10 +519,11 @@ impl App {
             dock_height: initial_layout.dock_height,
             preview_ratio: initial_layout.preview_ratio,
             dock_tree: initial_tree.unwrap_or_else(|| {
-                crate::dock::build_dock_tree(
+                crate::dock::build_dock_tree_with(
                     initial_layout.preview_ratio,
                     initial_tab,
                     initial_pv_left,
+                    initial_mb_place,
                 )
             }),
             pending_dock_focus: None,
@@ -4952,17 +4954,22 @@ impl App {
         save_prefs: bool,
     ) {
         let prev_pv_left = self.prefs.edit_layout.preview_on_left;
+        let prev_mb_place = self.prefs.edit_layout.master_bus_placement;
         let lt = next.layout_type;
         self.prefs.edit_layout = next;
         if apply_metrics {
             self.dock_height = lt.default_dock_height();
             self.preview_ratio = lt.default_preview_ratio();
         }
-        if apply_metrics || prev_pv_left != self.prefs.edit_layout.preview_on_left {
-            self.dock_tree = crate::dock::build_dock_tree(
+        if apply_metrics
+            || prev_pv_left != self.prefs.edit_layout.preview_on_left
+            || prev_mb_place != self.prefs.edit_layout.master_bus_placement
+        {
+            self.dock_tree = crate::dock::build_dock_tree_with(
                 self.preview_ratio,
                 self.dock_tab,
                 self.prefs.edit_layout.preview_on_left,
+                self.prefs.edit_layout.master_bus_placement,
             );
         }
         self.master_bus_visible = self.prefs.edit_layout.master_bus_docked;
@@ -5097,10 +5104,11 @@ impl App {
             self.prefs.edit_layout = el;
         }
         self.dock_tree = l.tile_tree.unwrap_or_else(|| {
-            crate::dock::build_dock_tree(
+            crate::dock::build_dock_tree_with(
                 self.preview_ratio,
                 self.dock_tab,
                 self.prefs.edit_layout.preview_on_left,
+                self.prefs.edit_layout.master_bus_placement,
             )
         });
         let lang = self.lang();

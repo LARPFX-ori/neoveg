@@ -332,7 +332,12 @@ fn ui_smoke() {
     assert!(!app.prefs.edit_layout.timeline_at_bottom);
     assert!(!app.prefs.edit_layout.tabs_at_top);
     assert!(!app.prefs.edit_layout.transport_at_bottom);
-    assert!(!app.prefs.edit_layout.master_bus_docked);
+    // Vegas 1.0: o Mixer fica como aba junto da Video Preview
+    assert!(app.prefs.edit_layout.master_bus_docked);
+    assert_eq!(
+        app.prefs.edit_layout.master_bus_placement,
+        neoveg_common::prefs::MasterBusPlacement::WithPreview
+    );
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasClaro);
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -341,7 +346,12 @@ fn ui_smoke() {
     assert!(app.prefs.edit_layout.timeline_at_bottom);
     assert!(!app.prefs.edit_layout.tabs_at_top);
     assert!(app.prefs.edit_layout.transport_at_bottom);
-    assert!(!app.prefs.edit_layout.master_bus_docked);
+    // Vegas 9 e 13: Master Bus entre as abas e a prévia
+    assert!(app.prefs.edit_layout.master_bus_docked);
+    assert_eq!(
+        app.prefs.edit_layout.master_bus_placement,
+        neoveg_common::prefs::MasterBusPlacement::Center
+    );
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasMedio);
     frame(&mut app, vec![], Modifiers::NONE);
 
@@ -1933,4 +1943,44 @@ fn aba_exibicao_cores_de_trilha_envelope_e_icones() {
     let vivo = crate::icons::saturate(c, 200);
     assert!(vivo.r() >= c.r() && vivo.b() <= c.b());
     crate::icons::set_display_prefs(100, None);
+}
+
+/// Posição do Master Bus na área de janelas por geração: à direita (21 em
+/// diante), entre as abas e a prévia (9 e 13) e como aba da prévia (1.0).
+#[test]
+fn master_bus_nas_tres_posicoes_da_area_de_janelas() {
+    use crate::dock::{build_dock_tree_with, DockPane};
+    use egui_tiles::{Container, Tile};
+    use neoveg_common::prefs::MasterBusPlacement as Mb;
+    let kinds = |place: Mb| -> Vec<Vec<DockPane>> {
+        let tree = build_dock_tree_with(0.40, DockTab::ProjectMedia, false, place);
+        let root = tree.root.unwrap();
+        let Some(Tile::Container(Container::Linear(lin))) = tree.tiles.get(root) else {
+            panic!("raiz horizontal");
+        };
+        lin.children
+            .iter()
+            .map(|c| match tree.tiles.get(*c) {
+                Some(Tile::Container(Container::Tabs(t))) => t
+                    .children
+                    .iter()
+                    .filter_map(|p| match tree.tiles.get(*p) {
+                        Some(Tile::Pane(pane)) => Some(*pane),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => vec![],
+            })
+            .collect()
+    };
+    let right = kinds(Mb::Right);
+    assert_eq!(right.len(), 3);
+    assert_eq!(right[2], vec![DockPane::MasterBus]);
+    let center = kinds(Mb::Center);
+    assert_eq!(center.len(), 3);
+    assert_eq!(center[1], vec![DockPane::MasterBus]);
+    assert!(center[2].contains(&DockPane::Preview));
+    let with_pv = kinds(Mb::WithPreview);
+    assert_eq!(with_pv.len(), 2);
+    assert!(with_pv[1].contains(&DockPane::Preview) && with_pv[1].contains(&DockPane::MasterBus));
 }

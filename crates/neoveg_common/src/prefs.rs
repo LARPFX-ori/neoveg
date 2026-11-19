@@ -205,6 +205,37 @@ impl LayoutType {
     }
 }
 
+/// Onde o Master Bus fica na área de janelas (muda de geração para geração:
+/// com a prévia no 1.0; entre as abas e a prévia no 9 e no 13; à direita no
+/// 11 e a partir do 21; manuais de cada versão, capítulo da janela principal).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MasterBusPlacement {
+    /// À direita da área de janelas.
+    #[default]
+    Right,
+    /// Entre o grupo de abas e a prévia.
+    Center,
+    /// Como aba no grupo da prévia.
+    WithPreview,
+}
+
+impl MasterBusPlacement {
+    pub const ALL: [MasterBusPlacement; 3] = [
+        MasterBusPlacement::Right,
+        MasterBusPlacement::Center,
+        MasterBusPlacement::WithPreview,
+    ];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
+            MasterBusPlacement::Right => "À direita",
+            MasterBusPlacement::Center => "Entre as abas e a prévia",
+            MasterBusPlacement::WithPreview => "Como aba junto da prévia",
+        };
+        tr(lang, pt)
+    }
+}
+
 /// Opções de disposição da área de trabalho configuradas em `Editar > Propriedades > Layout`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -218,8 +249,10 @@ pub struct EditLayoutPrefs {
     pub transport_at_bottom: bool,
     /// Exibe a janela de prévia à esquerda na área acoplável.
     pub preview_on_left: bool,
-    /// Exibe o painel Master Bus acoplado à direita na área de janelas (padrão VEGAS Pro 21).
+    /// Exibe o painel Master Bus acoplado na área de janelas.
     pub master_bus_docked: bool,
+    /// Onde o Master Bus acoplado fica.
+    pub master_bus_placement: MasterBusPlacement,
     /// Aplica automaticamente a paleta visual da era ao escolher um tipo de layout
     /// (preservando temas de Alto Contraste AAA quando ativos).
     pub sync_theme_with_layout: bool,
@@ -228,22 +261,26 @@ pub struct EditLayoutPrefs {
 impl EditLayoutPrefs {
     pub fn for_type(layout_type: LayoutType) -> Self {
         match layout_type {
+            // 1.0: área de janelas embaixo; Mixer como aba junto da Video Preview
             LayoutType::SonicFoundry => Self {
                 layout_type,
                 timeline_at_bottom: false,
                 tabs_at_top: false,
                 transport_at_bottom: false,
                 preview_on_left: false,
-                master_bus_docked: false,
+                master_bus_docked: true,
+                master_bus_placement: MasterBusPlacement::WithPreview,
                 sync_theme_with_layout: true,
             },
+            // 9 e 13: Master Bus entre as abas e a prévia
             LayoutType::Sony => Self {
                 layout_type,
                 timeline_at_bottom: true,
                 tabs_at_top: false,
                 transport_at_bottom: true,
                 preview_on_left: false,
-                master_bus_docked: false,
+                master_bus_docked: true,
+                master_bus_placement: MasterBusPlacement::Center,
                 sync_theme_with_layout: true,
             },
             LayoutType::Magix | LayoutType::Moderno => Self {
@@ -253,6 +290,7 @@ impl EditLayoutPrefs {
                 transport_at_bottom: true,
                 preview_on_left: false,
                 master_bus_docked: true,
+                master_bus_placement: MasterBusPlacement::Right,
                 sync_theme_with_layout: true,
             },
         }
@@ -1712,19 +1750,25 @@ mod tests {
         assert!(!sf.timeline_at_bottom);
         assert!(!sf.tabs_at_top);
         assert!(!sf.transport_at_bottom);
-        assert!(!sf.master_bus_docked);
+        assert!(sf.master_bus_docked);
+        assert_eq!(sf.master_bus_placement, MasterBusPlacement::WithPreview);
 
         let sony = EditLayoutPrefs::for_type(LayoutType::Sony);
         assert!(sony.timeline_at_bottom);
         assert!(!sony.tabs_at_top);
         assert!(sony.transport_at_bottom);
-        assert!(!sony.master_bus_docked);
+        assert!(sony.master_bus_docked);
+        assert_eq!(sony.master_bus_placement, MasterBusPlacement::Center);
 
         let magix = EditLayoutPrefs::for_type(LayoutType::Magix);
         assert!(magix.timeline_at_bottom);
         assert!(!magix.tabs_at_top);
         assert!(magix.transport_at_bottom);
         assert!(magix.master_bus_docked);
+        assert_eq!(magix.master_bus_placement, MasterBusPlacement::Right);
+        // preferências salvas antes do campo: Master Bus à direita
+        let old: EditLayoutPrefs = serde_json::from_str(r#"{"layout_type":"Sony"}"#).unwrap();
+        assert_eq!(old.master_bus_placement, MasterBusPlacement::Right);
 
         let raw = r#"{"edit_layout":{"layout_type":"Sonic Fonudry"}}"#;
         let p: Preferences = serde_json::from_str(raw).unwrap();
