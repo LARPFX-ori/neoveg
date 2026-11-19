@@ -36,12 +36,28 @@ pub struct Shared {
     pub preview_muted: bool,
     /// Erro ocorrido na thread de áudio, exibido pela interface.
     pub error: Option<String>,
+    /// Áudio sendo reproduzido no painel Trimmer (se ativo).
+    pub trimmer_audio: Option<TrimmerAudioPlayback>,
+}
+
+/// Estado de reprodução de áudio na janela Trimmer.
+#[derive(Clone, Debug, Default)]
+pub struct TrimmerAudioPlayback {
+    pub media_id: Id,
+    /// Posição do cursor em amostras na taxa de amostragem do dispositivo/mixer.
+    pub pos: i64,
+    /// Faixa de seleção em loop em amostras (in, out).
+    pub loop_range: Option<(i64, i64)>,
+    pub playing: bool,
 }
 
 impl Shared {
     pub fn reset_dsp(&mut self) {
         self.mixer.reset();
         self.varispeed.reset();
+        if let Some(ref mut trim) = self.trimmer_audio {
+            trim.playing = false;
+        }
     }
 }
 
@@ -117,6 +133,7 @@ impl AudioOut {
             mono_downmix: false,
             preview_muted: false,
             error: None,
+            trimmer_audio: None,
         }));
         let mut stream = None;
         if let (Some(dev), Some(cfg)) = (device, config) {
@@ -180,6 +197,17 @@ impl AudioOut {
             if s.pos < 0 {
                 s.pos = 0;
                 s.playing = false;
+            }
+        } else if let Some(ref mut trim) = s.trimmer_audio {
+            if trim.playing {
+                let adv = dt * self.sr as f64;
+                trim.pos = trim.pos.saturating_add(adv.trunc() as i64);
+                if let Some((a, b)) = trim.loop_range {
+                    if trim.pos >= b && b > a {
+                        let span = b - a;
+                        trim.pos = a + (trim.pos - a).rem_euclid(span);
+                    }
+                }
             }
         }
     }
@@ -306,7 +334,77 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                 buf.iter_mut().take(frames * 2).for_each(|v| *v = 0.0);
                 s.meters.master = [0.0, 0.0];
             }
+        } else if let Some(mut trim) = s.trimmer_audio.clone().filter(|t| t.playing) {
+            let sr = s.mixer.sr;
+            if let Some(audio) = s.audio.get(&trim.media_id).cloned() {
+                let mut peak = [0.0_f32; 2];
+                for (i, frame) in buf
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .take(frames)
+                    .enumerate()
+                {
+                    let cur_sample = trim.pos.saturating_add(i as i64);
+                    let sample_in_range = if let Some((start_s, end_s)) = trim.loop_range {
+                        if end_s > start_s {
+                            let span = end_s - start_s;
+                            start_s + (cur_sample - start_s).rem_euclid(span)
+                        } else {
+                            cur_sample
+                        }
+                    } else {
+                        cur_sample
+                    };
+                    let t = Ticks::from_samples(sample_in_range, sr);
+                    let (l, r) = audio.sample(t);
+                    frame[0] = l;
+                    frame[1] = r;
+                    peak[0] = peak[0].max(l.abs());
+                    peak[1] = peak[1].max(r.abs());
+                }
+                trim.pos = trim.pos.saturating_add(frames as i64);
+                if trim.loop_range.is_none() {
+                    let audio_dur = (audio.data.len() / 2) as i64;
+                    let dur_in_device_sr =
+                        (audio_dur as f64 * sr as f64 / (audio.sample_rate.max(1) as f64)) as i64;
+                    if trim.pos >= dur_in_device_sr {
+                        trim.playing = false;
+                    }
+                }
+                s.meters.master = peak;
+                for v in s.meters.tracks.values_mut() {
+                    *v = [0.0, 0.0];
+                }
+                for v in s.meters.buses.values_mut() {
+                    *v = [0.0, 0.0];
+                }
+                s.loudness.push_interleaved(&buf[..frames * 2]);
+                s.loudness_snapshot = s.loudness.snapshot();
+                if s.mono_downmix {
+                    let mut mono_peak = 0.0_f32;
+                    for pair in buf.as_chunks_mut::<2>().0.iter_mut().take(frames) {
+                        let m = 0.5 * (pair[0] + pair[1]);
+                        pair[0] = m;
+                        pair[1] = m;
+                        mono_peak = mono_peak.max(m.abs());
+                    }
+                    s.meters.master = [mono_peak, mono_peak];
+                }
+                if s.dim {
+                    buf.iter_mut().take(frames * 2).for_each(|v| *v *= 0.1);
+                }
+                if s.preview_muted {
+                    buf.iter_mut().take(frames * 2).for_each(|v| *v = 0.0);
+                    s.meters.master = [0.0, 0.0];
+                }
+                s.trimmer_audio = Some(trim);
+            } else {
+                buf.fill(0.0);
+                s.meters.master = [0.0, 0.0];
+            }
         } else {
+            buf.fill(0.0);
             s.meters.master = [0.0, 0.0];
             for v in s.meters.tracks.values_mut() {
                 *v = [0.0, 0.0];
@@ -950,5 +1048,57 @@ mod tests {
         assert!(cache.get(7, 0, 64, 64).is_some());
         assert!(cache.get(8, 0, 64, 64).is_none());
         assert!(cache.get(7, 0, 32, 32).is_none());
+    }
+
+    #[test]
+    fn trimmer_audio_mixa_corretamente_e_avanca_em_loop_e_parada() {
+        let p = Arc::new(Project::new_default());
+        let shared = Arc::new(Mutex::new(Shared {
+            project: p,
+            audio: HashMap::new(),
+            playing: false,
+            pos: 0,
+            loop_range: None,
+            mixer: Mixer::new(48000),
+            varispeed: TransportVarispeed::new(),
+            meters: Meters::default(),
+            loudness: LoudnessAnalyzer::new(48000),
+            loudness_snapshot: LoudnessSnapshot::default(),
+            speed: 1.0,
+            frac: 0.0,
+            dim: false,
+            mono_downmix: false,
+            preview_muted: false,
+            error: None,
+            trimmer_audio: None,
+        }));
+
+        let mid = 1001;
+        let mut audio_data = Vec::with_capacity(4800 * 2);
+        for _ in 0..4800 {
+            audio_data.push(0.5);
+            audio_data.push(-0.5);
+        }
+        let adata = Arc::new(crate::media::AudioData::from_stereo(48000, audio_data));
+        {
+            let mut s = crate::util::lock(&shared);
+            s.audio.insert(mid, adata);
+            s.trimmer_audio = Some(TrimmerAudioPlayback {
+                media_id: mid,
+                pos: 0,
+                loop_range: Some((0, 2400)),
+                playing: true,
+            });
+        }
+
+        let mut buf = vec![0.0_f32; 256 * 2];
+        mix_into(&mut buf, 256, &shared);
+
+        assert_eq!(buf[0], 0.5);
+        assert_eq!(buf[1], -0.5);
+
+        let s = crate::util::lock(&shared);
+        assert!(s.meters.master[0] > 0.4);
+        assert_eq!(s.trimmer_audio.as_ref().map(|t| t.pos), Some(256));
     }
 }

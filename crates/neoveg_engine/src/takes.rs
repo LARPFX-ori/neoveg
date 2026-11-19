@@ -523,4 +523,25 @@ mod tests {
         assert!(fixes.iter().any(|f| f.contains("sem mídia")), "{fixes:?}");
         assert_eq!(s.project.event(id).map(take_count), Some(2));
     }
+
+    #[test]
+    fn add_media_as_take_direto_no_evento_valida_bloqueio_e_compatibilidade() {
+        let (mut s, id) = session_with_takes();
+        assert!(s.add_media_as_take(id, 3));
+        let e = s.project.event(id).expect("evento");
+        assert_eq!(e.media_id, 3);
+        assert_eq!(take_count(e), 3);
+
+        // Mídia inexistente retorna false sem pânico
+        assert!(!s.add_media_as_take(id, 99999));
+
+        // Evento inexistente retorna false sem pânico
+        assert!(!s.add_media_as_take(88888, 3));
+
+        // Evento travado não aceita novo take
+        if let Some(e) = s.project.event_mut(id) {
+            e.locked = true;
+        }
+        assert!(!s.add_media_as_take(id, 2));
+    }
 }

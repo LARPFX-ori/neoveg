@@ -223,6 +223,16 @@ enum CtxTarget {
     },
 }
 
+/// Menu de contexto aberto ao soltar uma mídia com o botão direito na timeline.
+#[derive(Clone, Debug)]
+pub struct DropContextMenuState {
+    pub pos: Pos2,
+    pub media_id: Id,
+    pub track: Option<usize>,
+    pub t: Ticks,
+    pub target_event: Option<Id>,
+}
+
 pub struct TimelineState {
     pub px_per_sec: f32,
     pub scroll_x: Ticks,
@@ -233,6 +243,8 @@ pub struct TimelineState {
     rename: Option<(Id, String)>,
     snap_line: Option<Ticks>,
     drop_hint: Option<(usize, Ticks)>,
+    /// Menu de contexto aberto ao soltar mídia com botão direito.
+    pub drop_context_menu: Option<DropContextMenuState>,
     /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
     pub kf_collapsed: HashSet<Id>,
     /// Ponto atual da caixa das ferramentas Seleção e Zoom.
@@ -261,6 +273,7 @@ impl Default for TimelineState {
             rename: None,
             snap_line: None,
             drop_hint: None,
+            drop_context_menu: None,
             kf_collapsed: HashSet::new(),
             box_cur: None,
             last_lanes: Rect::NOTHING,
@@ -878,6 +891,7 @@ impl App {
         }
         self.draw_cursors(ui, top.union(lanes));
         self.rename_popup(ui);
+        self.show_drop_context_menu(ui);
     }
 
     fn effective_box_rect(&self, raw: Rect, lanes: Rect) -> Rect {
@@ -2471,6 +2485,71 @@ impl App {
         }
     }
 
+    fn show_drop_context_menu(&mut self, ui: &mut egui::Ui) {
+        let Some(drop_menu) = self.tl.drop_context_menu.clone() else {
+            return;
+        };
+        let mut close = false;
+        let mut handled = false;
+        egui::Area::new(egui::Id::new("tl_drop_context_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(drop_menu.pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(160.0);
+                    let lang = self.lang();
+                    if let Some(target_id) = drop_menu.target_event {
+                        if ui.button(tr(lang, "Adicionar como take")).clicked() {
+                            if self
+                                .session
+                                .add_media_as_take(target_id, drop_menu.media_id)
+                            {
+                                self.set_status(tr(lang, "Mídia adicionada como take."));
+                            }
+                            handled = true;
+                            close = true;
+                        }
+                        ui.separator();
+                    }
+                    if ui.button(tr(lang, "Copiar aqui")).clicked() {
+                        self.checkpoint();
+                        self.add_media_to_timeline(
+                            drop_menu.media_id,
+                            drop_menu.t,
+                            drop_menu.track,
+                        );
+                        handled = true;
+                        close = true;
+                    }
+                    if ui.button(tr(lang, "Mover aqui")).clicked() {
+                        self.checkpoint();
+                        self.add_media_to_timeline(
+                            drop_menu.media_id,
+                            drop_menu.t,
+                            drop_menu.track,
+                        );
+                        handled = true;
+                        close = true;
+                    }
+                    ui.separator();
+                    if ui.button(tr(lang, "Cancelar")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tl.drop_context_menu = None;
+        } else if !handled && ui.input(|i| i.pointer.any_pressed()) {
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                let r = Rect::from_min_size(drop_menu.pos, egui::vec2(180.0, 160.0));
+                if !r.contains(p) {
+                    self.tl.drop_context_menu = None;
+                }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------
     // Cabeçalhos de trilha
     // -----------------------------------------------------------------
@@ -3589,15 +3668,39 @@ impl App {
                     .unwrap_or(self.project.tracks.len());
                 let t = self.snap(self.tl.x2t(p.x, left), &HashSet::new(), mods.shift);
                 self.tl.drop_hint = Some((ti, t));
-                if ui.input(|i| i.pointer.any_released()) {
+                let right_release =
+                    ui.input(|i| i.pointer.button_released(egui::PointerButton::Secondary));
+                let any_release = ui.input(|i| i.pointer.any_released());
+                if any_release {
                     if let Some(payload) = egui::DragAndDrop::take_payload::<DndPayload>(ui.ctx()) {
                         let hit = self.hit_event(p, left, layout);
-                        self.handle_drop(
-                            (*payload).clone(),
-                            self.track_at(p.y, &rows.track_spans),
-                            t,
-                            hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id),
-                        );
+                        let target_event =
+                            hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id);
+                        if right_release {
+                            if let DndPayload::Media(mid) = *payload {
+                                self.tl.drop_context_menu = Some(DropContextMenuState {
+                                    pos: p,
+                                    media_id: mid,
+                                    track: self.track_at(p.y, &rows.track_spans),
+                                    t,
+                                    target_event,
+                                });
+                            } else {
+                                self.handle_drop(
+                                    (*payload).clone(),
+                                    self.track_at(p.y, &rows.track_spans),
+                                    t,
+                                    target_event,
+                                );
+                            }
+                        } else {
+                            self.handle_drop(
+                                (*payload).clone(),
+                                self.track_at(p.y, &rows.track_spans),
+                                t,
+                                target_event,
+                            );
+                        }
                     }
                 }
             }
