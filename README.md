@@ -2,6 +2,10 @@
 
 Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa multilíngue (`pt-BR` padrão, `en`, `es`, `fr`, `de` e `ja`; `eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
 
+## Testou o Neoveg? Conte como foi
+
+Se você instalou ou usou o Neoveg, responda o **[formulário para quem testou o Neoveg](https://docs.google.com/forms/d/e/1FAIpQLSfal0jWd9rdw7ph_Zm9_ZsTrZiThVsuzjlGMjL9v37Bdq9asQ/viewform)**. As respostas ajudam a decidir o que corrigir e o que fazer primeiro. Erros com passos para reproduzir também podem ir para as *Issues* do repositório.
+
 ## Imagens
 
 ![Janela principal do Neoveg com projeto demonstrativo: Mídia do Projeto, Prévia de Vídeo, Master Bus, botão Encoder e linha do tempo com trilhas de vídeo, título, áudio, auto-crossfade, marcadores e região](docs/screenshots/janela_principal.png)
