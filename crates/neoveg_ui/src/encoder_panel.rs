@@ -1270,8 +1270,9 @@ impl App {
                     if list.is_empty() {
                         continue;
                     }
+                    // todos os grupos começam abertos
                     egui::CollapsingHeader::new(cat.name_in(lang))
-                        .default_open(cat == PresetCategory::Web || cat == PresetCategory::Custom)
+                        .default_open(true)
                         .show(ui, |ui| {
                             for p in list {
                                 let sel = self.encoder.selected_preset.as_deref() == Some(&p.id);
