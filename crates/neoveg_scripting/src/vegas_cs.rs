@@ -40,6 +40,25 @@ struct ScriptEventSnap {
     takes: Vec<ScriptTakeSnap>,
     active_take: usize,
     effects: Vec<ScriptFxSnap>,
+    envelopes: Vec<ScriptEnvSnap>,
+}
+
+/// Parâmetro de efeito como o script o vê (`EffectParameter`).
+#[derive(Serialize)]
+struct ScriptFxParamSnap {
+    name: String,
+    value: f64,
+    min: f64,
+    max: f64,
+    default_value: f64,
+}
+
+/// Quadro-chave de efeito (`EffectKeyframe`).
+#[derive(Serialize)]
+struct ScriptFxKeySnap {
+    time: i64,
+    preset: String,
+    curve: &'static str,
 }
 
 /// Efeito de trilha ou de evento como o script o vê (`Effect`).
@@ -49,6 +68,9 @@ struct ScriptFxSnap {
     unique_id: String,
     name: String,
     bypass: bool,
+    preset: String,
+    parameters: Vec<ScriptFxParamSnap>,
+    keyframes: Vec<ScriptFxKeySnap>,
 }
 
 /// Ponto de envelope (`EnvelopePoint`): tempo em ticks, valor e curva
@@ -60,19 +82,20 @@ struct ScriptEnvPointSnap {
     curve: &'static str,
 }
 
-/// Envelope de trilha (`Envelope`): tipo pelo nome de `EnvelopeType`.
+/// Envelope de trilha ou evento (`Envelope`): tipo pelo nome de `EnvelopeType`.
 #[derive(Serialize)]
 struct ScriptEnvSnap {
     kind: &'static str,
     points: Vec<ScriptEnvPointSnap>,
 }
 
-/// Efeito nativo disponível em `Vegas.VideoFX` / `Vegas.AudioFX`.
+/// Efeito nativo ou de terceiros (OFX/VST3) disponível em `Vegas.VideoFX` / `Vegas.AudioFX`.
 #[derive(Serialize)]
 struct ScriptPluginSnap {
-    unique_id: &'static str,
+    unique_id: String,
     name: String,
     is_audio: bool,
+    is_ofx: bool,
 }
 
 #[derive(Serialize)]
@@ -144,7 +167,7 @@ struct ScriptInputPayload {
 
 /// Versão do formato de saída da ponte. Uma saída de outra versão veio de
 /// uma ponte antiga embutida numa `.dll`: é recusada, nunca reinterpretada.
-const SCRIPT_OUTPUT_PROTOCOL: u32 = 5;
+const SCRIPT_OUTPUT_PROTOCOL: u32 = 6;
 
 /// Take na lista final de um evento.
 #[derive(Deserialize, Default)]
@@ -174,6 +197,24 @@ struct ScriptEventOut {
     fade_in: Option<i64>,
     fade_out: Option<i64>,
     effects: Option<Vec<ScriptFxOut>>,
+    envelopes: Option<Vec<ScriptEnvOut>>,
+}
+
+/// Parâmetro de efeito devolvido pelo script.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptFxParamOut {
+    name: String,
+    value: f64,
+}
+
+/// Quadro-chave de efeito devolvido pelo script.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ScriptFxKeyOut {
+    time: i64,
+    preset: Option<String>,
+    curve: Option<String>,
 }
 
 /// Efeito na lista final (`Effects`): `id` do efeito original, ou 0 para um
@@ -184,6 +225,9 @@ struct ScriptFxOut {
     id: u64,
     unique_id: String,
     bypass: bool,
+    preset: Option<String>,
+    parameters: Option<Vec<ScriptFxParamOut>>,
+    keyframes: Option<Vec<ScriptFxKeyOut>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -194,7 +238,7 @@ struct ScriptEnvPointOut {
     curve: String,
 }
 
-/// Envelope na lista final de uma trilha (vem inteiro quando muda).
+/// Envelope na lista final de uma trilha ou evento (vem inteiro quando muda).
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ScriptEnvOut {
@@ -215,6 +259,7 @@ impl ScriptEventOut {
             && self.fade_in.is_none()
             && self.fade_out.is_none()
             && self.effects.is_none()
+            && self.envelopes.is_none()
     }
 }
 
@@ -779,6 +824,8 @@ namespace ScriptPortal.Vegas
 
         // VideoEvent.Effects / AudioEvent.Effects (Scripting API Summary).
         public Effects Effects { get; } = new Effects();
+        // TrackEvent.Envelopes / VideoEvent.Envelopes / AudioEvent.Envelopes (Scripting API Summary).
+        public Envelopes Envelopes { get; } = new Envelopes();
 
         public Take AddTake(MediaStream mediaStream) => AddTake(mediaStream, true, null);
 
@@ -1045,10 +1092,82 @@ namespace ScriptPortal.Vegas
         IEnumerator IEnumerable.GetEnumerator() => _children.GetEnumerator();
     }
 
+    public sealed class EffectKeyframe
+    {
+        internal EffectKeyframes _owner;
+
+        public EffectKeyframe(Timecode time) : this(time, "", CurveType.Linear) { }
+        public EffectKeyframe(Timecode time, string preset) : this(time, preset, CurveType.Linear) { }
+        public EffectKeyframe(Timecode time, string preset, CurveType curve)
+        {
+            Time = time ?? new Timecode();
+            Preset = preset ?? "";
+            Curve = curve;
+        }
+
+        public Timecode Time { get; set; }
+        public string Preset { get; set; } = "";
+        public CurveType Curve { get; set; } = CurveType.Linear;
+        public int Index => _owner == null ? -1 : _owner.IndexOf(this);
+        public bool IsValid() => _owner != null;
+    }
+
+    public sealed class EffectKeyframes : Collection<EffectKeyframe>
+    {
+        internal EffectKeyframes() { }
+
+        protected override void InsertItem(int index, EffectKeyframe item)
+        {
+            if (item is null) throw new ArgumentNullException(nameof(item));
+            item._owner = this;
+            base.InsertItem(index, item);
+        }
+
+        protected override void RemoveItem(int index)
+        {
+            this[index]._owner = null;
+            base.RemoveItem(index);
+        }
+
+        protected override void ClearItems()
+        {
+            foreach (var k in this) k._owner = null;
+            base.ClearItems();
+        }
+    }
+
+    public sealed class EffectParameter
+    {
+        public string Name { get; internal set; } = "";
+        public double Value { get; set; }
+        public double Min { get; internal set; }
+        public double Max { get; internal set; }
+        public double DefaultValue { get; internal set; }
+    }
+
+    public sealed class EffectParameters : Collection<EffectParameter>
+    {
+        internal EffectParameters() { }
+
+        public EffectParameter this[string name]
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(name)) return null;
+                foreach (var p in this)
+                {
+                    if (string.Equals(p.Name, name.Trim(), StringComparison.OrdinalIgnoreCase)) return p;
+                }
+                return null;
+            }
+        }
+    }
+
     public sealed class Effect
     {
         internal ulong _id;
         internal Effects _owner;
+        private string _preset = "";
 
         public Effect(PlugInNode plugIn)
         {
@@ -1065,6 +1184,22 @@ namespace ScriptPortal.Vegas
         public bool IsOFX => PlugIn.IsOFX;
         public int Index => _owner == null ? -1 : _owner.IndexOf(this);
         public bool IsValid() => _owner != null;
+
+        public string Preset
+        {
+            get => Keyframes.Count > 0 && !string.IsNullOrEmpty(Keyframes[0].Preset) ? Keyframes[0].Preset : _preset;
+            set
+            {
+                _preset = value ?? "";
+                if (Keyframes.Count > 0)
+                {
+                    Keyframes[0].Preset = _preset;
+                }
+            }
+        }
+
+        public EffectKeyframes Keyframes { get; } = new EffectKeyframes();
+        public EffectParameters Parameters { get; } = new EffectParameters();
     }
 
     public sealed class Effects : Collection<Effect>
@@ -1300,14 +1435,6 @@ namespace ScriptPortal.Vegas
         }
     }
 
-    internal sealed class FxSnap
-    {
-        public ulong id { get; set; }
-        public string unique_id { get; set; }
-        public string name { get; set; }
-        public bool bypass { get; set; }
-    }
-
     internal sealed class EnvPointSnap
     {
         public long x { get; set; }
@@ -1319,20 +1446,6 @@ namespace ScriptPortal.Vegas
     {
         public string kind { get; set; }
         public List<EnvPointSnap> points { get; set; }
-    }
-
-    internal sealed class PluginSnap
-    {
-        public string unique_id { get; set; }
-        public string name { get; set; }
-        public bool is_audio { get; set; }
-    }
-
-    internal sealed class FxOut
-    {
-        public ulong id { get; set; }
-        public string unique_id { get; set; }
-        public bool bypass { get; set; }
     }
 
     internal sealed class EnvPointOut
@@ -1557,7 +1670,7 @@ namespace ScriptPortal.Vegas
                     UniqueID = f.unique_id ?? "",
                     IsVideo = video,
                     IsAudio = !video,
-                    IsOFX = f.unique_id == "Ofx"
+                    IsOFX = f.unique_id == "Ofx" || (f.unique_id != null && f.unique_id.StartsWith("ofx:"))
                 };
         }
 
@@ -1565,7 +1678,29 @@ namespace ScriptPortal.Vegas
         {
             foreach (var f in list ?? new List<FxSnap>())
             {
-                into.Add(new Effect(NodeFor(f, video)) { _id = f.id, Bypass = f.bypass });
+                var fx = new Effect(NodeFor(f, video))
+                {
+                    _id = f.id,
+                    Bypass = f.bypass,
+                    Preset = f.preset ?? "",
+                };
+                foreach (var p in f.parameters ?? new List<FxParamSnap>())
+                {
+                    fx.Parameters.Add(new EffectParameter
+                    {
+                        Name = p.name ?? "",
+                        Value = p.value,
+                        Min = p.min,
+                        Max = p.max,
+                        DefaultValue = p.default_value,
+                    });
+                }
+                foreach (var k in f.keyframes ?? new List<FxKeySnap>())
+                {
+                    var curve = Enum.TryParse<CurveType>(k.curve, out var c) ? c : CurveType.Linear;
+                    fx.Keyframes.Add(new EffectKeyframe(Timecode.FromTicks(k.time), k.preset, curve));
+                }
+                into.Add(fx);
             }
         }
 
@@ -1606,7 +1741,8 @@ namespace ScriptPortal.Vegas
                     UniqueID = p.unique_id ?? "",
                     IsAudio = p.is_audio,
                     IsVideo = !p.is_audio,
-                    Group = "Neoveg"
+                    IsOFX = p.is_ofx,
+                    Group = p.is_ofx ? "OpenFX" : (p.is_audio && (p.unique_id != null && p.unique_id.StartsWith("vst3:")) ? "VST3" : "Neoveg")
                 };
                 (p.is_audio ? AudioFX : VideoFX)._children.Add(node);
             }
@@ -1666,6 +1802,20 @@ namespace ScriptPortal.Vegas
                             ev._active = ev.Takes[e.active_take];
                         }
                         LoadEffects(ev.Effects, e.effects, t.is_video);
+                        foreach (var es in e.envelopes ?? new List<EnvSnap>())
+                        {
+                            if (!Enum.TryParse<EnvelopeType>(es.kind, out var et))
+                            {
+                                continue;
+                            }
+                            var env = new Envelope(et, false);
+                            foreach (var ps in es.points ?? new List<EnvPointSnap>())
+                            {
+                                var curve = Enum.TryParse<CurveType>(ps.curve, out var c) ? c : CurveType.Linear;
+                                env.Points.Add(new EnvelopePoint(Timecode.FromTicks(ps.x), ps.y, curve));
+                            }
+                            ev.Envelopes.Add(env);
+                        }
                         tr.Events.Add(ev);
                     }
                     Project.Tracks.Add(tr);
@@ -1740,7 +1890,39 @@ namespace ScriptPortal.Vegas
             var list = new List<FxOut>();
             foreach (var e in fx)
             {
-                list.Add(new FxOut { id = e._id, unique_id = e.PlugIn.UniqueID ?? "", bypass = e.Bypass });
+                var fo = new FxOut
+                {
+                    id = e._id,
+                    unique_id = e.PlugIn.UniqueID ?? "",
+                    bypass = e.Bypass,
+                    preset = string.IsNullOrEmpty(e.Preset) ? null : e.Preset,
+                };
+                if (e.Keyframes.Count > 0)
+                {
+                    fo.keyframes = new List<FxKeyOut>();
+                    foreach (var k in e.Keyframes)
+                    {
+                        fo.keyframes.Add(new FxKeyOut
+                        {
+                            time = Ticks(k.Time),
+                            preset = string.IsNullOrEmpty(k.Preset) ? null : k.Preset,
+                            curve = k.Curve.ToString(),
+                        });
+                    }
+                }
+                if (e.Parameters.Count > 0)
+                {
+                    fo.parameters = new List<FxParamOut>();
+                    foreach (var p in e.Parameters)
+                    {
+                        fo.parameters.Add(new FxParamOut
+                        {
+                            name = p.Name ?? "",
+                            value = p.Value,
+                        });
+                    }
+                }
+                list.Add(fo);
             }
             return list;
         }
@@ -1754,9 +1936,43 @@ namespace ScriptPortal.Vegas
             }
             for (int i = 0; i < now.Count; i++)
             {
-                if (now[i].id == 0 || now[i].id != old[i].id || now[i].bypass != old[i].bypass)
+                var n = now[i];
+                var o = old[i];
+                if (n.id == 0 || n.id != o.id || n.bypass != o.bypass)
                 {
                     return false;
+                }
+                if ((n.preset ?? "") != (o.preset ?? ""))
+                {
+                    return false;
+                }
+                var np = n.parameters ?? new List<FxParamOut>();
+                var op = o.parameters ?? new List<FxParamSnap>();
+                if (np.Count != op.Count)
+                {
+                    return false;
+                }
+                for (int j = 0; j < np.Count; j++)
+                {
+                    if (Math.Abs(np[j].value - op[j].value) > 1e-6)
+                    {
+                        return false;
+                    }
+                }
+                var nk = n.keyframes ?? new List<FxKeyOut>();
+                var ok = o.keyframes ?? new List<FxKeySnap>();
+                if (nk.Count != ok.Count)
+                {
+                    return false;
+                }
+                for (int j = 0; j < nk.Count; j++)
+                {
+                    if (nk[j].time != ok[j].time
+                        || (nk[j].preset ?? "") != (ok[j].preset ?? "")
+                        || (nk[j].curve ?? "") != (ok[j].curve ?? ""))
+                    {
+                        return false;
+                    }
                 }
             }
             return true;
@@ -1883,7 +2099,8 @@ namespace ScriptPortal.Vegas
                             fade_out = fo != 0 ? fo : (long?)null,
                             takes = takesNow,
                             active_take = activeNow,
-                            effects = ev.Effects.Count > 0 ? FxOutList(ev.Effects) : null
+                            effects = ev.Effects.Count > 0 ? FxOutList(ev.Effects) : null,
+                            envelopes = ev.Envelopes.Count > 0 ? EnvOutList(ev.Envelopes) : null
                         });
                         continue;
                     }
@@ -1902,6 +2119,7 @@ namespace ScriptPortal.Vegas
                     }
                     bool takesChanged = !SameTakes(takesNow, oe.takes) || activeNow != oe.active_take;
                     var fxNow = FxOutList(ev.Effects);
+                    var envNow = EnvOutList(ev.Envelopes);
                     evOut.Add(new EventOut
                     {
                         id = ev._id,
@@ -1914,7 +2132,8 @@ namespace ScriptPortal.Vegas
                         fade_out = fo != oe.fade_out ? fo : (long?)null,
                         takes = takesChanged ? takesNow : null,
                         active_take = takesChanged ? activeNow : (int?)null,
-                        effects = SameFx(fxNow, oe.effects) ? null : fxNow
+                        effects = SameFx(fxNow, oe.effects) ? null : fxNow,
+                        envelopes = SameEnv(envNow, oe.envelopes) ? null : envNow
                     });
                 }
                 if (cur._origIndex >= 0)
@@ -2016,7 +2235,7 @@ namespace ScriptPortal.Vegas
             return new OutputSnap
             {
                 ok = true,
-                protocol = 5,
+                protocol = 6,
                 messages = _messages,
                 commands = _commands,
                 tracks = tracksOut,
@@ -2065,6 +2284,41 @@ namespace ScriptPortal.Vegas
         public string name { get; set; }
     }
 
+    internal sealed class FxParamSnap
+    {
+        public string name { get; set; }
+        public double value { get; set; }
+        public double min { get; set; }
+        public double max { get; set; }
+        public double default_value { get; set; }
+    }
+
+    internal sealed class FxKeySnap
+    {
+        public long time { get; set; }
+        public string preset { get; set; }
+        public string curve { get; set; }
+    }
+
+    internal sealed class FxSnap
+    {
+        public ulong id { get; set; }
+        public string unique_id { get; set; }
+        public string name { get; set; }
+        public bool bypass { get; set; }
+        public string preset { get; set; }
+        public List<FxParamSnap> parameters { get; set; }
+        public List<FxKeySnap> keyframes { get; set; }
+    }
+
+    internal sealed class PluginSnap
+    {
+        public string unique_id { get; set; }
+        public string name { get; set; }
+        public bool is_audio { get; set; }
+        public bool is_ofx { get; set; }
+    }
+
     internal sealed class EventSnap
     {
         public ulong id { get; set; }
@@ -2078,6 +2332,7 @@ namespace ScriptPortal.Vegas
         public List<TakeSnap> takes { get; set; }
         public int active_take { get; set; }
         public List<FxSnap> effects { get; set; }
+        public List<EnvSnap> envelopes { get; set; }
     }
 
     internal sealed class TrackSnap
@@ -2119,6 +2374,29 @@ namespace ScriptPortal.Vegas
         public ulong probe_token { get; set; }
     }
 
+    internal sealed class FxParamOut
+    {
+        public string name { get; set; }
+        public double value { get; set; }
+    }
+
+    internal sealed class FxKeyOut
+    {
+        public long time { get; set; }
+        public string preset { get; set; }
+        public string curve { get; set; }
+    }
+
+    internal sealed class FxOut
+    {
+        public ulong id { get; set; }
+        public string unique_id { get; set; }
+        public bool bypass { get; set; }
+        public string preset { get; set; }
+        public List<FxParamOut> parameters { get; set; }
+        public List<FxKeyOut> keyframes { get; set; }
+    }
+
     internal sealed class EventOut
     {
         public ulong id { get; set; }
@@ -2134,6 +2412,7 @@ namespace ScriptPortal.Vegas
         public List<TakeOut> takes { get; set; }
         public int? active_take { get; set; }
         public List<FxOut> effects { get; set; }
+        public List<EnvOut> envelopes { get; set; }
     }
 
     internal sealed class TrackOut
@@ -2637,6 +2916,7 @@ fn build_snapshot(
                         .collect(),
                     active_take: takes::active_index(e),
                     effects: fx_snaps(&e.fx, lang),
+                    envelopes: e.envelopes.iter().map(env_snap).collect(),
                 })
                 .collect(),
             effects: fx_snaps(&t.fx, lang),
@@ -2682,15 +2962,59 @@ fn build_snapshot(
         markers,
         audio_buses,
         media,
-        plugins: FxKind::VIDEO
-            .into_iter()
-            .chain(FxKind::AUDIO)
-            .map(|k| ScriptPluginSnap {
-                unique_id: k.id(),
-                name: k.name_in(lang).to_string(),
-                is_audio: k.is_audio(),
-            })
-            .collect(),
+        plugins: {
+            let mut pl: Vec<ScriptPluginSnap> = FxKind::VIDEO
+                .into_iter()
+                .chain(FxKind::AUDIO)
+                .map(|k| ScriptPluginSnap {
+                    unique_id: k.id().to_string(),
+                    name: k.name_in(lang).to_string(),
+                    is_audio: k.is_audio(),
+                    is_ofx: false,
+                })
+                .collect();
+            for ext in neoveg_engine::plugins::scan_default() {
+                let bin = ext
+                    .binary
+                    .as_ref()
+                    .or(Some(&ext.path))
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                match ext.kind {
+                    neoveg_engine::plugins::ExternalKind::Ofx => {
+                        let uid = format!("ofx:{}|{}", bin, ext.name);
+                        pl.push(ScriptPluginSnap {
+                            unique_id: uid,
+                            name: ext.name,
+                            is_audio: false,
+                            is_ofx: true,
+                        });
+                    }
+                    neoveg_engine::plugins::ExternalKind::Vst3 => {
+                        if ext.classes.is_empty() {
+                            let uid = format!("vst3:{}|{}", bin, ext.name);
+                            pl.push(ScriptPluginSnap {
+                                unique_id: uid,
+                                name: ext.name,
+                                is_audio: true,
+                                is_ofx: false,
+                            });
+                        } else {
+                            for cid in &ext.classes {
+                                let uid = format!("vst3:{}|{}", bin, cid);
+                                pl.push(ScriptPluginSnap {
+                                    unique_id: uid,
+                                    name: format!("{} ({})", ext.name, cid),
+                                    is_audio: true,
+                                    is_ofx: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            pl
+        },
         probe_fn: dotnet_host::media_probe_fn_addr(),
         probe_token,
         ui_fn: dotnet_host::ui_request_fn_addr(),
@@ -2706,11 +3030,84 @@ const MAX_SCRIPT_ENV_POINTS: usize = 100_000;
 
 fn fx_snaps(list: &[FxInstance], lang: neoveg_common::Language) -> Vec<ScriptFxSnap> {
     list.iter()
-        .map(|f| ScriptFxSnap {
-            id: f.id,
-            unique_id: f.kind.id().to_string(),
-            name: f.kind.name_in(lang).to_string(),
-            bypass: !f.enabled,
+        .map(|f| {
+            let (unique_id, name) = match f.kind {
+                FxKind::Ofx => {
+                    let ofx = f.ofx.as_ref();
+                    let bin = ofx.map(|o| o.binary.as_str()).unwrap_or("");
+                    let pid = ofx.map(|o| o.plugin_id.as_str()).unwrap_or("Ofx");
+                    let label = ofx
+                        .map(|o| o.label.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(pid);
+                    (format!("ofx:{bin}|{pid}"), label.to_string())
+                }
+                FxKind::Vst3 => {
+                    let vst3 = f.vst3.as_ref();
+                    let bin = vst3.map(|v| v.binary.as_str()).unwrap_or("");
+                    let cid = vst3.map(|v| v.class_id.as_str()).unwrap_or("Vst3");
+                    let label = vst3
+                        .map(|v| v.label.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(cid);
+                    (format!("vst3:{bin}|{cid}"), label.to_string())
+                }
+                _ => (f.kind.id().to_string(), f.kind.name_in(lang).to_string()),
+            };
+
+            let specs = f.kind.params();
+            let parameters = f
+                .params
+                .iter()
+                .zip(specs.iter())
+                .map(|(p, spec)| ScriptFxParamSnap {
+                    name: spec.name_in(lang).to_string(),
+                    value: f64::from(p.value),
+                    min: f64::from(spec.min),
+                    max: f64::from(spec.max),
+                    default_value: f64::from(spec.default),
+                })
+                .collect();
+
+            let mut key_times: Vec<Ticks> = Vec::new();
+            for p in &f.params {
+                for (t, _) in &p.keys {
+                    if !key_times.contains(t) {
+                        key_times.push(*t);
+                    }
+                }
+            }
+            key_times.sort();
+            let keyframes = key_times
+                .into_iter()
+                .map(|t| {
+                    let curve = f
+                        .params
+                        .iter()
+                        .find_map(|p| {
+                            p.keys
+                                .iter()
+                                .position(|k| k.0 == t)
+                                .map(|idx| p.curves.get(idx).copied().unwrap_or(Curve::Linear))
+                        })
+                        .unwrap_or(Curve::Linear);
+                    ScriptFxKeySnap {
+                        time: t.0,
+                        preset: String::new(),
+                        curve: curve_name(curve),
+                    }
+                })
+                .collect();
+
+            ScriptFxSnap {
+                id: f.id,
+                unique_id,
+                name,
+                bypass: !f.enabled,
+                preset: "Padrão".into(),
+                parameters,
+                keyframes,
+            }
         })
         .collect()
 }
@@ -2795,6 +3192,26 @@ fn script_effects(
                 return Err(bad(format!("o efeito {} aparece mais de uma vez", f.id)));
             }
             src.clone()
+        } else if let Some(rest) = f.unique_id.strip_prefix("ofx:") {
+            if !video {
+                return Err(bad(format!("efeito OFX numa {what} de áudio")));
+            }
+            let (bin, id) = rest.split_once('|').unwrap_or(("", rest));
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(bad("identificador de plug-in OFX vazio"));
+            }
+            FxInstance::new_ofx(bin.trim(), id, id)
+        } else if let Some(rest) = f.unique_id.strip_prefix("vst3:") {
+            if video {
+                return Err(bad(format!("efeito VST3 numa {what} de vídeo")));
+            }
+            let (bin, id) = rest.split_once('|').unwrap_or(("", rest));
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(bad("identificador de plug-in VST3 vazio"));
+            }
+            FxInstance::new_vst3(bin.trim(), id, id)
         } else {
             let Some(kind) = FxKind::from_id(&f.unique_id) else {
                 return Err(bad(format!(
@@ -2802,6 +3219,11 @@ fn script_effects(
                     truncate_str(&f.unique_id, 64)
                 )));
             };
+            if kind == FxKind::Ofx || kind == FxKind::Vst3 {
+                return Err(bad(
+                    "para criar plug-ins de terceiros por script, use o UniqueID retornado por Vegas.VideoFX/AudioFX (ex.: 'ofx:...' ou 'vst3:...')"
+                ));
+            }
             if kind.is_audio() == video {
                 return Err(bad(format!(
                     "efeito de {} numa {what} de {}",
@@ -2812,6 +3234,58 @@ fn script_effects(
             FxInstance::new(kind)
         };
         fx.enabled = !f.bypass;
+
+        if let Some(preset) = &f.preset {
+            let p_trim = preset.trim();
+            if p_trim.eq_ignore_ascii_case("Padrão") || p_trim.eq_ignore_ascii_case("Default") {
+                let specs = fx.kind.params();
+                for (p, s) in fx.params.iter_mut().zip(specs.iter()) {
+                    p.value = s.default;
+                }
+            }
+        }
+
+        if let Some(params) = &f.parameters {
+            let specs = fx.kind.params();
+            for po in params {
+                let name = po.name.trim();
+                for (p, spec) in fx.params.iter_mut().zip(specs.iter()) {
+                    let matches_name = spec.name.eq_ignore_ascii_case(name)
+                        || spec
+                            .name_in(neoveg_common::Language::PtBr)
+                            .eq_ignore_ascii_case(name)
+                        || spec
+                            .name_in(neoveg_common::Language::En)
+                            .eq_ignore_ascii_case(name);
+                    if matches_name && po.value.is_finite() {
+                        p.value = (po.value as f32).clamp(spec.min, spec.max);
+                    }
+                }
+            }
+        }
+
+        if let Some(keys) = &f.keyframes {
+            if keys.len() > MAX_SCRIPT_ENV_POINTS {
+                return Err(bad(format!(
+                    "mais de {MAX_SCRIPT_ENV_POINTS} quadros-chave num efeito"
+                )));
+            }
+            for k in keys {
+                if k.time < 0 {
+                    return Err(bad("tempo de quadro-chave de efeito negativo"));
+                }
+                let t = Ticks(k.time);
+                let curve = match &k.curve {
+                    Some(c) => curve_from_name(c)?,
+                    None => Curve::Linear,
+                };
+                for p in &mut fx.params {
+                    p.set_key(t, p.value, Ticks::from_millis_i64(5));
+                    p.set_curve(t, curve, Ticks::from_millis_i64(5));
+                }
+            }
+        }
+
         out.push(fx);
     }
     Ok(out)
@@ -3346,6 +3820,9 @@ fn rebuild_tracks(
                 if let Some(list) = &eo.effects {
                     ev.fx = script_effects(list, &[], video, "evento")?;
                 }
+                if let Some(list) = &eo.envelopes {
+                    ev.envelopes = script_envelopes(list, &[], tr.kind)?;
+                }
                 if eo.selected {
                     new_selected.push(ev.id);
                 }
@@ -3365,6 +3842,9 @@ fn rebuild_tracks(
             apply_event_changes(&mut ev, eo)?;
             if let Some(list) = &eo.effects {
                 ev.fx = script_effects(list, &ev.fx, video, "evento")?;
+            }
+            if let Some(list) = &eo.envelopes {
+                ev.envelopes = script_envelopes(list, &ev.envelopes, tr.kind)?;
             }
             if let Some(list) = &eo.takes {
                 let list = script_takes(list, tr.kind, media)?;
@@ -3755,6 +4235,9 @@ mod efeitos_envelopes_tests {
             id,
             unique_id: unique_id.into(),
             bypass,
+            preset: None,
+            parameters: None,
+            keyframes: None,
         }
     }
 
@@ -3786,13 +4269,197 @@ mod efeitos_envelopes_tests {
         assert!(script_effects(&[fx_out(0, "NaoExiste", false)], &[], true, "trilha").is_err());
         assert!(script_effects(&[fx_out(0, "Reverb", false)], &[], true, "trilha").is_err());
         assert!(script_effects(&[fx_out(0, "Sepia", false)], &[], false, "trilha").is_err());
-        // OFX/VST3 não se criam por script
+        // OFX/VST3 exigem identificador com prefixo ofx: ou vst3:
         assert!(script_effects(&[fx_out(0, "Ofx", false)], &[], true, "trilha").is_err());
+        assert!(script_effects(&[fx_out(0, "Vst3", false)], &[], false, "trilha").is_err());
         // limite
         let muitos: Vec<_> = (0..=MAX_SCRIPT_FX)
             .map(|_| fx_out(0, "Sepia", false))
             .collect();
         assert!(script_effects(&muitos, &[], true, "trilha").is_err());
+    }
+
+    #[test]
+    fn efeitos_criam_ofx_e_vst3_com_prefixo_e_validam_trilha() {
+        // Criar OFX em trilha de vídeo com sucesso
+        let ofx_out = ScriptFxOut {
+            id: 0,
+            unique_id: "ofx:C:/plugins/invert.ofx|com.example.invert".into(),
+            bypass: false,
+            ..Default::default()
+        };
+        let out = script_effects(&[ofx_out], &[], true, "trilha").expect("OFX válido");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, FxKind::Ofx);
+        assert_eq!(
+            out[0].ofx.as_ref().map(|o| o.plugin_id.as_str()),
+            Some("com.example.invert")
+        );
+
+        // OFX em trilha de áudio é rejeitado
+        let ofx_audio = ScriptFxOut {
+            id: 0,
+            unique_id: "ofx:C:/plugins/invert.ofx|com.example.invert".into(),
+            bypass: false,
+            ..Default::default()
+        };
+        assert!(script_effects(&[ofx_audio], &[], false, "trilha").is_err());
+
+        // Criar VST3 em trilha de áudio com sucesso
+        let vst3_out = ScriptFxOut {
+            id: 0,
+            unique_id: "vst3:C:/plugins/delay.vst3|Class123".into(),
+            bypass: false,
+            ..Default::default()
+        };
+        let out = script_effects(&[vst3_out], &[], false, "trilha").expect("VST3 válido");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, FxKind::Vst3);
+        assert_eq!(
+            out[0].vst3.as_ref().map(|v| v.class_id.as_str()),
+            Some("Class123")
+        );
+
+        // VST3 em trilha de vídeo é rejeitado
+        let vst3_video = ScriptFxOut {
+            id: 0,
+            unique_id: "vst3:C:/plugins/delay.vst3|Class123".into(),
+            bypass: false,
+            ..Default::default()
+        };
+        assert!(script_effects(&[vst3_video], &[], true, "trilha").is_err());
+
+        // Identificador vazio é rejeitado
+        assert!(script_effects(
+            &[ScriptFxOut {
+                id: 0,
+                unique_id: "ofx:".into(),
+                ..Default::default()
+            }],
+            &[],
+            true,
+            "trilha"
+        )
+        .is_err());
+        assert!(script_effects(
+            &[ScriptFxOut {
+                id: 0,
+                unique_id: "vst3:".into(),
+                ..Default::default()
+            }],
+            &[],
+            false,
+            "trilha"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn efeitos_aplicam_presets_parametros_e_keyframes() {
+        let mut blur = FxInstance::new(FxKind::GaussianBlur);
+        blur.params[0].value = 0.9;
+        let old = vec![blur.clone()];
+
+        // Preset "Padrão" reseta aos valores default
+        let reset_out = ScriptFxOut {
+            id: blur.id,
+            unique_id: "".into(),
+            bypass: false,
+            preset: Some("Padrão".into()),
+            ..Default::default()
+        };
+        let out = script_effects(&[reset_out], &old, true, "trilha").expect("preset válido");
+        assert_eq!(
+            out[0].params[0].value,
+            FxKind::GaussianBlur.params()[0].default
+        );
+
+        // Modificar parâmetro pelo nome e adicionar keyframes com curvas
+        let mod_out = ScriptFxOut {
+            id: blur.id,
+            unique_id: "".into(),
+            bypass: false,
+            preset: None,
+            parameters: Some(vec![ScriptFxParamOut {
+                name: "Raio horizontal (%)".into(),
+                value: 0.75,
+            }]),
+            keyframes: Some(vec![
+                ScriptFxKeyOut {
+                    time: 0,
+                    preset: None,
+                    curve: Some("Linear".into()),
+                },
+                ScriptFxKeyOut {
+                    time: Ticks::from_secs_i64(1).0,
+                    preset: None,
+                    curve: Some("Fast".into()),
+                },
+            ]),
+        };
+        let out = script_effects(&[mod_out], &old, true, "trilha").expect("modificação válida");
+        assert_eq!(out[0].params[0].value, 0.75);
+        assert_eq!(out[0].params[0].keys.len(), 2);
+        assert_eq!(out[0].params[0].curves.len(), 2);
+        assert_eq!(out[0].params[0].curves[1], Curve::Fast);
+
+        // Keyframe com tempo negativo é rejeitado
+        let neg_kf = ScriptFxOut {
+            id: blur.id,
+            unique_id: "".into(),
+            bypass: false,
+            keyframes: Some(vec![ScriptFxKeyOut {
+                time: -100,
+                preset: None,
+                curve: None,
+            }]),
+            ..Default::default()
+        };
+        assert!(script_effects(&[neg_kf], &old, true, "trilha").is_err());
+    }
+
+    #[test]
+    fn envelopes_de_evento_sao_suportados_e_validados() {
+        let media = MediaItem {
+            id: 1,
+            name: "video.mp4".into(),
+            source: MediaSource::File {
+                path: "C:/video.mp4".into(),
+            },
+            has_video: true,
+            has_audio: true,
+            duration: Some(Ticks::from_secs_i64(10)),
+            width: 1920,
+            height: 1080,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mut ev = neoveg_engine::model::Event::new(&media, Ticks::ZERO, Ticks::from_secs_i64(5));
+        assert!(ev.envelopes.is_empty());
+
+        let env = Envelope::new(EnvKind::Volume);
+        ev.envelopes.push(env);
+        assert!(ev.envelope(EnvKind::Volume).is_some());
+        assert!(ev.envelope(EnvKind::Pan).is_none());
+
+        // ScriptEventSnap serializa envelopes de evento
+        let snap = ScriptEventSnap {
+            id: ev.id,
+            name: ev.name.clone(),
+            start: ev.start.0,
+            length: ev.length.0,
+            mute: ev.mute,
+            locked: ev.locked,
+            fade_in: ev.fade_in.len.0,
+            fade_out: ev.fade_out.len.0,
+            takes: vec![],
+            active_take: 0,
+            effects: vec![],
+            envelopes: ev.envelopes.iter().map(env_snap).collect(),
+        };
+        assert_eq!(snap.envelopes.len(), 1);
+        assert_eq!(snap.envelopes[0].kind, "Volume");
     }
 
     fn env_out(kind: &str, pts: &[(i64, f64, &str)]) -> ScriptEnvOut {

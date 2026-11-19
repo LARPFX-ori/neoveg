@@ -1724,6 +1724,15 @@ fn sanitize_tracks_slice(
             for f in &mut e.fx {
                 sanitize_fx(f);
             }
+            sanitize_envelopes(
+                &mut e.envelopes,
+                &[
+                    EnvKind::Volume,
+                    EnvKind::Pan,
+                    EnvKind::Opacity,
+                    EnvKind::FadeToColor,
+                ],
+            );
             e.stereo_3d = e.stereo_3d.sanitized();
         }
     }
@@ -3371,6 +3380,9 @@ pub struct Event {
     /// 746) aplica compositores só a trilhas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<BlendMode>,
+    /// Envelopes de evento (ex.: Volume, Pan, Opacidade/Composite, FadeToColor).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub envelopes: Vec<Envelope>,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -3417,7 +3429,16 @@ impl Event {
             sync_link_master: None,
             stereo_3d: Stereo3dClip::default(),
             blend: None,
+            envelopes: vec![],
         }
+    }
+
+    pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        self.envelopes.iter().find(|e| e.kind == kind)
+    }
+
+    pub fn envelope_mut(&mut self, kind: EnvKind) -> Option<&mut Envelope> {
+        self.envelopes.iter_mut().find(|e| e.kind == kind)
     }
 
     /// Fator efetivo de altura tonal do áudio (`1.0` = tom original), considerando

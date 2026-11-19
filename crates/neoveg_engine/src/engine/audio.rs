@@ -1270,7 +1270,12 @@ impl Mixer {
                 for i in 0..n {
                     let t = timeline_sample_time(start.saturating_add(i as i64), sr);
                     let k = if e.contains(t) {
-                        g * fade_gain(e, &fi, &fo, t)
+                        let dt = t - e.start;
+                        let ev_vol = e
+                            .envelope(EnvKind::Volume)
+                            .map(|env| env.eval(dt))
+                            .unwrap_or(1.0);
+                        g * fade_gain(e, &fi, &fo, t) * ev_vol
                     } else {
                         0.0
                     };
