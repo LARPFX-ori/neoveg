@@ -15,6 +15,7 @@
 /filmcraft-main
 filmcraft-main.zip
 /.claude
+/drive
 
 # cache de bytecode Python (suíte tests/e2e)
 __pycache__/
