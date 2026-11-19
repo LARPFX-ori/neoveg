@@ -2386,15 +2386,11 @@ impl App {
             return;
         }
         let target_ids: Vec<Id> = armed.iter().map(|(_, id)| *id).collect();
-        let dir = if !self.prefs.audio_device.default_record_dir.trim().is_empty() {
-            PathBuf::from(self.prefs.audio_device.default_record_dir.trim())
-        } else {
-            self.path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("Neoveg Recordings"))
-                .unwrap_or_else(|| std::env::temp_dir().join("neoveg_recordings"))
-        };
+        let dir = self.project.work_folders.effective_audio_recordings(
+            self.path.as_deref(),
+            Some(&self.prefs.audio_device.default_record_dir),
+        );
+        let _ = std::fs::create_dir_all(&dir);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -2519,6 +2515,10 @@ impl App {
             }
             UiAction::SnapshotDialog => self.snapshot_dialog(),
             UiAction::OpenProjectProps => self.dlg.project_props = true,
+            UiAction::OpenWorkFolders => {
+                self.dlg.work_folders_open = true;
+                self.dlg.work_folders_draft = Some(self.session.project.work_folders.clone());
+            }
             UiAction::OpenEventProps => {
                 self.dlg.event_props = self.sel_events.iter().next().copied();
             }
@@ -3036,6 +3036,7 @@ impl App {
                 self.cmd_menu_btn(ui, "file.snapshot");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.project_props");
+                self.cmd_menu_btn(ui, "file.work_folders");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.exit");
             });
@@ -3581,6 +3582,7 @@ impl App {
             "file.render" => (Icon::RenderClapper, None, None),
             "view.tab.encoder" => (Icon::EncoderQueue, Some("Encoder"), None),
             "file.project_props" => (Icon::GearProps, None, None),
+            "file.work_folders" => (Icon::FolderItem, None, None),
             "file.import_media" => (Icon::ImportMedia, None, None),
             "edit.cut" => (Icon::Cut, None, None),
             "edit.copy" => (Icon::Copy, None, None),
@@ -4980,7 +4982,11 @@ impl App {
             self.set_status(tr(lang, "Mídia offline: não foi possível gerar proxy."));
             return;
         }
-        let dir = neoveg_common::util::base_dir().join("proxies");
+        let dir = self
+            .project
+            .work_folders
+            .effective_proxies(self.path.as_deref());
+        let _ = std::fs::create_dir_all(&dir);
         let out = dir.join(format!("proxy_{media_id}.avi"));
         let media = self.media.clone();
         let tx = self.loader_tx.clone();
@@ -5056,7 +5062,10 @@ impl App {
         let scale = self.opts.preview_quality.scale();
         let w = (((proj.settings.width as f32 * scale) as u32 / 2).max(32)) * 2;
         let h = (((proj.settings.height as f32 * scale) as u32 / 2).max(18)) * 2;
-        let dir = neoveg_common::util::base_dir().join("prerender");
+        let dir = self
+            .project
+            .work_folders
+            .effective_prerendered_files(self.path.as_deref());
         let _ = std::fs::create_dir_all(&dir);
         let out = dir.join(format!("prerender_{}_{}.avi", start.0, end.0));
         let settings = RenderSettings {

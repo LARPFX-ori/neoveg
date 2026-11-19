@@ -741,6 +741,23 @@ impl EditorSession {
         self.rename_sequence(id, new_name)
     }
 
+    /// Retorna as pastas de trabalho configuradas para o projeto.
+    pub fn work_folders(&self) -> &crate::model::WorkFolders {
+        &self.project.work_folders
+    }
+
+    /// Atualiza as pastas de trabalho do projeto em um passo de Desfazer (§3.3).
+    pub fn set_work_folders(&mut self, mut folders: crate::model::WorkFolders) {
+        folders.sanitize();
+        if self.project.work_folders == folders {
+            return;
+        }
+        self.checkpoint();
+        self.project.work_folders = folders;
+        self.refresh_snapshot();
+        self.changed();
+    }
+
     pub fn insert_track(&mut self, kind: TrackKind) -> usize {
         let n = self
             .project

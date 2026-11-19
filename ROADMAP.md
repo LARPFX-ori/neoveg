@@ -79,6 +79,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 - **Substituir e trocar mídia** mantendo eventos, takes e propriedades (`replace_media_item` e `swap_media_references`, pp. 137 e 144).
 - **Selecionar todos os eventos que usam uma mídia** (`media.select_events`, p. 144).
 - **Storyboards** com sequência ordenável, cálculo de duração e **Inserir storyboard na timeline** em passo único de Desfazer (`media.insert_storyboard`, p. 155).
+- **Mapeamento de Pastas de Trabalho do Projeto (item 14 do backlog)**: diálogo dedicado *Pastas de trabalho...* (`file.work_folders`, menu *Arquivo > Pastas de trabalho...*) para definir e persistir em `Project.work_folders` onde o projeto armazena mídias capturadas/importadas (`captured_media`), gravações de áudio (`audio_recordings`), trechos pré-renderizados (`prerendered_files`), proxies de vídeo (`proxies`) e exportações/renders (`render_exports`). Inclui resolução dinâmica de caminhos padrão relativos ao `.neoveg` (ou base da aplicação se ainda não salvo), botão *Restaurar padrões*, indicadores de existência em disco, integração funcional imediata com gravação de áudio, geração de proxy, pré-renderização e renderizador, com saneamento estrito contra entradas hostis (caracteres nulos e limites de tamanho).
 
 ### Prévia de Vídeo
 
