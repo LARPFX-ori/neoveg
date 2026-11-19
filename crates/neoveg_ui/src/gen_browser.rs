@@ -52,17 +52,21 @@ pub(crate) enum GenKind {
     Checkerboard,
     ColorBars,
     Noise,
+    TestPattern,
+    NoiseTexture,
     Ofx,
 }
 
 impl GenKind {
-    pub(crate) const ALL: [GenKind; 6] = [
+    pub(crate) const ALL: [GenKind; 8] = [
         GenKind::Text,
         GenKind::SolidColor,
         GenKind::Gradient,
         GenKind::Checkerboard,
         GenKind::ColorBars,
         GenKind::Noise,
+        GenKind::TestPattern,
+        GenKind::NoiseTexture,
     ];
 
     /// O tipo de um gerador (exaustivo: um tipo novo de `GenSpec` obriga a
@@ -75,6 +79,8 @@ impl GenKind {
             GenSpec::Checkerboard { .. } => GenKind::Checkerboard,
             GenSpec::ColorBars => GenKind::ColorBars,
             GenSpec::Noise { .. } => GenKind::Noise,
+            GenSpec::TestPattern { .. } => GenKind::TestPattern,
+            GenSpec::NoiseTexture { .. } => GenKind::NoiseTexture,
             GenSpec::Ofx(_) => GenKind::Ofx,
         }
     }
@@ -87,6 +93,8 @@ impl GenKind {
             GenKind::Checkerboard => "Quadriculado",
             GenKind::ColorBars => "Barras de teste",
             GenKind::Noise => "Ruído",
+            GenKind::TestPattern => "Padrão de teste",
+            GenKind::NoiseTexture => "Textura de ruído",
             GenKind::Ofx => "OFX",
         };
         tr(lang, key)
@@ -99,10 +107,14 @@ impl GenKind {
     pub(crate) fn category(self) -> GenCategory {
         match self {
             GenKind::Text => GenCategory::Text,
-            GenKind::SolidColor | GenKind::Gradient => GenCategory::Backgrounds,
-            GenKind::Checkerboard | GenKind::ColorBars | GenKind::Noise | GenKind::Ofx => {
-                GenCategory::Utility
+            GenKind::SolidColor | GenKind::Gradient | GenKind::NoiseTexture => {
+                GenCategory::Backgrounds
             }
+            GenKind::Checkerboard
+            | GenKind::ColorBars
+            | GenKind::Noise
+            | GenKind::TestPattern
+            | GenKind::Ofx => GenCategory::Utility,
         }
     }
 
@@ -214,6 +226,30 @@ pub(crate) fn gen_presets() -> Vec<(&'static str, GenSpec)> {
             GenSpec::Noise {
                 mono: true,
                 animated: true,
+            },
+        ),
+        ("Grade de convergência", GenSpec::TestPattern { pattern: 0 }),
+        ("Rampa de cinza", GenSpec::TestPattern { pattern: 1 }),
+        ("Placa de zona", GenSpec::TestPattern { pattern: 2 }),
+        ("Grade de pixels", GenSpec::TestPattern { pattern: 3 }),
+        (
+            "Nuvens",
+            GenSpec::NoiseTexture {
+                a: [0.2, 0.35, 0.7, 1.0],
+                b: [0.95, 0.95, 1.0, 1.0],
+                scale: 0.4,
+                octaves: 5,
+                animated: true,
+            },
+        ),
+        (
+            "Mármore escuro",
+            GenSpec::NoiseTexture {
+                a: [0.05, 0.05, 0.06, 1.0],
+                b: [0.55, 0.5, 0.45, 1.0],
+                scale: 0.15,
+                octaves: 6,
+                animated: false,
             },
         ),
     ]

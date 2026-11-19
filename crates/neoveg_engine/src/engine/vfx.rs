@@ -201,7 +201,7 @@ fn apply_color_grade_curves(
 }
 
 /// Aplica uma função de cor (em RGB não pré-multiplicado) a todos os pixels.
-fn map_color<F: Fn([f32; 3]) -> [f32; 3] + Sync>(f: &mut Frame, func: F) {
+pub(crate) fn map_color<F: Fn([f32; 3]) -> [f32; 3] + Sync>(f: &mut Frame, func: F) {
     f.px.par_iter_mut().for_each(|p| {
         let a = p[3];
         if a <= 1e-6 {
@@ -215,7 +215,7 @@ fn map_color<F: Fn([f32; 3]) -> [f32; 3] + Sync>(f: &mut Frame, func: F) {
     });
 }
 
-fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+pub(crate) fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [
         a[0] + (b[0] - a[0]) * t,
         a[1] + (b[1] - a[1]) * t,
@@ -223,7 +223,7 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-fn saturate(c: [f32; 3], s: f32) -> [f32; 3] {
+pub(crate) fn saturate(c: [f32; 3], s: f32) -> [f32; 3] {
     let l = luma(c);
     [l + (c[0] - l) * s, l + (c[1] - l) * s, l + (c[2] - l) * s]
 }
@@ -339,7 +339,7 @@ pub fn gaussian(f: &mut Frame, sx: f32, sy: f32) {
     }
 }
 
-fn hash(x: u32) -> u32 {
+pub(crate) fn hash(x: u32) -> u32 {
     let mut x = x;
     x ^= x >> 16;
     x = x.wrapping_mul(0x7feb_352d);
@@ -737,7 +737,9 @@ pub fn apply_with_aux(
             }
             crate::mask::apply_mask_to_frame(f, &mask, mode, opacity, invert);
         }
-        _ => {}
+        other => {
+            super::vfx_extra::apply(other, &v, f, t);
+        }
     }
 }
 

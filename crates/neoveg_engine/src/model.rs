@@ -2060,6 +2060,23 @@ fn sanitize_gen(g: &mut GenSpec) {
             *cells = (*cells).clamp(1, 512);
         }
         GenSpec::ColorBars | GenSpec::Noise { .. } => {}
+        GenSpec::TestPattern { pattern } => *pattern = (*pattern).min(3),
+        GenSpec::NoiseTexture {
+            a,
+            b,
+            scale,
+            octaves,
+            ..
+        } => {
+            col(a);
+            col(b);
+            *scale = if scale.is_finite() {
+                clampf(*scale, 0.01, 1.0)
+            } else {
+                0.2
+            };
+            *octaves = (*octaves).clamp(1, 8);
+        }
         GenSpec::Ofx(r) => r.sanitize(),
         GenSpec::Text(t) => {
             col(&mut t.color);
@@ -2466,6 +2483,21 @@ pub enum GenSpec {
         mono: bool,
         animated: bool,
     },
+    /// Padrão de teste técnico (0: grade e círculo, 1: rampa de cinza,
+    /// 2: placa de zona, 3: grade de pixels).
+    TestPattern {
+        pattern: u32,
+    },
+    /// Textura de ruído fractal suave entre duas cores.
+    NoiseTexture {
+        a: [f32; 4],
+        b: [f32; 4],
+        /// Tamanho do grão maior, em fração da altura (0,01..1).
+        scale: f32,
+        /// Camadas de detalhe (1..8).
+        octaves: u32,
+        animated: bool,
+    },
     Text(TextSpec),
     /// Gerador de mídia OFX externo (`OfxImageEffectContextGenerator` / `General`).
     Ofx(OfxFxRef),
@@ -2591,6 +2623,8 @@ impl GenSpec {
             GenSpec::Checkerboard { .. } => tr(lang, "Xadrez").into(),
             GenSpec::ColorBars => tr(lang, "Barras de cor").into(),
             GenSpec::Noise { .. } => tr(lang, "Ruído").into(),
+            GenSpec::TestPattern { .. } => tr(lang, "Padrão de teste").into(),
+            GenSpec::NoiseTexture { .. } => tr(lang, "Textura de ruído").into(),
             GenSpec::Text(t) => {
                 let first = t
                     .text
@@ -2617,7 +2651,7 @@ impl GenSpec {
     }
     pub fn is_animated(&self) -> bool {
         match self {
-            GenSpec::Noise { animated, .. } => *animated,
+            GenSpec::Noise { animated, .. } | GenSpec::NoiseTexture { animated, .. } => *animated,
             GenSpec::Text(t) => t.anim != TextAnim::None,
             GenSpec::Ofx(_) => true,
             _ => false,
@@ -3559,10 +3593,26 @@ pub enum TransitionKind {
     Blinds,
     Checker,
     WarpFlow,
+    StarWipe,
+    DiagonalWipe,
+    GradientWipe,
+    SplitHorizontal,
+    VenetianBlinds,
+    Spiral,
+    Portals,
+    RandomDissolve,
+    Cascade,
+    PushUp,
+    PushDown,
+    Squeeze,
+    Swap,
+    FlashWhite,
+    FlyIn,
+    PagePeel,
 }
 
 impl TransitionKind {
-    pub const ALL: [TransitionKind; 17] = [
+    pub const ALL: [TransitionKind; 33] = [
         TransitionKind::Dissolve,
         TransitionKind::FadeThroughBlack,
         TransitionKind::WipeLeft,
@@ -3580,6 +3630,22 @@ impl TransitionKind {
         TransitionKind::Blinds,
         TransitionKind::Checker,
         TransitionKind::WarpFlow,
+        TransitionKind::StarWipe,
+        TransitionKind::DiagonalWipe,
+        TransitionKind::GradientWipe,
+        TransitionKind::SplitHorizontal,
+        TransitionKind::VenetianBlinds,
+        TransitionKind::Spiral,
+        TransitionKind::Portals,
+        TransitionKind::RandomDissolve,
+        TransitionKind::Cascade,
+        TransitionKind::PushUp,
+        TransitionKind::PushDown,
+        TransitionKind::Squeeze,
+        TransitionKind::Swap,
+        TransitionKind::FlashWhite,
+        TransitionKind::FlyIn,
+        TransitionKind::PagePeel,
     ];
     pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
         let pt = match self {
@@ -3600,6 +3666,22 @@ impl TransitionKind {
             TransitionKind::Blinds => "Persianas",
             TransitionKind::Checker => "Tabuleiro",
             TransitionKind::WarpFlow => "Warp Flow (fluxo óptico)",
+            TransitionKind::StarWipe => "Estrela",
+            TransitionKind::DiagonalWipe => "Wipe diagonal",
+            TransitionKind::GradientWipe => "Wipe por gradiente (luminância)",
+            TransitionKind::SplitHorizontal => "Divisão horizontal",
+            TransitionKind::VenetianBlinds => "Persianas verticais",
+            TransitionKind::Spiral => "Espiral",
+            TransitionKind::Portals => "Portais",
+            TransitionKind::RandomDissolve => "Dissolver aleatório",
+            TransitionKind::Cascade => "Cascata de blocos",
+            TransitionKind::PushUp => "Empurrar (push) para cima",
+            TransitionKind::PushDown => "Empurrar (push) para baixo",
+            TransitionKind::Squeeze => "Espremer",
+            TransitionKind::Swap => "Trocar de lugar",
+            TransitionKind::FlashWhite => "Flash branco",
+            TransitionKind::FlyIn => "Voo 3D (entrar e sair)",
+            TransitionKind::PagePeel => "Virar página",
         };
         neoveg_common::tr(lang, pt)
     }
@@ -3862,16 +3944,20 @@ pub enum FxCategory {
     Stylize,
     Transform,
     Key,
+    Distort,
+    Composite,
 }
 
 impl FxCategory {
-    pub const ALL: [FxCategory; 6] = [
+    pub const ALL: [FxCategory; 8] = [
         FxCategory::Color,
         FxCategory::Light,
         FxCategory::BlurSharpen,
         FxCategory::Stylize,
         FxCategory::Transform,
         FxCategory::Key,
+        FxCategory::Distort,
+        FxCategory::Composite,
     ];
 
     pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
@@ -3882,6 +3968,8 @@ impl FxCategory {
             FxCategory::Stylize => "Estilizar",
             FxCategory::Transform => "Estabilização",
             FxCategory::Key => "Recorte",
+            FxCategory::Distort => "Distorcer",
+            FxCategory::Composite => "Composição e bordas",
         };
         neoveg_common::tr(lang, pt)
     }
@@ -3916,6 +4004,32 @@ pub enum FxKind {
     Colorize,
     Stabilization,
     BezierMasking,
+    WhiteBalance,
+    ColorBalance,
+    SaturationAdjust,
+    ChannelBlend,
+    GradientMap,
+    Threshold,
+    UnsharpMask,
+    LinearBlur,
+    RadialBlur,
+    Median,
+    MinMax,
+    Wave,
+    Swirl,
+    Spherize,
+    PinchPunch,
+    OffsetWrap,
+    LensFlare,
+    LightRays,
+    AddNoise,
+    TvSimulator,
+    FilmEffects,
+    Newsprint,
+    Border,
+    BlackBarFill,
+    PictureInPicture,
+    CookieCutter,
     // áudio
     Gain,
     ParametricEq,
@@ -4309,6 +4423,30 @@ impl FxKind {
             }
             FxKind::Stabilization => Some(FxCategory::Transform),
             FxKind::ChromaKeyer | FxKind::BezierMasking => Some(FxCategory::Key),
+            FxKind::WhiteBalance
+            | FxKind::ColorBalance
+            | FxKind::SaturationAdjust
+            | FxKind::ChannelBlend
+            | FxKind::GradientMap
+            | FxKind::Threshold => Some(FxCategory::Color),
+            FxKind::UnsharpMask
+            | FxKind::LinearBlur
+            | FxKind::RadialBlur
+            | FxKind::Median
+            | FxKind::MinMax => Some(FxCategory::BlurSharpen),
+            FxKind::Wave
+            | FxKind::Swirl
+            | FxKind::Spherize
+            | FxKind::PinchPunch
+            | FxKind::OffsetWrap => Some(FxCategory::Distort),
+            FxKind::LensFlare | FxKind::LightRays => Some(FxCategory::Light),
+            FxKind::AddNoise | FxKind::TvSimulator | FxKind::FilmEffects | FxKind::Newsprint => {
+                Some(FxCategory::Stylize)
+            }
+            FxKind::Border
+            | FxKind::BlackBarFill
+            | FxKind::PictureInPicture
+            | FxKind::CookieCutter => Some(FxCategory::Composite),
             FxKind::Gain
             | FxKind::ParametricEq
             | FxKind::HighPass
@@ -4325,7 +4463,7 @@ impl FxKind {
         }
     }
 
-    pub const VIDEO: [FxKind; 20] = [
+    pub const VIDEO: [FxKind; 46] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
         FxKind::ColorCorrector,
@@ -4346,6 +4484,61 @@ impl FxKind {
         FxKind::Colorize,
         FxKind::Stabilization,
         FxKind::BezierMasking,
+        FxKind::WhiteBalance,
+        FxKind::ColorBalance,
+        FxKind::SaturationAdjust,
+        FxKind::ChannelBlend,
+        FxKind::GradientMap,
+        FxKind::Threshold,
+        FxKind::UnsharpMask,
+        FxKind::LinearBlur,
+        FxKind::RadialBlur,
+        FxKind::Median,
+        FxKind::MinMax,
+        FxKind::Wave,
+        FxKind::Swirl,
+        FxKind::Spherize,
+        FxKind::PinchPunch,
+        FxKind::OffsetWrap,
+        FxKind::LensFlare,
+        FxKind::LightRays,
+        FxKind::AddNoise,
+        FxKind::TvSimulator,
+        FxKind::FilmEffects,
+        FxKind::Newsprint,
+        FxKind::Border,
+        FxKind::BlackBarFill,
+        FxKind::PictureInPicture,
+        FxKind::CookieCutter,
+    ];
+    /// Efeitos complementares implementados em `engine::vfx_extra`.
+    pub const VIDEO_EXTRA: [FxKind; 26] = [
+        FxKind::WhiteBalance,
+        FxKind::ColorBalance,
+        FxKind::SaturationAdjust,
+        FxKind::ChannelBlend,
+        FxKind::GradientMap,
+        FxKind::Threshold,
+        FxKind::UnsharpMask,
+        FxKind::LinearBlur,
+        FxKind::RadialBlur,
+        FxKind::Median,
+        FxKind::MinMax,
+        FxKind::Wave,
+        FxKind::Swirl,
+        FxKind::Spherize,
+        FxKind::PinchPunch,
+        FxKind::OffsetWrap,
+        FxKind::LensFlare,
+        FxKind::LightRays,
+        FxKind::AddNoise,
+        FxKind::TvSimulator,
+        FxKind::FilmEffects,
+        FxKind::Newsprint,
+        FxKind::Border,
+        FxKind::BlackBarFill,
+        FxKind::PictureInPicture,
+        FxKind::CookieCutter,
     ];
     pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
@@ -4387,6 +4580,32 @@ impl FxKind {
             FxKind::Colorize => "Colorize",
             FxKind::Stabilization => "Stabilization",
             FxKind::BezierMasking => "BezierMasking",
+            FxKind::WhiteBalance => "WhiteBalance",
+            FxKind::ColorBalance => "ColorBalance",
+            FxKind::SaturationAdjust => "SaturationAdjust",
+            FxKind::ChannelBlend => "ChannelBlend",
+            FxKind::GradientMap => "GradientMap",
+            FxKind::Threshold => "Threshold",
+            FxKind::UnsharpMask => "UnsharpMask",
+            FxKind::LinearBlur => "LinearBlur",
+            FxKind::RadialBlur => "RadialBlur",
+            FxKind::Median => "Median",
+            FxKind::MinMax => "MinMax",
+            FxKind::Wave => "Wave",
+            FxKind::Swirl => "Swirl",
+            FxKind::Spherize => "Spherize",
+            FxKind::PinchPunch => "PinchPunch",
+            FxKind::OffsetWrap => "OffsetWrap",
+            FxKind::LensFlare => "LensFlare",
+            FxKind::LightRays => "LightRays",
+            FxKind::AddNoise => "AddNoise",
+            FxKind::TvSimulator => "TvSimulator",
+            FxKind::FilmEffects => "FilmEffects",
+            FxKind::Newsprint => "Newsprint",
+            FxKind::Border => "Border",
+            FxKind::BlackBarFill => "BlackBarFill",
+            FxKind::PictureInPicture => "PictureInPicture",
+            FxKind::CookieCutter => "CookieCutter",
             FxKind::Gain => "Gain",
             FxKind::ParametricEq => "ParametricEq",
             FxKind::HighPass => "HighPass",
@@ -4433,6 +4652,32 @@ impl FxKind {
             FxKind::Colorize => "Colorir (Tint)",
             FxKind::Stabilization => "Estabilizador de Vídeo",
             FxKind::BezierMasking => "Máscara Bézier",
+            FxKind::WhiteBalance => "Balanço de Branco",
+            FxKind::ColorBalance => "Balanço de Cor",
+            FxKind::SaturationAdjust => "Ajuste de Saturação",
+            FxKind::ChannelBlend => "Mistura de Canais",
+            FxKind::GradientMap => "Mapa de Gradiente",
+            FxKind::Threshold => "Limiar",
+            FxKind::UnsharpMask => "Máscara de Nitidez",
+            FxKind::LinearBlur => "Desfoque Linear",
+            FxKind::RadialBlur => "Desfoque Radial",
+            FxKind::Median => "Mediana",
+            FxKind::MinMax => "Mínimo e Máximo",
+            FxKind::Wave => "Onda",
+            FxKind::Swirl => "Redemoinho",
+            FxKind::Spherize => "Esferizar",
+            FxKind::PinchPunch => "Beliscar e Inchar",
+            FxKind::OffsetWrap => "Deslocar e Repetir",
+            FxKind::LensFlare => "Reflexo de Lente",
+            FxKind::LightRays => "Raios de Luz",
+            FxKind::AddNoise => "Adicionar Ruído",
+            FxKind::TvSimulator => "Simulador de TV",
+            FxKind::FilmEffects => "Efeitos de Filme Antigo",
+            FxKind::Newsprint => "Retícula de Jornal",
+            FxKind::Border => "Borda",
+            FxKind::BlackBarFill => "Preencher Barras Pretas",
+            FxKind::PictureInPicture => "Imagem na Imagem",
+            FxKind::CookieCutter => "Recorte em Forma",
             FxKind::Gain => "Ganho",
             FxKind::ParametricEq => "EQ Paramétrico",
             FxKind::HighPass => "Passa-Altas",
@@ -4570,6 +4815,234 @@ impl FxKind {
                         p("Opacidade", 0.0, 1.0, 1.0),
                         p("Expansão", -100.0, 100.0, 0.0),
                         p("Inverter (0:Não, 1:Sim)", 0.0, 1.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::WhiteBalance => {
+                const {
+                    &[
+                        p("Neutro R", 0.05, 1.0, 1.0),
+                        p("Neutro G", 0.05, 1.0, 1.0),
+                        p("Neutro B", 0.05, 1.0, 1.0),
+                        p("Intensidade", 0.0, 1.0, 1.0),
+                    ]
+                }
+            }
+            FxKind::ColorBalance => {
+                const {
+                    &[
+                        p("Ciano / Vermelho", -1.0, 1.0, 0.0),
+                        p("Magenta / Verde", -1.0, 1.0, 0.0),
+                        p("Amarelo / Azul", -1.0, 1.0, 0.0),
+                        tg("Preservar luminância", 1.0),
+                    ]
+                }
+            }
+            FxKind::SaturationAdjust => {
+                const {
+                    &[
+                        p("Saturação", 0.0, 3.0, 1.0),
+                        p("Saturação nas sombras", 0.0, 3.0, 1.0),
+                        p("Saturação nos realces", 0.0, 3.0, 1.0),
+                    ]
+                }
+            }
+            FxKind::ChannelBlend => {
+                const {
+                    &[
+                        p("R ← R", -2.0, 2.0, 1.0),
+                        p("R ← G", -2.0, 2.0, 0.0),
+                        p("R ← B", -2.0, 2.0, 0.0),
+                        p("G ← R", -2.0, 2.0, 0.0),
+                        p("G ← G", -2.0, 2.0, 1.0),
+                        p("G ← B", -2.0, 2.0, 0.0),
+                        p("B ← R", -2.0, 2.0, 0.0),
+                        p("B ← G", -2.0, 2.0, 0.0),
+                        p("B ← B", -2.0, 2.0, 1.0),
+                    ]
+                }
+            }
+            FxKind::GradientMap => {
+                const {
+                    &[
+                        p("Escuro R", 0.0, 1.0, 0.0),
+                        p("Escuro G", 0.0, 1.0, 0.0),
+                        p("Escuro B", 0.0, 1.0, 0.3),
+                        p("Claro R", 0.0, 1.0, 1.0),
+                        p("Claro G", 0.0, 1.0, 0.9),
+                        p("Claro B", 0.0, 1.0, 0.6),
+                        p("Intensidade", 0.0, 1.0, 1.0),
+                    ]
+                }
+            }
+            FxKind::Threshold => {
+                const { &[p("Limiar", 0.0, 1.0, 0.5), p("Suavidade", 0.0, 0.5, 0.02)] }
+            }
+            FxKind::UnsharpMask => {
+                const {
+                    &[
+                        p("Quantidade", 0.0, 5.0, 1.0),
+                        p("Raio (%)", 0.05, 5.0, 0.5),
+                        p("Limiar", 0.0, 1.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::LinearBlur => {
+                const {
+                    &[
+                        p("Distância (%)", 0.0, 10.0, 2.0),
+                        p("Ângulo (graus)", -180.0, 180.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::RadialBlur => {
+                const {
+                    &[
+                        p("Quantidade", 0.0, 1.0, 0.2),
+                        p("Centro X", 0.0, 1.0, 0.5),
+                        p("Centro Y", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::Median => const { &[p("Raio (px)", 1.0, 5.0, 1.0)] },
+            FxKind::MinMax => const { &[tg("Máximo", 0.0), p("Raio (px)", 1.0, 10.0, 2.0)] },
+            FxKind::Wave => {
+                const {
+                    &[
+                        p("Amplitude (%)", 0.0, 10.0, 2.0),
+                        p("Comprimento (%)", 1.0, 100.0, 20.0),
+                        p("Fase (graus)", 0.0, 360.0, 0.0),
+                        tg("Horizontal", 1.0),
+                    ]
+                }
+            }
+            FxKind::Swirl => {
+                const {
+                    &[
+                        p("Ângulo (graus)", -720.0, 720.0, 180.0),
+                        p("Raio", 0.05, 1.5, 0.5),
+                    ]
+                }
+            }
+            FxKind::Spherize => {
+                const { &[p("Quantidade", -1.0, 1.0, 0.5), p("Raio", 0.05, 1.5, 0.5)] }
+            }
+            FxKind::PinchPunch => {
+                const { &[p("Quantidade", -1.0, 1.0, 0.5), p("Raio", 0.05, 1.5, 0.5)] }
+            }
+            FxKind::OffsetWrap => {
+                const {
+                    &[
+                        p("Deslocamento X (%)", -100.0, 100.0, 0.0),
+                        p("Deslocamento Y (%)", -100.0, 100.0, 0.0),
+                        tg("Repetir", 1.0),
+                    ]
+                }
+            }
+            FxKind::LensFlare => {
+                const {
+                    &[
+                        p("Posição X", 0.0, 1.0, 0.3),
+                        p("Posição Y", 0.0, 1.0, 0.3),
+                        p("Intensidade", 0.0, 2.0, 1.0),
+                        p("Tamanho", 0.01, 1.0, 0.2),
+                    ]
+                }
+            }
+            FxKind::LightRays => {
+                const {
+                    &[
+                        p("Centro X", 0.0, 1.0, 0.5),
+                        p("Centro Y", 0.0, 1.0, 0.5),
+                        p("Comprimento", 0.0, 1.0, 0.4),
+                        p("Intensidade", 0.0, 2.0, 0.8),
+                        p("Limiar", 0.0, 1.0, 0.6),
+                    ]
+                }
+            }
+            FxKind::AddNoise => {
+                const {
+                    &[
+                        p("Quantidade", 0.0, 1.0, 0.2),
+                        tg("Monocromático", 0.0),
+                        tg("Animado", 1.0),
+                    ]
+                }
+            }
+            FxKind::TvSimulator => {
+                const {
+                    &[
+                        p("Linhas de varredura", 0.0, 1.0, 0.5),
+                        p("Ruído", 0.0, 1.0, 0.1),
+                        p("Separação RGB (%)", 0.0, 2.0, 0.2),
+                        p("Vinheta", 0.0, 1.0, 0.3),
+                    ]
+                }
+            }
+            FxKind::FilmEffects => {
+                const {
+                    &[
+                        p("Envelhecimento", 0.0, 1.0, 0.5),
+                        p("Arranhões", 0.0, 1.0, 0.3),
+                        p("Tremulação", 0.0, 1.0, 0.2),
+                        p("Poeira", 0.0, 1.0, 0.2),
+                    ]
+                }
+            }
+            FxKind::Newsprint => {
+                const {
+                    &[
+                        p("Tamanho do ponto (%)", 0.2, 5.0, 1.0),
+                        p("Ângulo (graus)", -90.0, 90.0, 45.0),
+                        tg("Colorido", 0.0),
+                    ]
+                }
+            }
+            FxKind::Border => {
+                const {
+                    &[
+                        p("Espessura (%)", 0.0, 25.0, 3.0),
+                        p("Cor R", 0.0, 1.0, 1.0),
+                        p("Cor G", 0.0, 1.0, 1.0),
+                        p("Cor B", 0.0, 1.0, 1.0),
+                        p("Suavidade (%)", 0.0, 10.0, 0.0),
+                    ]
+                }
+            }
+            FxKind::BlackBarFill => {
+                const {
+                    &[
+                        p("Desfoque (%)", 0.0, 10.0, 3.0),
+                        p("Brilho do fundo", 0.0, 1.0, 0.8),
+                        p("Limiar de preto", 0.0, 0.2, 0.03),
+                    ]
+                }
+            }
+            FxKind::PictureInPicture => {
+                const {
+                    &[
+                        p("Posição X", 0.0, 1.0, 0.75),
+                        p("Posição Y", 0.0, 1.0, 0.75),
+                        p("Escala", 0.05, 1.0, 0.35),
+                        p("Rotação (graus)", -180.0, 180.0, 0.0),
+                        p("Borda (%)", 0.0, 5.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::CookieCutter => {
+                const {
+                    &[
+                        p(
+                            "Forma (0:Círculo, 1:Quadrado, 2:Losango, 3:Estrela)",
+                            0.0,
+                            3.0,
+                            0.0,
+                        ),
+                        p("Tamanho", 0.0, 2.0, 0.5),
+                        p("Centro X", 0.0, 1.0, 0.5),
+                        p("Centro Y", 0.0, 1.0, 0.5),
+                        p("Suavidade", 0.0, 0.3, 0.01),
+                        tg("Inverter", 0.0),
                     ]
                 }
             }

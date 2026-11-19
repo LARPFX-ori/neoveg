@@ -129,6 +129,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Efeitos, cor e legendas
 
+- **Biblioteca de efeitos, transições e geradores ampliada** segundo a ajuda pública do VEGAS Pro 23 (capítulo de plug-ins): 26 efeitos de vídeo novos (cor, desfoque, distorção, luz, estilo e composição, `engine/vfx_extra.rs`), 16 transições novas (33 no total, `engine/transition.rs`) e os geradores *Padrão de teste* e *Textura de ruído* (`media/generate.rs`), todos com miniatura nas janelas, quadros-chave e tradução nos 6 idiomas.
 - **Miniaturas na janela Transições** (cada transição entre dois quadros de amostra no meio do progresso, animando de 0 a 100% ao passar o mouse) e **prévia dos efeitos OFX de terceiros** na categoria *Terceiros* de Efeitos de Vídeo, renderizada no host isolado sob demanda, uma de cada vez, com "sem prévia" quando o plug-in falha (`fx_preview.rs`, `fx_browser.rs`).
 - **Pacotes e cadeias de efeitos salvos** para reutilizar (salvar/carregar/exportar `.neovegfxchain`, p. 514) implementado.
 - **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56) implementados.
