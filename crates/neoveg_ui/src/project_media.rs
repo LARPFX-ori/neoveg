@@ -129,6 +129,7 @@ impl ProjectMediaState {
 enum MediaRowAction {
     AddAtCursor(Id),
     OpenTrimmer(Id),
+    OpenNestedTab(Id),
     AddAsTake(Id),
     SelectEvents(Id),
     ReplaceFromDisk(Id),
@@ -1257,6 +1258,17 @@ impl App {
                 actions.push(MediaRowAction::OpenTrimmer(m.id));
                 ui.close_menu();
             }
+            if matches!(m.source, MediaSource::NestedProject { .. })
+                && ui
+                    .button(neoveg_common::tr(
+                        self.lang(),
+                        "Abrir projeto aninhado em aba",
+                    ))
+                    .clicked()
+            {
+                actions.push(MediaRowAction::OpenNestedTab(m.id));
+                ui.close_menu();
+            }
             if ui
                 .add_enabled(
                     has_event_sel,
@@ -1363,6 +1375,7 @@ impl App {
                     self.add_media_to_timeline(id, self.cursor, hint);
                 }
                 MediaRowAction::OpenTrimmer(id) => self.open_in_trimmer(id),
+                MediaRowAction::OpenNestedTab(id) => self.open_nested_media_tab(id),
                 MediaRowAction::AddAsTake(id) => {
                     let n = self.session.add_media_as_take_to_selected(id);
                     self.set_status(if n == 0 {

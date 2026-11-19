@@ -450,6 +450,10 @@ pub struct PreviewRequest {
     pub mute_video: bool,
     /// Modo de edição expandido (prévia dupla A/B lado a lado): `(esq_id, esq_t, dir_id, dir_t)`.
     pub expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
+    /// Mídia do documento deste pedido (cada aba de projeto tem a sua; os
+    /// ids de mídia de projetos diferentes podem coincidir). `None` usa a
+    /// mídia dada em [`Preview::new`].
+    pub media: Option<Arc<MediaCache>>,
 }
 
 pub struct PreviewResult {
@@ -486,6 +490,7 @@ impl Preview {
                     while let Ok(r) = rx_req.try_recv() {
                         req = r;
                     }
+                    let media = req.media.clone().unwrap_or_else(|| media.clone());
                     let t0 = std::time::Instant::now();
                     // §0.6: uma falha ao renderizar um quadro vira um quadro de erro,
                     // e o worker continua vivo para os próximos pedidos.

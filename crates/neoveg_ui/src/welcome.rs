@@ -774,6 +774,9 @@ impl App {
         p.settings.drop_frame = fps.is_ntsc_drop_eligible() && drop_frame;
         p.settings.manually_configured = manually_configured;
         let lang = self.lang();
+        if !self.close_nested_tabs_for_reset() {
+            return;
+        }
         self.session.reset_project(p, None);
         self.thumbs.clear();
         self.project_media.clear_thumbs();

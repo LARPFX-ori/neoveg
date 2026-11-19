@@ -476,6 +476,8 @@ pub enum UiAction {
     OpenFxMasterAudio,
     OpenFxMasterVideo,
     OpenGoto,
+    /// Abre em aba o projeto `.neoveg` aninhado do evento ou da mídia selecionada.
+    OpenNestedProjectTab,
     OpenEditLayoutProps,
     SetLayoutType(LayoutType),
     OpenShortcuts,
@@ -1837,6 +1839,15 @@ pub static COMMANDS: &[CommandDef] = &[
             s.select_loop_region();
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "file.open_nested_tab",
+        label: "Abrir projeto aninhado em aba",
+        menu_path: "Arquivo/Abrir projeto aninhado em aba",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenNestedProjectTab, h),
     },
     CommandDef {
         id: "edit.goto",
