@@ -2145,5 +2145,13 @@
   "◀ 1q": "◀ 1F",
   "★ Favoritos": "★ お気に入り",
   "＋ Barramento": "+ バス",
-  "＋ Marcador no Cursor": "+ カーソル位置にマーカー"
+  "＋ Marcador no Cursor": "+ カーソル位置にマーカー",
+  "Aninhar seleção em nova sequência": "選択範囲を新規シーケンスにネスト",
+  "Abrir sequência aninhada em aba": "ネストされたシーケンスをタブで開く",
+  "Nenhum evento selecionado para aninhar": "ネストするイベントが選択されていません",
+  "Uma sequência não pode ser aninhada dentro de si mesma": "シーケンスを自身の中にネストすることはできません",
+  "Referência cíclica detectada entre sequências aninhadas": "ネストされたシーケンス間で循環参照が検出されました",
+  "Profundidade máxima de aninhamento ({max}) excedida": "最大ネスト深度（{max}）を超過しました",
+  "Limite máximo de sequências atingido": "シーケンスの最大上限に達しました",
+  "Seleção inválida para aninhar": "ネストする無効な選択です"
 }

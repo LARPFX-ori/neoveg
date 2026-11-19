@@ -866,11 +866,15 @@ impl Project {
         Some(new_seq_id)
     }
 
-    /// Remove uma sequência se houver mais de uma. Nunca apaga mídia do projeto.
+    /// Remove uma sequência se houver mais de uma. Nunca apaga mídia do projeto
+    /// e impede exclusão se a sequência estiver aninhada em eventos do projeto.
     pub fn delete_sequence(&mut self, seq_id: Id) -> bool {
         self.ensure_sequences();
         let total = 1 + self.sequences.len();
         if total <= 1 {
+            return false;
+        }
+        if self.is_sequence_nested_in_events(seq_id) {
             return false;
         }
         let was_active = self.active_sequence_id == Some(seq_id);
@@ -920,6 +924,101 @@ impl Project {
         if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == seq_id) {
             seq.name = final_name;
             return true;
+        }
+        false
+    }
+
+    /// Devolve as trilhas da sequência especificada (seja a ativa ou uma inativa).
+    pub fn sequence_tracks(&self, seq_id: Id) -> Option<&Vec<Track>> {
+        if self.active_sequence_id == Some(seq_id) {
+            Some(&self.tracks)
+        } else {
+            self.sequences
+                .iter()
+                .find(|s| s.id == seq_id)
+                .map(|s| &s.tracks)
+        }
+    }
+
+    /// Calcula a duração de uma sequência pelo tempo final do seu último evento.
+    pub fn sequence_duration(&self, seq_id: Id) -> Ticks {
+        self.sequence_tracks(seq_id)
+            .map(|tracks| {
+                tracks
+                    .iter()
+                    .flat_map(|t| t.events.iter())
+                    .map(|e| e.end())
+                    .fold(Ticks::ZERO, Ticks::max)
+            })
+            .unwrap_or(Ticks::ZERO)
+    }
+
+    /// Devolve todos os IDs de sequências referenciadas pelas mídias dos eventos em uma fatia de trilhas.
+    pub fn sequence_ids_in_tracks(&self, tracks: &[Track]) -> std::collections::HashSet<Id> {
+        let mut ids = std::collections::HashSet::new();
+        for t in tracks {
+            for e in &t.events {
+                for mid in crate::takes::media_ids(e) {
+                    if let Some(m) = self.media(mid) {
+                        if let MediaSource::Sequence { id } = m.source {
+                            ids.insert(id);
+                        }
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    /// Devolve todos os IDs de sequências referenciadas diretamente pelos eventos de uma dada sequência.
+    pub fn referenced_sequences(&self, seq_id: Id) -> std::collections::HashSet<Id> {
+        if let Some(tracks) = self.sequence_tracks(seq_id) {
+            self.sequence_ids_in_tracks(tracks)
+        } else {
+            std::collections::HashSet::new()
+        }
+    }
+
+    /// Verifica se aninhar `child_seq_id` dentro de `parent_seq_id` criaria um ciclo
+    /// ou excederia o limite máximo de profundidade de aninhamento (AGENTS.md §0.4 / §0.5).
+    pub fn validate_no_sequence_cycle(
+        &self,
+        parent_seq_id: Id,
+        child_seq_id: Id,
+    ) -> Result<(), String> {
+        if parent_seq_id == child_seq_id {
+            return Err("Uma sequência não pode ser aninhada dentro de si mesma".into());
+        }
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![(child_seq_id, 1usize)];
+        while let Some((curr, depth)) = stack.pop() {
+            if depth > MAX_NESTED_SEQUENCE_DEPTH {
+                return Err(format!(
+                    "Profundidade máxima de aninhamento ({MAX_NESTED_SEQUENCE_DEPTH}) excedida"
+                ));
+            }
+            if curr == parent_seq_id {
+                return Err("Referência cíclica detectada entre sequências aninhadas".into());
+            }
+            if visited.insert(curr) {
+                for next_child in self.referenced_sequences(curr) {
+                    stack.push((next_child, depth + 1));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Verifica se uma sequência está atualmente aninhada em eventos do projeto
+    /// (seja na timeline da sequência ativa ou em qualquer outra sequência guardada).
+    pub fn is_sequence_nested_in_events(&self, seq_id: Id) -> bool {
+        if self.sequence_ids_in_tracks(&self.tracks).contains(&seq_id) {
+            return true;
+        }
+        for s in &self.sequences {
+            if self.sequence_ids_in_tracks(&s.tracks).contains(&seq_id) {
+                return true;
+            }
         }
         false
     }
@@ -1410,7 +1509,9 @@ impl Project {
                     }
                 }
                 MediaSource::Generated(g) => sanitize_gen(g),
-                MediaSource::File { .. } | MediaSource::NestedProject { .. } => {}
+                MediaSource::File { .. }
+                | MediaSource::NestedProject { .. }
+                | MediaSource::Sequence { .. } => {}
             }
         }
 
@@ -2200,6 +2301,10 @@ pub enum MediaSource {
     NestedProject {
         path: String,
     },
+    /// Sequência interna do projeto aninhada como mídia (Premiere Pro ref. pp. 290–291).
+    Sequence {
+        id: Id,
+    },
 }
 
 pub const MAX_MEDIA_BINS: usize = 256;
@@ -2207,6 +2312,8 @@ pub const MAX_BIN_DEPTH: usize = 32;
 pub const MAX_STORYBOARDS: usize = 64;
 pub const MAX_STORYBOARD_ITEMS: usize = 1024;
 pub const MAX_SEQUENCES: usize = 64;
+/// Profundidade máxima de sequências aninhadas (AGENTS.md §0.5: aciclicidade e profundidade limitada).
+pub const MAX_NESTED_SEQUENCE_DEPTH: usize = 32;
 /// Nome da primeira sequência de um projeto novo.
 pub const DEFAULT_SEQUENCE_NAME: &str = "Sequência 01";
 

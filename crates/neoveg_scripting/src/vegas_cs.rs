@@ -2710,6 +2710,7 @@ fn media_snap(m: &MediaItem) -> ScriptMediaSnap {
             (paths.first().cloned().unwrap_or_default(), false)
         }
         MediaSource::Generated(_) => (String::new(), true),
+        MediaSource::Sequence { id } => (format!("sequence:{id}"), false),
     };
     ScriptMediaSnap {
         id: m.id,

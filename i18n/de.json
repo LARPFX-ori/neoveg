@@ -2145,5 +2145,13 @@
   "◀ 1q": "◀ 1F",
   "★ Favoritos": "★ Favoriten",
   "＋ Barramento": "+ Bus",
-  "＋ Marcador no Cursor": "+ Marker am Cursor"
+  "＋ Marcador no Cursor": "+ Marker am Cursor",
+  "Aninhar seleção em nova sequência": "Auswahl in neue Sequenz verschachteln",
+  "Abrir sequência aninhada em aba": "Verschachtelte Sequenz in Registerkarte öffnen",
+  "Nenhum evento selecionado para aninhar": "Keine Ereignisse zum Verschachteln ausgewählt",
+  "Uma sequência não pode ser aninhada dentro de si mesma": "Eine Sequenz kann nicht in sich selbst verschachtelt werden",
+  "Referência cíclica detectada entre sequências aninhadas": "Zyklische Referenz zwischen verschachtelten Sequenzen erkannt",
+  "Profundidade máxima de aninhamento ({max}) excedida": "Maximale Verschachtelungstiefe ({max}) überschritten",
+  "Limite máximo de sequências atingido": "Maximale Sequenzbegrenzung erreicht",
+  "Seleção inválida para aninhar": "Ungültige Auswahl zum Verschachteln"
 }

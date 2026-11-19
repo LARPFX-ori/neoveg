@@ -2675,6 +2675,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "sequence.nest_selection",
+        label: "Aninhar seleção em nova sequência",
+        menu_path: "Editar/Sequência/Aninhar seleção em nova sequência",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| !s.sel_events.is_empty(),
+        run: |s, h| {
+            s.nest_selection(None).map_err(|e| e.to_string())?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.env_volume",
         label: "Envelope de Volume / Nível",
         menu_path: "Inserir/Volume / Nível de composição",
@@ -3969,7 +3981,7 @@ pub fn menu_label(id: &str, overrides: &HashMap<String, Option<String>>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Project;
+    use crate::model::*;
     use std::collections::HashSet;
 
     /// D e Shift+D percorrem as ferramentas; trocar de ferramenta ou de
@@ -4257,6 +4269,62 @@ mod tests {
         s.project.active_sequence_id = None;
         assert!(run_command("sequence.rename", &mut s, &mut h).is_err());
         assert!(run_command("sequence.duplicate", &mut s, &mut h).is_err());
+
+        // sequence.nest_selection sem eventos selecionados deve falhar
+        assert!(run_command("sequence.nest_selection", &mut s, &mut h).is_err());
+
+        // Cria projeto com evento e testa aninhamento
+        let mut s2 = EditorSession::new(Project::new_default());
+        let m = MediaItem {
+            id: new_id(),
+            name: "Video Teste".into(),
+            source: MediaSource::Generated(GenSpec::ColorBars),
+            duration: Some(Ticks::from_secs_i64(10)),
+            has_video: true,
+            has_audio: false,
+            width: 1920,
+            height: 1080,
+            fps: Some(FrameRate::FPS_30),
+            info: String::new(),
+            proxy_path: None,
+        };
+        s2.project.media.push(m.clone());
+        let ev1 = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(5));
+        let ev1_id = ev1.id;
+        s2.project.tracks[0].events.push(ev1);
+        s2.sel_events.insert(ev1_id);
+
+        // Aninhar seleção com sucesso
+        run_command("sequence.nest_selection", &mut s2, &mut h).unwrap();
+        // A timeline ativa agora deve conter 1 evento substituto apontando para a sequência
+        assert_eq!(s2.project.tracks[0].events.len(), 1);
+        let nested_clip = &s2.project.tracks[0].events[0];
+        assert_eq!(nested_clip.start, Ticks::from_secs_i64(2));
+        assert_eq!(nested_clip.length, Ticks::from_secs_i64(5));
+
+        // A mídia do clipe substituto deve ser MediaSource::Sequence
+        let nested_media = s2.project.media(nested_clip.media_id).unwrap();
+        let nested_seq_id = match nested_media.source {
+            MediaSource::Sequence { id } => id,
+            _ => panic!("deve ser MediaSource::Sequence"),
+        };
+
+        // A sequência aninhada deve existir em s2.project.sequences
+        let nested_seq = s2
+            .project
+            .sequences
+            .iter()
+            .find(|seq| seq.id == nested_seq_id)
+            .unwrap();
+        assert_eq!(nested_seq.tracks[0].events.len(), 1);
+        // O evento na sequência aninhada deve ter sido compensado para iniciar no zero
+        assert_eq!(nested_seq.tracks[0].events[0].start, Ticks::ZERO);
+
+        // Validação de ciclo: aninhar a sequência dentro de si mesma deve falhar
+        assert!(s2
+            .project
+            .validate_no_sequence_cycle(nested_seq_id, nested_seq_id)
+            .is_err());
     }
 
     #[test]

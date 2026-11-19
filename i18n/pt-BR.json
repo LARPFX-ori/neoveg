@@ -2145,5 +2145,13 @@
   "◀ 1q": "◀ 1q",
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "＋ Barramento",
-  "＋ Marcador no Cursor": "＋ Marcador no Cursor"
+  "＋ Marcador no Cursor": "＋ Marcador no Cursor",
+  "Aninhar seleção em nova sequência": "Aninhar seleção em nova sequência",
+  "Abrir sequência aninhada em aba": "Abrir sequência aninhada em aba",
+  "Nenhum evento selecionado para aninhar": "Nenhum evento selecionado para aninhar",
+  "Uma sequência não pode ser aninhada dentro de si mesma": "Uma sequência não pode ser aninhada dentro de si mesma",
+  "Referência cíclica detectada entre sequências aninhadas": "Referência cíclica detectada entre sequências aninhadas",
+  "Profundidade máxima de aninhamento ({max}) excedida": "Profundidade máxima de aninhamento ({max}) excedida",
+  "Limite máximo de sequências atingido": "Limite máximo de sequências atingido",
+  "Seleção inválida para aninhar": "Seleção inválida para aninhar"
 }

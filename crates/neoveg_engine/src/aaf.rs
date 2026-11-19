@@ -1077,7 +1077,7 @@ fn export_media_path(m: &MediaItem) -> Option<String> {
         MediaSource::ImageSequence { paths, .. } => {
             paths.first().filter(|p| !p.is_empty()).cloned()
         }
-        MediaSource::Generated(_) => None,
+        MediaSource::Generated(_) | MediaSource::Sequence { .. } => None,
     }
 }
 
