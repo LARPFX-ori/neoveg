@@ -685,6 +685,32 @@ pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameR
             let border_zoom = v.get(1).copied().unwrap_or(1.12);
             apply_stabilization_transform(f, 0.0, 0.0, 0.0, border_zoom);
         }
+        FxKind::BezierMasking => {
+            let (path, feather, opacity, expansion, mode, invert) =
+                if let Some(mask_data) = fx.bezier_mask.as_deref() {
+                    let (p, fth, op, exp) = mask_data.evaluate_at(t);
+                    (p, fth, op, exp, mask_data.mode, mask_data.invert)
+                } else {
+                    let m = match v.first().copied().unwrap_or(0.0).round() as i32 {
+                        1 => crate::mask::MaskBlendMode::Subtract,
+                        2 => crate::mask::MaskBlendMode::Multiply,
+                        3 => crate::mask::MaskBlendMode::Invert,
+                        _ => crate::mask::MaskBlendMode::Add,
+                    };
+                    let fth = v.get(1).copied().unwrap_or(0.0);
+                    let op = v.get(2).copied().unwrap_or(1.0);
+                    let exp = v.get(3).copied().unwrap_or(0.0);
+                    let inv = v.get(4).copied().unwrap_or(0.0) > 0.5;
+                    (crate::mask::MaskPath::default(), fth, op, exp, m, inv)
+                };
+
+            let poly = path.flatten(16);
+            let mut mask = crate::mask::rasterize_mask(&poly, f.w, f.h, expansion);
+            if feather > 0.5 {
+                crate::mask::apply_feather(&mut mask, f.w, f.h, feather);
+            }
+            crate::mask::apply_mask_to_frame(f, &mask, mode, opacity, invert);
+        }
         _ => {}
     }
 }
@@ -900,5 +926,17 @@ mod tests {
         let mut f_bad = Frame::filled(2, 2, [0.5, 0.4, 0.3, 1.0]);
         apply(&fx_bad, &mut f_bad, Ticks::ZERO, FrameRate::FPS_30);
         assert!(f_bad.px[0].iter().all(|c| c.is_finite()));
+    }
+
+    #[test]
+    fn bezier_masking_aplica_recorte_e_suavizacao_no_quadro() {
+        let fx = FxInstance::new(FxKind::BezierMasking);
+        let mut frame = Frame::filled(64, 64, [1.0, 1.0, 1.0, 1.0]);
+        apply(&fx, &mut frame, Ticks::ZERO, FrameRate::FPS_30);
+
+        // Centro (32, 32) deve permanecer visível
+        assert!(frame.px[32 * 64 + 32][3] > 0.9);
+        // Canto exterior (2, 2) cortado pela máscara padrão (elipse central)
+        assert!(frame.px[2 * 64 + 2][3] < 0.1);
     }
 }
