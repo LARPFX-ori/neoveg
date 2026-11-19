@@ -327,12 +327,12 @@ fn kittest_trimmer_in_out_e_inserir() {
     // Marca In em 2s e Out em 5s, depois envia trecho [2s..5s] à timeline no cursor.
     harness.state_mut().trimmer.cursor = neoveg_common::Ticks::from_secs_i64(2);
     harness.run_steps(1);
-    harness.get_by_label("Marcar In (I)").click();
+    harness.get_by_label("Definir ponto de entrada").click();
     harness.run_steps(1);
 
     harness.state_mut().trimmer.cursor = neoveg_common::Ticks::from_secs_i64(5);
     harness.run_steps(1);
-    harness.get_by_label("Marcar Out (O)").click();
+    harness.get_by_label("Definir ponto de saída").click();
     harness.run_steps(1);
 
     assert_eq!(
@@ -345,7 +345,7 @@ fn kittest_trimmer_in_out_e_inserir() {
     );
 
     harness
-        .get_by_label("Adicionar à Timeline no Cursor")
+        .get_by_label("Adicionar à timeline a partir do cursor")
         .click();
     harness.run_steps(2);
 
@@ -2338,6 +2338,63 @@ fn kittest_visor_e_chips_sem_oscilacao_tabular() {
         let v_col = lit_visor_seps.iter().map(|s| s[col]).collect::<Vec<_>>();
         assert_f32_spread(&format!("Literal Visor sep[{col}]"), &v_col);
     }
+}
+
+/// Barra do Trimmer no layout do VEGAS Pro: reproduzir e parar (Parar volta
+/// ao ponto de partida) e *Editar conjunto de botões visíveis* ("…"), que
+/// some com o botão desmarcado e grava a escolha nas preferências.
+#[test]
+fn kittest_trimmer_barra_reproduzir_e_botoes_visiveis() {
+    let _prefs_guard = I18nPrefsGuard::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|cc| build_ready_app_lang(cc, neoveg_common::Language::PtBr));
+    harness.state_mut().prefs.trimmer_hidden_buttons.clear();
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::Text(
+            crate::model::TextSpec::default(),
+        ));
+        let mid = app.project.media[0].id;
+        app.project.media[0].duration = Some(neoveg_common::Ticks::from_secs_i64(10));
+        app.open_in_trimmer(mid);
+    }
+    let ctx = harness.ctx.clone();
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.trimmer");
+    harness.run_steps(2);
+    let start = neoveg_common::Ticks::from_secs_i64(1);
+    harness.state_mut().trimmer.cursor = start;
+    harness.run_steps(1);
+    harness.get_by_label("Reproduzir").click();
+    harness.run_steps(3);
+    assert!(harness.state().trimmer.playing);
+    harness.get_by_label("Parar").click();
+    harness.run_steps(1);
+    assert!(!harness.state().trimmer.playing);
+    assert_eq!(
+        harness.state().trimmer.cursor,
+        start,
+        "Parar volta ao início da reprodução"
+    );
+
+    harness
+        .get_by_label("Editar conjunto de botões visíveis...")
+        .click();
+    harness.run_steps(2);
+    // com o diálogo aberto, "Pausar" é o botão da barra e a caixa de marcar
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::CheckBox, "Pausar")
+        .click();
+    harness.run_steps(1);
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().prefs.trimmer_hidden_buttons,
+        vec!["pause".to_string()]
+    );
+    assert!(harness.query_by_label("Pausar").is_none());
+    assert!(harness.query_by_label("Reproduzir").is_some());
 }
 
 #[test]
