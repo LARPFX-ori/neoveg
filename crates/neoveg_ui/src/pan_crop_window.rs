@@ -191,26 +191,32 @@ impl App {
                 ui.horizontal_top(|ui| {
                     self.pc_toolbar(ui, &mut st, lang);
                     if st.show_props {
-                        ui.allocate_ui(vec2(220.0, top_h), |ui| {
-                            ui.set_width(220.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt("pc_props")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    if let Some(k) = self.pc_properties(
-                                        ui,
-                                        &ev,
-                                        &cur,
-                                        key_idx,
-                                        frame,
-                                        &mut st,
-                                        &mut actions,
-                                        lang,
-                                    ) {
-                                        new_key = Some(k);
-                                    }
-                                });
-                        });
+                        // coluna das propriedades: layout vertical explícito; herdando o
+                        // horizontal do pai, as seções saíam lado a lado e se sobrepunham
+                        ui.allocate_ui_with_layout(
+                            vec2(220.0, top_h),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(220.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("pc_props")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        if let Some(k) = self.pc_properties(
+                                            ui,
+                                            &ev,
+                                            &cur,
+                                            key_idx,
+                                            frame,
+                                            &mut st,
+                                            &mut actions,
+                                            lang,
+                                        ) {
+                                            new_key = Some(k);
+                                        }
+                                    });
+                            },
+                        );
                     }
                     let canvas = vec2(ui.available_width(), top_h);
                     if let Some(k) = self.pc_workspace(

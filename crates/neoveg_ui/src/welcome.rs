@@ -931,10 +931,16 @@ impl App {
                         .max_rect(close_rect)
                         .id_salt("welcome_close_child"),
                 );
-                if icons::small_icon_button(&mut close_ui, Icon::CloseX, None, false, &theme)
-                    .on_hover_text(tr(lang, "Fechar (Esc)"))
-                    .clicked()
-                {
+                let close_resp =
+                    icons::small_icon_button(&mut close_ui, Icon::CloseX, None, false, &theme);
+                close_resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        tr(lang, "Fechar tela de boas-vindas"),
+                    )
+                });
+                if close_resp.on_hover_text(tr(lang, "Fechar (Esc)")).clicked() {
                     action = WelcomeAction::Close;
                 }
 
@@ -1018,29 +1024,30 @@ impl App {
                         );
                         right_ui.set_clip_rect(right_rect);
                         right_ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-                        match state.section {
-                            WelcomeSection::NewProject => {
-                                action = draw_new_project_pane(
-                                    &mut right_ui,
-                                    &mut state,
-                                    &theme,
-                                    lang,
-                                    compact_w,
-                                    compact_h,
-                                );
-                            }
-                            WelcomeSection::OpenProject => {
-                                action = draw_open_project_pane(
-                                    &mut right_ui,
-                                    &recents,
-                                    has_recovery,
-                                    &theme,
-                                    lang,
-                                );
-                            }
+                        let pane_action = match state.section {
+                            WelcomeSection::NewProject => draw_new_project_pane(
+                                &mut right_ui,
+                                &mut state,
+                                &theme,
+                                lang,
+                                compact_w,
+                                compact_h,
+                            ),
+                            WelcomeSection::OpenProject => draw_open_project_pane(
+                                &mut right_ui,
+                                &recents,
+                                has_recovery,
+                                &theme,
+                                lang,
+                            ),
                             WelcomeSection::GettingStarted => {
-                                action = draw_getting_started_pane(&mut right_ui, &theme, lang);
+                                draw_getting_started_pane(&mut right_ui, &theme, lang)
                             }
+                        };
+                        // o painel só manda quando algo nele foi clicado: sem
+                        // isso, o "nada" do painel apagava o clique no X
+                        if !matches!(pane_action, WelcomeAction::None) {
+                            action = pane_action;
                         }
                     },
                 );

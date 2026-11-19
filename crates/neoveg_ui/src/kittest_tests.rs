@@ -124,6 +124,31 @@ fn kittest_welcome_screen_interacao_e_monitor_pequeno() {
     );
 }
 
+/// O X da tela de boas-vindas fechava nada: o painel da direita devolvia
+/// "nenhuma ação" no mesmo quadro e apagava o clique. Vale nas três seções.
+#[test]
+fn kittest_x_fecha_a_tela_de_boas_vindas_em_todas_as_secoes() {
+    for section in ["Novo Projeto", "Abrir Projeto", "Primeiros Passos"] {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1280.0, 820.0))
+            .build_eframe(|cc| {
+                let mut app = build_ready_app(cc);
+                app.open_welcome();
+                app
+            });
+        harness.run_steps(2);
+        harness.get_by_label(section).click();
+        harness.run_steps(2);
+        assert!(harness.state().is_welcome_open(), "{section}: ainda aberta");
+        harness.get_by_label("Fechar tela de boas-vindas").click();
+        harness.run_steps(2);
+        assert!(
+            !harness.state().is_welcome_open(),
+            "{section}: o X tem de fechar a tela de boas-vindas"
+        );
+    }
+}
+
 #[test]
 fn kittest_layout_salvo_e_preferencias_navegacao() {
     let mut harness = Harness::builder()
