@@ -40,6 +40,8 @@ pub mod integrations;
 pub mod mask;
 pub mod media;
 #[forbid(unsafe_code)]
+pub mod midi;
+#[forbid(unsafe_code)]
 pub mod model;
 #[forbid(unsafe_code)]
 pub mod otio;

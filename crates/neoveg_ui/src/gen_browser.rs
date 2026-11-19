@@ -52,6 +52,7 @@ pub(crate) enum GenKind {
     Checkerboard,
     ColorBars,
     Noise,
+    Ofx,
 }
 
 impl GenKind {
@@ -74,6 +75,7 @@ impl GenKind {
             GenSpec::Checkerboard { .. } => GenKind::Checkerboard,
             GenSpec::ColorBars => GenKind::ColorBars,
             GenSpec::Noise { .. } => GenKind::Noise,
+            GenSpec::Ofx(_) => GenKind::Ofx,
         }
     }
 
@@ -85,6 +87,7 @@ impl GenKind {
             GenKind::Checkerboard => "Quadriculado",
             GenKind::ColorBars => "Barras de teste",
             GenKind::Noise => "Ruído",
+            GenKind::Ofx => "OFX",
         };
         tr(lang, key)
     }
@@ -97,7 +100,9 @@ impl GenKind {
         match self {
             GenKind::Text => GenCategory::Text,
             GenKind::SolidColor | GenKind::Gradient => GenCategory::Backgrounds,
-            GenKind::Checkerboard | GenKind::ColorBars | GenKind::Noise => GenCategory::Utility,
+            GenKind::Checkerboard | GenKind::ColorBars | GenKind::Noise | GenKind::Ofx => {
+                GenCategory::Utility
+            }
         }
     }
 
@@ -316,14 +321,7 @@ impl App {
         ui.separator();
 
         if self.gen_browser.cat == BrowserCat::ThirdParty {
-            ui.label(
-                egui::RichText::new(tr(
-                    lang,
-                    "Nenhum gerador de terceiros: geradores de mídia OFX ainda não são suportados.",
-                ))
-                .small()
-                .weak(),
-            );
+            self.third_party_generators(ui);
             return;
         }
 
@@ -597,6 +595,101 @@ impl App {
             let _ = self.prefs.save();
         }
         if let Some(spec) = insert {
+            self.insert_generated(spec);
+        }
+    }
+
+    /// Categoria Terceiros: plug-ins OFX consultados no Plug-In Manager que
+    /// podem ser inseridos como geradores de mídia (`GenSpec::Ofx`).
+    fn third_party_generators(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
+        let q = self.gen_browser.search.trim().to_lowercase();
+        let list: Vec<_> = crate::plugin_manager::probed_ofx_plugins(ui.ctx())
+            .into_iter()
+            .filter(|(_, info)| q.is_empty() || info.identifier.to_lowercase().contains(&q))
+            .collect();
+        if list.is_empty() {
+            ui.label(
+                egui::RichText::new(tr(
+                    lang,
+                    "Nenhum plug-in OFX consultado. Os plug-ins instalados aparecem no \
+                     Plug-In Manager; consulte-os lá para usá-los aqui.",
+                ))
+                .small()
+                .weak(),
+            );
+            if ui.button(tr(lang, "Abrir o Plug-In Manager")).clicked() {
+                let ctx = ui.ctx().clone();
+                self.exec_cmd(Some(&ctx), "view.tab.plugin_manager");
+            }
+            return;
+        }
+        let thumb_sz = egui::vec2(THUMB_W as f32, THUMB_H as f32);
+        let mut insert_spec: Option<GenSpec> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("genb_terceiros")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (idx, (bin, info)) in list.iter().enumerate() {
+                    let bin_s = bin.to_string_lossy().to_string();
+                    let spec = GenSpec::Ofx(neoveg_engine::model::OfxFxRef {
+                        binary: bin_s.clone(),
+                        plugin_id: info.identifier.clone(),
+                        label: info.identifier.clone(),
+                        params: Vec::new(),
+                    });
+                    ui.horizontal(|ui| {
+                        ui.dnd_drag_source(
+                            egui::Id::new(("genb_ofx_drag", idx, &info.identifier)),
+                            DndPayload::Generator(spec.clone()),
+                            |ui| {
+                                let ctx = ui.ctx().clone();
+                                match self.fx_browser.ofx.get(&ctx, &bin_s, &info.identifier) {
+                                    crate::fx_browser::OfxThumb::Ready(tex) => {
+                                        ui.image((tex.id(), thumb_sz));
+                                    }
+                                    crate::fx_browser::OfxThumb::Pending => {
+                                        let (r, _) =
+                                            ui.allocate_exact_size(thumb_sz, egui::Sense::hover());
+                                        ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                                        ui.painter().text(
+                                            r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            tr(lang, "Gerando prévia..."),
+                                            egui::FontId::proportional(9.0),
+                                            self.theme.text_muted,
+                                        );
+                                    }
+                                    crate::fx_browser::OfxThumb::Failed(e) => {
+                                        let e = e.clone();
+                                        let (r, resp) =
+                                            ui.allocate_exact_size(thumb_sz, egui::Sense::hover());
+                                        ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                                        ui.painter().text(
+                                            r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            tr(lang, "sem prévia"),
+                                            egui::FontId::proportional(9.0),
+                                            self.theme.text_muted,
+                                        );
+                                        resp.on_hover_text(e);
+                                    }
+                                }
+                            },
+                        );
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&info.identifier).small());
+                            if ui
+                                .add(egui::Button::new(tr(lang, "Inserir no cursor")).small())
+                                .clicked()
+                            {
+                                insert_spec = Some(spec);
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some(spec) = insert_spec {
             self.insert_generated(spec);
         }
     }

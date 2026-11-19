@@ -665,6 +665,8 @@ pub struct Mixer {
     offline: bool,
     /// Ignora globalmente todos os efeitos de áudio (eventos, trilhas, barramentos e master).
     pub bypass_fx: bool,
+    /// Eventos MIDI do bloco atual (evento ou trilha) para instrumentos VST3.
+    pending_midi: Vec<crate::midi::Vst3MidiEvent>,
 }
 
 impl Drop for Mixer {
@@ -784,6 +786,7 @@ impl Mixer {
             vst3_owner: crate::plugin_host::new_vst3_owner(),
             offline: false,
             bypass_fx: false,
+            pending_midi: Vec::new(),
         }
     }
 
@@ -801,6 +804,7 @@ impl Mixer {
         self.event_resamplers.clear();
         self.pitch_shifters.clear();
         self.delay_lines.clear();
+        self.pending_midi.clear();
         crate::plugin_host::vst3_reset_owner(self.vst3_owner);
     }
 
@@ -936,9 +940,130 @@ impl Mixer {
             .process(delay_frames, buf);
     }
 
-    /// Efeito VST3 pelo host isolado. Em falha o bloco passa seco e o erro
-    /// vai uma vez para o log (por efeito), sem travar o áudio.
-    fn run_vst3(&mut self, fx: &FxInstance, buf: &mut [f32]) {
+    /// Amostra os pontos de automação com precisão de amostra para todos os
+    /// parâmetros VST3 com keyframes dentro do bloco `[t_start, t_start + dur)`.
+    fn sample_vst3_automation(
+        r: &Vst3FxRef,
+        t_start: Ticks,
+        sr: u32,
+        frames: usize,
+    ) -> Vec<crate::plugin_host::Vst3ParamPoint> {
+        let mut pts = Vec::new();
+        if frames == 0 || sr == 0 {
+            return pts;
+        }
+        let block_ticks = timeline_sample_time(frames as i64, sr);
+        let t_end = Ticks::from_raw(t_start.0.saturating_add(block_ticks.0));
+        let max_off = frames.saturating_sub(1).min(i32::MAX as usize) as i32;
+        const SUBDIV: usize = 64;
+        for p in &r.params {
+            if p.keys.is_empty() {
+                continue;
+            }
+            let v0 = p.value_at(t_start);
+            let v1 = p.value_at(t_end);
+            pts.push(crate::plugin_host::Vst3ParamPoint {
+                id: p.id,
+                sample_offset: 0,
+                value: v0,
+            });
+            // Adiciona pontos intermediários a cada 64 amostras em rampas ativas
+            // mais os keyframes exatos que caem dentro do bloco.
+            let mut has_interior_key = false;
+            for &(kt, kv) in &p.keys {
+                if kt > t_start && kt < t_end {
+                    has_interior_key = true;
+                    let rel = (kt - t_start).0;
+                    let off = if block_ticks.0 > 0 {
+                        ((rel as i128).saturating_mul(frames as i128) / (block_ticks.0 as i128))
+                            as i32
+                    } else {
+                        0
+                    };
+                    pts.push(crate::plugin_host::Vst3ParamPoint {
+                        id: p.id,
+                        sample_offset: off.clamp(0, max_off),
+                        value: kv.clamp(0.0, 1.0),
+                    });
+                }
+            }
+            if has_interior_key || (v1 - v0).abs() > 1e-5 {
+                let mut f = SUBDIV;
+                while f < frames {
+                    let tf = Ticks::from_raw(
+                        t_start
+                            .0
+                            .saturating_add(timeline_sample_time(f as i64, sr).0),
+                    );
+                    pts.push(crate::plugin_host::Vst3ParamPoint {
+                        id: p.id,
+                        sample_offset: (f as i32).clamp(0, max_off),
+                        value: p.value_at(tf),
+                    });
+                    f = f.saturating_add(SUBDIV);
+                }
+                if max_off > 0 {
+                    pts.push(crate::plugin_host::Vst3ParamPoint {
+                        id: p.id,
+                        sample_offset: max_off,
+                        value: v1,
+                    });
+                }
+            }
+        }
+        pts
+    }
+
+    /// Extrai eventos MIDI de um evento da timeline dentro do bloco `[t0, t1)`,
+    /// respeitando `offset`, recorte e velocidade (`rate`).
+    fn extract_event_midi(
+        e: &Event,
+        clip: &crate::midi::MidiClip,
+        t0: Ticks,
+        t1: Ticks,
+        frames: usize,
+        out: &mut Vec<crate::midi::Vst3MidiEvent>,
+    ) {
+        let rate = e.rate.as_f64();
+        if frames == 0 || t1 <= t0 || !rate.is_finite() || rate <= 0.0 {
+            return;
+        }
+        let span_tl = (t1 - t0).0;
+        if span_tl <= 0 {
+            return;
+        }
+        let win_a = t0.max(e.start);
+        let win_b = t1.min(e.end());
+        if win_b <= win_a {
+            return;
+        }
+        let clip_a = Ticks::from_raw(
+            e.offset
+                .0
+                .saturating_add((((win_a - e.start).0 as f64) * rate).round() as i64),
+        );
+        let clip_b = Ticks::from_raw(
+            e.offset
+                .0
+                .saturating_add((((win_b - e.start).0 as f64) * rate).round() as i64),
+        );
+        let mut local = Vec::new();
+        let sub_frames = (((win_b - win_a).0 as i128).saturating_mul(frames as i128)
+            / (span_tl as i128))
+            .clamp(1, frames as i128) as usize;
+        clip.events_in_window(clip_a, clip_b, sub_frames, &mut local);
+        let base_off = (((win_a - t0).0 as i128).saturating_mul(frames as i128) / (span_tl as i128))
+            .clamp(0, frames.saturating_sub(1) as i128) as i32;
+        let max_off = frames.saturating_sub(1).min(i32::MAX as usize) as i32;
+        for mut ev in local {
+            ev.sample_offset = ev.sample_offset.saturating_add(base_off).clamp(0, max_off);
+            out.push(ev);
+        }
+    }
+
+    /// Efeito/instrumento VST3 pelo host isolado com automação em tempo real e MIDI.
+    /// Em falha o bloco passa seco e o erro vai uma vez para o log (por efeito).
+    fn run_vst3(&mut self, fx: &FxInstance, buf: &mut [f32], t: Ticks) {
         use std::sync::{Mutex, OnceLock, PoisonError};
         static LOGGED: OnceLock<Mutex<std::collections::HashSet<Id>>> = OnceLock::new();
         let (Some(r), true) = (fx.vst3.as_ref(), fx.enabled) else {
@@ -947,13 +1072,17 @@ impl Mixer {
         let Some(host) = crate::plugin_host::default_host_exe() else {
             return;
         };
-        let res = crate::plugin_host::vst3_process(
+        let frames = buf.len() / 2;
+        let auto_pts = Self::sample_vst3_automation(r, t, self.sr, frames);
+        let res = crate::plugin_host::vst3_process_ex(
             &host,
             self.vst3_owner,
             fx.id,
             r,
             self.sr,
             buf,
+            &auto_pts,
+            &self.pending_midi,
             self.offline,
         );
         if let Err(e) = res {
@@ -973,7 +1102,7 @@ impl Mixer {
             return;
         }
         if fx.kind == FxKind::Vst3 {
-            self.run_vst3(fx, buf);
+            self.run_vst3(fx, buf, t);
             return;
         }
         let sr = self.sr;
@@ -1251,6 +1380,13 @@ impl Mixer {
             }
             let max_ev_lat = pdc.track_ev_lat.get(ti).copied().unwrap_or(0);
             let t_lat = pdc.track_lat.get(ti).copied().unwrap_or(0);
+            let track_has_instrument = !self.bypass_fx
+                && track.fx.iter().any(|fx| {
+                    fx.enabled
+                        && fx.kind == FxKind::Vst3
+                        && fx.vst3.as_ref().is_some_and(|r| r.is_instrument)
+                });
+            let mut track_midi: Vec<crate::midi::Vst3MidiEvent> = Vec::new();
             track_buf.fill(0.0);
             for (ei, e) in track.events.iter().enumerate() {
                 if e.mute || e.end() <= t0 || e.start >= t1 {
@@ -1265,26 +1401,49 @@ impl Mixer {
                 let dur = m.duration.or_else(|| Some(a.duration()));
                 let (fi, fo) = effective_fades(track, ei);
                 let g = db_to_lin(e.gain_db);
+                let ev_has_instrument = !self.bypass_fx
+                    && e.fx.iter().any(|fx| {
+                        fx.enabled
+                            && fx.kind == FxKind::Vst3
+                            && fx.vst3.as_ref().is_some_and(|r| r.is_instrument)
+                    });
+                let mut ev_midi = Vec::new();
+                if let Some(midi_clip) = a.midi.as_ref() {
+                    Self::extract_event_midi(e, midi_clip, t0, t1, n, &mut ev_midi);
+                }
                 ev_buf.fill(0.0);
-                self.sample_event_block(e, dur, a, start, n, &mut ev_buf[..n * 2]);
-                for i in 0..n {
-                    let t = timeline_sample_time(start.saturating_add(i as i64), sr);
-                    let k = if e.contains(t) {
-                        let dt = t - e.start;
-                        let ev_vol = e
-                            .envelope(EnvKind::Volume)
-                            .map(|env| env.eval(dt))
-                            .unwrap_or(1.0);
-                        g * fade_gain(e, &fi, &fo, t) * ev_vol
-                    } else {
-                        0.0
-                    };
-                    ev_buf[i * 2] *= k;
-                    ev_buf[i * 2 + 1] *= k;
+                // Quando há instrumento VST3 ativo para o clipe MIDI, deixa o
+                // instrumento sintetizar em vez do áudio de prévia embutido.
+                if a.midi.is_none() || (!ev_has_instrument && !track_has_instrument) {
+                    self.sample_event_block(e, dur, a, start, n, &mut ev_buf[..n * 2]);
+                    for i in 0..n {
+                        let t = timeline_sample_time(start.saturating_add(i as i64), sr);
+                        let k = if e.contains(t) {
+                            let dt = t - e.start;
+                            let ev_vol = e
+                                .envelope(EnvKind::Volume)
+                                .map(|env| env.eval(dt))
+                                .unwrap_or(1.0);
+                            g * fade_gain(e, &fi, &fo, t) * ev_vol
+                        } else {
+                            0.0
+                        };
+                        ev_buf[i * 2] *= k;
+                        ev_buf[i * 2 + 1] *= k;
+                    }
+                }
+                if ev_has_instrument {
+                    self.pending_midi = ev_midi;
+                } else {
+                    if !ev_midi.is_empty() && track_has_instrument {
+                        track_midi.extend(ev_midi);
+                    }
+                    self.pending_midi.clear();
                 }
                 for fx in &e.fx {
                     exec_fx(self, fx, &mut ev_buf[..n * 2], t0 - e.start);
                 }
+                self.pending_midi.clear();
                 if max_ev_lat > 0 {
                     let ev_l = pdc.ev_lat.get(&e.id).copied().unwrap_or(0);
                     let pad = max_ev_lat.saturating_sub(ev_l);
@@ -1294,9 +1453,14 @@ impl Mixer {
                     track_buf[i] += ev_buf[i];
                 }
             }
+            if !track_midi.is_empty() {
+                track_midi.sort_by_key(|ev| (ev.sample_offset, ev.is_note_on));
+                self.pending_midi = track_midi;
+            }
             for fx in &track.fx {
                 exec_fx(self, fx, &mut track_buf[..n * 2], t0);
             }
+            self.pending_midi.clear();
 
             // Envios auxiliares pré-fader (pre-fader sends) com alinhamento PDC
             for (si, send) in track.sends.iter().enumerate() {
@@ -2020,5 +2184,78 @@ mod tests {
         mixer.reset();
         mixer.process(&p, &audio, 0, &mut out);
         assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn vst3_automacao_por_amostra_e_extracao_midi_de_evento() {
+        let mut r = Vst3FxRef {
+            binary: "synth.vst3".into(),
+            class_id: "0".repeat(32),
+            label: "Synth".into(),
+            params: vec![
+                Vst3ParamValue {
+                    id: 7,
+                    value: 0.0,
+                    keys: vec![(Ticks::ZERO, 0.0), (Ticks::from_secs_i64(1), 1.0)],
+                },
+                Vst3ParamValue {
+                    id: 8,
+                    value: 0.5,
+                    keys: vec![],
+                },
+            ],
+            state: None,
+            is_instrument: true,
+        };
+        r.sanitize();
+        let pts = Mixer::sample_vst3_automation(&r, Ticks::ZERO, 48_000, 256);
+        // Só o parâmetro 7 tem keyframes e deve gerar pontos intermediários na rampa
+        assert!(pts.iter().all(|p| p.id == 7));
+        assert!(pts.len() >= 4, "{pts:?}");
+        assert!((pts[0].value - 0.0).abs() < 1e-6);
+        assert!(pts.last().unwrap().value > pts[0].value);
+
+        // Extração de notas MIDI com deslocamento de evento
+        let clip = crate::midi::MidiClip {
+            tpqn: 480,
+            notes: vec![crate::midi::MidiNote {
+                start: Ticks::from_millis_i64(100),
+                duration: Ticks::from_millis_i64(200),
+                channel: 0,
+                pitch: 69,
+                velocity: 100,
+            }],
+            duration: Ticks::from_secs_i64(1),
+        };
+        let media = MediaItem {
+            id: new_id(),
+            name: "melodia.mid".into(),
+            source: MediaSource::File {
+                path: "melodia.mid".into(),
+            },
+            duration: Some(clip.duration),
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let ev = Event::new(&media, Ticks::from_secs_i64(1), Ticks::from_secs_i64(1));
+        let mut out_evs = Vec::new();
+        Mixer::extract_event_midi(
+            &ev,
+            &clip,
+            Ticks::from_secs_i64(1),
+            Ticks::from_millis_i64(1500),
+            500,
+            &mut out_evs,
+        );
+        assert_eq!(out_evs.len(), 2);
+        assert!(out_evs[0].is_note_on && out_evs[0].pitch == 69);
+        assert!((out_evs[0].sample_offset - 100).abs() <= 1);
+        assert!(!out_evs[1].is_note_on && out_evs[1].pitch == 69);
+        assert!((out_evs[1].sample_offset - 300).abs() <= 1);
     }
 }

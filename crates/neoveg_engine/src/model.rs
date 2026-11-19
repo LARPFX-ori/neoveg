@@ -2060,6 +2060,7 @@ fn sanitize_gen(g: &mut GenSpec) {
             *cells = (*cells).clamp(1, 512);
         }
         GenSpec::ColorBars | GenSpec::Noise { .. } => {}
+        GenSpec::Ofx(r) => r.sanitize(),
         GenSpec::Text(t) => {
             col(&mut t.color);
             col(&mut t.outline_color);
@@ -2466,6 +2467,8 @@ pub enum GenSpec {
         animated: bool,
     },
     Text(TextSpec),
+    /// Gerador de mídia OFX externo (`OfxImageEffectContextGenerator` / `General`).
+    Ofx(OfxFxRef),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -2599,6 +2602,13 @@ impl GenSpec {
                     .collect::<String>();
                 tr_args(lang, "Texto: {first}", &[("first", &first)])
             }
+            GenSpec::Ofx(r) => {
+                if !r.label.is_empty() {
+                    r.label.clone()
+                } else {
+                    r.plugin_id.clone()
+                }
+            }
         }
     }
 
@@ -2609,6 +2619,7 @@ impl GenSpec {
         match self {
             GenSpec::Noise { animated, .. } => *animated,
             GenSpec::Text(t) => t.anim != TextAnim::None,
+            GenSpec::Ofx(_) => true,
             _ => false,
         }
     }
@@ -4063,11 +4074,67 @@ impl OfxFxRef {
     }
 }
 
-/// Valor normalizado (0..1) de um parâmetro VST3, pelo `ParamID` do plug-in.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Máximo de keyframes de automação por parâmetro VST3 (§0.4).
+pub const MAX_VST3_KEYS: usize = 4096;
+
+/// Valor normalizado (0..1) de um parâmetro VST3, pelo `ParamID` do plug-in,
+/// com suporte opcional a automação por keyframes em tempo exato.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vst3ParamValue {
     pub id: u32,
     pub value: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<(Ticks, f64)>,
+}
+
+impl Vst3ParamValue {
+    /// Avalia o parâmetro no instante `t` (interpolação linear entre keyframes).
+    pub fn value_at(&self, t: Ticks) -> f64 {
+        let clamp01 = |v: f64| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
+            return clamp01(self.value);
+        };
+        if t <= first.0 {
+            return clamp01(first.1);
+        }
+        if t >= last.0 {
+            return clamp01(last.1);
+        }
+        for w in self.keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if t >= a.0 && t <= b.0 {
+                let dt = (b.0 - a.0).0;
+                if dt <= 0 {
+                    return clamp01(a.1);
+                }
+                let x = ((t - a.0).0 as f64 / dt as f64).clamp(0.0, 1.0);
+                return clamp01(a.1 + (b.1 - a.1) * x);
+            }
+        }
+        clamp01(last.1)
+    }
+
+    /// Insere ou substitui um keyframe próximo de `t` (dentro de `tol`).
+    pub fn set_key(&mut self, t: Ticks, value: f64, tol: Ticks) {
+        let t = t.max(Ticks::ZERO);
+        let v = if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if let Some(k) = self.keys.iter_mut().find(|k| k.0.abs_diff(t) <= tol) {
+            k.1 = v;
+        } else if self.keys.len() < MAX_VST3_KEYS {
+            self.keys.push((t, v));
+            self.keys.sort_by_key(|k| k.0);
+        }
+    }
 }
 
 /// Tamanho máximo em bytes do estado binário serializado de um componente VST3.
@@ -4116,6 +4183,10 @@ pub struct Vst3FxRef {
     pub params: Vec<Vst3ParamValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Verdadeiro quando a classe VST3 é um instrumento (`Instrument` / `Synth`)
+    /// alimentado por eventos MIDI da timeline.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_instrument: bool,
 }
 
 const MAX_VST3_REF_PARAMS: usize = 16384;
@@ -4144,6 +4215,17 @@ impl Vst3FxRef {
             } else {
                 0.0
             };
+            p.keys.truncate(MAX_VST3_KEYS);
+            p.keys.retain(|k| k.0 >= Ticks::ZERO);
+            for k in &mut p.keys {
+                k.1 = if k.1.is_finite() {
+                    k.1.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+            p.keys.sort_by_key(|k| k.0);
+            p.keys.dedup_by_key(|k| k.0);
         }
         self.state = self
             .state
@@ -4162,7 +4244,11 @@ impl Vst3FxRef {
         };
         match self.params.iter_mut().find(|p| p.id == id) {
             Some(p) => p.value = value,
-            None => self.params.push(Vst3ParamValue { id, value }),
+            None => self.params.push(Vst3ParamValue {
+                id,
+                value,
+                keys: Vec::new(),
+            }),
         }
     }
 }
@@ -4877,6 +4963,15 @@ impl FxInstance {
     /// Efeito de áudio VST3 de terceiros (`binary` + classe), com os
     /// parâmetros no padrão do plug-in.
     pub fn new_vst3(binary: &str, class_id: &str, label: &str) -> Self {
+        Self::new_vst3_with_kind(binary, class_id, label, false)
+    }
+
+    pub fn new_vst3_with_kind(
+        binary: &str,
+        class_id: &str,
+        label: &str,
+        is_instrument: bool,
+    ) -> Self {
         let mut f = FxInstance::new(FxKind::Vst3);
         f.vst3 = Some(Vst3FxRef {
             binary: binary.into(),
@@ -4884,6 +4979,7 @@ impl FxInstance {
             label: label.into(),
             params: vec![],
             state: None,
+            is_instrument,
         });
         f
     }
@@ -5157,9 +5253,21 @@ mod tests {
         let mut fx = FxInstance::new_vst3("x.vst3", &"A".repeat(32), &"é".repeat(5000));
         if let Some(r) = fx.vst3.as_mut() {
             r.params = vec![
-                Vst3ParamValue { id: 1, value: 2.5 },
-                Vst3ParamValue { id: 2, value: -3.0 },
-                Vst3ParamValue { id: 1, value: 0.5 },
+                Vst3ParamValue {
+                    id: 1,
+                    value: 2.5,
+                    keys: vec![],
+                },
+                Vst3ParamValue {
+                    id: 2,
+                    value: -3.0,
+                    keys: vec![],
+                },
+                Vst3ParamValue {
+                    id: 1,
+                    value: 0.5,
+                    keys: vec![],
+                },
             ];
         }
         let mut orphan = FxInstance::new(FxKind::Vst3);
@@ -5171,6 +5279,7 @@ mod tests {
             label: String::new(),
             params: vec![],
             state: Some("00FF".into()),
+            is_instrument: false,
         });
         p.master.fx = vec![fx, orphan, native];
         let json = serde_json::to_string(&p).expect("serializa");
@@ -5180,6 +5289,7 @@ mod tests {
             r.params.push(Vst3ParamValue {
                 id: 3,
                 value: f64::NAN,
+                keys: vec![],
             });
             r.state = Some("AABB".into());
         }
@@ -5188,9 +5298,21 @@ mod tests {
         assert_eq!(
             r.params,
             vec![
-                Vst3ParamValue { id: 1, value: 1.0 },
-                Vst3ParamValue { id: 2, value: 0.0 },
-                Vst3ParamValue { id: 3, value: 0.0 },
+                Vst3ParamValue {
+                    id: 1,
+                    value: 1.0,
+                    keys: vec![],
+                },
+                Vst3ParamValue {
+                    id: 2,
+                    value: 0.0,
+                    keys: vec![],
+                },
+                Vst3ParamValue {
+                    id: 3,
+                    value: 0.0,
+                    keys: vec![],
+                },
             ]
         );
         assert_eq!(r.state.as_deref(), Some("aabb"));
@@ -5209,6 +5331,7 @@ mod tests {
             label: "l".into(),
             params: vec![],
             state: Some("abc".into()), // ímpar
+            is_instrument: false,
         };
         hostile.sanitize();
         assert_eq!(hostile.state, None);

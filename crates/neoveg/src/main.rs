@@ -316,6 +316,11 @@ fn plugin_host_mode(args: &[String]) -> Option<i32> {
         ["--plugin-host", "serve-vst3", bin, class_id, sr] => {
             Some(ph::serve_vst3(std::path::Path::new(bin), class_id, sr))
         }
+        ["--plugin-host", "edit-vst3", bin, class_id, sr] => Some(ph::serve_vst3_editor(
+            std::path::Path::new(bin),
+            class_id,
+            sr,
+        )),
         ["--plugin-host", ..] => {
             eprintln!("modo de host de plug-ins desconhecido");
             Some(2)

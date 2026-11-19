@@ -3294,6 +3294,8 @@ impl App {
                                         lang,
                                         fx,
                                         &self.theme,
+                                        local_t,
+                                        tol,
                                     );
                                 }
                                 let specs = fx.kind.params();
@@ -3719,6 +3721,25 @@ impl App {
                 GenSpec::Noise { mono, animated } => {
                     ui.checkbox(mono, tr(lang, "Monocromático"));
                     ui.checkbox(animated, tr(lang, "Animado"));
+                }
+                GenSpec::Ofx(ofx_ref) => {
+                    let mut tmp_fx = crate::model::FxInstance::new(FxKind::Ofx);
+                    tmp_fx.id = mid;
+                    tmp_fx.ofx = Some(ofx_ref.clone());
+                    let tol = Ticks((self.project.settings.frame_dur().0 / 2).max(1));
+                    let local_t = self.cursor;
+                    if crate::plugin_manager::ofx_params_editor(
+                        ui,
+                        lang,
+                        &mut tmp_fx,
+                        &self.theme,
+                        local_t,
+                        tol,
+                    ) {
+                        if let Some(updated) = tmp_fx.ofx {
+                            *ofx_ref = updated;
+                        }
+                    }
                 }
             });
         if spec != before {

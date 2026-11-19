@@ -885,11 +885,12 @@ fn render_track_processed(
     opts: VideoRenderOpts,
     eye: StereoEye,
     parent_3d: Option<&super::motion3d::Mat4>,
+    bg: Option<&Frame>,
 ) -> Option<Frame> {
     let mut layer = render_track_eye(p, media, track, t, w, h, opts, eye)?;
     if !opts.bypass_fx {
         for fx in &track.fx {
-            vfx::apply(fx, &mut layer, t, p.settings.fps);
+            vfx::apply_with_aux(fx, &mut layer, bg, t, p.settings.fps);
         }
     }
     let ftc = track.env_value(EnvKind::FadeToColor, t);
@@ -1039,7 +1040,8 @@ fn compose_subtree(
         if !track_active {
             return;
         }
-        let Some(layer) = render_track_processed(p, media, track, t, w, h, opts, eye, parent_3d)
+        let Some(layer) =
+            render_track_processed(p, media, track, t, w, h, opts, eye, parent_3d, Some(out))
         else {
             return;
         };
@@ -1074,9 +1076,18 @@ fn compose_subtree(
     for child in ordered_children {
         if !p.is_track_effectively_muted(child.id) && child.mask_mode != TrackMaskMode::None {
             if !any_solo || child.solo {
-                if let Some(mask) =
-                    render_track_processed(p, media, child, t, w, h, opts, eye, child_parent_3d)
-                {
+                if let Some(mask) = render_track_processed(
+                    p,
+                    media,
+                    child,
+                    t,
+                    w,
+                    h,
+                    opts,
+                    eye,
+                    child_parent_3d,
+                    Some(&group),
+                ) {
                     apply_track_mask(&mut group, &mask, child.mask_mode);
                 }
             }
@@ -1098,9 +1109,18 @@ fn compose_subtree(
         }
     }
     if track_active {
-        if let Some(layer) =
-            render_track_processed(p, media, track, t, w, h, opts, eye, child_parent_3d)
-        {
+        if let Some(layer) = render_track_processed(
+            p,
+            media,
+            track,
+            t,
+            w,
+            h,
+            opts,
+            eye,
+            child_parent_3d,
+            Some(&group),
+        ) {
             if track.mask_mode != TrackMaskMode::None {
                 apply_track_mask(&mut group, &layer, track.mask_mode);
             } else {

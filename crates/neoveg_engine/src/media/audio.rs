@@ -21,6 +21,8 @@ pub struct AudioData {
     pub peaks_lr: Vec<[(f32, f32); 2]>,
     /// A fonte tinha um canal só (L e R são a mesma amostra).
     pub mono_source: bool,
+    /// Clipe MIDI original (`.mid`/`.midi`) para acionar instrumentos VST3.
+    pub midi: Option<std::sync::Arc<crate::midi::MidiClip>>,
 }
 
 /// Canal desenhado na forma de onda.
@@ -48,8 +50,18 @@ impl AudioData {
             peaks: vec![],
             peaks_lr: vec![],
             mono_source: false,
+            midi: None,
         };
         a.compute_peaks();
+        a
+    }
+
+    /// Constrói dados de áudio + eventos MIDI a partir de um clipe SMF decodificado.
+    pub fn from_midi(clip: crate::midi::MidiClip, sample_rate: u32) -> Self {
+        let sr = sample_rate.clamp(8000, 192_000);
+        let stereo = clip.render_fallback_stereo(sr);
+        let mut a = Self::from_stereo(sr, stereo);
+        a.midi = Some(std::sync::Arc::new(clip));
         a
     }
 

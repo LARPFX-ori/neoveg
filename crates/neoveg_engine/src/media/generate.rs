@@ -222,7 +222,40 @@ pub fn render(spec: &GenSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
             })
         }
         GenSpec::Text(ts) => render_text(ts, t, w, h, fonts),
+        GenSpec::Ofx(r) => render_ofx_generator(r, t, w, h),
     }
+}
+
+fn render_ofx_generator(r: &crate::model::OfxFxRef, t: f64, w: u32, h: u32) -> RgbaImage {
+    let n = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    let mut px = vec![0.0f32; n];
+    if let Some(host) = crate::plugin_host::default_host_exe() {
+        let fps = 30.0;
+        let frame_t = if t.is_finite() { t * fps } else { 0.0 };
+        if crate::plugin_host::ofx_render(&host, r, w, h, frame_t, fps, &mut px).is_ok() {
+            let mut raw = Vec::with_capacity(n);
+            for &[cr, cg, cb, ca] in px.as_chunks::<4>().0 {
+                let a = ca.clamp(0.0, 1.0);
+                let (ur, ug, ub) = if a > 1e-6 {
+                    (
+                        (cr / a).clamp(0.0, 1.0),
+                        (cg / a).clamp(0.0, 1.0),
+                        (cb / a).clamp(0.0, 1.0),
+                    )
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+                raw.push((ur * 255.0).round() as u8);
+                raw.push((ug * 255.0).round() as u8);
+                raw.push((ub * 255.0).round() as u8);
+                raw.push((a * 255.0).round() as u8);
+            }
+            if let Some(img) = RgbaImage::from_raw(w, h, raw) {
+                return img;
+            }
+        }
+    }
+    RgbaImage::from_pixel(w, h, image::Rgba([28, 32, 38, 255]))
 }
 
 struct Laid {
