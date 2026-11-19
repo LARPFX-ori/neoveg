@@ -1891,3 +1891,46 @@ fn projeto_aninhado_editado_em_aba_e_salvo_junto() {
     assert!(!app.has_doc_tabs());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Aba Exibição: a paleta de trilhas troca a cor só na tela, as cores de
+/// envelope têm padrão do tema e a intensidade dos ícones muda a saturação.
+#[test]
+fn aba_exibicao_cores_de_trilha_envelope_e_icones() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let p0 = crate::model::TRACK_COLORS[0];
+    assert_eq!(app.track_rgb(p0), p0, "sem escolha, a cor padrão");
+    app.prefs.display.set_track_color(0, Some([1, 2, 3]));
+    assert_eq!(app.track_rgb(p0), [1, 2, 3]);
+    assert_eq!(
+        app.track_rgb([9, 9, 9]),
+        [9, 9, 9],
+        "cor fora da paleta não muda"
+    );
+    // a trilha guarda a cor original: a troca é só de exibição
+    let t = crate::model::Track::new(crate::model::TrackKind::Video, "V");
+    assert!(crate::model::TRACK_COLORS.contains(&t.color));
+
+    let fb = egui::Color32::from_rgb(10, 20, 30);
+    assert_eq!(app.envelope_color(1, fb), fb);
+    app.prefs.display.envelope_colors[1] = Some([200, 0, 0]);
+    assert_eq!(
+        app.envelope_color(1, fb),
+        egui::Color32::from_rgb(200, 0, 0)
+    );
+    assert_eq!(app.envelope_color(99, fb), fb);
+
+    let c = egui::Color32::from_rgb(240, 60, 20);
+    assert_eq!(crate::icons::saturate(c, 100), c);
+    let g = crate::icons::saturate(c, 0);
+    assert!(g.r() == g.g() && g.g() == g.b(), "0% é cinza");
+    let vivo = crate::icons::saturate(c, 200);
+    assert!(vivo.r() >= c.r() && vivo.b() <= c.b());
+    crate::icons::set_display_prefs(100, None);
+}

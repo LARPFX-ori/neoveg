@@ -344,6 +344,11 @@ pub struct App {
     pub edit_details: crate::edit_details::EditDetailsState,
     pub(crate) confirm_close: bool,
     pub(crate) allow_close: bool,
+    /// Ocultar automaticamente a área de janelas: aberta agora, onde estava
+    /// no último quadro e desde quando o ponteiro saiu dela.
+    pub(crate) dock_auto_open: bool,
+    pub(crate) dock_auto_rect: Option<egui::Rect>,
+    pub(crate) dock_auto_left: Option<Instant>,
     /// Abas de documento: o projeto principal (0) e os projetos aninhados
     /// abertos em aba (`doc_tabs`).
     pub(crate) doc_tabs: Vec<crate::doc_tabs::DocTab>,
@@ -554,6 +559,9 @@ impl App {
             edit_details: crate::edit_details::EditDetailsState::default(),
             confirm_close: false,
             allow_close: false,
+            dock_auto_open: false,
+            dock_auto_rect: None,
+            dock_auto_left: None,
             doc_tabs: Vec::new(),
             active_doc: 0,
             pending_close_doc: None,
@@ -4603,6 +4611,11 @@ impl App {
     }
 
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
+        // aba Exibição: cor dos ícones e dos botões ativos
+        crate::icons::set_display_prefs(
+            self.prefs.display.icon_strength_pct,
+            self.prefs.display.button_highlight,
+        );
         // idioma e ícone das janelas próprias dos diálogos (dialog_window)
         crate::dialog_window::set_context(ctx, self.lang(), &self.window_icon);
         // escala da interface (Exibir > Escala da interface, Preferências)
@@ -4836,6 +4849,39 @@ impl App {
             crate::dock_drop::end(ctx);
             return;
         }
+        // Ocultar automaticamente a área de janelas (aba Exibição): fica uma
+        // faixa fina; passar o ponteiro nela mostra a área, que some de novo
+        // pouco depois de o ponteiro sair (nunca durante um arraste ou menu).
+        if self.prefs.display.auto_hide_dock && !self.dock_auto_open {
+            let strip = if at_top {
+                egui::TopBottomPanel::top("dock_auto_strip_top")
+            } else {
+                egui::TopBottomPanel::bottom("dock_auto_strip_bot")
+            };
+            let theme = self.theme.clone();
+            let lang = self.lang();
+            let hovered = strip
+                .exact_height(6.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    let r = ui.max_rect();
+                    ui.painter().rect_filled(r, 0.0, theme.border);
+                    ui.interact(r, ui.id().with("dock_auto_strip"), egui::Sense::hover())
+                        .on_hover_text(tr(
+                            lang,
+                            "Passe o ponteiro aqui para mostrar a área de janelas",
+                        ))
+                        .hovered()
+                })
+                .inner;
+            if hovered {
+                self.dock_auto_open = true;
+                self.dock_auto_left = None;
+                ctx.request_repaint();
+            }
+            return;
+        }
         let panel = if at_top {
             egui::TopBottomPanel::top("dock_top")
         } else {
@@ -4854,6 +4900,48 @@ impl App {
         if resp.response.dragged() && h.is_finite() && h >= 150.0 {
             self.dock_height = h.clamp(160.0, 720.0);
         }
+        if self.prefs.display.auto_hide_dock {
+            let rect = resp.response.rect;
+            self.dock_auto_rect = Some(rect);
+            let inside = ctx
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|p| rect.expand(4.0).contains(p));
+            let busy = ctx.dragged_id().is_some() || ctx.memory(|m| m.any_popup_open());
+            if inside || busy {
+                self.dock_auto_left = None;
+            } else {
+                let left = *self.dock_auto_left.get_or_insert_with(Instant::now);
+                if left.elapsed() >= std::time::Duration::from_millis(600) {
+                    self.dock_auto_open = false;
+                    self.dock_auto_left = None;
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        } else {
+            self.dock_auto_open = false;
+        }
+    }
+
+    /// Cor de exibição de uma trilha: a da paleta escolhida na aba Exibição
+    /// quando a trilha usa uma cor da paleta padrão.
+    pub(crate) fn track_rgb(&self, c: [u8; 3]) -> [u8; 3] {
+        crate::model::TRACK_COLORS
+            .iter()
+            .position(|d| *d == c)
+            .and_then(|i| self.prefs.display.track_color(i))
+            .unwrap_or(c)
+    }
+
+    /// Cor do envelope `i` (ordem de `DISPLAY_ENVELOPES`), ou `fallback`.
+    pub(crate) fn envelope_color(&self, i: usize, fallback: egui::Color32) -> egui::Color32 {
+        self.prefs
+            .display
+            .envelope_colors
+            .get(i)
+            .copied()
+            .flatten()
+            .map_or(fallback, |[r, g, b]| egui::Color32::from_rgb(r, g, b))
     }
 
     pub fn apply_edit_layout(

@@ -5700,6 +5700,164 @@ fn prefs_appearance(
             });
         },
     );
+    prefs_display_group(ui, cx, draft, inner_lw);
+}
+
+fn rgb_of(c: egui::Color32) -> [u8; 3] {
+    [c.r(), c.g(), c.b()]
+}
+
+/// Botão de cor com "Padrão": `None` volta à cor `def`.
+fn display_color_row(ui: &mut egui::Ui, lang: Language, slot: &mut Option<[u8; 3]>, def: [u8; 3]) {
+    let mut c = slot.unwrap_or(def);
+    if ui.color_edit_button_srgb(&mut c).changed() {
+        *slot = Some(c);
+    }
+    if ui
+        .add_enabled(
+            slot.is_some(),
+            egui::Button::new(tr(lang, "Padrão")).small(),
+        )
+        .clicked()
+    {
+        *slot = None;
+    }
+}
+
+/// Opções da aba Exibição (manual do VEGAS Pro 21, pp. 1101–1103; ajuda do
+/// VEGAS Pro 2026, *Display Tab*).
+fn prefs_display_group(
+    ui: &mut egui::Ui,
+    cx: &PrefsFormContext<'_>,
+    draft: &mut Preferences,
+    inner_lw: f32,
+) {
+    let lang = cx.lang;
+    let theme = cx.theme;
+    prefs_group_box(ui, theme, tr(lang, "Cores e exibição"), |ui| {
+        let d = &mut draft.display;
+        let n_of = |i: usize| tr_args(lang, "Cor {n}", &[("n", &(i + 1).to_string())]);
+        prefs_row(ui, inner_lw, tr(lang, "Cores das trilhas:"), |ui| {
+            let id = egui::Id::new("prefs_display_track_idx");
+            let mut idx: usize = ui.data_mut(|m| *m.get_temp_mut_or(id, 0usize));
+            idx = idx.min(neoveg_common::prefs::TRACK_PALETTE_LEN - 1);
+            egui::ComboBox::from_id_salt("prefs_display_track")
+                .selected_text(n_of(idx))
+                .show_ui(ui, |ui| {
+                    for i in 0..neoveg_common::prefs::TRACK_PALETTE_LEN {
+                        ui.selectable_value(&mut idx, i, n_of(i));
+                    }
+                });
+            ui.data_mut(|m| m.insert_temp(id, idx));
+            let def = crate::model::TRACK_COLORS
+                .get(idx)
+                .copied()
+                .unwrap_or([128, 128, 128]);
+            let mut slot = d.track_color(idx);
+            display_color_row(ui, lang, &mut slot, def);
+            d.set_track_color(idx, slot);
+            ui.label("(?)").on_hover_text(tr(
+                lang,
+                "Toda trilha que usa esta cor da paleta passa a ser mostrada com a cor escolhida.",
+            ));
+        });
+        prefs_row(ui, inner_lw, tr(lang, "Cores dos envelopes:"), |ui| {
+            let id = egui::Id::new("prefs_display_env_idx");
+            let mut idx: usize = ui.data_mut(|m| *m.get_temp_mut_or(id, 0usize));
+            idx = idx.min(neoveg_common::prefs::DISPLAY_ENVELOPES.len() - 1);
+            let name = |i: usize| {
+                tr(
+                    lang,
+                    neoveg_common::prefs::DISPLAY_ENVELOPES
+                        .get(i)
+                        .copied()
+                        .unwrap_or("Volume"),
+                )
+            };
+            egui::ComboBox::from_id_salt("prefs_display_env")
+                .selected_text(name(idx))
+                .show_ui(ui, |ui| {
+                    for i in 0..neoveg_common::prefs::DISPLAY_ENVELOPES.len() {
+                        ui.selectable_value(&mut idx, i, name(i));
+                    }
+                });
+            ui.data_mut(|m| m.insert_temp(id, idx));
+            // Volume e Opacidade usam a cor principal; Pan e Fade, a secundária
+            let def = if idx == 0 || idx == 2 {
+                rgb_of(theme.tl_env_primary)
+            } else {
+                rgb_of(theme.tl_env_secondary)
+            };
+            if let Some(slot) = d.envelope_colors.get_mut(idx) {
+                display_color_row(ui, lang, slot, def);
+            }
+        });
+        prefs_row(
+            ui,
+            inner_lw,
+            tr(lang, "Cor do indicador de encaixe:"),
+            |ui| {
+                display_color_row(ui, lang, &mut d.snap_color, rgb_of(theme.tl_playhead_edit));
+            },
+        );
+        prefs_row(
+            ui,
+            inner_lw,
+            tr(lang, "Intensidade da cor dos ícones:"),
+            |ui| {
+                ui.add(
+                egui::Slider::new(
+                    &mut d.icon_strength_pct,
+                    0..=neoveg_common::prefs::DisplayPrefs::ICON_STRENGTH_MAX,
+                )
+                    .suffix(" %"),
+            )
+            .on_hover_text(tr(
+                lang,
+                "À esquerda os ícones ficam menos saturados; à direita, mais. Não muda os temas de Alto Contraste.",
+            ));
+            },
+        );
+        prefs_row(
+            ui,
+            inner_lw,
+            tr(lang, "Cor de destaque dos botões:"),
+            |ui| {
+                display_color_row(
+                    ui,
+                    lang,
+                    &mut d.button_highlight,
+                    rgb_of(theme.selection_bg),
+                );
+                ui.label("(?)")
+                    .on_hover_text(tr(lang, "Fundo dos botões ativos da barra de ferramentas."));
+            },
+        );
+        prefs_indented(ui, inner_lw, |ui| {
+            ui.checkbox(
+                &mut d.auto_hide_dock,
+                tr(lang, "Ocultar automaticamente a área de janelas"),
+            )
+            .on_hover_text(tr(
+                lang,
+                "A área de janelas some quando não está em uso; passe o ponteiro na faixa fina para mostrá-la.",
+            ));
+            ui.checkbox(
+                &mut d.reverse_event_bg,
+                tr(lang, "Inverter a cor de fundo do evento"),
+            )
+            .on_hover_text(tr(
+                lang,
+                "Troca a cor de frente e de fundo dos eventos: no áudio, a cor da trilha vai para o fundo e a forma de onda fica escura.",
+            ));
+            if ui
+                .button(tr(lang, "Restaurar padrões da exibição"))
+                .clicked()
+            {
+                *d = neoveg_common::prefs::DisplayPrefs::default();
+            }
+        });
+    });
 }
 
 fn prefs_editing(
