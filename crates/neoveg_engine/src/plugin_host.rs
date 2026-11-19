@@ -17,6 +17,7 @@ mod ofx;
 #[cfg(windows)]
 mod vst3;
 
+use crate::midi::Vst3MidiEvent;
 use crate::model::{
     decode_hex_bytes, encode_hex_bytes, Id, OfxFxRef, OfxParamValue, Vst3FxRef, Vst3ParamValue,
     MAX_VST3_STATE_BYTES,
@@ -61,12 +62,29 @@ pub struct Vst3ClassInfo {
 }
 
 impl Vst3ClassInfo {
-    /// Verdadeiro para instrumentos (precisam de MIDI, que o host ainda não envia).
+    /// Verdadeiro para instrumentos VST3 (`Instrument` / `Synth`), alimentados por MIDI.
     pub fn is_instrument(&self) -> bool {
         self.sub_categories
             .split('|')
             .any(|c| c.eq_ignore_ascii_case("Instrument"))
     }
+}
+
+/// Ponto de automação VST3 com precisão de amostra dentro de um bloco.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vst3ParamPoint {
+    pub id: u32,
+    pub sample_offset: i32,
+    pub value: f64,
+}
+
+/// Resultado retornado ao fechar a janela gráfica nativa (`IPlugView`) de um VST3.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vst3EditorResult {
+    #[serde(default)]
+    pub params: Vec<Vst3ParamValue>,
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// Descritor de um parâmetro VST3 (para a interface). Valores normalizados.
@@ -291,7 +309,13 @@ pub fn serve_ofx(binary: &Path, plugin_id: &str) -> i32 {
         let params = fx.params();
         if write_msg(
             &mut output,
-            &serde_json::json!({"ok": true, "params": params}),
+            &serde_json::json!({
+                "ok": true,
+                "params": params,
+                "context": fx.context(),
+                "aux_clips": fx.aux_clips(),
+                "is_generator": fx.is_generator(),
+            }),
             &[],
         )
         .is_err()
@@ -323,13 +347,46 @@ pub fn serve_ofx(binary: &Path, plugin_id: &str) -> i32 {
                 .cloned()
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
+            let aux_names: Vec<String> = req
+                .get("aux_clips")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
             let n = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+            let plane_bytes = n.saturating_mul(4);
+            let aux_count = aux_names.len().min(4);
+            let expected_bytes = plane_bytes.saturating_mul(1 + aux_count);
             let mut px = vec![0f32; n];
-            let reply = if w == 0 || h == 0 || w > 7680 || h > 4320 || !bytes_to_f32(&data, &mut px)
+            let reply = if w == 0
+                || h == 0
+                || w > 7680
+                || h > 4320
+                || data.len() != expected_bytes
+                || !bytes_to_f32(&data[..plane_bytes], &mut px)
             {
                 Err("quadro inválido".to_string())
             } else {
-                fx.render(w as u32, h as u32, time, fps, &values, &mut px)
+                let mut aux_planes: Vec<(String, Vec<f32>)> = Vec::with_capacity(aux_count);
+                let mut ok_aux = true;
+                for (idx, name) in aux_names.iter().take(aux_count).enumerate() {
+                    let start = plane_bytes.saturating_mul(1 + idx);
+                    let end = start.saturating_add(plane_bytes);
+                    let mut apx = vec![0f32; n];
+                    if !bytes_to_f32(&data[start..end], &mut apx) {
+                        ok_aux = false;
+                        break;
+                    }
+                    aux_planes.push((name.clone(), apx));
+                }
+                if !ok_aux {
+                    Err("quadro auxiliar inválido".to_string())
+                } else {
+                    let aux_refs: Vec<(&str, &[f32])> = aux_planes
+                        .iter()
+                        .map(|(name, buf)| (name.as_str(), buf.as_slice()))
+                        .collect();
+                    fx.render_ex(w as u32, h as u32, time, fps, &values, &mut px, &aux_refs)
+                }
             };
             let sent = match reply {
                 Ok(()) => write_msg(
@@ -484,7 +541,8 @@ impl Worker {
         Ok((reply, out))
     }
 
-    fn render(
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_aux(
         &mut self,
         w: u32,
         h: u32,
@@ -492,9 +550,28 @@ impl Worker {
         fps: f64,
         values: &[OfxParamValue],
         px: &mut [f32],
+        aux: &[(&str, &[f32])],
     ) -> Result<(), String> {
-        let req = serde_json::json!({"w": w, "h": h, "time": time, "fps": fps, "values": values});
-        let (_, data) = self.request(&req, &f32_to_bytes(px), WORKER_TIMEOUT)?;
+        let valid_aux: Vec<(&str, &[f32])> = aux
+            .iter()
+            .copied()
+            .filter(|(_, a)| a.len() == px.len())
+            .take(4)
+            .collect();
+        let aux_names: Vec<&str> = valid_aux.iter().map(|(n, _)| *n).collect();
+        let req = serde_json::json!({
+            "w": w,
+            "h": h,
+            "time": time,
+            "fps": fps,
+            "values": values,
+            "aux_clips": aux_names,
+        });
+        let mut payload = f32_to_bytes(px);
+        for (_, apx) in &valid_aux {
+            payload.extend_from_slice(&f32_to_bytes(apx));
+        }
+        let (_, data) = self.request(&req, &payload, WORKER_TIMEOUT)?;
         if bytes_to_f32(&data, px) {
             Ok(())
         } else {
@@ -559,7 +636,25 @@ pub fn ofx_render(
     fps: f64,
     px: &mut [f32],
 ) -> Result<(), String> {
-    with_worker(host_exe, r, |wk| wk.render(w, h, time, fps, &r.params, px))
+    ofx_render_with_aux(host_exe, r, w, h, time, fps, px, &[])
+}
+
+/// Variante de [`ofx_render`] que fornece entradas auxiliares (ex.: quadro
+/// de fundo ou máscara da timeline) para plug-ins OFX em contexto *General*.
+#[allow(clippy::too_many_arguments)]
+pub fn ofx_render_with_aux(
+    host_exe: &Path,
+    r: &OfxFxRef,
+    w: u32,
+    h: u32,
+    time: f64,
+    fps: f64,
+    px: &mut [f32],
+    aux: &[(&str, &[f32])],
+) -> Result<(), String> {
+    with_worker(host_exe, r, |wk| {
+        wk.render_with_aux(w, h, time, fps, &r.params, px, aux)
+    })
 }
 
 /// Encerra todos os hosts de plug-ins abertos.
@@ -718,13 +813,23 @@ pub fn serve_vst3(binary: &Path, class_id: &str, sample_rate: &str) -> i32 {
                         .cloned()
                         .and_then(|v| serde_json::from_value(v).ok())
                         .unwrap_or_default();
+                    let automation: Vec<Vst3ParamPoint> = req
+                        .get("automation")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default();
+                    let midi: Vec<Vst3MidiEvent> = req
+                        .get("midi")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default();
                     let n = data.len() / 4;
                     buf.resize(n, 0.0);
                     let res =
                         if n % 2 != 0 || n > VST3_MAX_BLOCK * 2 || !bytes_to_f32(&data, &mut buf) {
                             Err("bloco de áudio inválido".to_string())
                         } else {
-                            fx.process(&mut buf, &values)
+                            fx.process(&mut buf, &values, &automation, &midi)
                         };
                     match res {
                         Ok(()) => write_msg(
@@ -807,6 +912,128 @@ pub fn serve_vst3(binary: &Path, class_id: &str, sample_rate: &str) -> i32 {
     }
 }
 
+/// Subprocesso `neoveg --plugin-host edit-vst3 <binário> <classe> <taxa>`:
+/// restaura o estado/parâmetros atuais do plug-in, abre a janela gráfica nativa
+/// (`IPlugView`) e, quando o usuário a fecha, devolve parâmetros e estado em JSON.
+pub fn serve_vst3_editor(binary: &Path, class_id: &str, sample_rate: &str) -> i32 {
+    #[cfg(windows)]
+    {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut input = stdin.lock();
+        let mut output = stdout.lock();
+        let Ok((init_req, state_bytes)) = read_msg(&mut input) else {
+            let _ = write_msg(
+                &mut output,
+                &serde_json::json!({"ok": false, "error": "pedido inicial ausente"}),
+                &[],
+            );
+            return 3;
+        };
+        let title = init_req
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("VST3")
+            .to_string();
+        let init_params: Vec<Vst3ParamValue> = init_req
+            .get("params")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let opened = sample_rate
+            .parse::<u32>()
+            .map_err(|_| format!("taxa de amostragem inválida: {sample_rate}"))
+            .and_then(|sr| vst3::HostedVst3::open(binary, class_id, sr));
+        let mut fx = match opened {
+            Ok(fx) => fx,
+            Err(e) => {
+                let _ = write_msg(
+                    &mut output,
+                    &serde_json::json!({"ok": false, "error": e}),
+                    &[],
+                );
+                return 3;
+            }
+        };
+        if !state_bytes.is_empty() && state_bytes.len() <= MAX_VST3_STATE_BYTES {
+            let _ = fx.set_state_bytes(&state_bytes);
+        }
+        if !init_params.is_empty() {
+            let mut silence = [0.0f32; 2];
+            let _ = fx.process(&mut silence, &init_params, &[], &[]);
+        }
+        let reply = match fx.run_editor_modal(&title) {
+            Ok((params, state)) => serde_json::json!({
+                "ok": true,
+                "params": params,
+                "state": state,
+            }),
+            Err(e) => serde_json::json!({"ok": false, "error": e}),
+        };
+        let _ = write_msg(&mut output, &reply, &[]);
+        0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (binary, class_id, sample_rate);
+        eprintln!("interface gráfica VST3 disponível só no Windows por enquanto");
+        5
+    }
+}
+
+/// Abre a interface gráfica nativa (`IPlugView`) de um plug-in VST3 em um
+/// subprocesso isolado (`--plugin-host edit-vst3`) e retorna os parâmetros e
+/// o estado binário editados quando a janela é fechada.
+pub fn vst3_open_editor_isolated(
+    host_exe: &Path,
+    r: &Vst3FxRef,
+    title: &str,
+) -> Result<Vst3EditorResult, String> {
+    let mut child = Command::new(host_exe)
+        .args([
+            "--plugin-host",
+            "edit-vst3",
+            &r.binary,
+            &r.class_id,
+            "48000",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("não foi possível abrir a interface do plug-in: {e}"))?;
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        return Err("host de interface VST3 sem canais".into());
+    };
+    let state_bytes = r
+        .state
+        .as_deref()
+        .and_then(decode_hex_bytes)
+        .unwrap_or_default();
+    let req = serde_json::json!({
+        "title": title,
+        "params": r.params,
+    });
+    if let Err(e) = write_msg(&mut stdin, &req, &state_bytes) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("falha ao enviar estado ao editor VST3: {e}"));
+    }
+    drop(stdin);
+    let msg = read_msg(&mut stdout);
+    let _ = child.wait();
+    let (reply, _) = msg.map_err(|e| format!("editor VST3 encerrado inesperadamente: {e}"))?;
+    if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(reply
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("não foi possível abrir a interface gráfica do plug-in")
+            .to_string());
+    }
+    serde_json::from_value(reply).map_err(|e| format!("resposta inválida da interface VST3: {e}"))
+}
+
 fn hash_vst3_state(state: Option<&str>) -> u64 {
     let Some(s) = state else {
         return 0;
@@ -850,8 +1077,19 @@ impl Worker {
         Ok(w)
     }
 
-    fn vst3_process(&mut self, buf: &mut [f32], values: &[Vst3ParamValue]) -> Result<(), String> {
-        let req = serde_json::json!({"cmd": "process", "values": values});
+    fn vst3_process(
+        &mut self,
+        buf: &mut [f32],
+        values: &[Vst3ParamValue],
+        automation: &[Vst3ParamPoint],
+        midi: &[Vst3MidiEvent],
+    ) -> Result<(), String> {
+        let req = serde_json::json!({
+            "cmd": "process",
+            "values": values,
+            "automation": automation,
+            "midi": midi,
+        });
         let (_, data) = self.request(&req, &f32_to_bytes(buf), VST3_BLOCK_TIMEOUT)?;
         if bytes_to_f32(&data, buf) {
             Ok(())
@@ -942,6 +1180,24 @@ pub fn vst3_process(
     buf: &mut [f32],
     wait: bool,
 ) -> Result<Result<(), Vst3Skip>, String> {
+    vst3_process_ex(host_exe, owner, fx, r, sr, buf, &[], &[], wait)
+}
+
+/// Variante de [`vst3_process`] que também envia pontos de automação com
+/// precisão de amostra (`auto_points`) e eventos MIDI (`midi_events`) para
+/// instrumentos e efeitos automatizados.
+#[allow(clippy::too_many_arguments)]
+pub fn vst3_process_ex(
+    host_exe: &Path,
+    owner: u64,
+    fx: Id,
+    r: &Vst3FxRef,
+    sr: u32,
+    buf: &mut [f32],
+    auto_points: &[Vst3ParamPoint],
+    midi_events: &[Vst3MidiEvent],
+    wait: bool,
+) -> Result<Result<(), Vst3Skip>, String> {
     let key = Vst3Key {
         owner,
         fx,
@@ -991,11 +1247,32 @@ pub fn vst3_process(
     // trabalha numa cópia: se um bloco falhar no meio, `buf` fica intacto
     let mut out = buf.to_vec();
     let mut res = Ok(());
+    let mut chunk_start_frame: i32 = 0;
     for chunk in out.chunks_mut(VST3_MAX_BLOCK * 2) {
-        res = w.vst3_process(chunk, &r.params);
+        let chunk_frames = (chunk.len() / 2) as i32;
+        let chunk_end_frame = chunk_start_frame.saturating_add(chunk_frames);
+        let sub_auto: Vec<Vst3ParamPoint> = auto_points
+            .iter()
+            .filter(|p| p.sample_offset >= chunk_start_frame && p.sample_offset < chunk_end_frame)
+            .map(|p| Vst3ParamPoint {
+                id: p.id,
+                sample_offset: p.sample_offset - chunk_start_frame,
+                value: p.value,
+            })
+            .collect();
+        let sub_midi: Vec<Vst3MidiEvent> = midi_events
+            .iter()
+            .filter(|m| m.sample_offset >= chunk_start_frame && m.sample_offset < chunk_end_frame)
+            .map(|m| Vst3MidiEvent {
+                sample_offset: m.sample_offset - chunk_start_frame,
+                ..*m
+            })
+            .collect();
+        res = w.vst3_process(chunk, &r.params, &sub_auto, &sub_midi);
         if res.is_err() {
             break;
         }
+        chunk_start_frame = chunk_end_frame;
     }
     match res {
         Ok(()) => {
@@ -1142,7 +1419,7 @@ pub fn vst3_get_state(host_exe: &Path, r: &Vst3FxRef) -> Result<String, String> 
     let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
     if !r.params.is_empty() {
         let mut silence = [0f32; 2];
-        w.vst3_process(&mut silence, &r.params)?;
+        w.vst3_process(&mut silence, &r.params, &[], &[])?;
     }
     let (_, data) = w.request(
         &serde_json::json!({"cmd": "get_state"}),

@@ -188,6 +188,7 @@ fn vst3_ref(bin: &Path, class_id: &str, label: &str) -> neoveg_engine::model::Vs
         label: label.into(),
         params: vec![],
         state: None,
+        is_instrument: false,
     }
 }
 
@@ -362,6 +363,7 @@ fn vst3_effect_processes_its_input() {
         fx.params.push(neoveg_engine::model::Vst3ParamValue {
             id: p.id,
             value: 1.0,
+            keys: vec![],
         });
         let mut buf = sine(1024);
         vst3_process(host(), owner, 9, &fx, 48_000, &mut buf, true)

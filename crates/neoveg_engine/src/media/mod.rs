@@ -50,7 +50,7 @@ pub const IMAGE_EXTS: &[&str] = &[
 ];
 pub const AUDIO_EXTS: &[&str] = &[
     "wav", "wave", "bwf", "rf64", "aif", "aiff", "aifc", "flac", "ogg", "oga", "mp3", "au", "snd",
-    "caf", "w64", "voc", "8svx", "svx", "qoa",
+    "caf", "w64", "voc", "8svx", "svx", "qoa", "mid", "midi",
 ];
 pub const VIDEO_EXTS: &[&str] = &["avi", "y4m"];
 /// Contêineres de mídia decodificados via API nativa do sistema operacional
@@ -1100,6 +1100,18 @@ fn load_entry_inner(
                 }
             } else if SYSTEM_CONTAINER_EXTS.contains(&ext.as_str()) {
                 load_system_container(&p, item)?
+            } else if ext == "mid" || ext == "midi" {
+                let clip = crate::midi::load_smf_file(&p).map_err(anyhow::Error::msg)?;
+                let notes_n = clip.notes.len();
+                let dur = clip.duration;
+                let a = AudioData::from_midi(clip, 48_000);
+                item.has_audio = true;
+                item.duration = Some(dur);
+                item.info = format!("MIDI ({notes_n} notas), {:.2} s", dur.as_secs_f64());
+                MediaEntry {
+                    video: VideoSource::None,
+                    audio: Some(Arc::new(a)),
+                }
             } else {
                 let a = audio::decode_file(&p)?;
                 item.has_audio = true;

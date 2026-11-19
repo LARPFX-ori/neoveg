@@ -348,9 +348,16 @@ fn hash(x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
-/// Aplica um efeito OFX pelo host isolado. Em erro o quadro fica intacto e a
-/// falha vai uma vez para o log (por efeito), sem travar a renderização.
-fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameRate) {
+/// Aplica um efeito OFX pelo host isolado, podendo passar um quadro auxiliar
+/// (ex.: composição das trilhas abaixo) como entrada secundária em contexto
+/// *General*. Em erro o quadro fica intacto e a falha vai uma vez para o log.
+fn apply_ofx(
+    fx: &FxInstance,
+    f: &mut Frame,
+    aux: Option<&Frame>,
+    t: crate::model::Ticks,
+    fps: FrameRate,
+) {
     use std::sync::{Mutex, OnceLock, PoisonError};
     static LOGGED: OnceLock<Mutex<std::collections::HashSet<crate::model::Id>>> = OnceLock::new();
     let Some(r) = fx.ofx.as_ref() else {
@@ -364,7 +371,14 @@ fn apply_ofx(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameR
     };
     let (time, rate) = ofx_time(t, fps);
     let mut px: Vec<f32> = f.px.iter().flatten().copied().collect();
-    match crate::plugin_host::ofx_render(&host, r, w, h, time, rate, &mut px) {
+    let aux_px: Option<Vec<f32>> = aux
+        .filter(|a| a.w == f.w && a.h == f.h)
+        .map(|a| a.px.iter().flatten().copied().collect());
+    let aux_slice: Vec<(&str, &[f32])> = match aux_px.as_deref() {
+        Some(buf) => vec![("Background", buf)],
+        None => Vec::new(),
+    };
+    match crate::plugin_host::ofx_render_with_aux(&host, r, w, h, time, rate, &mut px, &aux_slice) {
         Ok(()) => {
             for (dst, src) in f.px.iter_mut().zip(px.as_chunks::<4>().0) {
                 *dst = *src;
@@ -399,11 +413,23 @@ fn ofx_time(t: crate::model::Ticks, fps: FrameRate) -> (f64, f64) {
 /// keyframes dos parâmetros; `fps` é a taxa do projeto (tempo dos efeitos
 /// OFX).
 pub fn apply(fx: &FxInstance, f: &mut Frame, t: crate::model::Ticks, fps: FrameRate) {
+    apply_with_aux(fx, f, None, t, fps);
+}
+
+/// Variante de [`apply`] que encaminha um quadro auxiliar (ex.: camada de fundo)
+/// para plug-ins OFX de múltiplas entradas em contexto *General*.
+pub fn apply_with_aux(
+    fx: &FxInstance,
+    f: &mut Frame,
+    aux: Option<&Frame>,
+    t: crate::model::Ticks,
+    fps: FrameRate,
+) {
     if !fx.enabled || fx.kind.is_audio() {
         return;
     }
     if fx.kind == FxKind::Ofx {
-        apply_ofx(fx, f, t, fps);
+        apply_ofx(fx, f, aux, t, fps);
         return;
     }
     let v = fx.values(t);

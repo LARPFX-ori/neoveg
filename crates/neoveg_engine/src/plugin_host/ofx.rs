@@ -6,10 +6,11 @@
 //! **Só roda no subprocesso `neoveg --plugin-host serve-ofx`**: o plug-in é
 //! código de terceiros e pode travar ou derrubar o processo.
 //!
-//! Escopo: contexto *Filter* (ou *General* com `Source`, `Output` e clipes
-//! opcionais desconectados), imagem RGBA inteira (sem tiles), profundidade float
-//! ou byte, um quadro por chamada, parâmetros com keyframes (`getValueAtTime`,
-//! `getDerivative`, `getIntegral`, chaves) e execução *multithread* sequencial.
+//! Escopo: contextos *General* (com `Source`, `Output` e clipes auxiliares
+//! conectados sob demanda), *Filter* e *Generator*, renderização por tiles
+//! (`OfxImageEffectPropSupportsTiles = 1`), profundidade float ou byte,
+//! parâmetros com keyframes (`getValueAtTime`, `getDerivative`, `getIntegral`,
+//! chaves) e execução *multithread* sequencial.
 //!
 //! As funções variádicas de `ofxParam.h` (`paramGetValue`, `paramSetValue` e
 //! afins) são implementadas como funções de aridade fixa. Isso depende da
@@ -734,6 +735,8 @@ struct Buffers {
     float: bool,
     src: Vec<u8>,
     dst: Vec<u8>,
+    /// Entradas auxiliares do contexto *General* (ex.: `Mask`, `Background`), por nome do clipe.
+    aux_srcs: HashMap<String, Vec<u8>>,
 }
 
 pub(crate) struct Effect {
@@ -900,8 +903,16 @@ unsafe extern "C" fn ie_clip_get_image(
     }
     let data = match c.name.as_str() {
         "Output" => b.dst.as_mut_ptr(),
-        "Source" => b.src.as_mut_ptr(),
-        _ => return STAT_FAILED,
+        "Source" => {
+            if b.src.is_empty() {
+                return STAT_FAILED;
+            }
+            b.src.as_mut_ptr()
+        }
+        other => match b.aux_srcs.get_mut(other) {
+            Some(buf) if !buf.is_empty() => buf.as_mut_ptr(),
+            _ => return STAT_FAILED,
+        },
     };
     let bpp: c_int = if b.float { 16 } else { 4 };
     let mut img = Box::<PropSet>::default();
@@ -1799,7 +1810,7 @@ fn host_props() -> Box<PropSet> {
     p.set_int("OfxImageEffectHostPropIsBackground", &[0]);
     p.set_int("OfxImageEffectPropSupportsOverlays", &[0]);
     p.set_int("OfxImageEffectPropSupportsMultiResolution", &[0]);
-    p.set_int("OfxImageEffectPropSupportsTiles", &[0]);
+    p.set_int("OfxImageEffectPropSupportsTiles", &[1]);
     p.set_int("OfxImageEffectPropTemporalClipAccess", &[0]);
     p.set_str(
         "OfxImageEffectPropSupportedComponents",
@@ -1808,8 +1819,9 @@ fn host_props() -> Box<PropSet> {
     p.set_str(
         "OfxImageEffectPropSupportedContexts",
         &[
-            "OfxImageEffectContextFilter",
             "OfxImageEffectContextGeneral",
+            "OfxImageEffectContextFilter",
+            "OfxImageEffectContextGenerator",
         ],
     );
     p.set_str(
@@ -1839,7 +1851,66 @@ fn host_props() -> Box<PropSet> {
 // Instância hospedada
 // ---------------------------------------------------------------------------
 
-/// Plug-in OFX carregado, descrito e instanciado no contexto *Filter*.
+/// Tamanho padrão dos tiles enviados em `OfxImageEffectPropRenderWindow` (em pixels).
+pub(crate) const OFX_TILE_SIZE: i32 = 512;
+
+/// Divide um quadro `w x h` em retângulos `[x1, y1, x2, y2]` para renderização
+/// por tiles OFX. Quando `!supports_tiles` ou o quadro cabe em um tile, devolve
+/// um único retângulo `[0, 0, w, h]`.
+pub(crate) fn compute_render_tiles(
+    w: i32,
+    h: i32,
+    tile_size: i32,
+    supports_tiles: bool,
+) -> Vec<[i32; 4]> {
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    let step = tile_size.max(64);
+    if !supports_tiles || (w <= step && h <= step) {
+        return vec![[0, 0, w, h]];
+    }
+    let mut tiles = Vec::new();
+    let mut y = 0;
+    while y < h {
+        let y2 = y.saturating_add(step).min(h);
+        let mut x = 0;
+        while x < w {
+            let x2 = x.saturating_add(step).min(w);
+            tiles.push([x, y, x2, y2]);
+            x = x2;
+        }
+        y = y2;
+    }
+    tiles
+}
+
+/// Converte um quadro RGBA `f32` de cima para baixo em buffer OFX (de baixo para cima).
+fn encode_ofx_plane(pixels: &[f32], w: usize, h: usize, float: bool) -> Vec<u8> {
+    let row = w.saturating_mul(4);
+    let n = w.saturating_mul(h);
+    if float {
+        let mut dst = vec![0u8; n.saturating_mul(16)];
+        for y in 0..h {
+            let from = &pixels[(h - 1 - y) * row..][..row];
+            for (i, v) in from.iter().enumerate() {
+                dst[(y * row + i) * 4..][..4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        dst
+    } else {
+        let mut dst = vec![0u8; n.saturating_mul(4)];
+        for y in 0..h {
+            let from = &pixels[(h - 1 - y) * row..][..row];
+            for (i, v) in from.iter().enumerate() {
+                dst[y * row + i] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+        dst
+    }
+}
+
+/// Plug-in OFX carregado, descrito e instanciado em *General*, *Filter* ou *Generator*.
 pub(crate) struct HostedEffect {
     plugin: *const OfxPluginRaw,
     _host: Box<OfxHostRaw>,
@@ -1847,6 +1918,9 @@ pub(crate) struct HostedEffect {
     _desc: Box<Effect>,
     inst: Box<Effect>,
     float: bool,
+    supports_tiles: bool,
+    context: String,
+    aux_clips: Vec<String>,
 }
 
 impl HostedEffect {
@@ -1926,6 +2000,9 @@ impl HostedEffect {
             _desc: Effect::new(),
             inst: Effect::new(),
             float: true,
+            supports_tiles: true,
+            context: String::new(),
+            aux_clips: Vec::new(),
         };
         let ok = |st: OfxStatus| st == STAT_OK || st == STAT_REPLY_DEFAULT;
         let st = me.call(
@@ -1948,13 +2025,28 @@ impl HostedEffect {
             return Err(format!("OfxActionDescribe falhou (status {st})"));
         }
         let contexts = me._desc.props.strs("OfxImageEffectPropSupportedContexts");
-        let ctx = if contexts.iter().any(|c| c == "OfxImageEffectContextFilter") {
-            "OfxImageEffectContextFilter"
-        } else if contexts.iter().any(|c| c == "OfxImageEffectContextGeneral") {
+        let ctx = if contexts.iter().any(|c| c == "OfxImageEffectContextGeneral") {
             "OfxImageEffectContextGeneral"
+        } else if contexts.iter().any(|c| c == "OfxImageEffectContextFilter") {
+            "OfxImageEffectContextFilter"
+        } else if contexts
+            .iter()
+            .any(|c| c == "OfxImageEffectContextGenerator")
+        {
+            "OfxImageEffectContextGenerator"
         } else {
-            return Err("plug-in não suporta os contextos Filter nem General".into());
+            return Err("plug-in não suporta os contextos General, Filter nem Generator".into());
         };
+        me.context = ctx.to_string();
+        // Pela especificação OFX 1.4, `OfxImageEffectPropSupportsTiles` tem padrão 1.
+        me.supports_tiles = me
+            ._desc
+            .props
+            .nums("OfxImageEffectPropSupportsTiles")
+            .first()
+            .copied()
+            .map(|v| v != 0.0)
+            .unwrap_or(true);
         let depths = me
             ._desc
             .props
@@ -1974,11 +2066,19 @@ impl HostedEffect {
         if !ok(st) {
             return Err(format!("DescribeInContext falhou (status {st})"));
         }
+        let is_gen = ctx == "OfxImageEffectContextGenerator";
         if !me._desc.clips.iter().any(|c| c.name == "Output")
-            || !me._desc.clips.iter().any(|c| c.name == "Source")
+            || (!is_gen && !me._desc.clips.iter().any(|c| c.name == "Source"))
         {
-            return Err("plug-in não define os clipes Source e Output".into());
+            return Err("plug-in não define os clipes obrigatórios do contexto".into());
         }
+        me.aux_clips = me
+            ._desc
+            .clips
+            .iter()
+            .filter(|c| c.name != "Output" && c.name != "Source")
+            .map(|c| c.name.clone())
+            .collect();
 
         me.inst = Effect::instance_of(&me._desc);
         me.inst.props.set_str("OfxImageEffectPropContext", &[ctx]);
@@ -2084,8 +2184,24 @@ impl HostedEffect {
             .collect()
     }
 
-    /// Renderiza um quadro RGBA premultiplicado (de cima para baixo) no lugar.
-    pub(crate) fn render(
+    pub(crate) fn context(&self) -> &str {
+        &self.context
+    }
+
+    pub(crate) fn aux_clips(&self) -> &[String] {
+        &self.aux_clips
+    }
+
+    pub(crate) fn is_generator(&self) -> bool {
+        self.context == "OfxImageEffectContextGenerator"
+            || !self.inst.clips.iter().any(|c| c.name == "Source")
+    }
+
+    /// Renderiza um quadro RGBA premultiplicado (de cima para baixo) no lugar,
+    /// com suporte a tiles (`OfxImageEffectPropSupportsTiles`) e entradas
+    /// auxiliares no contexto *General*.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_ex(
         &mut self,
         w: u32,
         h: u32,
@@ -2093,6 +2209,7 @@ impl HostedEffect {
         fps: f64,
         values: &[OfxParamValue],
         pixels: &mut [f32],
+        aux_inputs: &[(&str, &[f32])],
     ) -> Result<(), String> {
         let (wi, hi) = (
             i32::try_from(w).map_err(|_| "largura inválida")?,
@@ -2152,31 +2269,54 @@ impl HostedEffect {
         }
         // monta os buffers (OFX: primeira linha = baixo)
         let row = w as usize * 4;
+        let primary_plane = encode_ofx_plane(pixels, w as usize, h as usize, self.float);
+        let mut aux_map: HashMap<String, Vec<u8>> = HashMap::new();
+        for &(clip_name, aux_px) in aux_inputs.iter().take(4) {
+            if aux_px.len() == pixels.len() {
+                aux_map.insert(
+                    clip_name.to_string(),
+                    encode_ofx_plane(aux_px, w as usize, h as usize, self.float),
+                );
+            }
+        }
+        // Conecta entradas auxiliares declaradas no contexto General: se vier
+        // um frame explícito (ex.: fundo ou máscara da timeline) conecta pelo
+        // nome, ou liga o primeiro frame auxiliar disponível ao primeiro clipe
+        // auxiliar que o plug-in declarou.
+        let fallback_aux = aux_inputs
+            .first()
+            .filter(|(_, p)| p.len() == pixels.len())
+            .map(|(_, p)| encode_ofx_plane(p, w as usize, h as usize, self.float));
+        for c in &mut self.inst.clips {
+            if c.name == "Output" || c.name == "Source" {
+                c.props.set_int("OfxImageClipPropConnected", &[1]);
+                continue;
+            }
+            if !aux_map.contains_key(&c.name) {
+                let optional = c
+                    .props
+                    .nums("OfxImageClipPropOptional")
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0)
+                    != 0.0;
+                if let Some(fb) = &fallback_aux {
+                    aux_map.insert(c.name.clone(), fb.clone());
+                } else if !optional {
+                    aux_map.insert(c.name.clone(), primary_plane.clone());
+                }
+            }
+            let connected = i32::from(aux_map.contains_key(&c.name));
+            c.props.set_int("OfxImageClipPropConnected", &[connected]);
+        }
+
         let b = &mut self.inst.bufs;
         b.w = wi;
         b.h = hi;
         b.float = self.float;
-        if self.float {
-            let mut src = vec![0u8; n * 16];
-            for y in 0..h as usize {
-                let from = &pixels[(h as usize - 1 - y) * row..][..row];
-                for (i, v) in from.iter().enumerate() {
-                    src[(y * row + i) * 4..][..4].copy_from_slice(&v.to_le_bytes());
-                }
-            }
-            b.src = src;
-            b.dst = vec![0u8; n * 16];
-        } else {
-            let mut src = vec![0u8; n * 4];
-            for y in 0..h as usize {
-                let from = &pixels[(h as usize - 1 - y) * row..][..row];
-                for (i, v) in from.iter().enumerate() {
-                    src[y * row + i] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                }
-            }
-            b.src = src;
-            b.dst = vec![0u8; n * 4];
-        }
+        b.src = primary_plane;
+        b.dst = vec![0u8; n * if self.float { 16 } else { 4 }];
+        b.aux_srcs = aux_map;
 
         let inst_ptr: *mut Effect = &mut *self.inst;
         let mut seq = Box::<PropSet>::default();
@@ -2193,20 +2333,27 @@ impl HostedEffect {
             std::ptr::null_mut(),
         );
 
-        let mut args = Box::<PropSet>::default();
-        args.set_dbl("OfxPropTime", &[time]);
-        args.set_str("OfxImageEffectPropFieldToRender", &["OfxImageFieldNone"]);
-        args.set_int("OfxImageEffectPropRenderWindow", &[0, 0, wi, hi]);
-        args.set_dbl("OfxImageEffectPropRenderScale", &[1.0, 1.0]);
-        args.set_int("OfxImageEffectPropSequentialRenderStatus", &[0]);
-        args.set_int("OfxImageEffectPropInteractiveRenderStatus", &[0]);
-        args.set_int("OfxImageEffectPropRenderQualityDraft", &[0]);
-        let st = self.call(
-            "OfxImageEffectActionRender",
-            inst_ptr.cast(),
-            &mut *args,
-            std::ptr::null_mut(),
-        );
+        let tiles = compute_render_tiles(wi, hi, OFX_TILE_SIZE, self.supports_tiles);
+        let mut st = STAT_OK;
+        for tile in tiles {
+            let mut args = Box::<PropSet>::default();
+            args.set_dbl("OfxPropTime", &[time]);
+            args.set_str("OfxImageEffectPropFieldToRender", &["OfxImageFieldNone"]);
+            args.set_int("OfxImageEffectPropRenderWindow", &tile);
+            args.set_dbl("OfxImageEffectPropRenderScale", &[1.0, 1.0]);
+            args.set_int("OfxImageEffectPropSequentialRenderStatus", &[0]);
+            args.set_int("OfxImageEffectPropInteractiveRenderStatus", &[0]);
+            args.set_int("OfxImageEffectPropRenderQualityDraft", &[0]);
+            st = self.call(
+                "OfxImageEffectActionRender",
+                inst_ptr.cast(),
+                &mut *args,
+                std::ptr::null_mut(),
+            );
+            if st != STAT_OK {
+                break;
+            }
+        }
         let _ = self.call(
             "OfxImageEffectActionEndSequenceRender",
             inst_ptr.cast(),
@@ -2429,6 +2576,60 @@ mod tests {
             assert_eq!(pa_delete_all_keys(ptr), STAT_OK);
             assert_eq!(pa_get_num_keys(ptr, &mut count), STAT_OK);
             assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn ofx_tiles_cobrem_quadro_completo_e_aceitam_entradas_auxiliares() {
+        let tiles = compute_render_tiles(1920, 1080, 512, true);
+        assert_eq!(tiles.len(), 12); // 4 colunas x 3 linhas
+        let area: i64 = tiles
+            .iter()
+            .map(|t| i64::from(t[2] - t[0]) * i64::from(t[3] - t[1]))
+            .sum();
+        assert_eq!(area, 1920 * 1080);
+        assert_eq!(
+            compute_render_tiles(1920, 1080, 512, false),
+            vec![[0, 0, 1920, 1080]]
+        );
+        assert!(compute_render_tiles(0, 1080, 512, true).is_empty());
+        assert!(compute_render_tiles(-4, 10, 512, true).is_empty());
+
+        // Clipe auxiliar ("Mask") no contexto General resolve via ie_clip_get_image
+        let mut eff = Effect::new();
+        eff.bufs.w = 4;
+        eff.bufs.h = 4;
+        eff.bufs.float = true;
+        eff.bufs.src = vec![1u8; 4 * 4 * 16];
+        eff.bufs.dst = vec![0u8; 4 * 4 * 16];
+        eff.bufs
+            .aux_srcs
+            .insert("Mask".to_string(), vec![2u8; 4 * 4 * 16]);
+        let eff_ptr: *mut Effect = &mut *eff;
+        let mut mask_clip = Box::new(Clip {
+            name: "Mask".into(),
+            props: Box::default(),
+            images: vec![],
+            owner: eff_ptr,
+        });
+        let mut missing_clip = Box::new(Clip {
+            name: "Absent".into(),
+            props: Box::default(),
+            images: vec![],
+            owner: eff_ptr,
+        });
+        let mut img_out: *mut PropSet = std::ptr::null_mut();
+        // SAFETY: clipes e efeito locais válidos.
+        unsafe {
+            assert_eq!(
+                ie_clip_get_image(&mut *mask_clip, 0.0, std::ptr::null(), &mut img_out),
+                STAT_OK
+            );
+            assert!(!img_out.is_null());
+            assert_eq!(
+                ie_clip_get_image(&mut *missing_clip, 0.0, std::ptr::null(), &mut img_out),
+                STAT_FAILED
+            );
         }
     }
 }

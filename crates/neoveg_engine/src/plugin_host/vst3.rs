@@ -5,21 +5,24 @@
 //! `probe-vst3`): o plug-in é código de terceiros e pode travar ou derrubar o
 //! processo.
 //!
-//! Escopo: classes `Audio Module Class` usadas como efeito, barramento de
-//! áudio principal (entrada e saída) em estéreo ou mono, amostras `f32`,
-//! blocos de até [`MAX_BLOCK`] quadros, parâmetros por valor normalizado
-//! aplicados no início do bloco, sem editor gráfico (`IPlugView`), sem
-//! eventos MIDI e sem compensação de latência.
+//! Escopo: classes `Audio Module Class` (efeitos de áudio e instrumentos),
+//! barramentos de áudio em estéreo ou mono + barramento de eventos MIDI
+//! (`IEventList`, `kNoteOnEvent`/`kNoteOffEvent`), amostras `f32`, blocos de
+//! até [`MAX_BLOCK`] quadros, automação de parâmetros em tempo real com
+//! precisão de amostra (`IParameterChanges`/`IParamValueQueue`), persistência
+//! de estado (`IComponent::getState`/`setState`), compensação de latência e
+//! editor gráfico nativo do plug-in (`IPlugView`/`IPlugFrame` em janela Win32).
 //!
 //! Os objetos do lado do host (`IHostApplication`, `IMessage`,
-//! `IAttributeList`, `IBStream`, `IComponentHandler`, `IParameterChanges` e
-//! `IParamValueQueue`) são implementados aqui com estado em `Mutex`, porque
-//! o plug-in pode chamá-los de qualquer thread.
+//! `IAttributeList`, `IBStream`, `IComponentHandler`, `IParameterChanges`,
+//! `IParamValueQueue`, `IEventList` e `IPlugFrame`) são implementados aqui com
+//! estado em `Mutex`, porque o plug-in pode chamá-los de qualquer thread.
 
 #![allow(unsafe_code)]
 
-use super::{Vst3ClassInfo, Vst3ParamInfo};
-use crate::model::Vst3ParamValue;
+use super::{Vst3ClassInfo, Vst3ParamInfo, Vst3ParamPoint};
+use crate::midi::Vst3MidiEvent;
+use crate::model::{encode_hex_bytes, Vst3ParamValue};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
 use std::mem::ManuallyDrop;
@@ -580,9 +583,21 @@ impl IBStreamTrait for MemStream {
     }
 }
 
-/// `IComponentHandler`: sem editor gráfico, as edições do plug-in são aceitas
-/// e ignoradas.
-pub(crate) struct Handler;
+/// Máximo de eventos MIDI por bloco em `IEventList` (§0.4).
+const MAX_EVENTS: usize = 4096;
+
+/// `IComponentHandler`: registra as edições feitas na interface gráfica do
+/// plug-in (`performEdit`) para sincronizá-las de volta ao Neoveg.
+#[derive(Default)]
+pub(crate) struct Handler {
+    edited: Mutex<HashMap<ParamID, f64>>,
+}
+
+impl Handler {
+    fn take_edited(&self) -> HashMap<ParamID, f64> {
+        std::mem::take(&mut *lock(&self.edited))
+    }
+}
 
 impl Class for Handler {
     type Interfaces = (IComponentHandler,);
@@ -592,7 +607,16 @@ impl IComponentHandlerTrait for Handler {
     unsafe fn beginEdit(&self, _id: ParamID) -> tresult {
         kResultOk
     }
-    unsafe fn performEdit(&self, _id: ParamID, _value: ParamValue) -> tresult {
+    unsafe fn performEdit(&self, id: ParamID, value: ParamValue) -> tresult {
+        let v = if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut g = lock(&self.edited);
+        if g.len() < MAX_PARAMS as usize || g.contains_key(&id) {
+            g.insert(id, v);
+        }
         kResultOk
     }
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {
@@ -600,6 +624,177 @@ impl IComponentHandlerTrait for Handler {
     }
     unsafe fn restartComponent(&self, _flags: i32) -> tresult {
         kNotImplemented
+    }
+}
+
+/// `IEventList`: fila de eventos MIDI (`kNoteOnEvent`/`kNoteOffEvent`) do bloco.
+#[derive(Default)]
+pub(crate) struct EventList {
+    events: Mutex<Vec<Event>>,
+}
+
+impl Class for EventList {
+    type Interfaces = (IEventList,);
+}
+
+impl EventList {
+    fn from_midi(midi: &[Vst3MidiEvent], sr: f64, block_pos: i64, frames: usize) -> Self {
+        let max_off = frames.saturating_sub(1).min(i32::MAX as usize) as i32;
+        let mut list = Vec::with_capacity(midi.len().min(MAX_EVENTS));
+        let sr_safe = if sr.is_finite() && sr > 0.0 {
+            sr
+        } else {
+            48_000.0
+        };
+        for m in midi.iter().take(MAX_EVENTS) {
+            let off = m.sample_offset.clamp(0, max_off);
+            let sample_pos = block_pos.saturating_add(i64::from(off));
+            let ppq = (sample_pos as f64 / sr_safe) * 2.0; // 120 BPM = 2 semínimas/s
+            let vel = if m.velocity.is_finite() {
+                m.velocity.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let ev = if m.is_note_on {
+                Event {
+                    busIndex: 0,
+                    sampleOffset: off,
+                    ppqPosition: ppq,
+                    flags: 0,
+                    r#type: Event_::EventTypes_::kNoteOnEvent as u16,
+                    __field0: Event__type0 {
+                        noteOn: NoteOnEvent {
+                            channel: i16::from(m.channel & 0x0F),
+                            pitch: i16::from(m.pitch & 0x7F),
+                            tuning: 0.0,
+                            velocity: vel,
+                            length: 0,
+                            noteId: m.note_id,
+                        },
+                    },
+                }
+            } else {
+                Event {
+                    busIndex: 0,
+                    sampleOffset: off,
+                    ppqPosition: ppq,
+                    flags: 0,
+                    r#type: Event_::EventTypes_::kNoteOffEvent as u16,
+                    __field0: Event__type0 {
+                        noteOff: NoteOffEvent {
+                            channel: i16::from(m.channel & 0x0F),
+                            pitch: i16::from(m.pitch & 0x7F),
+                            velocity: vel,
+                            noteId: m.note_id,
+                            tuning: 0.0,
+                        },
+                    },
+                }
+            };
+            list.push(ev);
+        }
+        EventList {
+            events: Mutex::new(list),
+        }
+    }
+}
+
+impl IEventListTrait for EventList {
+    unsafe fn getEventCount(&self) -> i32 {
+        lock(&self.events).len() as i32
+    }
+
+    unsafe fn getEvent(&self, index: i32, e: *mut Event) -> tresult {
+        if e.is_null() {
+            return kInvalidArgument;
+        }
+        let g = lock(&self.events);
+        let Some(ev) = usize::try_from(index).ok().and_then(|i| g.get(i)) else {
+            return kInvalidArgument;
+        };
+        // SAFETY: `e` não é nulo e foi fornecido pelo plug-in.
+        unsafe { *e = *ev };
+        kResultOk
+    }
+
+    unsafe fn addEvent(&self, e: *mut Event) -> tresult {
+        if e.is_null() {
+            return kInvalidArgument;
+        }
+        let mut g = lock(&self.events);
+        if g.len() >= MAX_EVENTS {
+            return kResultFalse;
+        }
+        // SAFETY: `e` não é nulo e aponta para um `Event` legível.
+        g.push(unsafe { *e });
+        kResultOk
+    }
+}
+
+/// `IPlugFrame`: redimensiona a janela nativa Win32 quando a interface gráfica
+/// (`IPlugView`) do plug-in solicita novo tamanho.
+pub(crate) struct PlugFrame {
+    hwnd: Mutex<isize>,
+}
+
+impl Class for PlugFrame {
+    type Interfaces = (IPlugFrame,);
+}
+
+impl IPlugFrameTrait for PlugFrame {
+    unsafe fn resizeView(&self, view: *mut IPlugView, new_size: *mut ViewRect) -> tresult {
+        if new_size.is_null() {
+            return kInvalidArgument;
+        }
+        // SAFETY: `new_size` não nulo, fornecido pelo plug-in.
+        let rect = unsafe { *new_size };
+        let w = rect.right.saturating_sub(rect.left).clamp(120, 3840);
+        let h = rect.bottom.saturating_sub(rect.top).clamp(80, 2160);
+        let raw_hwnd = *lock(&self.hwnd);
+        if raw_hwnd != 0 {
+            use windows::Win32::Foundation::{HWND, RECT};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                AdjustWindowRectEx, GetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE,
+            };
+            let hwnd = HWND(raw_hwnd as *mut c_void);
+            let mut wr = RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            };
+            // SAFETY: `hwnd` pertence a esta janela Win32 viva enquanto o `PlugFrame` está anexado.
+            unsafe {
+                let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+                let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+                let _ = AdjustWindowRectEx(&mut wr, style, false, ex_style);
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND::default(),
+                    0,
+                    0,
+                    wr.right.saturating_sub(wr.left),
+                    wr.bottom.saturating_sub(wr.top),
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        if !view.is_null() {
+            // SAFETY: `view` foi passado pelo próprio plug-in.
+            unsafe {
+                if let Some(vr) = vst3::ComRef::from_raw(view) {
+                    let mut out_rect = ViewRect {
+                        left: 0,
+                        top: 0,
+                        right: w,
+                        bottom: h,
+                    };
+                    vr.onSize(&mut out_rect);
+                }
+            }
+        }
+        kResultOk
     }
 }
 
@@ -668,18 +863,40 @@ impl Class for ParamChanges {
 }
 
 impl ParamChanges {
+    #[cfg(test)]
     fn with_values(values: &[(ParamID, f64)]) -> Self {
-        let queues = values
+        let pts: Vec<(ParamID, Vec<(i32, f64)>)> =
+            values.iter().map(|&(id, v)| (id, vec![(0, v)])).collect();
+        Self::with_points(&pts)
+    }
+
+    fn with_points(queues: &[(ParamID, Vec<(i32, f64)>)]) -> Self {
+        let qs = queues
             .iter()
-            .map(|(id, v)| {
+            .take(MAX_PARAMS as usize)
+            .map(|(id, pts)| {
+                let clean: Vec<(i32, f64)> = pts
+                    .iter()
+                    .take(MAX_POINTS)
+                    .map(|&(o, v)| {
+                        (
+                            o.max(0),
+                            if v.is_finite() {
+                                v.clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            },
+                        )
+                    })
+                    .collect();
                 ComWrapper::new(ParamQueue {
                     id: *id,
-                    points: Mutex::new(vec![(0, *v)]),
+                    points: Mutex::new(clean),
                 })
             })
             .collect();
         ParamChanges {
-            queues: Mutex::new(queues),
+            queues: Mutex::new(qs),
         }
     }
 }
@@ -853,7 +1070,7 @@ impl HostedVst3 {
             .create(&cid)
             .ok_or("o plug-in não criou o componente pedido")?;
         let host = ComWrapper::new(HostApp);
-        let handler = ComWrapper::new(Handler);
+        let handler = ComWrapper::new(Handler::default());
         let host_ptr = host
             .as_com_ref::<IHostApplication>()
             .map(|r| r.as_ptr() as *mut FUnknown)
@@ -975,6 +1192,16 @@ impl HostedVst3 {
             }
             for i in 0..n_out {
                 self.component.activateBus(audio, dout, i, u8::from(i == 0));
+            }
+            // Ativa o barramento principal de eventos MIDI (necessário para instrumentos VST3).
+            let ev_media = MediaTypes_::kEvent as MediaType;
+            let n_ev_in = self
+                .component
+                .getBusCount(ev_media, din)
+                .clamp(0, MAX_BUSES);
+            for i in 0..n_ev_in {
+                self.component
+                    .activateBus(ev_media, din, i, u8::from(i == 0));
             }
         }
         self.inputs = (0..n_in)
@@ -1161,9 +1388,199 @@ impl HostedVst3 {
         Some(str128(&s))
     }
 
+    /// Abre a interface gráfica nativa do plug-in (`IPlugView` em janela Win32)
+    /// até o usuário fechá-la, devolvendo os parâmetros atualizados e o estado
+    /// serializado (`IComponent::getState`).
+    pub fn run_editor_modal(
+        &mut self,
+        title: &str,
+    ) -> Result<(Vec<Vst3ParamValue>, Option<String>), String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+            GetMessageW, PostQuitMessage, RegisterClassW, ShowWindow, TranslateMessage,
+            CW_USEDEFAULT, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WNDCLASSW,
+            WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
+        };
+
+        unsafe extern "system" fn wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            match msg {
+                WM_CLOSE => {
+                    // SAFETY: `hwnd` é a janela criada neste processo.
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                    LRESULT(0)
+                }
+                WM_DESTROY => {
+                    // SAFETY: encerra apenas o laço de mensagens desta thread do subprocesso.
+                    unsafe { PostQuitMessage(0) };
+                    LRESULT(0)
+                }
+                // SAFETY: encaminha mensagens padrão do Windows.
+                _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+            }
+        }
+
+        let Some(ctrl) = self.controller.as_ref() else {
+            return Err("plug-in VST3 sem controlador de edição".into());
+        };
+        // SAFETY: controlador válido; `ViewType::kEditor` é string C estática.
+        let raw_view = unsafe { ctrl.createView(ViewType::kEditor) };
+        // SAFETY: `createView` devolve ponteiro com referência pertencente ao host ou nulo.
+        let Some(view) = (unsafe { ComPtr::from_raw(raw_view) }) else {
+            return Err("o plug-in não fornece interface gráfica (IPlugView)".into());
+        };
+        // SAFETY: `view` válido; `kPlatformTypeHWND` é constante estática NUL-terminada.
+        if unsafe { view.isPlatformTypeSupported(kPlatformTypeHWND) } != kResultOk {
+            return Err("a interface gráfica do plug-in não suporta HWND".into());
+        }
+        let mut vrect = ViewRect {
+            left: 0,
+            top: 0,
+            right: 640,
+            bottom: 420,
+        };
+        // SAFETY: `vrect` gravável.
+        let _ = unsafe { view.getSize(&mut vrect) };
+        let w = vrect.right.saturating_sub(vrect.left).clamp(120, 3840);
+        let h = vrect.bottom.saturating_sub(vrect.top).clamp(80, 2160);
+        // SAFETY: consulta se a janela aceita redimensionamento.
+        let resizable = unsafe { view.canResize() } == kResultOk;
+        let style = if resizable {
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME
+        } else {
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+        };
+        let mut wr = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
+        // SAFETY: `wr` gravável.
+        unsafe {
+            let _ = AdjustWindowRectEx(&mut wr, style, false, WINDOW_EX_STYLE(0));
+        }
+
+        let class_name: Vec<u16> = "NeovegVst3EditorClass\0".encode_utf16().collect();
+        let title_clean = if title.trim().is_empty() {
+            "VST3"
+        } else {
+            title.trim()
+        };
+        let title_w: Vec<u16> = title_clean.encode_utf16().chain([0]).collect();
+
+        // SAFETY: registra classe local ao subprocesso isolado e cria janela Win32.
+        let hinst = unsafe { GetModuleHandleW(None) }
+            .map_err(|e| format!("falha ao obter HINSTANCE: {e}"))?;
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: hinst.into(),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: `wc` válido durante `RegisterClassW`.
+        unsafe {
+            RegisterClassW(&wc);
+        }
+        // SAFETY: strings UTF-16 NUL-terminadas válidas durante `CreateWindowExW`.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(title_w.as_ptr()),
+                style,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                wr.right.saturating_sub(wr.left),
+                wr.bottom.saturating_sub(wr.top),
+                None,
+                None,
+                hinst,
+                None,
+            )
+        }
+        .map_err(|e| format!("não foi possível criar a janela do plug-in: {e}"))?;
+
+        let frame = ComWrapper::new(PlugFrame {
+            hwnd: Mutex::new(hwnd.0 as isize),
+        });
+        if let Some(fp) = frame.as_com_ref::<IPlugFrame>() {
+            // SAFETY: `frame` vive até depois de `view.removed()`.
+            unsafe {
+                view.setFrame(fp.as_ptr());
+            }
+        }
+        // SAFETY: `hwnd.0` é um HWND válido; `kPlatformTypeHWND` é constante estática.
+        let attach_res = unsafe { view.attached(hwnd.0, kPlatformTypeHWND) };
+        if attach_res != kResultOk {
+            // SAFETY: limpa janela e frame em erro de anexo.
+            unsafe {
+                view.setFrame(ptr::null_mut());
+                let _ = DestroyWindow(hwnd);
+            }
+            return Err(format!(
+                "plug-in recusou anexar interface gráfica (código {attach_res})"
+            ));
+        }
+
+        // SAFETY: exibe a janela e processa mensagens Win32 até `WM_QUIT`.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            view.removed();
+            view.setFrame(ptr::null_mut());
+            *lock(&frame.hwnd) = 0;
+        }
+
+        // Coleta estado atualizado (parâmetros editados + estado binário do componente).
+        let edited = self.handler.take_edited();
+        let current_params = self.read_params();
+        let mut merged: HashMap<u32, f64> = HashMap::new();
+        for p in &current_params {
+            merged.insert(p.id, p.current);
+        }
+        for (id, v) in edited {
+            merged.insert(id, v);
+        }
+        let mut out_params: Vec<Vst3ParamValue> = merged
+            .into_iter()
+            .map(|(id, value)| Vst3ParamValue {
+                id,
+                value,
+                keys: Vec::new(),
+            })
+            .collect();
+        out_params.sort_by_key(|p| p.id);
+        let state_hex = self
+            .state_bytes()
+            .ok()
+            .filter(|b| !b.is_empty())
+            .map(|b| encode_hex_bytes(&b));
+        Ok((out_params, state_hex))
+    }
+
     /// Processa `buf` (estéreo intercalado, até [`MAX_BLOCK`] quadros) com os
-    /// valores `values`. Valores não finitos na saída viram zero.
-    pub fn process(&mut self, buf: &mut [f32], values: &[Vst3ParamValue]) -> Result<(), String> {
+    /// valores base `values`, pontos de automação com precisão de amostra
+    /// `auto_points` e eventos MIDI `midi_events`. Valores não finitos na saída
+    /// viram zero.
+    pub fn process(
+        &mut self,
+        buf: &mut [f32],
+        values: &[Vst3ParamValue],
+        auto_points: &[Vst3ParamPoint],
+        midi_events: &[Vst3MidiEvent],
+    ) -> Result<(), String> {
         let frames = buf.len() / 2;
         if frames == 0 {
             return Ok(());
@@ -1175,14 +1592,44 @@ impl HostedVst3 {
             return Err("plug-in inativo".into());
         }
         let changed = param_changes(&mut self.sent, values, &self.params);
+        let max_off = frames.saturating_sub(1).min(i32::MAX as usize) as i32;
+        let mut by_id: HashMap<ParamID, Vec<(i32, f64)>> = HashMap::new();
         for (id, v) in &changed {
-            if let Some(c) = &self.controller {
-                // SAFETY: controlador válido; mantém a UI do plug-in em dia.
-                unsafe { c.setParamNormalized(*id, *v) };
+            by_id.entry(*id).or_default().push((0, *v));
+        }
+        for pt in auto_points.iter().take(MAX_POINTS) {
+            if !pt.value.is_finite() {
+                continue;
+            }
+            let v = pt.value.clamp(0.0, 1.0);
+            let off = pt.sample_offset.clamp(0, max_off);
+            let entry = by_id.entry(pt.id).or_default();
+            if entry.len() < MAX_POINTS {
+                entry.push((off, v));
             }
         }
-        let in_changes = ComWrapper::new(ParamChanges::with_values(&changed));
+        let mut queues: Vec<(ParamID, Vec<(i32, f64)>)> = Vec::with_capacity(by_id.len());
+        for (id, mut pts) in by_id {
+            pts.sort_by_key(|p| p.0);
+            if let Some(&(_, last_v)) = pts.last() {
+                self.sent.insert(id, last_v);
+                if let Some(c) = &self.controller {
+                    // SAFETY: controlador válido; mantém a UI do plug-in em dia.
+                    unsafe { c.setParamNormalized(id, last_v) };
+                }
+            }
+            queues.push((id, pts));
+        }
+        queues.sort_by_key(|q| q.0);
+        let in_changes = ComWrapper::new(ParamChanges::with_points(&queues));
         let out_changes = ComWrapper::new(ParamChanges::default());
+        let in_events = ComWrapper::new(EventList::from_midi(
+            midi_events,
+            self.sample_rate,
+            self.pos,
+            frames,
+        ));
+        let out_events = ComWrapper::new(EventList::default());
 
         // Entrada: L/R no barramento principal (mono = média); o resto em zero.
         for (bi, bus) in self.inputs.iter_mut().enumerate() {
@@ -1235,6 +1682,14 @@ impl HostedVst3 {
             .as_com_ref::<IParameterChanges>()
             .map(|r| r.as_ptr())
             .unwrap_or(ptr::null_mut());
+        let in_ev_ptr = in_events
+            .as_com_ref::<IEventList>()
+            .map(|r| r.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        let out_ev_ptr = out_events
+            .as_com_ref::<IEventList>()
+            .map(|r| r.as_ptr())
+            .unwrap_or(ptr::null_mut());
         let mut data = ProcessData {
             processMode: ProcessModes_::kRealtime,
             symbolicSampleSize: SymbolicSampleSizes_::kSample32,
@@ -1249,8 +1704,8 @@ impl HostedVst3 {
             outputs: out_bufs.as_mut_ptr(),
             inputParameterChanges: in_ptr,
             outputParameterChanges: out_ptr,
-            inputEvents: ptr::null_mut(),
-            outputEvents: ptr::null_mut(),
+            inputEvents: in_ev_ptr,
+            outputEvents: out_ev_ptr,
             processContext: &mut ctx,
         };
         // SAFETY: todos os ponteiros de `data` apontam para buffers com
@@ -1322,7 +1777,11 @@ mod tests {
             bypass: false,
         };
         let params = [info(1, 0.2), info(2, 0.7)];
-        let v = |id: u32, value: f64| Vst3ParamValue { id, value };
+        let v = |id: u32, value: f64| Vst3ParamValue {
+            id,
+            value,
+            keys: Vec::new(),
+        };
         let mut sent = HashMap::new();
         // primeiro bloco: tudo é novo; valores hostis saneados ou ignorados
         let c = param_changes(&mut sent, &[v(1, 0.5), v(2, 9.0), v(3, f64::NAN)], &params);
@@ -1500,5 +1959,77 @@ mod tests {
         // uma DLL do sistema que não exporta GetPluginFactory
         let err = probe(Path::new("kernel32.dll")).expect_err("não é VST3");
         assert!(err.contains("GetPluginFactory"), "{err}");
+    }
+
+    #[test]
+    fn event_list_automation_and_handler_edits_work_safely() {
+        let midi = [
+            Vst3MidiEvent {
+                sample_offset: 12,
+                is_note_on: true,
+                channel: 1,
+                pitch: 60,
+                velocity: 0.8,
+                note_id: 7,
+            },
+            Vst3MidiEvent {
+                sample_offset: 200,
+                is_note_on: false,
+                channel: 1,
+                pitch: 60,
+                velocity: 0.0,
+                note_id: 7,
+            },
+        ];
+        let el = ComWrapper::new(EventList::from_midi(&midi, 48_000.0, 0, 256));
+        let iface = el.to_com_ptr::<IEventList>().expect("IEventList");
+        // SAFETY: chamadas COM válidas ao objeto local.
+        unsafe {
+            assert_eq!(iface.getEventCount(), 2);
+            let mut e: Event = std::mem::zeroed();
+            assert_eq!(iface.getEvent(0, &mut e), kResultOk);
+            assert_eq!(e.sampleOffset, 12);
+            assert_eq!(e.r#type, Event_::EventTypes_::kNoteOnEvent as u16);
+            assert_eq!(e.__field0.noteOn.pitch, 60);
+            assert_eq!(iface.getEvent(1, &mut e), kResultOk);
+            assert_eq!(e.r#type, Event_::EventTypes_::kNoteOffEvent as u16);
+            assert_eq!(e.__field0.noteOff.noteId, 7);
+            assert_ne!(iface.getEvent(2, &mut e), kResultOk);
+            assert_ne!(iface.getEvent(0, ptr::null_mut()), kResultOk);
+            assert_eq!(iface.addEvent(&mut e), kResultOk);
+            assert_eq!(iface.getEventCount(), 3);
+            assert_ne!(iface.addEvent(ptr::null_mut()), kResultOk);
+        }
+
+        // Automação multi-ponto por bloco
+        let pc_wrap = ComWrapper::new(ParamChanges::with_points(&[(
+            42,
+            vec![(0, 0.1), (64, 0.5), (128, 0.9)],
+        )]));
+        let pc = pc_wrap
+            .to_com_ptr::<IParameterChanges>()
+            .expect("IParameterChanges");
+        // SAFETY: chamadas COM válidas ao objeto local.
+        unsafe {
+            let q = ComRef::from_raw(pc.getParameterData(0)).expect("fila");
+            assert_eq!(q.getPointCount(), 3);
+            let (mut o, mut v) = (0, 0.0);
+            assert_eq!(q.getPoint(2, &mut o, &mut v), kResultOk);
+            assert_eq!((o, v), (128, 0.9));
+        }
+
+        // Handler registra edições feitas na GUI nativa
+        let h_wrap = ComWrapper::new(Handler::default());
+        let h = h_wrap
+            .to_com_ptr::<IComponentHandler>()
+            .expect("IComponentHandler");
+        // SAFETY: chamadas COM válidas ao objeto local.
+        unsafe {
+            assert_eq!(h.performEdit(10, 0.75), kResultOk);
+            assert_eq!(h.performEdit(11, f64::NAN), kResultOk);
+        }
+        let edits = h_wrap.take_edited();
+        assert_eq!(edits.get(&10), Some(&0.75));
+        assert_eq!(edits.get(&11), Some(&0.0));
     }
 }

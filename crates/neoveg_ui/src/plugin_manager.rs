@@ -108,14 +108,16 @@ type ProbeFn<T> = fn(&Path, &Path, Duration) -> Result<Vec<T>, String>;
 type Vst3ParamsState = Option<Result<Arc<Vec<Vst3ParamInfo>>, String>>;
 type Vst3ParamsMap = Arc<Mutex<HashMap<(String, String), Vst3ParamsState>>>;
 
-/// Editor dos parâmetros de um efeito VST3 (no diálogo de FX), em valores
-/// normalizados. Os descritores vêm do host isolado numa thread de fundo e
-/// ficam em cache por plug-in. Devolve verdadeiro quando algum valor mudou.
+/// Editor dos parâmetros de um efeito/instrumento VST3 (no diálogo de FX), em
+/// valores normalizados, com automação por keyframes em tempo real e botão para
+/// abrir a interface gráfica nativa (`IPlugView`) do plug-in.
 pub(crate) fn vst3_params_editor(
     ui: &mut egui::Ui,
     lang: Language,
     fx: &mut crate::model::FxInstance,
     theme: &crate::theme::ThemeColors,
+    local_t: crate::model::Ticks,
+    tol: crate::model::Ticks,
 ) -> bool {
     let fx_id = fx.id;
     let Some(r) = fx.vst3.as_mut() else {
@@ -173,10 +175,6 @@ pub(crate) fn vst3_params_editor(
         }
         Some(Some(Ok(infos))) => infos,
     };
-    if infos.is_empty() {
-        ui.label(muted(tr(lang, "O plug-in não expõe parâmetros.").into()));
-        return false;
-    }
     let filter_key = egui::Id::new(("vst3_param_filter", fx_id));
     let mut filter: String = ui.data(|d| d.get_temp(filter_key)).unwrap_or_default();
     let state_op_key = egui::Id::new(("vst3_state_capture", fx_id));
@@ -185,6 +183,12 @@ pub(crate) fn vst3_params_editor(
         d.get_temp_mut_or_default::<CaptureSlot>(state_op_key)
             .clone()
     });
+    let gui_op_key = egui::Id::new(("vst3_gui_editor", fx_id));
+    type GuiSlot = Arc<Mutex<Option<Result<neoveg_engine::plugin_host::Vst3EditorResult, String>>>>;
+    let gui_slot: GuiSlot =
+        ui.data_mut(|d| d.get_temp_mut_or_default::<GuiSlot>(gui_op_key).clone());
+    let gui_err_key = egui::Id::new(("vst3_gui_err", fx_id));
+    let mut gui_err: Option<String> = ui.data(|d| d.get_temp(gui_err_key));
     let mut changed = false;
     {
         let mut g = capture_slot.lock().unwrap_or_else(PoisonError::into_inner);
@@ -193,17 +197,78 @@ pub(crate) fn vst3_params_editor(
             changed = true;
         }
     }
+    {
+        let mut g = gui_slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(res) = g.take() {
+            match res {
+                Ok(ed) => {
+                    gui_err = None;
+                    for p in ed.params {
+                        r.set_param(p.id, p.value);
+                    }
+                    if let Some(st) = ed.state {
+                        r.state = Some(st);
+                    }
+                    changed = true;
+                }
+                Err(e) => {
+                    gui_err = Some(e);
+                }
+            }
+        }
+    }
     let count_s = infos.len().to_string();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        if r.is_instrument {
+            ui.label(
+                egui::RichText::new(tr(lang, "Instrumento MIDI"))
+                    .small()
+                    .strong()
+                    .color(theme.accent),
+            );
+        }
         ui.label(muted(tr_args(lang, "{n} parâmetro(s)", &[("n", &count_s)])));
         ui.add(
             egui::TextEdit::singleline(&mut filter)
                 .hint_text(tr(lang, "Filtrar"))
-                .desired_width(120.0),
+                .desired_width(110.0),
         );
         if ui
-            .small_button("Capturar estado")
-            .on_hover_text("Salva o estado interno completo do plug-in VST3 no projeto")
+            .small_button(tr(lang, "Interface do plug-in..."))
+            .on_hover_text(tr(
+                lang,
+                "Abrir a interface gráfica nativa (IPlugView) do plug-in VST3 em processo isolado",
+            ))
+            .clicked()
+        {
+            gui_err = None;
+            let r2 = r.clone();
+            let title = if r.label.is_empty() {
+                "VST3".to_string()
+            } else {
+                r.label.clone()
+            };
+            let slot2 = gui_slot.clone();
+            let ctx = ui.ctx().clone();
+            let missing_exe = tr(lang, "executável do Neoveg não encontrado").to_string();
+            let _ = std::thread::Builder::new()
+                .name("vst3-gui".into())
+                .spawn(move || {
+                    let res = neoveg_engine::plugin_host::default_host_exe()
+                        .ok_or(missing_exe)
+                        .and_then(|exe| {
+                            neoveg_engine::plugin_host::vst3_open_editor_isolated(&exe, &r2, &title)
+                        });
+                    *slot2.lock().unwrap_or_else(PoisonError::into_inner) = Some(res);
+                    ctx.request_repaint();
+                });
+        }
+        if ui
+            .small_button(tr(lang, "Capturar estado"))
+            .on_hover_text(tr(
+                lang,
+                "Salva o estado interno completo do plug-in VST3 no projeto",
+            ))
             .clicked()
         {
             let r2 = r.clone();
@@ -221,12 +286,30 @@ pub(crate) fn vst3_params_editor(
         }
         if let Some(hex) = &r.state {
             ui.label(muted(format!("Estado: {} B", hex.len() / 2)));
-            if ui.small_button("Limpar estado").clicked() {
+            if ui.small_button(tr(lang, "Limpar estado")).clicked() {
                 r.state = None;
                 changed = true;
             }
         }
     });
+    if let Some(err) = &gui_err {
+        ui.label(muted(tr_args(
+            lang,
+            "Interface indisponível: {err}",
+            &[("err", err)],
+        )));
+    }
+    ui.data_mut(|d| {
+        if let Some(e) = gui_err {
+            d.insert_temp(gui_err_key, e);
+        } else {
+            d.remove_temp::<String>(gui_err_key);
+        }
+    });
+    if infos.is_empty() {
+        ui.label(muted(tr(lang, "O plug-in não expõe parâmetros.").into()));
+        return changed;
+    }
     let f = filter.trim().to_lowercase();
     ui.data_mut(|d| d.insert_temp(filter_key, filter));
     egui::ScrollArea::vertical()
@@ -234,7 +317,7 @@ pub(crate) fn vst3_params_editor(
         .max_height(260.0)
         .show(ui, |ui| {
             egui::Grid::new(("vst3_params", fx_id))
-                .num_columns(2)
+                .num_columns(3)
                 .striped(true)
                 .show(ui, |ui| {
                     for info in infos.iter() {
@@ -245,38 +328,104 @@ pub(crate) fn vst3_params_editor(
                             .params
                             .iter()
                             .find(|p| p.id == info.id)
-                            .map(|p| p.value)
+                            .map(|p| p.value_at(local_t))
                             .unwrap_or(info.current);
                         let mut v = cur;
                         ui.label(&info.title);
                         let edited = ui
                             .horizontal(|ui| {
-                                if info.bypass || info.step_count == 1 {
+                                let e = if info.bypass || info.step_count == 1 {
                                     let mut b = v > 0.5;
-                                    let e = ui.checkbox(&mut b, "").changed();
+                                    let ch = ui.checkbox(&mut b, "").changed();
                                     v = if b { 1.0 } else { 0.0 };
-                                    e
+                                    ch
                                 } else if info.step_count > 1 {
                                     let steps = f64::from(info.step_count);
                                     let mut k = (v * steps).round().clamp(0.0, steps) as i32;
-                                    let e = ui
+                                    let ch = ui
                                         .add(egui::Slider::new(&mut k, 0..=info.step_count))
                                         .changed();
                                     v = f64::from(k) / steps;
-                                    e
+                                    ch
                                 } else {
                                     ui.add(egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(3))
                                         .changed()
+                                };
+                                if !info.units.is_empty() {
+                                    ui.label(muted(info.units.clone()));
                                 }
+                                e
                             })
                             .inner;
-                        if !info.units.is_empty() {
-                            ui.label(muted(info.units.clone()));
-                        }
+                        let mut key_op: Option<bool> = None;
+                        let (has_keys, key_here) = r
+                            .params
+                            .iter()
+                            .find(|p| p.id == info.id)
+                            .map(|p| {
+                                (
+                                    p.keys.len(),
+                                    p.keys.iter().any(|k| k.0.abs_diff(local_t) <= tol),
+                                )
+                            })
+                            .unwrap_or((0, false));
+                        ui.horizontal(|ui| {
+                            if icons::small_icon_button(
+                                ui,
+                                if key_here {
+                                    Icon::KeyframeFilled
+                                } else {
+                                    Icon::KeyframeEmpty
+                                },
+                                None,
+                                key_here,
+                                theme,
+                            )
+                            .on_hover_text(tr(lang, "Criar keyframe neste tempo"))
+                            .clicked()
+                            {
+                                key_op = Some(true);
+                            }
+                            if has_keys > 0 {
+                                ui.label(egui::RichText::new(format!("{has_keys}")).small());
+                                if icons::small_icon_button(ui, Icon::Backspace, None, false, theme)
+                                    .on_hover_text(tr(lang, "Remover keyframes"))
+                                    .clicked()
+                                {
+                                    key_op = Some(false);
+                                }
+                            }
+                        });
                         ui.end_row();
-                        if edited && v != cur {
-                            r.set_param(info.id, v);
+                        if (edited && v != cur) || key_op.is_some() {
                             changed = true;
+                            let idx = match r.params.iter().position(|p| p.id == info.id) {
+                                Some(i) => i,
+                                None => {
+                                    r.params.push(crate::model::Vst3ParamValue {
+                                        id: info.id,
+                                        value: info.current,
+                                        keys: Vec::new(),
+                                    });
+                                    r.params.len() - 1
+                                }
+                            };
+                            if let Some(p) = r.params.get_mut(idx) {
+                                match key_op {
+                                    Some(true) => {
+                                        if p.keys.is_empty() && local_t > tol {
+                                            p.keys.push((crate::model::Ticks::ZERO, p.value));
+                                        }
+                                        p.set_key(local_t, v, tol);
+                                    }
+                                    Some(false) => {
+                                        p.value = v;
+                                        p.keys.clear();
+                                    }
+                                    None if p.keys.is_empty() => p.value = v,
+                                    None => p.set_key(local_t, v, tol),
+                                }
+                            }
                         }
                     }
                 });
@@ -1075,25 +1224,35 @@ impl App {
                         let instrument = info.is_instrument();
                         if ui
                             .add_enabled(
-                                can_apply && !instrument,
+                                can_apply,
                                 egui::Button::new(tr(lang, "Aplicar")).small(),
                             )
-                            .on_hover_text(tr(
-                                lang,
-                                "Aplicar aos eventos de áudio selecionados (ou à trilha de \
-                                 áudio selecionada)",
-                            ))
-                            .on_disabled_hover_text(if instrument {
+                            .on_hover_text(if instrument {
                                 tr(
                                     lang,
-                                    "Instrumentos precisam de MIDI, que ainda não é suportado",
+                                    "Aplicar instrumento VST3 aos eventos MIDI/áudio ou à trilha de áudio selecionada",
                                 )
                             } else {
-                                tr(lang, "Selecione eventos ou uma trilha de áudio na timeline")
+                                tr(
+                                    lang,
+                                    "Aplicar aos eventos de áudio selecionados (ou à trilha de \
+                                     áudio selecionada)",
+                                )
                             })
+                            .on_disabled_hover_text(tr(
+                                lang,
+                                "Selecione eventos ou uma trilha de áudio na timeline",
+                            ))
                             .clicked()
                         {
                             self.apply_vst3_to_selection(bin, info);
+                        }
+                        if instrument {
+                            ui.label(
+                                egui::RichText::new("[MIDI]")
+                                    .small()
+                                    .color(self.theme.accent),
+                            );
                         }
                         ui.label(egui::RichText::new(&info.name).small())
                             .on_hover_text(tr_args(
@@ -1330,7 +1489,14 @@ impl App {
             return;
         };
         let bin = bin.display().to_string();
-        let make = || crate::model::FxInstance::new_vst3(&bin, &info.class_id, &info.name);
+        let make = || {
+            crate::model::FxInstance::new_vst3_with_kind(
+                &bin,
+                &info.class_id,
+                &info.name,
+                info.is_instrument(),
+            )
+        };
         self.checkpoint();
         let status = match target {
             Ok(ids) => {
