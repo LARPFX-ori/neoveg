@@ -49,9 +49,27 @@ impl DockPane {
         }
     }
 
+    pub fn key(self) -> &'static str {
+        match self {
+            DockPane::Tab(t) => crate::layout::panel_key(t),
+            DockPane::Preview => crate::layout::FLOATING_PREVIEW_KEY,
+            DockPane::MasterBus => crate::layout::FLOATING_MASTER_KEY,
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<DockPane> {
+        if key == crate::layout::FLOATING_PREVIEW_KEY {
+            Some(DockPane::Preview)
+        } else if key == crate::layout::FLOATING_MASTER_KEY {
+            Some(DockPane::MasterBus)
+        } else {
+            crate::layout::panel_from_key(key).map(DockPane::Tab)
+        }
+    }
+
     /// Painéis que a árvore do dock tem de ter; os só de janela (Encoder)
     /// ficam de fora.
-    fn all_canonical() -> Vec<DockPane> {
+    pub fn all_canonical() -> Vec<DockPane> {
         let mut out: Vec<DockPane> = DockTab::ALL
             .into_iter()
             .filter(|t| !crate::layout::window_only(*t))
@@ -413,6 +431,8 @@ struct NeovegTileBehavior<'a> {
     strips: Vec<(TileId, Rect)>,
     pending_detach: Vec<DockPane>,
     pending_detach_all: bool,
+    pending_detach_group: Option<Vec<DockPane>>,
+    pending_move_to_floating: Option<(DockPane, DockPane)>,
     pending_close: Vec<DockPane>,
     pending_toggle_preview: bool,
     pending_toggle_master: bool,
@@ -432,6 +452,38 @@ impl NeovegTileBehavior<'_> {
         if ui.button(detach_label).clicked() {
             self.pending_detach.push(pane);
             ui.close_menu();
+        }
+        let siblings = self.tabs_info.values().find_map(|s| {
+            if s.siblings.iter().any(|(_, p, _)| *p == pane) && s.siblings.len() > 1 {
+                Some(s.siblings.iter().map(|(_, p, _)| *p).collect::<Vec<_>>())
+            } else {
+                None
+            }
+        });
+        if let Some(sibs) = siblings {
+            if ui
+                .button(neoveg_common::tr(lang, "Destacar grupo de abas"))
+                .clicked()
+            {
+                self.pending_detach_group = Some(sibs);
+                ui.close_menu();
+            }
+        }
+        if !self.app.floating_docks.is_empty() {
+            ui.menu_button(
+                neoveg_common::tr(lang, "Mover para janela flutuante"),
+                |ui| {
+                    for grp in &self.app.floating_docks {
+                        if let Some(target) = grp.active_pane() {
+                            let title = format!("{} ({})", target.title_in(lang), grp.panes.len());
+                            if ui.button(title).clicked() {
+                                self.pending_move_to_floating = Some((pane, target));
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                },
+            );
         }
         if ui
             .button(neoveg_common::tr(lang, "Maximizar na área de janelas"))
@@ -1111,6 +1163,8 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
         strips,
         mut pending_detach,
         pending_detach_all,
+        pending_detach_group,
+        pending_move_to_floating,
         pending_close,
         pending_toggle_preview,
         pending_toggle_master,
@@ -1124,6 +1178,8 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
             strips: Vec::new(),
             pending_detach: Vec::new(),
             pending_detach_all: false,
+            pending_detach_group: None,
+            pending_move_to_floating: None,
             pending_close: Vec::new(),
             pending_toggle_preview: false,
             pending_toggle_master: false,
@@ -1135,6 +1191,8 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
             behavior.strips,
             behavior.pending_detach,
             behavior.pending_detach_all,
+            behavior.pending_detach_group,
+            behavior.pending_move_to_floating,
             behavior.pending_close,
             behavior.pending_toggle_preview,
             behavior.pending_toggle_master,
@@ -1185,10 +1243,27 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
 
     app.dock_tree = tree;
 
-    if pending_detach_all {
+    if let Some(group_panes) = pending_detach_group {
+        if let Some(&first) = group_panes.first() {
+            for &pane in &group_panes {
+                match pane {
+                    DockPane::Tab(t) => app.detach_dock_tab(t),
+                    DockPane::Preview => app.preview_detached = true,
+                    DockPane::MasterBus => app.master_bus_detached = true,
+                }
+            }
+            app.sync_floating_docks();
+            for &pane in group_panes.iter().skip(1) {
+                app.group_floating_panes(first, pane);
+            }
+        }
+    } else if let Some((pane, target)) = pending_move_to_floating {
+        app.group_floating_panes(target, pane);
+    } else if pending_detach_all {
         for tab in DockTab::ALL {
             app.detached_tabs.insert(tab);
         }
+        app.sync_floating_docks();
     } else {
         for pane in pending_detach {
             match pane {
@@ -1197,6 +1272,7 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
                 DockPane::MasterBus => app.master_bus_detached = true,
             }
         }
+        app.sync_floating_docks();
     }
     for pane in pending_close {
         match pane {
@@ -1267,6 +1343,8 @@ fn draw_maximized_pane(app: &mut App, ui: &mut Ui, avail: Rect, pane: DockPane) 
             strips: Vec::new(),
             pending_detach: Vec::new(),
             pending_detach_all: false,
+            pending_detach_group: None,
+            pending_move_to_floating: None,
             pending_close: Vec::new(),
             pending_toggle_preview: false,
             pending_toggle_master: false,
