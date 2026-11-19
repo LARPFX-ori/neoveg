@@ -1435,14 +1435,6 @@ namespace ScriptPortal.Vegas
         }
     }
 
-    internal sealed class FxSnap
-    {
-        public ulong id { get; set; }
-        public string unique_id { get; set; }
-        public string name { get; set; }
-        public bool bypass { get; set; }
-    }
-
     internal sealed class EnvPointSnap
     {
         public long x { get; set; }
@@ -1454,20 +1446,6 @@ namespace ScriptPortal.Vegas
     {
         public string kind { get; set; }
         public List<EnvPointSnap> points { get; set; }
-    }
-
-    internal sealed class PluginSnap
-    {
-        public string unique_id { get; set; }
-        public string name { get; set; }
-        public bool is_audio { get; set; }
-    }
-
-    internal sealed class FxOut
-    {
-        public ulong id { get; set; }
-        public string unique_id { get; set; }
-        public bool bypass { get; set; }
     }
 
     internal sealed class EnvPointOut
@@ -4403,7 +4381,7 @@ mod efeitos_envelopes_tests {
             bypass: false,
             preset: None,
             parameters: Some(vec![ScriptFxParamOut {
-                name: "Raio".into(),
+                name: "Raio horizontal (%)".into(),
                 value: 0.75,
             }]),
             keyframes: Some(vec![
