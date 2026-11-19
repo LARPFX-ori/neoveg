@@ -12,7 +12,7 @@ pub use neoveg_common::prefs::{
 };
 use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::commands::{
-    self, is_command_enabled, menu_label_in, resolved_shortcut, run_command, CommandHost,
+    self, is_command_enabled, resolved_shortcut, run_command, shortcut_label_in, CommandHost,
     DockPanel, ShortcutKey, UiAction, COMMANDS,
 };
 use neoveg_engine::engine::loudness::{LoudnessReport, LoudnessSnapshot, LoudnessTarget};
@@ -368,6 +368,9 @@ pub struct App {
     pub(crate) splash: crate::splash::SplashState,
     /// A janela ainda está no modo tela de abertura (sem bordas, tamanho da abertura).
     pub(crate) startup_window: bool,
+    /// Quadros restantes para ajustar a janela principal ao monitor quando
+    /// ela abre sem a tela de abertura (0 = nada a fazer).
+    pub(crate) window_fit_frames: u8,
     pub(crate) welcome: crate::welcome::WelcomeState,
     pub(crate) welcome_open: bool,
     pub(crate) pending_welcome_after_splash: bool,
@@ -578,6 +581,7 @@ impl App {
             crash_reports: Vec::new(),
             splash,
             startup_window: false,
+            window_fit_frames: 0,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
             pending_welcome_after_splash,
@@ -3017,12 +3021,36 @@ impl App {
     // Barras de menu e ferramentas (despachadas pela Tabela Única)
     // -----------------------------------------------------------------
 
+    /// Item de menu de um comando: rótulo à esquerda e atalho alinhado à
+    /// direita, em coluna, como nos menus do Windows e do VEGAS Pro.
+    /// `selected` destaca o item (escolha única, como os modos de edição) e
+    /// troca a cor do atalho para continuar legível sobre o destaque.
+    pub(crate) fn cmd_menu_item(
+        &self,
+        ui: &egui::Ui,
+        id: &str,
+        selected: bool,
+    ) -> egui::Button<'static> {
+        let lang = self.lang();
+        let label = commands::find_command(id)
+            .map_or_else(|| id.to_string(), |c| c.label_in(lang).to_string());
+        let item = egui::Button::new(label).selected(selected);
+        match shortcut_label_in(id, &self.prefs.shortcuts, lang) {
+            Some(sc) => {
+                let color = if selected {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                item.shortcut_text(egui::RichText::new(sc).color(color))
+            }
+            None => item,
+        }
+    }
+
     pub(crate) fn cmd_menu_btn(&mut self, ui: &mut egui::Ui, id: &str) {
-        let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
-        if ui
-            .add_enabled(self.cmd_enabled(id), egui::Button::new(label))
-            .clicked()
-        {
+        let item = self.cmd_menu_item(ui, id, false);
+        if ui.add_enabled(self.cmd_enabled(id), item).clicked() {
             self.exec_cmd(Some(ui.ctx()), id);
             ui.close_menu();
         }
@@ -3057,8 +3085,32 @@ impl App {
     }
 
     pub(crate) fn cmd_menu_chk(&mut self, ui: &mut egui::Ui, mut value: bool, id: &str) {
-        let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
-        if ui.checkbox(&mut value, label).changed() {
+        let lang = self.lang();
+        let label = commands::find_command(id)
+            .map_or_else(|| id.to_string(), |c| c.label_in(lang).to_string());
+        let shortcut = shortcut_label_in(id, &self.prefs.shortcuts, lang);
+        let changed = ui
+            .horizontal(|ui| {
+                let changed = ui.checkbox(&mut value, label).changed();
+                // atalho na mesma coluna à direita dos itens comuns do menu
+                if let Some(sc) = shortcut {
+                    let text = egui::RichText::new(sc).color(ui.visuals().weak_text_color());
+                    let galley = egui::WidgetText::from(text.clone()).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Button,
+                    );
+                    let pad = ui.spacing().button_padding.x;
+                    let gap = (ui.available_width() - galley.size().x - pad)
+                        .max(ui.spacing().item_spacing.x);
+                    ui.add_space(gap);
+                    ui.label(text);
+                }
+                changed
+            })
+            .inner;
+        if changed {
             self.exec_cmd(Some(ui.ctx()), id);
         }
     }
@@ -3203,8 +3255,8 @@ impl App {
                             ("edit.properties.layout.moderno", LayoutType::Moderno),
                         ] {
                             let selected = self.prefs.edit_layout.layout_type == lt;
-                            let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
-                            if ui.selectable_label(selected, label).clicked() {
+                            let item = self.cmd_menu_item(ui, cmd_id, selected);
+                            if ui.add(item).clicked() {
                                 self.exec_cmd(Some(ui.ctx()), cmd_id);
                                 ui.close_menu();
                             }
@@ -3213,83 +3265,86 @@ impl App {
                 });
             });
             ui.menu_button(tr(lang, "Exibir"), |ui| {
-                for tab in DockPanel::ALL {
-                    let open = self.is_panel_open(tab);
-                    let suffix = if self.detached_tabs.contains(&tab) {
-                        tr_args(
-                            lang,
-                            "{panel} (flutuante)",
-                            &[("panel", &tab.name_in(lang))],
-                        )
+                // Exibir > Janela, como no VEGAS Pro: a lista de janelas fica num
+                // submenu para o menu Exibir caber em telas de 768 a 900 pontos
+                ui.menu_button(tr(lang, "Janela"), |ui| {
+                    for tab in DockPanel::ALL {
+                        let open = self.is_panel_open(tab);
+                        let suffix = if self.detached_tabs.contains(&tab) {
+                            tr_args(
+                                lang,
+                                "{panel} (flutuante)",
+                                &[("panel", &tab.name_in(lang))],
+                            )
+                        } else {
+                            tab.name_in(lang).to_string()
+                        };
+                        if ui.selectable_label(open, suffix).clicked() {
+                            self.exec_cmd(Some(ui.ctx()), tab.command_id());
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    let pv_open =
+                        (self.dock_visible && self.preview_visible && !self.preview_detached)
+                            || self.preview_detached;
+                    let pv_label = if self.preview_detached {
+                        tr(lang, "Prévia de Vídeo (flutuante)")
                     } else {
-                        tab.name_in(lang).to_string()
+                        tr(lang, "Prévia de Vídeo")
                     };
-                    if ui.selectable_label(open, suffix).clicked() {
-                        self.exec_cmd(Some(ui.ctx()), tab.command_id());
+                    if ui.selectable_label(pv_open, pv_label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), "view.preview");
                         ui.close_menu();
                     }
-                }
+                    let mb_open =
+                        (self.dock_visible && self.master_bus_visible && !self.master_bus_detached)
+                            || self.master_bus_detached;
+                    let mb_label = if self.master_bus_detached {
+                        tr(lang, "Master Bus (flutuante)")
+                    } else {
+                        tr(lang, "Master Bus")
+                    };
+                    if ui.selectable_label(mb_open, mb_label).clicked() {
+                        self.exec_cmd(Some(ui.ctx()), "view.master_bus");
+                        ui.close_menu();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.preview_detached,
+                            tr(lang, "Prévia de Vídeo em janela separada"),
+                        )
+                        .clicked()
+                    {
+                        self.preview_detached = !self.preview_detached;
+                        if !self.preview_detached {
+                            self.preview_visible = true;
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.master_bus_detached,
+                            tr(lang, "Master Bus em janela separada"),
+                        )
+                        .clicked()
+                    {
+                        self.master_bus_detached = !self.master_bus_detached;
+                        if !self.master_bus_detached {
+                            self.master_bus_visible = true;
+                        }
+                        ui.close_menu();
+                    }
+                });
                 ui.separator();
-                let pv_open = (self.dock_visible && self.preview_visible && !self.preview_detached)
-                    || self.preview_detached;
-                let pv_label = if self.preview_detached {
-                    tr(lang, "Prévia de Vídeo (flutuante)")
-                } else {
-                    tr(lang, "Prévia de Vídeo")
-                };
-                if ui.selectable_label(pv_open, pv_label).clicked() {
-                    self.exec_cmd(Some(ui.ctx()), "view.preview");
-                    ui.close_menu();
-                }
-                let mb_open =
-                    (self.dock_visible && self.master_bus_visible && !self.master_bus_detached)
-                        || self.master_bus_detached;
-                let mb_label = if self.master_bus_detached {
-                    tr(lang, "Master Bus (flutuante)")
-                } else {
-                    tr(lang, "Master Bus")
-                };
-                if ui.selectable_label(mb_open, mb_label).clicked() {
-                    self.exec_cmd(Some(ui.ctx()), "view.master_bus");
-                    ui.close_menu();
-                }
-                if ui
-                    .selectable_label(
-                        self.preview_detached,
-                        tr(lang, "Prévia de Vídeo em janela separada"),
-                    )
-                    .clicked()
-                {
-                    self.preview_detached = !self.preview_detached;
-                    if !self.preview_detached {
-                        self.preview_visible = true;
-                    }
-                    ui.close_menu();
-                }
-                if ui
-                    .selectable_label(
-                        self.master_bus_detached,
-                        tr(lang, "Master Bus em janela separada"),
-                    )
-                    .clicked()
-                {
-                    self.master_bus_detached = !self.master_bus_detached;
-                    if !self.master_bus_detached {
-                        self.master_bus_visible = true;
-                    }
-                    ui.close_menu();
-                }
                 // F11, Shift+F11 e Ctrl+F11 do VEGAS Pro, pela Tabela de Comandos.
+                // são liga/desliga: caixa de seleção, como no menu do VEGAS Pro
                 for (cmd_id, on) in [
                     ("view.toggle_dock_area", self.dock_visible),
                     ("view.toggle_track_list", !self.tl.header_collapsed()),
                     ("view.maximize_timeline", self.timeline_restore.is_some()),
                 ] {
-                    let label = menu_label_in(cmd_id, &self.prefs.shortcuts, lang);
-                    if ui.selectable_label(on, label).clicked() {
-                        self.exec_cmd(Some(ui.ctx()), cmd_id);
-                        ui.close_menu();
-                    }
+                    self.cmd_menu_chk(ui, on, cmd_id);
                 }
                 if self.dock_visible
                     && !self.detached_tabs.contains(&self.dock_tab)
@@ -3427,10 +3482,11 @@ impl App {
                     self.cmd_menu_chk(ui, self.external_monitor, "preview.external_monitor");
                 });
                 ui.separator();
-                ui.label(tr(lang, "Formato de tempo:"));
-                for fmt in TimeFormat::ALL {
-                    ui.radio_value(&mut self.opts.time_format, fmt, fmt.name_in(lang));
-                }
+                ui.menu_button(tr(lang, "Formato de tempo"), |ui| {
+                    for fmt in TimeFormat::ALL {
+                        ui.radio_value(&mut self.opts.time_format, fmt, fmt.name_in(lang));
+                    }
+                });
             });
             ui.menu_button(tr(lang, "Inserir"), |ui| {
                 self.cmd_menu_btn(ui, "insert.track_video");
@@ -3828,8 +3884,8 @@ impl App {
                     let id = mode.command_id();
                     let on =
                         tool == neoveg_engine::session::EditTool::Normal && active_mode == mode;
-                    let label = menu_label_in(id, &self.prefs.shortcuts, self.lang());
-                    if ui.selectable_label(on, label).clicked() {
+                    let item = self.cmd_menu_item(ui, id, on);
+                    if ui.add(item).clicked() {
                         self.exec_cmd(Some(ui.ctx()), id);
                         ui.close_menu();
                     }
@@ -4586,6 +4642,51 @@ impl eframe::App for App {
     }
 }
 
+/// Quantos quadros a janela espera o tamanho do monitor antes de desistir do
+/// ajuste inicial (o eframe costuma informá-lo já no primeiro quadro).
+const WINDOW_FIT_MAX_FRAMES: u8 = 30;
+/// Reserva para a barra de título do sistema, que fica fora do `InnerSize`.
+const WINDOW_TITLE_BAR: f32 = 32.0;
+/// Reserva para a barra de tarefas: o egui só informa o tamanho total do
+/// monitor, não a área útil, e a barra do Windows tem 40 a 48 pontos.
+const WINDOW_TASKBAR: f32 = 48.0;
+/// Folga entre a janela e as bordas da área útil.
+const WINDOW_MARGIN: f32 = 16.0;
+
+/// Tamanho e posição iniciais da janela principal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MainWindowGeometry {
+    /// Tamanho interno (sem a barra de título).
+    pub size: egui::Vec2,
+    /// Canto superior esquerdo da janela com a barra de título.
+    pub pos: egui::Pos2,
+    /// O tamanho padrão não cabe: abre maximizada, como o VEGAS Pro em telas
+    /// pequenas; `size`/`pos` ficam como tamanho restaurado.
+    pub maximize: bool,
+}
+
+/// Geometria inicial da janela principal num monitor de `monitor` pontos.
+/// A janela inteira (barra de título incluída) fica dentro da área útil,
+/// acima da barra de tarefas. `None` para tamanhos inválidos.
+pub(crate) fn main_window_geometry(monitor: egui::Vec2) -> Option<MainWindowGeometry> {
+    if !(monitor.x.is_finite() && monitor.y.is_finite() && monitor.x > 0.0 && monitor.y > 0.0) {
+        return None;
+    }
+    let [w, h] = crate::MAIN_WINDOW_SIZE;
+    let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
+    let avail_w = monitor.x - 2.0 * WINDOW_MARGIN;
+    let avail_h = monitor.y - WINDOW_TASKBAR - WINDOW_TITLE_BAR - 2.0 * WINDOW_MARGIN;
+    let maximize = w > avail_w || h > avail_h;
+    let size = egui::vec2(w.min(avail_w).max(min_w), h.min(avail_h).max(min_h));
+    let x = ((monitor.x - size.x) * 0.5).max(0.0);
+    let y = ((monitor.y - WINDOW_TASKBAR - size.y - WINDOW_TITLE_BAR) * 0.5).max(0.0);
+    Some(MainWindowGeometry {
+        size,
+        pos: egui::pos2(x, y),
+        maximize,
+    })
+}
+
 impl App {
     /// Um quadro completo da interface (separado de `eframe::App` para testes).
     /// A janela abriu do tamanho da tela de abertura (ver `native_options`):
@@ -4594,33 +4695,47 @@ impl App {
     /// devolve as bordas e o tamanho normal, e a janela nunca fica presa pequena.
     pub fn set_startup_splash_window(&mut self, on: bool) {
         self.startup_window = on;
+        // sem a tela de abertura, a janela já nasce com MAIN_WINDOW_SIZE, que
+        // pode não caber no monitor: ajusta no primeiro quadro em que o
+        // tamanho do monitor for conhecido
+        self.window_fit_frames = if on { 0 } else { WINDOW_FIT_MAX_FRAMES };
     }
 
     /// Fim da tela de abertura na inicialização: a janela ganha bordas e o
     /// tamanho normal, centralizada no monitor.
     fn leave_startup_window(&mut self, ctx: &egui::Context) {
         self.startup_window = false;
-        let [w, h] = crate::MAIN_WINDOW_SIZE;
         let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
-        let monitor = ctx
-            .input(|i| i.viewport().monitor_size)
-            .filter(|m| m.x.is_finite() && m.y.is_finite() && m.x > 0.0 && m.y > 0.0);
-        let size = match monitor {
-            Some(m) => egui::vec2(w.min(m.x - 40.0).max(min_w), h.min(m.y - 80.0).max(min_h)),
-            None => egui::vec2(w, h),
-        };
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
             min_w, min_h,
         )));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        if let Some(m) = monitor {
-            let x = ((m.x - size.x) * 0.5).max(0.0);
-            let y = ((m.y - size.y) * 0.5).max(0.0);
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        if !self.fit_main_window(ctx) {
+            let [w, h] = crate::MAIN_WINDOW_SIZE;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            self.window_fit_frames = WINDOW_FIT_MAX_FRAMES;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Ajusta a janela principal à área útil do monitor (ver
+    /// [`main_window_geometry`]). Devolve `false` se o tamanho do monitor
+    /// ainda não é conhecido.
+    fn fit_main_window(&mut self, ctx: &egui::Context) -> bool {
+        let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
+            return false;
+        };
+        let Some(geo) = main_window_geometry(monitor) else {
+            return false;
+        };
+        self.window_fit_frames = 0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(geo.size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(geo.pos));
+        if geo.maximize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        true
     }
 
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
@@ -4662,6 +4777,9 @@ impl App {
                 return;
             }
             self.leave_startup_window(ctx);
+        } else if self.window_fit_frames > 0 {
+            self.window_fit_frames -= 1;
+            self.fit_main_window(ctx);
         }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
