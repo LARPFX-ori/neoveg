@@ -5266,9 +5266,7 @@ impl EditorSession {
                     MotionKey {
                         x: (base.x + dx).clamp(-1.5, 1.5),
                         y: (base.y + dy).clamp(-1.5, 1.5),
-                        scale_x: base.scale_x,
-                        scale_y: base.scale_y,
-                        rot: base.rot,
+                        ..base.clone()
                     },
                     tol,
                 );

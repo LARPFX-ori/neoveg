@@ -126,6 +126,11 @@ pub fn draw_source(
     out
 }
 
+/// No modo 2D os campos de 3D não contam.
+fn motion_2d_is_identity(m: &MotionKey) -> bool {
+    m.x == 0.0 && m.y == 0.0 && m.scale_x == 1.0 && m.scale_y == 1.0 && m.rot == 0.0
+}
+
 /// Aplica Track Motion (posição, escala, rotação) a uma camada.
 fn apply_motion(f: &Frame, m: &MotionKey) -> Frame {
     let (w, h) = (f.w, f.h);
@@ -704,7 +709,11 @@ fn render_track_processed(
         });
     }
     let mk = track.motion.eval(t);
-    if mk != MotionKey::default() {
+    if track.motion_3d {
+        if !super::motion3d::is_identity(&mk) {
+            layer = super::motion3d::apply_motion_3d(&layer, &mk);
+        }
+    } else if !motion_2d_is_identity(&mk) {
         layer = apply_motion(&layer, &mk);
     }
     Some(layer)
@@ -817,7 +826,7 @@ fn compose_subtree(
         }
     }
     let pmk = track.parent_motion.eval(t);
-    if pmk != MotionKey::default() {
+    if !motion_2d_is_identity(&pmk) {
         group = apply_motion(&group, &pmk);
     }
     let op = track.opacity * track.env_value(EnvKind::Opacity, t);
