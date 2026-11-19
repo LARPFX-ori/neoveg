@@ -774,12 +774,22 @@ impl App {
         } else {
             Color32::from_gray(40)
         };
-        let thin = Stroke::new(1.0_f32, ink);
+        let stroke_w = if self.theme.high_contrast {
+            1.5_f32
+        } else {
+            1.0_f32
+        };
+        let thin = Stroke::new(stroke_w, ink);
         // quadro de saída
+        let frame_stroke_col = if self.theme.high_contrast {
+            self.theme.border
+        } else {
+            Color32::from_gray(90)
+        };
         painter.rect_stroke(
             egui::Rect::from_min_max(sc(Vec2::ZERO), sc(frame)),
             0.0,
-            Stroke::new(1.0_f32, Color32::from_gray(90)),
+            Stroke::new(stroke_w, frame_stroke_col),
             egui::StrokeKind::Middle,
         );
         // camada: retângulo, círculo e eixos X/Y do objeto
@@ -801,7 +811,11 @@ impl App {
         painter.line_segment([c, ax], thin);
         painter.line_segment([c, ay], thin);
         let font = egui::FontId::proportional(10.0);
-        let label_col = Color32::from_rgb(170, 110, 90);
+        let label_col = if self.theme.high_contrast {
+            self.theme.accent
+        } else {
+            Color32::from_rgb(170, 110, 90)
+        };
         painter.text(
             ax + vec2(4.0, 0.0),
             egui::Align2::LEFT_CENTER,
@@ -985,12 +999,22 @@ impl App {
         } else {
             Color32::from_gray(40)
         };
-        let thin = Stroke::new(1.0_f32, ink);
+        let stroke_w = if self.theme.high_contrast {
+            1.5_f32
+        } else {
+            1.0_f32
+        };
+        let thin = Stroke::new(stroke_w, ink);
         if edges {
+            let edge_col = if self.theme.high_contrast {
+                self.theme.border
+            } else {
+                Color32::from_gray(90)
+            };
             painter.rect_stroke(
                 egui::Rect::from_min_max(to_s(-frame * 0.5), to_s(frame * 0.5)),
                 0.0,
-                Stroke::new(1.0_f32, Color32::from_gray(90)),
+                Stroke::new(stroke_w, edge_col),
                 egui::StrokeKind::Middle,
             );
         }

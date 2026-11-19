@@ -624,9 +624,16 @@ impl App {
             Color32::from_rgb(240, 200, 40),
             Stroke::NONE,
         ));
+        let stroke_w = if th.high_contrast { 1.5_f32 } else { 1.0_f32 };
         p.line_segment(
             [pos2(cx, strip.top()), pos2(cx, strip.bottom())],
-            Stroke::new(1.0_f32, th.tl_playhead_edit),
+            Stroke::new(stroke_w, th.tl_playhead_edit),
+        );
+        p.rect_stroke(
+            strip,
+            0.0,
+            Stroke::new(stroke_w, th.border),
+            StrokeKind::Inside,
         );
         let _ = media_id;
         self.trimmer_pointer(&resp, strip, dur, frame_dur);
@@ -742,6 +749,17 @@ impl App {
                 );
             }
         }
+        let stroke_w = if self.theme.high_contrast {
+            1.5_f32
+        } else {
+            1.0_f32
+        };
+        p.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(stroke_w, self.theme.border),
+            StrokeKind::Inside,
+        );
     }
 
     fn trimmer_waveform(
@@ -780,24 +798,34 @@ impl App {
                 let t1 =
                     Ticks::from_raw((i128::from(dur.0) * (i as i128 + 1) / cols as i128) as i64);
                 let (lo, hi) = audio.peak_range(t0, t1);
+                let wave_col = if self.theme.high_contrast {
+                    self.theme.accent
+                } else {
+                    self.theme.tl_gain_line
+                };
                 p.line_segment(
                     [
                         pos2(x, mid - hi.clamp(-1.0, 1.0) * half_h),
                         pos2(x, mid - lo.clamp(-1.0, 1.0) * half_h),
                     ],
-                    Stroke::new(1.0_f32, self.theme.accent),
+                    Stroke::new(1.0_f32, wave_col),
                 );
             }
         }
+        let stroke_w = if self.theme.high_contrast {
+            1.5_f32
+        } else {
+            1.0_f32
+        };
         let cx = x_of(self.trimmer.cursor);
         p.line_segment(
             [pos2(cx, strip.top()), pos2(cx, strip.bottom())],
-            Stroke::new(1.0_f32, self.theme.tl_playhead_edit),
+            Stroke::new(stroke_w, self.theme.tl_playhead_edit),
         );
         p.rect_stroke(
             strip,
             0.0,
-            Stroke::new(1.0_f32, self.theme.border),
+            Stroke::new(stroke_w, self.theme.border),
             StrokeKind::Inside,
         );
         self.trimmer_pointer(&resp, strip, dur, frame_dur);

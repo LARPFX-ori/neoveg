@@ -191,8 +191,8 @@ impl App {
                 ui.horizontal_top(|ui| {
                     self.pc_toolbar(ui, &mut st, lang);
                     if st.show_props {
-                        ui.allocate_ui(vec2(230.0, top_h), |ui| {
-                            ui.set_width(230.0);
+                        ui.allocate_ui(vec2(220.0, top_h), |ui| {
+                            ui.set_width(220.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("pc_props")
                                 .auto_shrink([false, false])
@@ -600,7 +600,12 @@ impl App {
         } else {
             Color32::BLACK
         };
-        let thin = Stroke::new(1.0_f32, ink);
+        let stroke_w = if self.theme.high_contrast {
+            1.5_f32
+        } else {
+            1.0_f32
+        };
+        let thin = Stroke::new(stroke_w, ink);
         let corners: Vec<Pos2> = g.corners().iter().map(|p| sc(*p)).collect();
         dashed_closed(&painter, &corners, thin);
         let r = ws.frame_len(1.0).recip() * g.rotate_radius();
@@ -621,9 +626,14 @@ impl App {
             .collect();
         dashed_closed(&painter, &f_pts, thin);
         painter.circle_stroke(sc(g.center), 4.0, thin);
+        let handle_fill = if self.theme.high_contrast {
+            self.theme.accent
+        } else {
+            Color32::WHITE
+        };
         for i in 0..8 {
             let h = Rect::from_center_size(sc(g.handle(i)), vec2(7.0, 7.0));
-            painter.rect_filled(h, 0.0, Color32::WHITE);
+            painter.rect_filled(h, 0.0, handle_fill);
             painter.rect_stroke(h, 0.0, thin, egui::StrokeKind::Inside);
         }
 

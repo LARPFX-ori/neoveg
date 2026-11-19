@@ -37,15 +37,37 @@ pub(crate) fn prop_section(
         theme.widget_bg
     };
     p.rect_filled(rect, 0.0, head_bg);
+    if theme.high_contrast {
+        p.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.5_f32, theme.border),
+            StrokeKind::Inside,
+        );
+    }
     let bx = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(9.0, 9.0));
     p.rect_filled(bx, 0.0, theme.window_fill);
     p.rect_stroke(
         bx,
         0.0,
-        Stroke::new(1.0_f32, theme.text_muted),
+        Stroke::new(
+            if theme.high_contrast {
+                1.5_f32
+            } else {
+                1.0_f32
+            },
+            theme.border,
+        ),
         StrokeKind::Inside,
     );
-    let mid = Stroke::new(1.0_f32, theme.text_primary);
+    let mid = Stroke::new(
+        if theme.high_contrast {
+            1.5_f32
+        } else {
+            1.0_f32
+        },
+        theme.text_primary,
+    );
     p.line_segment(
         [
             bx.left_center() + vec2(2.0, 0.0),
@@ -435,6 +457,11 @@ pub(crate) fn keyframe_strip(
         for &(t, _) in &row.keys {
             let x = x_of(t);
             let cy = lane.center().y;
+            let (fill, stroke_col, stroke_w) = if theme.high_contrast {
+                (theme.accent, theme.text_primary, 1.5_f32)
+            } else {
+                (theme.tl_env_primary, theme.text_primary, 1.0_f32)
+            };
             p.add(Shape::convex_polygon(
                 vec![
                     pos2(x, cy - 5.0),
@@ -442,8 +469,8 @@ pub(crate) fn keyframe_strip(
                     pos2(x, cy + 5.0),
                     pos2(x - 5.0, cy),
                 ],
-                theme.tl_env_primary,
-                Stroke::new(1.0_f32, theme.text_primary),
+                fill,
+                Stroke::new(stroke_w, stroke_col),
             ));
         }
     }
@@ -451,7 +478,14 @@ pub(crate) fn keyframe_strip(
     let cx = x_of(cursor.clamp_safe(Ticks::ZERO, len));
     p.line_segment(
         [pos2(cx, lanes.top()), pos2(cx, lanes.bottom())],
-        Stroke::new(1.0_f32, theme.tl_playhead_edit),
+        Stroke::new(
+            if theme.high_contrast {
+                1.5_f32
+            } else {
+                1.0_f32
+            },
+            theme.tl_playhead_edit,
+        ),
     );
     p.rect_stroke(
         rect,

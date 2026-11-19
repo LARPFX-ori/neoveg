@@ -24,9 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Altura da barra de título própria (pontos).
-pub const BAR_H: f32 = 24.0;
+pub const BAR_H: f32 = 22.0;
 /// Margem interna do conteúdo na janela nativa (pontos).
-const MARGIN: f32 = 8.0;
+const MARGIN: f32 = 6.0;
 /// Faixa das bordas que redimensiona a janela nativa (pontos).
 const EDGE: f32 = 5.0;
 /// Tempo parada que conta como "soltou a janela" ao arrastar pelo `:::`.
@@ -246,8 +246,8 @@ fn title_bar(
 ) -> BarOut {
     let mut close = false;
     let inner = ui.horizontal(|ui| {
-        ui.set_height(BAR_H - 4.0);
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.set_height(BAR_H - 2.0);
+        ui.spacing_mut().item_spacing.x = 4.0;
         let grip = ui
             .add(
                 egui::Label::new(egui::RichText::new(":::").strong().monospace())
@@ -259,9 +259,9 @@ fn title_bar(
                 lang,
                 "Arraste para soltar a janela ou acoplá-la na janela do Neoveg",
             ));
-        let close_w = if has_close { 22.0 } else { 0.0 };
+        let close_w = if has_close { 20.0 } else { 0.0 };
         let area_w = (ui.available_width() - close_w).max(0.0);
-        let (rect, area) = ui.allocate_exact_size(vec2(area_w, BAR_H - 4.0), area_sense);
+        let (rect, area) = ui.allocate_exact_size(vec2(area_w, BAR_H - 2.0), area_sense);
         let visuals = ui.visuals().clone();
         ui.painter().with_clip_rect(rect).text(
             rect.left_center(),
@@ -691,7 +691,7 @@ impl<'open> DialogWindow<'open> {
                 .frame(
                     egui::Frame::NONE
                         .fill(visuals.faint_bg_color)
-                        .inner_margin(egui::Margin::symmetric(6, 2)),
+                        .inner_margin(egui::Margin::symmetric(4, 1)),
                 )
                 .show(vctx, |ui| {
                     title_bar(ui, &title, has_close, lang, Sense::click_and_drag())
