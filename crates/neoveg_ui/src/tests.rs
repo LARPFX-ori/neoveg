@@ -1432,6 +1432,103 @@ fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
     assert!(cmds.contains(&egui::ViewportCommand::Resizable(true)));
 }
 
+/// Num monitor 1440x900 (barra de tarefas de 40 pontos), a janela abria com
+/// 820 pontos internos em y=40 e terminava em y=891: a barra de transporte e
+/// a de status ficavam atrás da barra de tarefas. A janela inteira, barra de
+/// título incluída, tem de caber acima da barra de tarefas.
+#[test]
+fn janela_principal_cabe_na_area_util_do_monitor() {
+    use crate::app::main_window_geometry;
+    for (mw, mh) in [
+        (1366.0, 768.0),
+        (1440.0, 900.0),
+        (1600.0, 900.0),
+        (1920.0, 1080.0),
+        (2560.0, 1440.0),
+    ] {
+        let geo = main_window_geometry(vec2(mw, mh)).expect("monitor válido");
+        let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
+        assert!(geo.size.x >= min_w && geo.size.y >= min_h);
+        assert!(geo.pos.x >= 0.0 && geo.pos.y >= 0.0);
+        assert!(
+            geo.pos.x + geo.size.x <= mw,
+            "{mw}x{mh}: a janela passa da borda direita"
+        );
+        // 32 de barra de título + 48 de barra de tarefas
+        assert!(
+            geo.pos.y + 32.0 + geo.size.y <= mh - 48.0,
+            "{mw}x{mh}: a janela passa para trás da barra de tarefas ({geo:?})"
+        );
+    }
+    // o tamanho padrão não cabe em 1440x900: abre maximizada
+    let small = main_window_geometry(vec2(1440.0, 900.0)).expect("monitor válido");
+    assert!(small.maximize);
+    // em Full HD cabe: tamanho padrão, sem maximizar
+    let full_hd = main_window_geometry(vec2(1920.0, 1080.0)).expect("monitor válido");
+    assert!(!full_hd.maximize);
+    assert_eq!(
+        full_hd.size,
+        vec2(crate::MAIN_WINDOW_SIZE[0], crate::MAIN_WINDOW_SIZE[1])
+    );
+    for bad in [
+        vec2(0.0, 900.0),
+        vec2(f32::NAN, 900.0),
+        vec2(1440.0, f32::INFINITY),
+        vec2(-1.0, -1.0),
+    ] {
+        assert!(main_window_geometry(bad).is_none());
+    }
+}
+
+/// Sem a tela de abertura, a janela nasce com MAIN_WINDOW_SIZE; no primeiro
+/// quadro em que o monitor é conhecido, ela é ajustada à área útil.
+#[test]
+fn janela_sem_abertura_se_ajusta_ao_monitor_no_primeiro_quadro() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.set_startup_splash_window(false);
+    let raw = |t: f64, monitor: Option<egui::Vec2>| {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+            time: Some(t),
+            ..Default::default()
+        };
+        if let Some(vp) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
+            vp.monitor_size = monitor;
+        }
+        input
+    };
+    let cmds = |out: &egui::FullOutput| -> Vec<egui::ViewportCommand> {
+        out.viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter().cloned())
+            .collect()
+    };
+    // monitor ainda desconhecido: espera
+    let out = ctx.run(raw(0.0, None), |c| app.frame_ui(c));
+    assert!(!cmds(&out)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_))));
+    // monitor 1440x900: ajusta e maximiza uma vez só
+    let out = ctx.run(raw(0.05, Some(vec2(1440.0, 900.0))), |c| app.frame_ui(c));
+    let first = cmds(&out);
+    assert!(first.contains(&egui::ViewportCommand::Maximized(true)));
+    assert!(first
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_))));
+    let out = ctx.run(raw(0.1, Some(vec2(1440.0, 900.0))), |c| app.frame_ui(c));
+    assert!(
+        !cmds(&out).contains(&egui::ViewportCommand::Maximized(true)),
+        "o ajuste inicial não pode se repetir e brigar com o usuário"
+    );
+}
+
 /// Exibir > Escala da interface: o comando muda a preferência e o quadro
 /// seguinte aplica o fator no egui; os limites seguram cliques repetidos.
 #[test]
