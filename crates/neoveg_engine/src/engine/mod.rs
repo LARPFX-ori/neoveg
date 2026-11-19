@@ -9,6 +9,7 @@ pub mod scene_detect;
 pub mod surround;
 pub mod transition;
 pub mod vfx;
+mod vfx_extra;
 pub mod video;
 
 use image::RgbaImage;

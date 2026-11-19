@@ -3722,6 +3722,39 @@ impl App {
                     ui.checkbox(mono, tr(lang, "Monocromático"));
                     ui.checkbox(animated, tr(lang, "Animado"));
                 }
+                GenSpec::TestPattern { pattern } => {
+                    let names = [
+                        "Grade de convergência",
+                        "Rampa de cinza",
+                        "Placa de zona",
+                        "Grade de pixels",
+                    ];
+                    let cur = names.get(*pattern as usize).copied().unwrap_or(names[0]);
+                    egui::ComboBox::from_label(tr(lang, "Padrão"))
+                        .selected_text(tr(lang, cur))
+                        .show_ui(ui, |ui| {
+                            for (i, n) in names.iter().enumerate() {
+                                ui.selectable_value(pattern, i as u32, tr(lang, n));
+                            }
+                        });
+                }
+                GenSpec::NoiseTexture {
+                    a,
+                    b,
+                    scale,
+                    octaves,
+                    animated,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "Cor inicial"));
+                        ui.color_edit_button_rgba_unmultiplied(a);
+                        ui.label(tr(lang, "Cor final"));
+                        ui.color_edit_button_rgba_unmultiplied(b);
+                    });
+                    ui.add(egui::Slider::new(scale, 0.01..=1.0).text(tr(lang, "Escala")));
+                    ui.add(egui::Slider::new(octaves, 1..=8).text(tr(lang, "Detalhe")));
+                    ui.checkbox(animated, tr(lang, "Animado"));
+                }
                 GenSpec::Ofx(ofx_ref) => {
                     let mut tmp_fx = crate::model::FxInstance::new(FxKind::Ofx);
                     tmp_fx.id = mid;

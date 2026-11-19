@@ -221,9 +221,137 @@ pub fn render(spec: &GenSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
                 }
             })
         }
+        GenSpec::TestPattern { pattern } => render_test_pattern(*pattern, w, h),
+        GenSpec::NoiseTexture {
+            a,
+            b,
+            scale,
+            octaves,
+            animated,
+        } => render_noise_texture(*a, *b, *scale, *octaves, *animated, t, w, h),
         GenSpec::Text(ts) => render_text(ts, t, w, h, fonts),
         GenSpec::Ofx(r) => render_ofx_generator(r, t, w, h),
     }
+}
+
+/// Padrões técnicos para conferir geometria, níveis e nitidez.
+fn render_test_pattern(pattern: u32, w: u32, h: u32) -> RgbaImage {
+    let (wf, hf) = (w as f32, h as f32);
+    let cell = (hf / 12.0).max(2.0);
+    RgbaImage::from_fn(w, h, |x, y| {
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let v: [u8; 3] = match pattern {
+            // rampa de cinza em 11 degraus em cima e contínua embaixo
+            1 => {
+                let k = fx / wf;
+                let k = if fy < hf * 0.5 {
+                    (k * 11.0).floor() / 10.0
+                } else {
+                    k
+                };
+                let g = (k.clamp(0.0, 1.0) * 255.0).round() as u8;
+                [g, g, g]
+            }
+            // placa de zona: anéis cada vez mais finos (mostra aliasing)
+            2 => {
+                let (dx, dy) = ((fx - wf * 0.5) / hf, (fy - hf * 0.5) / hf);
+                let r2 = dx * dx + dy * dy;
+                let g = (0.5 + 0.5 * (r2 * hf * 0.9 * std::f32::consts::PI).cos()) * 255.0;
+                let g = g.round() as u8;
+                [g, g, g]
+            }
+            // grade de pixels alternados (1 px)
+            3 => {
+                if (x + y) % 2 == 0 {
+                    [255, 255, 255]
+                } else {
+                    [0, 0, 0]
+                }
+            }
+            // grade de convergência com círculo central e cruz
+            _ => {
+                let on_grid = (fx % cell) < 1.0 || (fy % cell) < 1.0;
+                let (dx, dy) = (fx - wf * 0.5, fy - hf * 0.5);
+                let r = (dx * dx + dy * dy).sqrt();
+                let circle = (r - hf * 0.42).abs() < 1.0;
+                let cross = dx.abs() < 1.0 || dy.abs() < 1.0;
+                if on_grid || circle || cross {
+                    [235, 235, 235]
+                } else {
+                    [16, 16, 16]
+                }
+            }
+        };
+        image::Rgba([v[0], v[1], v[2], 255])
+    })
+}
+
+/// Ruído de valor interpolado em várias oitavas (determinístico).
+#[allow(clippy::too_many_arguments)]
+fn render_noise_texture(
+    a: [f32; 4],
+    b: [f32; 4],
+    scale: f32,
+    octaves: u32,
+    animated: bool,
+    t: f64,
+    w: u32,
+    h: u32,
+) -> RgbaImage {
+    let scale = if scale.is_finite() {
+        scale.clamp(0.01, 1.0)
+    } else {
+        0.2
+    };
+    let octaves = octaves.clamp(1, 8);
+    let z = if animated && t.is_finite() {
+        (t * 0.5).rem_euclid(4096.0) as f32
+    } else {
+        0.0
+    };
+    let lattice = |ix: i32, iy: i32, iz: i32| -> f32 {
+        let h = hash32(
+            (ix as u32).wrapping_mul(73_856_093)
+                ^ (iy as u32).wrapping_mul(19_349_663)
+                ^ (iz as u32).wrapping_mul(83_492_791),
+        );
+        (h & 0xffff) as f32 / 65_535.0
+    };
+    let smooth = |k: f32| k * k * (3.0 - 2.0 * k);
+    let value = |x: f32, y: f32, zz: f32| -> f32 {
+        let (x0, y0, z0) = (x.floor(), y.floor(), zz.floor());
+        let (tx, ty, tz) = (smooth(x - x0), smooth(y - y0), smooth(zz - z0));
+        let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
+        let plane = |iz: i32| {
+            let a0 = lattice(ix, iy, iz);
+            let a1 = lattice(ix + 1, iy, iz);
+            let b0 = lattice(ix, iy + 1, iz);
+            let b1 = lattice(ix + 1, iy + 1, iz);
+            let top = a0 + (a1 - a0) * tx;
+            let bot = b0 + (b1 - b0) * tx;
+            top + (bot - top) * ty
+        };
+        let p0 = plane(iz);
+        p0 + (plane(iz + 1) - p0) * tz
+    };
+    let base = (h as f32 * scale).max(1.0);
+    RgbaImage::from_fn(w, h, |x, y| {
+        let (mut amp, mut freq, mut sum, mut norm) = (1.0f32, 1.0f32, 0.0f32, 0.0f32);
+        for _ in 0..octaves {
+            sum += amp * value(x as f32 / base * freq, y as f32 / base * freq, z + freq);
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
+        }
+        let k = (sum / norm.max(1e-6)).clamp(0.0, 1.0);
+        let c = [
+            a[0] + (b[0] - a[0]) * k,
+            a[1] + (b[1] - a[1]) * k,
+            a[2] + (b[2] - a[2]) * k,
+            a[3] + (b[3] - a[3]) * k,
+        ];
+        image::Rgba(rgba8(c))
+    })
 }
 
 fn render_ofx_generator(r: &crate::model::OfxFxRef, t: f64, w: u32, h: u32) -> RgbaImage {

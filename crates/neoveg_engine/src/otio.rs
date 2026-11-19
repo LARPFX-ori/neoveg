@@ -1033,6 +1033,10 @@ fn export_media_ref(item: Option<&MediaItem>, fps: FrameRate, sr: Option<u32>) -
                 GenSpec::Text(t) => ("Text", serde_json::json!({ "text": t.text })),
                 GenSpec::Gradient { .. } => ("Gradient", serde_json::json!({})),
                 GenSpec::Noise { .. } => ("Noise", serde_json::json!({})),
+                GenSpec::TestPattern { pattern } => {
+                    ("TestPattern", serde_json::json!({ "pattern": pattern }))
+                }
+                GenSpec::NoiseTexture { .. } => ("NoiseTexture", serde_json::json!({})),
                 GenSpec::Ofx(r) => (
                     "Ofx",
                     serde_json::json!({ "plugin_id": r.plugin_id, "label": r.label }),

@@ -104,7 +104,18 @@ fn warp_flow(a: &Frame, b: &Frame, p: f32) -> Frame {
 /// Combina o quadro de saída `a` com o de entrada `b` no progresso `p` (0..1).
 pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) -> Frame {
     let (w, h) = (a.w, a.h);
-    let p = p.clamp(0.0, 1.0);
+    let p = if p.is_finite() {
+        p.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if w == 0 || h == 0 || a.px.len() != w * h {
+        return Frame::new(w.min(a.px.len()), h.min(a.px.len()));
+    }
+    if b.w != w || b.h != h || b.px.len() != a.px.len() {
+        // quadros de tamanhos diferentes: troca seca no meio, sem indexar fora
+        return if p < 0.5 { a.clone() } else { b.clone() };
+    }
     if kind == TransitionKind::WarpFlow {
         return warp_flow(a, b, p);
     }
@@ -202,6 +213,13 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
                 }
             });
         }
+        TransitionKind::PushUp
+        | TransitionKind::PushDown
+        | TransitionKind::Squeeze
+        | TransitionKind::Swap
+        | TransitionKind::FlashWhite
+        | TransitionKind::FlyIn
+        | TransitionKind::PagePeel => geometric(kind, a, b, p, &mut out),
         _ => {
             // transições por máscara: B aparece onde v(x,y) < progresso
             let s = softness.clamp(0.0, 0.5).max(0.002);
@@ -238,6 +256,54 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
                             let par = ((cx + cy) & 1) as f32;
                             (par + (nx * 8.0).fract()) * 0.5
                         }
+                        TransitionKind::DiagonalWipe => (nx * aspect + ny) / (aspect + 1.0),
+                        TransitionKind::SplitHorizontal => (ny - 0.5).abs() * 2.0,
+                        TransitionKind::VenetianBlinds => (nx * 10.0).fract(),
+                        TransitionKind::StarWipe => {
+                            let dx = (nx - 0.5) * aspect;
+                            let dy = ny - 0.5;
+                            let ang = dy.atan2(dx) + PI / 2.0;
+                            let k = 0.55 + 0.45 * (2.5 * ang).cos().abs().powi(3);
+                            let half_diag = 0.5 * (aspect * aspect + 1.0).sqrt();
+                            ((dx * dx + dy * dy).sqrt() / k / (half_diag / 0.55)).min(1.0)
+                        }
+                        TransitionKind::Spiral => {
+                            let dx = (nx - 0.5) * aspect;
+                            let dy = ny - 0.5;
+                            let half_diag = 0.5 * (aspect * aspect + 1.0).sqrt();
+                            let d = (dx * dx + dy * dy).sqrt() / half_diag;
+                            let ang = (dy.atan2(dx) + PI) / (2.0 * PI);
+                            (d * 3.0 + ang) / 4.0
+                        }
+                        TransitionKind::Portals => {
+                            let (cx, cy) = ((nx * 6.0).floor(), (ny * 4.0).floor());
+                            let delay = (super::vfx::hash(
+                                (cx as u32).wrapping_mul(73) ^ (cy as u32).wrapping_mul(9_151),
+                            ) & 0xffff) as f32
+                                / 65_536.0
+                                * 0.5;
+                            let (fx, fy) = ((nx * 6.0).fract() - 0.5, (ny * 4.0).fract() - 0.5);
+                            let d =
+                                ((fx * fx + fy * fy).sqrt() * std::f32::consts::SQRT_2).min(1.0);
+                            delay + d * 0.5
+                        }
+                        TransitionKind::RandomDissolve => {
+                            (super::vfx::hash(
+                                (x as u32 / 2).wrapping_mul(7_919)
+                                    ^ (y as u32 / 2).wrapping_mul(104_729),
+                            ) & 0xffff) as f32
+                                / 65_536.0
+                        }
+                        TransitionKind::Cascade => {
+                            let (cx, cy) = ((nx * 8.0).floor(), (ny * 6.0).floor());
+                            let local = ((nx * 8.0).fract() + (ny * 6.0).fract()) * 0.5;
+                            (cx + cy) / 12.0 * 0.7 + local * 0.3
+                        }
+                        TransitionKind::GradientWipe => {
+                            let q = a.px.get(y * w + x).copied().unwrap_or([0.0; 4]);
+                            let al = q[3].max(1e-6);
+                            super::luma([q[0] / al, q[1] / al, q[2] / al]).clamp(0.0, 1.0)
+                        }
                         _ => nx,
                     };
                     let pp = p * (1.0 + 2.0 * s) - s;
@@ -253,9 +319,166 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
     out
 }
 
+/// `top` sobre `bottom` (RGBA pré-multiplicado).
+#[inline]
+fn over(top: [f32; 4], bottom: [f32; 4]) -> [f32; 4] {
+    let ia = 1.0 - top[3];
+    [
+        top[0] + bottom[0] * ia,
+        top[1] + bottom[1] * ia,
+        top[2] + bottom[2] * ia,
+        top[3] + bottom[3] * ia,
+    ]
+}
+
+#[inline]
+fn scaled(px: [f32; 4], k: f32) -> [f32; 4] {
+    [px[0] * k, px[1] * k, px[2] * k, px[3] * k]
+}
+
+/// Amostra `f` em (x, y) somente dentro do quadro; fora devolve transparente.
+#[inline]
+fn sample_in(f: &Frame, x: f32, y: f32) -> [f32; 4] {
+    if x >= 0.0 && y >= 0.0 && x < f.w as f32 && y < f.h as f32 {
+        f.sample(x, y)
+    } else {
+        [0.0; 4]
+    }
+}
+
+/// Transições que movem ou deformam os quadros (sem máscara).
+fn geometric(kind: TransitionKind, a: &Frame, b: &Frame, p: f32, out: &mut Frame) {
+    let (w, h) = (a.w, a.h);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (wf, hf) = (w as f32, h as f32);
+    let (cx, cy) = (wf * 0.5, hf * 0.5);
+    out.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let fy = y as f32 + 0.5;
+        for (x, o) in row.iter_mut().enumerate() {
+            let fx = x as f32 + 0.5;
+            let pa = a.px.get(y * w + x).copied().unwrap_or([0.0; 4]);
+            let pb = b.px.get(y * w + x).copied().unwrap_or([0.0; 4]);
+            *o = match kind {
+                TransitionKind::PushUp => {
+                    let sy = fy + p * hf;
+                    if sy < hf {
+                        sample_in(a, fx, sy)
+                    } else {
+                        sample_in(b, fx, sy - hf)
+                    }
+                }
+                TransitionKind::PushDown => {
+                    let sy = fy - p * hf;
+                    if sy >= 0.0 {
+                        sample_in(a, fx, sy)
+                    } else {
+                        sample_in(b, fx, sy + hf)
+                    }
+                }
+                TransitionKind::Squeeze => {
+                    // A se comprime para a esquerda enquanto B se expande pela direita
+                    let split = (1.0 - p) * wf;
+                    if fx < split {
+                        sample_in(a, fx / (1.0 - p).max(1e-4), fy)
+                    } else {
+                        sample_in(b, (fx - split) / p.max(1e-4), fy)
+                    }
+                }
+                TransitionKind::Swap => {
+                    // os dois saem para lados opostos e voltam trocando a ordem
+                    let off = (p * PI).sin() * wf * 0.55;
+                    let sa = sample_in(a, fx + off, fy);
+                    let sb = sample_in(b, fx - off, fy);
+                    if p < 0.5 {
+                        over(sa, sb)
+                    } else {
+                        over(sb, sa)
+                    }
+                }
+                TransitionKind::FlashWhite => {
+                    let white = (1.0 - (p - 0.5).abs() * 2.0).powf(0.7);
+                    let base = if p < 0.5 { pa } else { pb };
+                    let al = base[3].max(white);
+                    [
+                        base[0] + (al - base[0]) * white,
+                        base[1] + (al - base[1]) * white,
+                        base[2] + (al - base[2]) * white,
+                        al,
+                    ]
+                }
+                TransitionKind::FlyIn => {
+                    // A voa em direção à câmera e some; B chega do fundo
+                    let ka = 1.0 + p * 0.8;
+                    let kb = (0.2 + 0.8 * p).max(1e-3);
+                    let sa = scaled(
+                        sample_in(a, cx + (fx - cx) / ka, cy + (fy - cy) / ka),
+                        1.0 - p,
+                    );
+                    let sb = scaled(sample_in(b, cx + (fx - cx) / kb, cy + (fy - cy) / kb), p);
+                    over(sa, sb)
+                }
+                TransitionKind::PagePeel => {
+                    // dobra plana a partir do canto inferior direito
+                    let span = wf + hf;
+                    let s = ((wf - fx) + (hf - fy)) / span;
+                    let fold = p * 1.02;
+                    if s >= fold {
+                        pa
+                    } else {
+                        // verso da página: reflexo do ponto em relação à linha da dobra
+                        let s2 = 2.0 * fold - s;
+                        let d = (s - s2) * span * 0.5;
+                        let (rx, ry) = (fx + d, fy + d);
+                        if s2 <= 1.0 && rx >= 0.0 && ry >= 0.0 && rx < wf && ry < hf {
+                            let q = a.sample(rx, ry);
+                            let al = q[3];
+                            [
+                                q[0] * 0.35 + al * 0.6,
+                                q[1] * 0.35 + al * 0.6,
+                                q[2] * 0.35 + al * 0.6,
+                                al,
+                            ]
+                        } else {
+                            pb
+                        }
+                    }
+                }
+                _ => pa,
+            };
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Toda transição começa em A, termina em B e não trava com quadros
+    /// vazios, minúsculos ou de tamanhos diferentes.
+    #[test]
+    fn todas_as_transicoes_vao_de_a_para_b_sem_panico() {
+        let (w, h) = (24, 16);
+        let a = Frame::filled(w, h, [1.0, 0.0, 0.0, 1.0]);
+        let b = Frame::filled(w, h, [0.0, 0.0, 1.0, 1.0]);
+        for kind in TransitionKind::ALL {
+            let start = apply(kind, 0.05, &a, &b, 0.0);
+            let end = apply(kind, 0.05, &a, &b, 1.0);
+            let mid = apply(kind, 0.05, &a, &b, 0.5);
+            assert!(mid.px.iter().flatten().all(|c| c.is_finite()), "{kind:?}");
+            let red = start.px.iter().filter(|q| q[0] > 0.9).count();
+            let blue = end.px.iter().filter(|q| q[2] > 0.9).count();
+            assert!(red * 10 >= w * h * 9, "{kind:?} não começa em A ({red})");
+            assert!(blue * 10 >= w * h * 9, "{kind:?} não termina em B ({blue})");
+            let e = Frame::new(0, 0);
+            let z = apply(kind, 0.05, &e, &e, 0.5);
+            assert_eq!(z.px.len(), 0, "{kind:?}");
+            let one = Frame::filled(1, 1, [0.5; 4]);
+            apply(kind, 0.05, &one, &one, 0.3);
+            apply(kind, f32::NAN, &a, &b, f32::NAN);
+        }
+    }
 
     #[test]
     fn warp_flow_interpola_movimento_sem_panico_e_resiste_dimensoes_extremas() {
