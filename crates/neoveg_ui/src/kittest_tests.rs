@@ -2389,3 +2389,55 @@ fn kittest_pan_crop_grade_de_propriedades_recolhivel() {
     harness.run_steps(2);
     assert!(harness.query_by_label("Área de trabalho").is_none());
 }
+
+/// Janela Movimento da Trilha 2D no layout do VEGAS Pro (manual do VEGAS Pro
+/// 21, pp. 412–413): composição da trilha na barra, grade de propriedades
+/// com Posição, Rotação, Quadro-chave, Área de trabalho e Encaixe.
+#[test]
+fn kittest_movimento_da_trilha_grade_e_composicao() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let tid = {
+        let app = harness.state_mut();
+        let tid = app
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.kind == crate::model::TrackKind::Video)
+            .map(|t| t.id)
+            .expect("trilha de vídeo");
+        app.dlg.track_motion = Some(tid);
+        tid
+    };
+    harness.run_steps(3);
+    for label in [
+        "Posição",
+        "Rotação",
+        "Quadro-chave",
+        "Área de trabalho",
+        "Encaixe",
+        "Largura:",
+    ] {
+        assert!(
+            harness.query_by_label(label).is_some(),
+            "falta '{label}' na janela Movimento da Trilha"
+        );
+    }
+    harness.get_by_label("Encaixe").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Espaçamento da grade:").is_none());
+    let blend = |h: &Harness<'_, App>| {
+        h.state()
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.id == tid)
+            .map(|t| t.blend)
+    };
+    assert_eq!(blend(&harness), Some(crate::model::BlendMode::SourceAlpha));
+    harness.state_mut().dlg.track_motion = None;
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Encaixe").is_none());
+}
