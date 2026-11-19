@@ -97,6 +97,12 @@ fn native_options(renderer: eframe::Renderer, splash_window: bool) -> eframe::Na
 /// Inicia a janela principal usando `wgpu`; caso não haja adaptador gráfico
 /// compatível (§3.6), cai automaticamente para `glow` (OpenGL/software) e
 /// exibe aviso na barra de status sem entrar em pânico.
+/// Ícone das janelas do Neoveg (desenhado em código), também usado pelo
+/// instalador.
+pub fn window_icon() -> egui::IconData {
+    crate::splash::window_icon_data()
+}
+
 pub fn run_gui(
     open: Option<PathBuf>,
     crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,

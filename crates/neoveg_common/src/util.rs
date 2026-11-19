@@ -75,27 +75,77 @@ pub fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<(), String
 
 static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Pasta base para `logs/` e `autosave/`: ao lado do executável (build
-/// portátil) ou, se não for gravável, na pasta temporária do sistema.
+/// Arquivo que o instalador grava ao lado do executável. Com ele, o Neoveg
+/// está instalado (e não portátil): os dados do usuário vão para a pasta de
+/// dados do usuário, porque a pasta do programa pode não ser gravável
+/// (Arquivos de Programas) e é apagada ao desinstalar.
+pub const INSTALL_MARKER: &str = "instalado.json";
+
+/// Nome da pasta de dados do usuário quando instalado (`%APPDATA%\Neoveg`).
+pub const USER_DATA_DIR_NAME: &str = "Neoveg";
+
+/// Escolhe a pasta base (regra pura, testável):
+/// - instalado e com pasta de dados do usuário conhecida: `<appdata>/Neoveg`;
+/// - portátil com a pasta do executável gravável: a pasta do executável;
+/// - senão a pasta de dados do usuário e, por último, a temporária.
+pub fn choose_base_dir(
+    exe_dir: Option<PathBuf>,
+    installed: bool,
+    exe_dir_writable: bool,
+    user_data: Option<PathBuf>,
+    temp: PathBuf,
+) -> PathBuf {
+    let user_dir = user_data
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(USER_DATA_DIR_NAME));
+    if installed {
+        if let Some(u) = user_dir.clone() {
+            return u;
+        }
+    }
+    if let Some(d) = exe_dir {
+        if !installed && exe_dir_writable {
+            return d;
+        }
+    }
+    user_dir.unwrap_or_else(|| temp.join("neoveg"))
+}
+
+fn dir_is_writable(d: &std::path::Path) -> bool {
+    let probe = d.join("logs");
+    std::fs::create_dir_all(&probe).is_ok()
+        && OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(probe.join("neoveg.log"))
+            .is_ok()
+}
+
+/// Pasta base para `logs/`, `autosave/`, preferências e layouts: ao lado do
+/// executável (build portátil) ou, instalado pelo instalador, na pasta de
+/// dados do usuário (`%APPDATA%\Neoveg`). Ver [`choose_base_dir`].
 pub fn base_dir() -> PathBuf {
     BASE_DIR
         .get_or_init(|| {
             let exe_dir = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-            if let Some(d) = exe_dir {
-                let probe = d.join("logs");
-                if std::fs::create_dir_all(&probe).is_ok()
-                    && OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(probe.join("neoveg.log"))
-                        .is_ok()
-                {
-                    return d;
-                }
-            }
-            std::env::temp_dir().join("neoveg")
+            let installed = exe_dir
+                .as_ref()
+                .is_some_and(|d| d.join(INSTALL_MARKER).is_file());
+            let writable = !installed && exe_dir.as_deref().is_some_and(dir_is_writable);
+            let user_data = std::env::var_os("APPDATA")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from);
+            let chosen = choose_base_dir(
+                exe_dir,
+                installed,
+                writable,
+                user_data,
+                std::env::temp_dir(),
+            );
+            let _ = std::fs::create_dir_all(&chosen);
+            chosen
         })
         .clone()
 }
@@ -230,5 +280,41 @@ mod tests {
         assert!(m.is_poisoned());
         *lock(&m) += 1;
         assert_eq!(*lock(&m), 2);
+    }
+
+    /// Instalado (marcador ao lado do executável): os dados vão para
+    /// `%APPDATA%\Neoveg`, mesmo que a pasta do programa seja gravável;
+    /// portátil continua ao lado do executável.
+    #[test]
+    fn pasta_base_instalado_vai_para_dados_do_usuario() {
+        let abs = |w: &str, u: &str| PathBuf::from(if cfg!(windows) { w } else { u });
+        let exe = abs(r"C:\Neoveg", "/opt/neoveg");
+        let appdata = abs(r"C:\Users\u\AppData\Roaming", "/home/u/.config");
+        let temp = abs(r"C:\Temp", "/tmp");
+        let pick = |exe_dir, installed, writable, user| {
+            choose_base_dir(exe_dir, installed, writable, user, temp.clone())
+        };
+        assert_eq!(
+            pick(Some(exe.clone()), true, true, Some(appdata.clone())),
+            appdata.join("Neoveg")
+        );
+        assert_eq!(
+            pick(Some(exe.clone()), false, true, Some(appdata.clone())),
+            exe
+        );
+        // portátil numa pasta só de leitura: dados do usuário, não a temporária
+        assert_eq!(
+            pick(Some(exe.clone()), false, false, Some(appdata.clone())),
+            appdata.join("Neoveg")
+        );
+        // sem pasta de dados do usuário (ou relativa): temporária
+        assert_eq!(
+            pick(Some(exe.clone()), true, false, None),
+            temp.join("neoveg")
+        );
+        assert_eq!(
+            pick(None, false, false, Some(PathBuf::from("relativa"))),
+            temp.join("neoveg")
+        );
     }
 }

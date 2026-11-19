@@ -175,6 +175,25 @@ python build_portable.py
 
 O script `build_portable.py` compila em modo release e gera o pacote portátil em `dist/` na raiz do repositório, com as fontes abertas `assets/fonts/` (`OFL-1.1`) e os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos. Depois de confirmar e verificar a cópia (`SHA-256`), ele apaga a pasta de build do cargo (`target/` ou `CARGO_TARGET_DIR`); se a compilação, verificação ou a cópia falhar, a pasta é mantida e o erro é informado. Use `--keep-target` para manter a pasta de build e `--out` para gravar o pacote em outro lugar. `dist/` e `target/` ficam no `.gitignore`.
 
+### Instalador para Windows
+
+```bash
+python build_installer.py
+```
+
+O `build_installer.py` gera o pacote portátil com o `build_portable.py`, compacta a pasta `dist/` e anexa o ZIP ao fim do `neoveg-setup.exe`, o instalador próprio escrito em Rust (`crates/neoveg/src/setup/`, licença `MIT OR Apache-2.0`, sem ferramenta de terceiros). O resultado vai para `dist-installer/Neoveg-Setup-<versão>.exe`, também no `.gitignore`. Ele aceita as mesmas opções `--no-build` e `--keep-target`.
+
+O instalador pergunta para quem instalar:
+
+- **Só para mim:** em `%LOCALAPPDATA%\Programs\Neoveg`, sem pedir administrador.
+- **Para todos os usuários:** em `%ProgramFiles%\Neoveg`, com a confirmação do UAC.
+
+Ele cria o atalho no menu Iniciar e, se marcado, na Área de Trabalho. Também pode associar os arquivos `.neoveg` ao Neoveg. O Neoveg aparece em *Configurações → Aplicativos* (Adicionar ou remover programas) com o desinstalador `desinstalar.exe`.
+
+Instalado, o Neoveg guarda preferências, layouts, logs e cópias de recuperação em `%APPDATA%\Neoveg`, e não na pasta do programa. A pasta de dados só é apagada se essa opção for marcada no desinstalador. O pacote portátil continua guardando tudo ao lado do executável.
+
+Modo silencioso: `Neoveg-Setup.exe --silent [--user | --all-users] [--dir <pasta>] [--desktop] [--no-assoc]`. Para remover sem janela: `desinstalar.exe --uninstall --silent [--remove-data]`.
+
 ### Idiomas (`i18n/*.json`)
 
 O Neoveg suporta **português do Brasil (`pt-BR`, padrão)**, **inglês (`en`)**, **espanhol (`es`)**, **francês (`fr`)**, **alemão (`de`)** e **japonês (`ja`)** a partir dos catálogos JSON na pasta `i18n/`. A troca de idioma pode ser feita ao vivo em **Preferências → Geral**, na tela inicial (**Boas-vindas**) ou na inicialização via `--lang <código>` / `NEOVEG_LANG`. Em japonês, glifos CJK são carregados das fontes instaladas no sistema operacional em tempo de execução. A interface usa as fontes do sistema, como o VEGAS Pro: Segoe UI no Windows (Tahoma como alternativa; Noto Sans, Liberation Sans ou DejaVu Sans no Linux) e Consolas ou Cascadia Mono nos campos monoespaçados, lidas da pasta de fontes do sistema e nunca distribuídas; **Preferências → Geral** volta para as fontes embutidas. O tamanho de textos, botões e painéis muda em **Exibir → Escala da interface** (Aumentar, Diminuir, 100%; de 50% a 300%, em passos de 10%) ou no campo *Escala da interface* das Preferências; os comandos vêm sem atalho padrão e podem receber um em *Personalizar teclado*. O *Visor de tempo* usa a sem serifa do sistema em negrito (Segoe UI Bold), com números de largura fixa.
