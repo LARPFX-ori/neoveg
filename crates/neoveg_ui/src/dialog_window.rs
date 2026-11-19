@@ -41,13 +41,61 @@ const AUTO_WIDTH: f32 = 560.0;
 /// Chaves dos dados temporários do egui gravados pelo `App` a cada quadro.
 const LANG_KEY: &str = "neoveg_dialog_lang";
 const ICON_KEY: &str = "neoveg_dialog_icon";
+const DOCKED_SET_KEY: &str = "neoveg_dialog_docked_set";
+const DOCKED_CHANGES_KEY: &str = "neoveg_dialog_docked_changes";
+const ANY_DLG_FOCUSED_PREV_KEY: &str = "neoveg_dialog_any_focused_prev";
+const ANY_DLG_FOCUSED_CUR_KEY: &str = "neoveg_dialog_any_focused_cur";
 
-/// Idioma e ícone das janelas dos diálogos (chamado pelo `App` a cada quadro).
+/// Chave determinística persistida nas preferências para lembrar o acoplamento
+/// de cada diálogo entre sessões.
+pub(crate) fn persist_key(key: Id) -> String {
+    format!("dlg:{:016x}", key.value())
+}
+
+/// Decide o nível de empilhamento (`WindowLevel`) de um diálogo nativo:
+/// quando a janela principal ou algum diálogo do Neoveg está focado, o diálogo
+/// fica acima da janela principal; ao mudar para outro aplicativo, volta ao
+/// nível normal para não cobrir outras janelas do sistema.
+pub(crate) fn dialog_window_level(app_focused: bool) -> egui::WindowLevel {
+    if app_focused {
+        egui::WindowLevel::AlwaysOnTop
+    } else {
+        egui::WindowLevel::Normal
+    }
+}
+
+/// Idioma, ícone e conjunto de diálogos acoplados (chamado pelo `App` a cada quadro).
 pub fn set_context(ctx: &egui::Context, lang: Language, icon: &Arc<egui::IconData>) {
     ctx.data_mut(|d| {
         d.insert_temp(Id::new(LANG_KEY), lang);
         d.insert_temp(Id::new(ICON_KEY), icon.clone());
+        let prev = d
+            .get_temp::<bool>(Id::new(ANY_DLG_FOCUSED_CUR_KEY))
+            .unwrap_or(false);
+        d.insert_temp(Id::new(ANY_DLG_FOCUSED_PREV_KEY), prev);
+        d.insert_temp(Id::new(ANY_DLG_FOCUSED_CUR_KEY), false);
     });
+}
+
+/// Informa aos diálogos quais chaves estavam acopladas na sessão anterior.
+pub fn sync_docked_prefs(ctx: &egui::Context, docked: &[String]) {
+    let set: Arc<std::collections::HashSet<String>> = Arc::new(docked.iter().cloned().collect());
+    ctx.data_mut(|d| {
+        d.insert_temp(Id::new(DOCKED_SET_KEY), set);
+    });
+}
+
+/// Retira as mudanças de acoplamento ocorridas neste quadro para persistência.
+pub fn take_docked_changes(ctx: &egui::Context) -> Vec<(String, bool)> {
+    ctx.data_mut(|d| {
+        let changes = d
+            .get_temp::<Vec<(String, bool)>>(Id::new(DOCKED_CHANGES_KEY))
+            .unwrap_or_default();
+        if !changes.is_empty() {
+            d.insert_temp(Id::new(DOCKED_CHANGES_KEY), Vec::<(String, bool)>::new());
+        }
+        changes
+    })
 }
 
 /// Traz para a frente a janela própria do diálogo de id `id` (o mesmo
@@ -261,8 +309,12 @@ struct ResizeDrag {
 /// Estado de cada diálogo entre os quadros (dados temporários do egui).
 #[derive(Clone, Debug, Default)]
 struct DlgState {
+    /// Já consultou a preferência de acoplamento persistida nesta sessão.
+    initialized: bool,
     /// Acoplado na janela de origem (padrão: janela própria).
     docked: bool,
+    /// Último nível de empilhamento aplicado à janela nativa.
+    last_level: Option<egui::WindowLevel>,
     /// Posição e tamanho com que a janela nativa abriu (fixos enquanto ela
     /// está aberta: o egui só reenvia o que muda no `ViewportBuilder`).
     geom: Option<[f32; 4]>,
@@ -536,8 +588,19 @@ impl<'open> DialogWindow<'open> {
             return self.show_plain(ctx, add_contents);
         }
         let key = self.key();
+        let pkey = persist_key(key);
         let sid = key.with("neoveg_dialog_state");
         let mut st: DlgState = ctx.data_mut(|d| d.get_temp(sid)).unwrap_or_default();
+        if !st.initialized {
+            st.initialized = true;
+            let saved_docked = ctx
+                .data_mut(|d| {
+                    d.get_temp::<Arc<std::collections::HashSet<String>>>(Id::new(DOCKED_SET_KEY))
+                })
+                .is_some_and(|set| set.contains(&pkey));
+            st.docked = saved_docked;
+        }
+        let docked_before = st.docked;
         let pass = ctx.cumulative_pass_nr();
         let reopened = st.last_pass == 0 || pass > st.last_pass.saturating_add(1);
         st.last_pass = pass;
@@ -551,6 +614,7 @@ impl<'open> DialogWindow<'open> {
             st.moving = None;
             st.resize = None;
             st.dock_drag_base = None;
+            st.last_level = None;
         }
         let lang = ctx
             .data_mut(|d| d.get_temp::<Language>(Id::new(LANG_KEY)))
@@ -560,6 +624,16 @@ impl<'open> DialogWindow<'open> {
         } else {
             self.show_native(ctx, key, &mut st, lang, reopened, add_contents)
         };
+        if st.docked != docked_before {
+            let new_docked = st.docked;
+            ctx.data_mut(|d| {
+                let mut changes = d
+                    .get_temp::<Vec<(String, bool)>>(Id::new(DOCKED_CHANGES_KEY))
+                    .unwrap_or_default();
+                changes.push((pkey, new_docked));
+                d.insert_temp(Id::new(DOCKED_CHANGES_KEY), changes);
+            });
+        }
         ctx.data_mut(|d| d.insert_temp(sid, st));
         out
     }
@@ -691,15 +765,26 @@ impl<'open> DialogWindow<'open> {
             self.min_height.unwrap_or(40.0) + 2.0 * MARGIN + BAR_H,
         );
         let vid = viewport_id(key);
+        let main_focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+        let prev_dlg_focused = ctx.data_mut(|d| {
+            d.get_temp::<bool>(Id::new(ANY_DLG_FOCUSED_PREV_KEY))
+                .unwrap_or(false)
+        });
+        let level = dialog_window_level(main_focused || prev_dlg_focused);
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("{} - Neoveg", self.title))
             .with_decorations(false)
             .with_resizable(self.resizable)
             .with_min_inner_size(min_inner)
             .with_position([geom[0], geom[1]])
-            .with_inner_size([geom[2], geom[3]]);
+            .with_inner_size([geom[2], geom[3]])
+            .with_window_level(level);
         if let Some(icon) = ctx.data_mut(|d| d.get_temp::<Arc<egui::IconData>>(Id::new(ICON_KEY))) {
             builder = builder.with_icon(icon);
+        }
+        if st.last_level != Some(level) {
+            ctx.send_viewport_cmd_to(vid, ViewportCommand::WindowLevel(level));
+            st.last_level = Some(level);
         }
         if reopened {
             ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
@@ -740,6 +825,9 @@ impl<'open> DialogWindow<'open> {
                     result = w.show(vctx, f).and_then(|r| r.inner);
                 }
                 return;
+            }
+            if vctx.input(|i| i.viewport().focused).unwrap_or(false) {
+                vctx.data_mut(|d| d.insert_temp(Id::new(ANY_DLG_FOCUSED_CUR_KEY), true));
             }
             if vctx.input(|i| i.viewport().close_requested()) {
                 match open.as_deref_mut() {
@@ -1081,5 +1169,17 @@ mod tests {
             resized_rect(start, ResizeDirection::East, vec2(f32::INFINITY, 0.0), min),
             None
         );
+    }
+
+    #[test]
+    fn nivel_de_empilhamento_e_chave_persistida_de_acoplamento() {
+        assert_eq!(dialog_window_level(true), egui::WindowLevel::AlwaysOnTop);
+        assert_eq!(dialog_window_level(false), egui::WindowLevel::Normal);
+        let k1 = persist_key(Id::new("prefs_dialog"));
+        let k2 = persist_key(Id::new("prefs_dialog"));
+        let k3 = persist_key(Id::new("render_dialog"));
+        assert_eq!(k1, k2);
+        assert_ne!(k1, k3);
+        assert!(k1.starts_with("dlg:"));
     }
 }

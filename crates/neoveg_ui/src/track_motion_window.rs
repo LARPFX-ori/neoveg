@@ -841,16 +841,24 @@ impl App {
         let tol = ws.frame_len(6.0);
         if let Some(p) = resp.hover_pos().map(|p| ws.to_frame(rect, frame, p)) {
             let hit = st.drag.map(|d| d.hit).unwrap_or_else(|| g.hit(p, tol));
-            let icon = match hit {
-                Hit::Inside => CursorIcon::Move,
-                Hit::Handle(1 | 5) => CursorIcon::ResizeVertical,
-                Hit::Handle(3 | 7) => CursorIcon::ResizeHorizontal,
-                Hit::Handle(0 | 4) => CursorIcon::ResizeNwSe,
-                Hit::Handle(_) => CursorIcon::ResizeNeSw,
-                Hit::Rotate if st.enable_rotation => CursorIcon::Alias,
-                Hit::Rotate => CursorIcon::Default,
+            let cur = match hit {
+                Hit::Inside => match (st.prevent_move_x, st.prevent_move_y) {
+                    (false, true) => crate::cursors::NeovegCursor::MoveX,
+                    (true, false) => crate::cursors::NeovegCursor::MoveY,
+                    _ => crate::cursors::NeovegCursor::Move,
+                },
+                Hit::Handle(1 | 5) => {
+                    crate::cursors::NeovegCursor::System(CursorIcon::ResizeVertical)
+                }
+                Hit::Handle(3 | 7) => {
+                    crate::cursors::NeovegCursor::System(CursorIcon::ResizeHorizontal)
+                }
+                Hit::Handle(0 | 4) => crate::cursors::NeovegCursor::System(CursorIcon::ResizeNwSe),
+                Hit::Handle(_) => crate::cursors::NeovegCursor::System(CursorIcon::ResizeNeSw),
+                Hit::Rotate if st.enable_rotation => crate::cursors::NeovegCursor::Rotate,
+                Hit::Rotate => crate::cursors::NeovegCursor::System(CursorIcon::Default),
             };
-            ui.ctx().set_cursor_icon(icon);
+            crate::cursors::render_cursor(ui.ctx(), cur, &self.theme, self.prefs.custom_cursors);
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
@@ -1088,7 +1096,12 @@ impl App {
                     st.views[vi].zoom_at(rect, frame, hp, (1.0 + scroll * 0.0015).clamp(0.5, 2.0));
                 }
             }
-            ui.ctx().set_cursor_icon(CursorIcon::Move);
+            crate::cursors::render_cursor(
+                ui.ctx(),
+                crate::cursors::NeovegCursor::Move,
+                &self.theme,
+                self.prefs.custom_cursors,
+            );
         }
         if resp.dragged_by(egui::PointerButton::Middle) {
             let d = resp.drag_delta();

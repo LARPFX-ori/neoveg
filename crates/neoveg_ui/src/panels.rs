@@ -210,6 +210,31 @@ impl App {
         if show {
             self.opts.safe_areas = true;
         }
+        ui.menu_button(tr(lang, "Legendas fechadas (CC1–CC4)"), |ui| {
+            for ch in crate::preview_overlays::ClosedCaptionChannel::ALL {
+                if ui
+                    .radio(self.preview_cc_channel == ch, tr(lang, ch.label()))
+                    .clicked()
+                {
+                    self.preview_cc_channel = ch;
+                    ui.close_menu();
+                }
+            }
+        });
+        if ui
+            .checkbox(
+                &mut self.preview_360.enabled,
+                tr(lang, "Prévia 360° (equiretangular)"),
+            )
+            .changed()
+            && !self.preview_360.enabled
+        {
+            self.preview_360.reset_view();
+        }
+        if self.preview_360.enabled && ui.button(tr(lang, "Restaurar visão 360°")).clicked() {
+            self.preview_360.reset_view();
+            ui.close_menu();
+        }
         ui.separator();
         let g = &mut self.prefs.safe_guides;
         changed |= ui
@@ -1212,19 +1237,83 @@ impl App {
                 }
                 let sy = ui.input(|i| i.smooth_scroll_delta.y);
                 if sy.abs() > 0.5 {
-                    self.preview_zoom_bypass = None;
-                    let factor = if sy > 0.0 { 1.10 } else { 1.0 / 1.10 };
-                    self.preview_zoom = (self.preview_zoom * factor).clamp(0.25, 8.0);
-                    if (self.preview_zoom - 1.0).abs() < 0.02 {
-                        self.apply_preview_zoom(0.0);
+                    if self.preview_360.enabled {
+                        self.preview_360
+                            .adjust_fov(if sy > 0.0 { -5.0 } else { 5.0 });
+                    } else {
+                        self.preview_zoom_bypass = None;
+                        let factor = if sy > 0.0 { 1.10 } else { 1.0 / 1.10 };
+                        self.preview_zoom = (self.preview_zoom * factor).clamp(0.25, 8.0);
+                        if (self.preview_zoom - 1.0).abs() < 0.02 {
+                            self.apply_preview_zoom(0.0);
+                        }
                     }
                 }
             }
-            if !dragging_split && self.preview_zoom > 1.01 && canvas_resp.dragged() {
-                self.preview_pan += canvas_resp.drag_delta();
+            if !dragging_split && self.preview_360.enabled {
+                if canvas_resp.hovered() || canvas_resp.dragged() {
+                    self.set_cursor_shape(crate::cursors::NeovegCursor::Rotate);
+                }
+                if canvas_resp.dragged() {
+                    let d = canvas_resp.drag_delta();
+                    self.preview_360.orbit(d.x * 0.35, -d.y * 0.35);
+                }
+                if canvas_resp.double_clicked() {
+                    self.preview_360.reset_view();
+                }
+            } else {
+                if !dragging_split && self.preview_zoom > 1.01 && canvas_resp.dragged() {
+                    self.set_cursor_shape(crate::cursors::NeovegCursor::Move);
+                    self.preview_pan += canvas_resp.drag_delta();
+                }
+                if canvas_resp.double_clicked() && (self.preview_zoom - 1.0).abs() > 0.02 {
+                    self.apply_preview_zoom(0.0);
+                }
             }
-            if canvas_resp.double_clicked() && (self.preview_zoom - 1.0).abs() > 0.02 {
-                self.apply_preview_zoom(0.0);
+        }
+        if self.preview_360.enabled {
+            let badge = format!(
+                "360°  Y:{:+.0}° P:{:+.0}° FOV:{:.0}°",
+                self.preview_360.yaw_deg, self.preview_360.pitch_deg, self.preview_360.fov_deg
+            );
+            let b_rect = Rect::from_min_size(
+                pos2(img_rect.left() + 6.0, img_rect.top() + 6.0),
+                vec2(180.0, 18.0),
+            );
+            painter.rect_filled(
+                b_rect,
+                2.0,
+                Color32::from_rgba_unmultiplied(12, 14, 18, 195),
+            );
+            painter.text(
+                pos2(b_rect.left() + 5.0, b_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                badge,
+                egui::FontId::monospace(10.0),
+                self.theme.accent,
+            );
+        }
+        if self.preview_cc_channel != crate::preview_overlays::ClosedCaptionChannel::Off {
+            if let Some(cc_txt) = crate::preview_overlays::resolve_closed_caption(
+                &self.project,
+                self.play_pos(),
+                self.preview_cc_channel,
+            ) {
+                let font = egui::FontId::monospace(13.0);
+                let galley = painter.layout(
+                    cc_txt,
+                    font,
+                    Color32::WHITE,
+                    (img_rect.width() * 0.86).max(60.0),
+                );
+                let pad = vec2(8.0, 4.0);
+                let sz = galley.size() + pad * 2.0;
+                let center_x = img_rect.center().x;
+                let bottom_y =
+                    (img_rect.bottom() - img_rect.height() * 0.08).max(img_rect.top() + sz.y);
+                let cc_rect = Rect::from_min_size(pos2(center_x - sz.x * 0.5, bottom_y - sz.y), sz);
+                painter.rect_filled(cc_rect, 2.0, Color32::from_rgba_unmultiplied(0, 0, 0, 215));
+                painter.galley(cc_rect.min + pad, galley, Color32::WHITE);
             }
         }
 
@@ -1618,23 +1707,28 @@ impl App {
             changed |= slider
                 .on_hover_text(tr(lang, "Volume do Master Bus (duplo clique para 0,0 dB)"))
                 .changed();
-            let (mr, _) = ui.allocate_exact_size(vec2(18.0, meter_h), Sense::hover());
-            draw_meter(ui.painter(), mr, self.master_hold);
             if tall_dock && meter_h >= 78.0 {
-                let (sr, _) = ui.allocate_exact_size(vec2(22.0, meter_h), Sense::hover());
+                let (ml, _) = ui.allocate_exact_size(vec2(8.0, meter_h), Sense::hover());
+                crate::timeline::draw_meter_channel(ui.painter(), ml, self.master_hold[0]);
+                let (sr, _) = ui.allocate_exact_size(vec2(20.0, meter_h), Sense::hover());
                 let sp = ui.painter_at(sr);
                 let font = egui::FontId::monospace(8.5);
-                for db in [0, -6, -12, -24, -48] {
+                for db in [0, -6, -12, -18, -24, -48] {
                     let n = ((db as f32 + 60.0) / 66.0).clamp(0.0, 1.0);
                     let y = sr.bottom() - n * sr.height();
                     sp.text(
-                        pos2(sr.left() + 1.0, y),
-                        egui::Align2::LEFT_CENTER,
+                        pos2(sr.center().x, y),
+                        egui::Align2::CENTER_CENTER,
                         format!("{db}"),
                         font.clone(),
                         self.theme.text_muted,
                     );
                 }
+                let (mr, _) = ui.allocate_exact_size(vec2(8.0, meter_h), Sense::hover());
+                crate::timeline::draw_meter_channel(ui.painter(), mr, self.master_hold[1]);
+            } else {
+                let (mr, _) = ui.allocate_exact_size(vec2(18.0, meter_h), Sense::hover());
+                draw_meter(ui.painter(), mr, self.master_hold);
             }
         });
         ui.label(

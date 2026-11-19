@@ -650,19 +650,37 @@ impl App {
             .map(|p| ws.to_frame(rect, frame, p));
         let tol = ws.frame_len(6.0);
         if let (Some(p), PcTool::Normal) = (ptr, st.tool) {
-            let icon = match st.drag.map(|d| d.hit).unwrap_or_else(|| g.hit(p, tol)) {
-                Hit::Inside => CursorIcon::Move,
-                Hit::Handle(1 | 5) => CursorIcon::ResizeVertical,
-                Hit::Handle(3 | 7) => CursorIcon::ResizeHorizontal,
-                Hit::Handle(0 | 4) => CursorIcon::ResizeNwSe,
-                Hit::Handle(_) => CursorIcon::ResizeNeSw,
-                Hit::Rotate => CursorIcon::Alias,
+            let cur = match st.drag.map(|d| d.hit).unwrap_or_else(|| g.hit(p, tol)) {
+                Hit::Inside => match st.move_mode {
+                    MoveMode::Free => crate::cursors::NeovegCursor::Move,
+                    MoveMode::XOnly => crate::cursors::NeovegCursor::MoveX,
+                    MoveMode::YOnly => crate::cursors::NeovegCursor::MoveY,
+                },
+                Hit::Handle(1 | 5) => {
+                    crate::cursors::NeovegCursor::System(CursorIcon::ResizeVertical)
+                }
+                Hit::Handle(3 | 7) => {
+                    crate::cursors::NeovegCursor::System(CursorIcon::ResizeHorizontal)
+                }
+                Hit::Handle(0 | 4) => crate::cursors::NeovegCursor::System(CursorIcon::ResizeNwSe),
+                Hit::Handle(_) => crate::cursors::NeovegCursor::System(CursorIcon::ResizeNeSw),
+                Hit::Rotate => crate::cursors::NeovegCursor::Rotate,
             };
             if resp.hovered() || st.drag.is_some() {
-                ui.ctx().set_cursor_icon(icon);
+                crate::cursors::render_cursor(
+                    ui.ctx(),
+                    cur,
+                    &self.theme,
+                    self.prefs.custom_cursors,
+                );
             }
         } else if resp.hovered() && st.tool == PcTool::Zoom {
-            ui.ctx().set_cursor_icon(CursorIcon::ZoomIn);
+            let cur = if ui.input(|i| i.modifiers.shift || i.modifiers.alt) {
+                crate::cursors::NeovegCursor::ZoomOut
+            } else {
+                crate::cursors::NeovegCursor::ZoomIn
+            };
+            crate::cursors::render_cursor(ui.ctx(), cur, &self.theme, self.prefs.custom_cursors);
         }
         // roda = zoom da área; botão do meio = deslocar a área
         if resp.hovered() {

@@ -627,14 +627,16 @@ impl NeovegTileBehavior<'_> {
         content_ui.set_clip_rect(content_rect);
         self.render_pane_body(&mut content_ui, pane);
 
+        ui.painter()
+            .rect_filled(strip_rect, 0.0, self.app.theme.extreme_bg);
         ui.painter().hline(
             (outer_rect.left() + 1.0)..=(outer_rect.right() - 1.0),
             strip_rect.top(),
             Stroke::new(1.0_f32, self.app.theme.border),
         );
 
-        let row_top = strip_rect.top() + 3.0;
-        let row_bottom = (row_top + row_h).min(strip_rect.bottom());
+        let row_top = strip_rect.top() + 1.0;
+        let row_bottom = (row_top + row_h + 2.0).min(strip_rect.bottom());
         let actions_left = (strip_rect.right() - action_w - 2.0).max(strip_rect.left() + 36.0);
         let tabs_rect = egui::Rect::from_min_max(
             egui::pos2(strip_rect.left() + 2.0, row_top),
@@ -644,7 +646,7 @@ impl NeovegTileBehavior<'_> {
             ),
         );
         let actions_rect = egui::Rect::from_min_max(
-            egui::pos2(actions_left, row_top),
+            egui::pos2(actions_left, row_top + 1.0),
             egui::pos2(strip_rect.right() - 2.0, row_bottom),
         );
 
@@ -674,16 +676,90 @@ impl NeovegTileBehavior<'_> {
             .max_height(tabs_rect.height())
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(&mut tabs_ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 ui.horizontal(|ui| {
+                    let th = self.app.theme.clone();
                     for &(sib_id, sib_pane, active) in &snapshot.siblings {
-                        let resp = icons::small_icon_drag_button(
-                            ui,
-                            sib_pane.icon(),
-                            Some(sib_pane.title_in(lang)),
-                            active,
-                            &self.app.theme,
-                        )
-                        .on_hover_text(neoveg_common::tr(
+                        let title = sib_pane.title_in(lang);
+                        let font = egui::FontId::proportional(11.5);
+                        let text_col = if active {
+                            if th.high_contrast {
+                                crate::theme::contrast_on(th.selection_bg)
+                            } else {
+                                th.text_primary
+                            }
+                        } else {
+                            th.text_muted
+                        };
+                        let galley = ui.painter().layout_no_wrap(
+                            title.to_string(),
+                            font,
+                            text_col,
+                        );
+                        let icon_sz = 12.0;
+                        let pad_x = 6.0;
+                        let w = (pad_x * 2.0 + icon_sz + 4.0 + galley.size().x).max(28.0);
+                        let (r, resp) =
+                            ui.allocate_exact_size(vec2(w, tabs_rect.height()), Sense::click_and_drag());
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled(),
+                                title,
+                            )
+                        });
+                        if ui.is_rect_visible(r) {
+                            let bg = if active {
+                                if th.high_contrast {
+                                    th.selection_bg
+                                } else {
+                                    th.panel_fill
+                                }
+                            } else if resp.hovered() {
+                                th.widget_hover_bg
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            if bg != Color32::TRANSPARENT {
+                                ui.painter().rect_filled(r, 0.0, bg);
+                            }
+                            if active {
+                                let bar_col = if th.high_contrast {
+                                    th.accent
+                                } else {
+                                    th.text_primary
+                                };
+                                ui.painter().hline(
+                                    r.left()..=r.right(),
+                                    r.top() + 1.0,
+                                    Stroke::new(2.0_f32, bar_col),
+                                );
+                                if th.high_contrast {
+                                    ui.painter().rect_stroke(
+                                        r,
+                                        0.0,
+                                        Stroke::new(1.5_f32, th.border),
+                                        StrokeKind::Inside,
+                                    );
+                                }
+                            }
+                            let ir = Rect::from_min_size(
+                                pos2(r.left() + pad_x, r.center().y - icon_sz * 0.5),
+                                vec2(icon_sz, icon_sz),
+                            );
+                            let mut icon_th = th.clone();
+                            if active && th.high_contrast {
+                                icon_th.text_primary = text_col;
+                                icon_th.accent = text_col;
+                            }
+                            icons::paint(ui.painter(), ir, sib_pane.icon(), &icon_th, active);
+                            ui.painter().galley(
+                                pos2(ir.right() + 4.0, r.center().y - galley.size().y * 0.5),
+                                galley,
+                                text_col,
+                            );
+                        }
+                        let resp = resp.on_hover_text(neoveg_common::tr(
                             lang,
                             "Clique para selecionar; arraste para os alvos para acoplar ou para fora da área para destacar; duplo clique maximiza",
                         ));

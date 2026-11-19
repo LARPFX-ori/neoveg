@@ -15,6 +15,7 @@ pub mod app;
 mod color_grading;
 mod convert_dialog;
 mod crash_report;
+pub mod cursors;
 mod dialog_window;
 mod dialogs;
 mod dlg_work_folders;
