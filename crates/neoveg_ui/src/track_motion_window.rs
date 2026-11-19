@@ -370,27 +370,33 @@ impl App {
             let top_w = ui.available_width();
             ui.allocate_ui(vec2(top_w, top_h), |ui| {
                 ui.horizontal_top(|ui| {
-                    ui.allocate_ui(vec2(230.0, top_h), |ui| {
-                        ui.set_width(230.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("tm_props")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                if let Some(k) = self.tm_properties(
-                                    ui,
-                                    &motion,
-                                    &cur,
-                                    key_idx,
-                                    frame,
-                                    is_3d,
-                                    &mut st,
-                                    &mut actions,
-                                    lang,
-                                ) {
-                                    new_key = Some(k);
-                                }
-                            });
-                    });
+                    // coluna das propriedades: layout vertical explícito; herdando o
+                    // horizontal do pai, as seções saíam lado a lado e se sobrepunham
+                    ui.allocate_ui_with_layout(
+                        vec2(230.0, top_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(230.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("tm_props")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    if let Some(k) = self.tm_properties(
+                                        ui,
+                                        &motion,
+                                        &cur,
+                                        key_idx,
+                                        frame,
+                                        is_3d,
+                                        &mut st,
+                                        &mut actions,
+                                        lang,
+                                    ) {
+                                        new_key = Some(k);
+                                    }
+                                });
+                        },
+                    );
                     let canvas = vec2(ui.available_width(), top_h);
                     let edited = if is_3d {
                         self.tm_workspace_3d(ui, canvas, &cur, frame, &mut st, &mut actions, lang)

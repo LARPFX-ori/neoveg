@@ -205,6 +205,59 @@ pub fn undock_geom(parent_min: Option<Pos2>, win: Rect, drag: Vec2) -> Option<[f
     g.iter().all(|v| v.is_finite()).then_some(g)
 }
 
+/// Onde a janela fica ao ser arrastada pela barra: o ponto agarrado
+/// (`grab`, relativo ao canto da janela) acompanha o ponteiro. `outer_min` é o
+/// canto atual na tela e `pointer` a posição do ponteiro dentro da janela.
+pub fn moved_window_pos(outer_min: Pos2, pointer: Pos2, grab: Vec2) -> Option<Pos2> {
+    let p = outer_min + pointer.to_vec2() - grab;
+    (p.x.is_finite() && p.y.is_finite()).then_some(p)
+}
+
+/// Retângulo da janela redimensionada pela borda `dir`, com o ponteiro
+/// deslocado `delta` desde o início. Nunca fica menor que `min`; a borda
+/// oposta não se move.
+pub fn resized_rect(start: Rect, dir: ResizeDirection, delta: Vec2, min: Vec2) -> Option<Rect> {
+    use ResizeDirection as D;
+    if !(delta.x.is_finite() && delta.y.is_finite()) {
+        return None;
+    }
+    let (west, east, north, south) = match dir {
+        D::North => (false, false, true, false),
+        D::South => (false, false, false, true),
+        D::West => (true, false, false, false),
+        D::East => (false, true, false, false),
+        D::NorthWest => (true, false, true, false),
+        D::NorthEast => (false, true, true, false),
+        D::SouthWest => (true, false, false, true),
+        D::SouthEast => (false, true, false, true),
+    };
+    let min_w = min.x.max(1.0);
+    let min_h = min.y.max(1.0);
+    let mut r = start;
+    if west {
+        r.min.x = (start.min.x + delta.x).min(start.max.x - min_w);
+    }
+    if east {
+        r.max.x = (start.max.x + delta.x).max(start.min.x + min_w);
+    }
+    if north {
+        r.min.y = (start.min.y + delta.y).min(start.max.y - min_h);
+    }
+    if south {
+        r.max.y = (start.max.y + delta.y).max(start.min.y + min_h);
+    }
+    (r.is_finite() && r.width() >= 1.0 && r.height() >= 1.0).then_some(r)
+}
+
+/// Redimensionamento manual em curso: borda, ponteiro (na tela) e retângulo
+/// da janela no início.
+#[derive(Clone, Copy, Debug)]
+struct ResizeDrag {
+    dir: ResizeDirection,
+    start_pointer: Pos2,
+    start_rect: Rect,
+}
+
 /// Estado de cada diálogo entre os quadros (dados temporários do egui).
 #[derive(Clone, Debug, Default)]
 struct DlgState {
@@ -228,6 +281,15 @@ struct DlgState {
     /// Largura natural do conteúdo, medida numa passada invisível ao abrir
     /// (separadores e afins não se esticam nela).
     natural_w: Option<f32>,
+    /// Janela nativa sendo arrastada pela barra: ponto agarrado, relativo ao
+    /// canto da janela. O Neoveg move a janela ele mesmo (e não pelo laço de
+    /// arraste do Windows), então ela continua opaca e acompanha o ponteiro
+    /// mesmo com "Mostrar conteúdo da janela ao arrastar" desligado.
+    moving: Option<Vec2>,
+    /// Redimensionamento manual em curso, pelo mesmo motivo.
+    resize: Option<ResizeDrag>,
+    /// Janela acoplada sendo arrastada pelo `:::`: onde ela estava no início.
+    dock_drag_base: Option<Pos2>,
 }
 
 /// Barra de título própria: `:::`, área vazia com o título e fechar.
@@ -486,6 +548,9 @@ impl<'open> DialogWindow<'open> {
             st.hint = false;
             st.drag_acc = Vec2::ZERO;
             st.natural_w = None;
+            st.moving = None;
+            st.resize = None;
+            st.dock_drag_base = None;
         }
         let lang = ctx
             .data_mut(|d| d.get_temp::<Language>(Id::new(LANG_KEY)))
@@ -529,6 +594,12 @@ impl<'open> DialogWindow<'open> {
             .collapsible(false);
         match st.dock_pos.take() {
             Some(p) => w = w.current_pos(p),
+            // arrastando pelo `:::`: a própria janela acompanha o ponteiro
+            None if st.dock_drag_base.is_some() => {
+                if let Some(base) = st.dock_drag_base {
+                    w = w.current_pos(base + st.drag_acc);
+                }
+            }
             None => {
                 // âncora fixaria a janela: centrada, mas livre para mover
                 w = w
@@ -557,24 +628,28 @@ impl<'open> DialogWindow<'open> {
         }
         let win_rect = shown.as_ref().map(|r| r.response.rect);
         if let (Some(g), Some(win)) = (grip_resp, win_rect) {
+            if g.drag_started() {
+                st.dock_drag_base = Some(win.min);
+                st.drag_acc = Vec2::ZERO;
+            }
+            // a janela já está onde o arraste a levou (sem fantasma): só falta
+            // o deslocamento deste quadro
+            let pending = g.drag_delta();
             if g.dragged() {
-                st.drag_acc += g.drag_delta();
-                // fantasma de onde a janela vai abrir
-                ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, key.with("ghost")))
-                    .rect_stroke(
-                        win.translate(st.drag_acc),
-                        2.0,
-                        Stroke::new(2.0_f32, ctx.style().visuals.selection.bg_fill),
-                        StrokeKind::Inside,
-                    );
+                st.drag_acc += pending;
+                ctx.request_repaint();
             }
             if g.drag_stopped() {
                 if st.drag_acc.length() >= UNDOCK_MIN_DRAG {
                     st.docked = false;
-                    st.geom = undock_geom(parent.map(|r| r.min), win, st.drag_acc);
+                    st.geom = undock_geom(parent.map(|r| r.min), win, pending);
                     st.frames = u32::MAX / 2;
+                } else if let Some(base) = st.dock_drag_base {
+                    // arraste curto: fica acoplada onde foi solta
+                    st.dock_pos = Some(base + st.drag_acc);
                 }
                 st.drag_acc = Vec2::ZERO;
+                st.dock_drag_base = None;
             }
         }
         shown.and_then(|r| r.inner)
@@ -643,6 +718,8 @@ impl<'open> DialogWindow<'open> {
         let mut dock_now: Option<Pos2> = None;
         let frames = st.frames;
         let mut grip = st.grip;
+        let mut moving = st.moving;
+        let mut resize = st.resize;
         let mut hint = false;
         let natural_w = st.natural_w;
         let mut new_natural_w = None;
@@ -670,6 +747,18 @@ impl<'open> DialogWindow<'open> {
                     None => vctx.send_viewport_cmd(ViewportCommand::CancelClose),
                 }
             }
+            // O Neoveg move e redimensiona a janela ele mesmo, em vez de usar o
+            // laço de arraste do Windows (StartDrag/BeginResize): com "Mostrar
+            // conteúdo da janela ao arrastar" desligado, o Windows mostraria só
+            // um contorno e a janela ficaria parada, como um fantasma.
+            let (outer, pointer, down, pressed) = vctx.input(|i| {
+                (
+                    i.viewport().outer_rect,
+                    i.pointer.latest_pos(),
+                    i.pointer.primary_down(),
+                    i.pointer.primary_pressed(),
+                )
+            });
             // bordas que redimensionam (antes da barra, que também arrasta)
             let mut resizing = false;
             if resizable {
@@ -679,10 +768,35 @@ impl<'open> DialogWindow<'open> {
                     .and_then(|p| resize_dir(r, p, EDGE))
                 {
                     vctx.set_cursor_icon(resize_cursor(d));
-                    if vctx.input(|i| i.pointer.primary_pressed()) {
-                        vctx.send_viewport_cmd(ViewportCommand::BeginResize(d));
-                        resizing = true;
+                    if pressed {
+                        if let (Some(o), Some(p)) = (outer, pointer) {
+                            resize = Some(ResizeDrag {
+                                dir: d,
+                                start_pointer: o.min + p.to_vec2(),
+                                start_rect: o,
+                            });
+                        }
                     }
+                }
+            }
+            if let Some(rd) = resize {
+                if down {
+                    resizing = true;
+                    vctx.set_cursor_icon(resize_cursor(rd.dir));
+                    if let (Some(o), Some(p)) = (outer, pointer) {
+                        let delta = o.min + p.to_vec2() - rd.start_pointer;
+                        if let Some(r) = resized_rect(rd.start_rect, rd.dir, delta, min_inner) {
+                            if (r.min - o.min).length() >= 0.5 {
+                                vctx.send_viewport_cmd(ViewportCommand::OuterPosition(r.min));
+                            }
+                            if (r.size() - o.size()).length() >= 0.5 {
+                                vctx.send_viewport_cmd(ViewportCommand::InnerSize(r.size()));
+                            }
+                        }
+                    }
+                    vctx.request_repaint();
+                } else {
+                    resize = None;
                 }
             }
             let visuals = vctx.style().visuals.clone();
@@ -702,31 +816,43 @@ impl<'open> DialogWindow<'open> {
                     *o = false;
                 }
             }
-            let outer_min = vctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
-            if !resizing && bar.area.drag_started() {
-                vctx.send_viewport_cmd(ViewportCommand::StartDrag);
+            let outer_min = outer.map(|r| r.min);
+            let grab_started = bar.area.drag_started() || bar.grip.drag_started();
+            if !resizing && grab_started {
+                moving = pointer.map(|p| p.to_vec2());
             }
             if !resizing && bar.grip.drag_started() {
-                vctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 if let Some(p) = outer_min {
                     grip = Some(GripDrag::new(p, Instant::now()));
+                }
+            }
+            // a janela acompanha o ponteiro enquanto o botão estiver apertado
+            let released = moving.is_some() && !down;
+            if let Some(grab) = moving {
+                if down {
+                    if let (Some(o), Some(p)) = (outer_min, pointer) {
+                        if let Some(to) = moved_window_pos(o, p, grab) {
+                            if (to - o).length() >= 0.5 {
+                                vctx.send_viewport_cmd(ViewportCommand::OuterPosition(to));
+                            }
+                        }
+                    }
+                    vctx.request_repaint();
+                } else {
+                    moving = None;
                 }
             }
             // arrastando pelo `:::`: acopla ao soltar sobre a janela de origem
             if let (Some(g), Some(p)) = (grip.as_mut(), outer_min) {
                 let over = parent.is_some_and(|r| r.contains(grip_point(p)));
-                match g.step(p, Instant::now()) {
-                    GripPhase::Waiting => {}
-                    GripPhase::Moving => hint = over,
-                    GripPhase::Settled => {
-                        if over {
-                            dock_now = parent.map(|r| pos2(p.x - r.min.x, p.y - r.min.y));
-                        }
-                        grip = None;
+                if released {
+                    if over {
+                        dock_now = parent.map(|r| pos2(p.x - r.min.x, p.y - r.min.y));
                     }
-                    GripPhase::GaveUp => grip = None,
+                    grip = None;
+                } else if g.step(p, Instant::now()) != GripPhase::Waiting {
+                    hint = over;
                 }
-                vctx.request_repaint_after(Duration::from_millis(50));
             }
             let panel = egui::CentralPanel::default().frame(
                 egui::Frame::NONE
@@ -800,6 +926,8 @@ impl<'open> DialogWindow<'open> {
         });
         st.frames = frames.saturating_add(1);
         st.grip = grip;
+        st.moving = moving;
+        st.resize = resize;
         st.hint = hint;
         if new_natural_w.is_some() {
             st.natural_w = new_natural_w;
@@ -904,6 +1032,53 @@ mod tests {
         assert_eq!(undock_geom(None, win, Vec2::ZERO), None);
         assert_eq!(
             undock_geom(Some(pos2(f32::NAN, 0.0)), win, Vec2::ZERO),
+            None
+        );
+    }
+
+    /// O Neoveg move a janela ele mesmo: o ponto agarrado na barra fica sob
+    /// o ponteiro, sem depender do arraste do Windows.
+    #[test]
+    fn arrastar_a_barra_mantem_o_ponto_agarrado_sob_o_ponteiro() {
+        // janela em (100, 50), agarrada a (30, 10) do canto; o ponteiro foi
+        // para (70, 40) dentro da janela, ou seja (170, 90) na tela
+        let to = moved_window_pos(pos2(100.0, 50.0), pos2(70.0, 40.0), vec2(30.0, 10.0));
+        assert_eq!(to, Some(pos2(140.0, 80.0)));
+        // ponteiro parado no ponto agarrado: a janela não se move
+        let same = moved_window_pos(pos2(100.0, 50.0), pos2(30.0, 10.0), vec2(30.0, 10.0));
+        assert_eq!(same, Some(pos2(100.0, 50.0)));
+        assert_eq!(
+            moved_window_pos(pos2(f32::NAN, 0.0), pos2(1.0, 1.0), Vec2::ZERO),
+            None
+        );
+    }
+
+    /// Redimensionar pela borda move só aquela borda e respeita o mínimo.
+    #[test]
+    fn redimensionar_pela_borda_respeita_o_minimo() {
+        let start = Rect::from_min_size(pos2(100.0, 100.0), vec2(400.0, 300.0));
+        let min = vec2(200.0, 100.0);
+        let se = resized_rect(start, ResizeDirection::SouthEast, vec2(50.0, 20.0), min);
+        assert_eq!(
+            se,
+            Some(Rect::from_min_max(pos2(100.0, 100.0), pos2(550.0, 420.0)))
+        );
+        // borda esquerda: o canto direito fica onde estava
+        let w = resized_rect(start, ResizeDirection::West, vec2(-40.0, 0.0), min);
+        assert_eq!(
+            w,
+            Some(Rect::from_min_max(pos2(60.0, 100.0), pos2(500.0, 400.0)))
+        );
+        // encolher demais para no mínimo, sem inverter
+        let nw = resized_rect(start, ResizeDirection::NorthWest, vec2(900.0, 900.0), min)
+            .expect("retângulo válido");
+        assert_eq!(nw.size(), min);
+        assert_eq!(nw.max, start.max);
+        let n = resized_rect(start, ResizeDirection::North, vec2(0.0, 500.0), min)
+            .expect("retângulo válido");
+        assert_eq!(n.height(), 100.0);
+        assert_eq!(
+            resized_rect(start, ResizeDirection::East, vec2(f32::INFINITY, 0.0), min),
             None
         );
     }
