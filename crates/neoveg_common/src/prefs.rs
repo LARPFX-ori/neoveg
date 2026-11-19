@@ -647,6 +647,18 @@ pub struct Preferences {
     /// Exibe a tela de boas-vindas com ações rápidas e projetos recentes ao iniciar.
     #[serde(default = "default_show_welcome")]
     pub show_welcome: bool,
+    /// Verifica atualizações ao abrir o programa instalado (uma vez por dia).
+    #[serde(default = "default_check_updates")]
+    pub check_updates: bool,
+    /// Inclui pré-lançamentos na verificação de atualizações.
+    #[serde(default = "default_check_updates")]
+    pub update_prereleases: bool,
+    /// Dia (AAAA-MM-DD) da última verificação automática.
+    #[serde(default)]
+    pub update_last_check: String,
+    /// Versão que o usuário mandou ignorar no aviso automático.
+    #[serde(default)]
+    pub update_skip_version: String,
     /// Caminhos dos projetos recentes (mais recente primeiro, máx. 10).
     #[serde(default)]
     pub recent_projects: Vec<String>,
@@ -1188,6 +1200,10 @@ fn default_show_welcome() -> bool {
     true
 }
 
+fn default_check_updates() -> bool {
+    true
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1289,6 +1305,10 @@ impl Default for Preferences {
             display: DisplayPrefs::default(),
             ui_scale_pct: default_ui_scale_pct(),
             show_welcome: default_show_welcome(),
+            check_updates: default_check_updates(),
+            update_prereleases: default_check_updates(),
+            update_last_check: String::new(),
+            update_skip_version: String::new(),
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
             fx_favorites: Vec::new(),

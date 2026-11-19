@@ -368,6 +368,8 @@ pub struct App {
     pub(crate) splash: crate::splash::SplashState,
     /// A janela ainda está no modo tela de abertura (sem bordas, tamanho da abertura).
     pub(crate) startup_window: bool,
+    /// Verificação, aviso e download de atualizações (`updates_ui.rs`).
+    pub(crate) update: crate::updates_ui::UpdateState,
     /// Quadros restantes para ajustar a janela principal ao monitor quando
     /// ela abre sem a tela de abertura (0 = nada a fazer).
     pub(crate) window_fit_frames: u8,
@@ -581,6 +583,7 @@ impl App {
             crash_reports: Vec::new(),
             splash,
             startup_window: false,
+            update: Default::default(),
             window_fit_frames: 0,
             welcome: crate::welcome::WelcomeState::default(),
             welcome_open,
@@ -2692,6 +2695,7 @@ impl App {
             UiAction::OpenSplash => self.open_splash(),
             UiAction::OpenWelcome => self.open_welcome(),
             UiAction::OpenAbout => self.dlg.about = true,
+            UiAction::CheckUpdates => self.start_update_check(true),
             UiAction::BuildProxySelected => self.build_proxy_selected(),
             UiAction::PrerenderRegion => self.prerender_region(),
             UiAction::RunScriptDialog => self.run_script_dialog(),
@@ -3687,6 +3691,7 @@ impl App {
                 self.cmd_menu_btn(ui, "help.welcome");
                 self.cmd_menu_btn(ui, "help.splash");
                 self.cmd_menu_btn(ui, "help.shortcuts");
+                self.cmd_menu_btn(ui, "help.check_updates");
                 self.cmd_menu_btn(ui, "help.about");
             });
         });
@@ -4713,6 +4718,8 @@ impl eframe::App for App {
         }
         self.encoder.save_to_disk();
         recovery::clear_recovery();
+        // atualização baixada: o instalador espera este processo fechar
+        self.launch_pending_update();
         util::log_info("Neoveg encerrado normalmente");
     }
 }
@@ -4856,6 +4863,10 @@ impl App {
             self.window_fit_frames -= 1;
             self.fit_main_window(ctx);
         }
+        // atualizações: verificação automática (instalado, 1x por dia), resultado e aviso
+        self.maybe_auto_update_check();
+        self.poll_updates(ctx);
+        self.show_update_dialog(ctx);
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(dt as f32);

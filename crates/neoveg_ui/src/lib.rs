@@ -48,6 +48,7 @@ mod timeline;
 mod track_motion_window;
 mod transcript_panel;
 mod trimmer_panel;
+mod updates_ui;
 mod welcome;
 
 #[cfg(test)]

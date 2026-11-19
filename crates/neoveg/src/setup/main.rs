@@ -34,8 +34,13 @@ use system::Scope;
 pub enum Mode {
     /// Assistente de instalação.
     InstallGui,
-    /// Instalação silenciosa.
-    InstallSilent(InstallOptions),
+    /// Instalação silenciosa. `wait_pid`: espera esse processo (o Neoveg
+    /// que pediu a atualização) fechar antes; `launch`: abre o Neoveg no fim.
+    InstallSilent {
+        opts: InstallOptions,
+        wait_pid: Option<u32>,
+        launch: bool,
+    },
     /// Desinstalação (assistente ou silenciosa).
     Uninstall {
         silent: bool,
@@ -53,6 +58,8 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
     let mut dir: Option<PathBuf> = None;
     let mut desktop = false;
     let mut assoc = true;
+    let mut wait_pid: Option<u32> = None;
+    let mut launch = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -63,6 +70,11 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
             "--all-users" => scope = Some(Scope::AllUsers),
             "--desktop" => desktop = true,
             "--no-assoc" => assoc = false,
+            "--launch" => launch = true,
+            "--wait-pid" => {
+                let p = it.next().ok_or("--wait-pid precisa de um número")?;
+                wait_pid = Some(p.parse().map_err(|_| format!("--wait-pid inválido: {p}"))?);
+            }
             "--dir" => {
                 let d = it.next().ok_or("--dir precisa de uma pasta")?;
                 dir = Some(PathBuf::from(d));
@@ -85,12 +97,16 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
         Some(d) => d,
         None => system::default_install_dir(scope).ok_or("pasta padrão desconhecida")?,
     };
-    Ok(Mode::InstallSilent(InstallOptions {
-        scope,
-        dir,
-        desktop_shortcut: desktop,
-        associate_files: assoc,
-    }))
+    Ok(Mode::InstallSilent {
+        opts: InstallOptions {
+            scope,
+            dir,
+            desktop_shortcut: desktop,
+            associate_files: assoc,
+        },
+        wait_pid,
+        launch,
+    })
 }
 
 fn main() {
@@ -118,13 +134,11 @@ fn run(args: &[String]) -> i32 {
             eprintln!("{e}");
             2
         }
-        Ok(Mode::InstallSilent(opts)) => match ops::install(&opts, &exe, &mut |_, _| {}) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        },
+        Ok(Mode::InstallSilent {
+            opts,
+            wait_pid,
+            launch,
+        }) => install_silent(&exe, &opts, wait_pid, launch),
         Ok(Mode::Uninstall {
             silent: true,
             remove_data,
@@ -144,6 +158,43 @@ fn run(args: &[String]) -> i32 {
         },
         Ok(Mode::Uninstall { silent: false, .. }) => gui::run(exe, true),
         Ok(Mode::InstallGui) => gui::run(exe, false),
+    }
+}
+
+/// Instalação silenciosa (também a atualização pedida pelo Neoveg).
+fn install_silent(
+    exe: &std::path::Path,
+    opts: &InstallOptions,
+    wait_pid: Option<u32>,
+    launch: bool,
+) -> i32 {
+    if let Some(pid) = wait_pid {
+        system::wait_for_process(pid);
+    }
+    let result = if opts.scope == Scope::AllUsers && !system::is_elevated() {
+        // Arquivos de Programas pede administrador: só a instalação sobe, o
+        // Neoveg reaberto no fim continua com o usuário comum
+        match system::run_elevated(exe, &opts.to_args()) {
+            Ok(0) => Ok(()),
+            Ok(c) => Err(format!(
+                "a instalação como administrador falhou (código {c})"
+            )),
+            Err(e) => Err(e),
+        }
+    } else {
+        ops::install(opts, exe, &mut |_, _| {})
+    };
+    match result {
+        Ok(()) => {
+            if launch {
+                let _ = std::process::Command::new(opts.dir.join(system::APP_EXE)).spawn();
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
     }
 }
 
@@ -168,13 +219,35 @@ mod tests {
         .expect("válido");
         assert_eq!(
             m,
-            Mode::InstallSilent(InstallOptions {
-                scope: Scope::AllUsers,
-                dir: PathBuf::from(r"D:\Apps\Neoveg"),
-                desktop_shortcut: true,
-                associate_files: true,
-            })
+            Mode::InstallSilent {
+                opts: InstallOptions {
+                    scope: Scope::AllUsers,
+                    dir: PathBuf::from(r"D:\Apps\Neoveg"),
+                    desktop_shortcut: true,
+                    associate_files: true,
+                },
+                wait_pid: None,
+                launch: false,
+            }
         );
+        // atualização pedida pelo Neoveg
+        match parse_args(&a(&[
+            "--silent",
+            "--user",
+            "--wait-pid",
+            "4242",
+            "--launch",
+        ])) {
+            Ok(Mode::InstallSilent {
+                wait_pid, launch, ..
+            }) => {
+                assert_eq!(wait_pid, Some(4242));
+                assert!(launch);
+            }
+            other => panic!("esperada instalação silenciosa: {other:?}"),
+        }
+        assert!(parse_args(&a(&["--silent", "--wait-pid", "abc"])).is_err());
+        assert!(parse_args(&a(&["--silent", "--wait-pid"])).is_err());
         assert_eq!(
             parse_args(&a(&["--uninstall", "--silent", "--remove-data"])),
             Ok(Mode::Uninstall {

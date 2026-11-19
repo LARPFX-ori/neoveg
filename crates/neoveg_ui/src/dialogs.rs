@@ -5556,6 +5556,20 @@ fn prefs_general(
             ),
         );
         ui.checkbox(
+            &mut draft.check_updates,
+            tr(lang, "Verificar atualizações ao iniciar (uma vez por dia)"),
+        )
+        .on_hover_text(tr(
+            lang,
+            "Só no programa instalado. Consulta os lançamentos públicos do Neoveg no GitHub, sem enviar dados seus.",
+        ));
+        ui.add_enabled_ui(draft.check_updates, |ui| {
+            ui.checkbox(
+                &mut draft.update_prereleases,
+                tr(lang, "Incluir pré-lançamentos"),
+            );
+        });
+        ui.checkbox(
             &mut draft.always_draw_marker_lines,
             tr(lang, "Desenhar sempre as linhas de marcadores na timeline"),
         );

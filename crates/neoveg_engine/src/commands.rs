@@ -485,6 +485,8 @@ pub enum UiAction {
     OpenSplash,
     OpenWelcome,
     OpenAbout,
+    /// Ajuda > Verificar atualizações.
+    CheckUpdates,
     BuildProxySelected,
     PrerenderRegion,
     RunScriptDialog,
@@ -3892,6 +3894,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenShortcuts, h),
+    },
+    CommandDef {
+        id: "help.check_updates",
+        label: "Verificar atualizações...",
+        menu_path: "Ajuda/Verificar atualizações...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::CheckUpdates, h),
     },
     CommandDef {
         id: "help.about",

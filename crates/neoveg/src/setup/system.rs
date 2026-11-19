@@ -356,6 +356,21 @@ pub fn run_elevated(exe: &Path, args: &[String]) -> Result<i32, String> {
     Ok(st.code().unwrap_or(1))
 }
 
+/// Espera o processo `pid` terminar (no máximo 2 minutos): a atualização
+/// só sobrescreve o programa depois que o Neoveg fechou.
+pub fn wait_for_process(pid: u32) {
+    let script = format!("Wait-Process -Id {pid} -Timeout 120 -ErrorAction SilentlyContinue");
+    let _ = run_hidden(
+        "powershell.exe",
+        &[
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            script,
+        ],
+    );
+}
+
 /// Tamanho em KB dos arquivos instalados (para "Adicionar ou remover").
 pub fn installed_size_kb(install_dir: &Path, files: &[PathBuf]) -> u64 {
     let bytes: u64 = files
