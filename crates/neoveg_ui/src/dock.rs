@@ -142,6 +142,22 @@ pub fn build_dock_tree(
     active_tab: DockTab,
     preview_on_left: bool,
 ) -> Tree<DockPane> {
+    build_dock_tree_with(
+        preview_ratio,
+        active_tab,
+        preview_on_left,
+        neoveg_common::prefs::MasterBusPlacement::Right,
+    )
+}
+
+/// Como [`build_dock_tree`], com o Master Bus na posição `master`.
+pub fn build_dock_tree_with(
+    preview_ratio: f32,
+    active_tab: DockTab,
+    preview_on_left: bool,
+    master: neoveg_common::prefs::MasterBusPlacement,
+) -> Tree<DockPane> {
+    use neoveg_common::prefs::MasterBusPlacement as Mb;
     let mut tiles = Tiles::default();
     // Grupo à esquerda: os painéis padrão primeiro, depois os outros (que
     // começam fechados e aparecem aqui quando abertos pelo menu Exibir).
@@ -171,7 +187,13 @@ pub fn build_dock_tree(
     // O Trimmer fica no mesmo grupo da Prévia de Vídeo.
     let pv_pane = tiles.insert_pane(DockPane::Preview);
     let trimmer_pane = tiles.insert_pane(DockPane::Tab(DockTab::Trimmer));
-    let mut pv_tabs = Tabs::new(vec![pv_pane, trimmer_pane]);
+    let mb_pane = tiles.insert_pane(DockPane::MasterBus);
+    let pv_children = if master == Mb::WithPreview {
+        vec![pv_pane, mb_pane, trimmer_pane]
+    } else {
+        vec![pv_pane, trimmer_pane]
+    };
+    let mut pv_tabs = Tabs::new(pv_children);
     pv_tabs.set_active(if active_tab == DockTab::Trimmer {
         trimmer_pane
     } else {
@@ -179,23 +201,36 @@ pub fn build_dock_tree(
     });
     let pv_group = tiles.insert_container(Container::Tabs(pv_tabs));
 
-    let mb_pane = tiles.insert_pane(DockPane::MasterBus);
-    let mb_group = tiles.insert_tab_tile(vec![mb_pane]);
-
-    let order = if preview_on_left {
-        vec![pv_group, tabs_group, mb_group]
+    let mb_group = if master == Mb::WithPreview {
+        None
     } else {
-        vec![tabs_group, pv_group, mb_group]
+        Some(tiles.insert_tab_tile(vec![mb_pane]))
+    };
+
+    let (first, second) = if preview_on_left {
+        (pv_group, tabs_group)
+    } else {
+        (tabs_group, pv_group)
+    };
+    let order = match mb_group {
+        Some(mb) if master == Mb::Center => vec![first, mb, second],
+        Some(mb) => vec![first, second, mb],
+        None => vec![first, second],
     };
     let mut linear = Linear::new(LinearDir::Horizontal, order);
 
-    let pv_frac = preview_ratio.clamp(0.20, 0.72) * (1.0 - DEFAULT_MASTER_SHARE);
-    let tabs_frac = (1.0 - DEFAULT_MASTER_SHARE - pv_frac).max(0.18);
+    let mb_share = if mb_group.is_some() {
+        DEFAULT_MASTER_SHARE
+    } else {
+        0.0
+    };
+    let pv_frac = preview_ratio.clamp(0.20, 0.72) * (1.0 - mb_share);
+    let tabs_frac = (1.0 - mb_share - pv_frac).max(0.18);
     linear.shares.set_share(tabs_group, tabs_frac * 3.0);
     linear.shares.set_share(pv_group, pv_frac * 3.0);
-    linear
-        .shares
-        .set_share(mb_group, DEFAULT_MASTER_SHARE * 3.0);
+    if let Some(mb) = mb_group {
+        linear.shares.set_share(mb, mb_share * 3.0);
+    }
 
     let root = tiles.insert_container(Container::Linear(linear));
     Tree::new(TREE_SALT, root, tiles)

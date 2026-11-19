@@ -4839,10 +4839,11 @@ impl App {
                 self.prefs.edit_layout = orig_el;
                 self.dock_height = orig_dock_h;
                 self.preview_ratio = orig_prev_r;
-                self.dock_tree = crate::dock::build_dock_tree(
+                self.dock_tree = crate::dock::build_dock_tree_with(
                     self.preview_ratio,
                     self.dock_tab,
                     self.prefs.edit_layout.preview_on_left,
+                    self.prefs.edit_layout.master_bus_placement,
                 );
                 let tid = ThemeId::from_pref(&orig_theme);
                 self.set_theme(ctx, tid, false);
@@ -5269,9 +5270,26 @@ fn edit_layout_checkboxes(
     changed |= ui
         .checkbox(
             &mut cfg.master_bus_docked,
-            tr(lang, "Exibir Master Bus acoplado à direita (padrão)"),
+            tr(lang, "Exibir Master Bus acoplado na área de janelas"),
         )
         .changed();
+    ui.add_enabled_ui(cfg.master_bus_docked, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(tr(lang, "Posição do Master Bus:"));
+            egui::ComboBox::from_id_salt("edit_layout_master_place")
+                .selected_text(cfg.master_bus_placement.label_in(lang))
+                .show_ui(ui, |ui| {
+                    for m in neoveg_common::prefs::MasterBusPlacement::ALL {
+                        if ui
+                            .selectable_value(&mut cfg.master_bus_placement, m, m.label_in(lang))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+    });
     if ui
         .checkbox(
             &mut cfg.sync_theme_with_layout,
