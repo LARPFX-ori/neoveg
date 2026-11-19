@@ -219,6 +219,7 @@ fn relative_motion_from_frames(data: &BlenderCameraExchange) -> Vec<(Ticks, Moti
                 scale_x: zoom,
                 scale_y: zoom,
                 rot,
+                ..MotionKey::default()
             },
         ));
     }

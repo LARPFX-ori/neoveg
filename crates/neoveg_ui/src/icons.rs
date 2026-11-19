@@ -129,11 +129,12 @@ pub enum Icon {
     ObjectSpace,
     PreventScaleX,
     PreventScaleY,
+    MoveZOnly,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 121] = [
+    pub const ALL: [Icon; 122] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -255,6 +256,7 @@ impl Icon {
         Icon::ObjectSpace,
         Icon::PreventScaleX,
         Icon::PreventScaleY,
+        Icon::MoveZOnly,
     ];
 }
 
@@ -1702,6 +1704,23 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.50, 0.74, 0.50, 0.94, pal.red, 0.09);
             c.line(0.36, 0.10, 0.64, 0.10, pal.red, 0.07);
             c.line(0.36, 0.90, 0.64, 0.90, pal.red, 0.07);
+        }
+        Icon::MoveZOnly => {
+            // eixo em profundidade: seta diagonal entre um plano perto e um longe
+            c.p.rect_stroke(
+                c.rect(0.52, 0.12, 0.88, 0.40),
+                0.0,
+                c.stroke(0.06, pal.muted),
+                StrokeKind::Inside,
+            );
+            c.p.rect_stroke(
+                c.rect(0.10, 0.52, 0.56, 0.88),
+                0.0,
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.34, 0.66, 0.70, 0.28, pal.blue, 0.09);
+            c.poly(&[(0.76, 0.22), (0.58, 0.28), (0.70, 0.40)], pal.blue, None);
         }
         Icon::TimelineGrid => {
             c.p.rect_stroke(
