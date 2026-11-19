@@ -5652,6 +5652,11 @@ fn split_event_in_track(
             f
         })
         .collect();
+    for env in &mut right.envelopes {
+        for p in &mut env.points {
+            p.t -= left_len;
+        }
+    }
     let right_id = right.id;
     track.events.push(right);
     Some(right_id)
