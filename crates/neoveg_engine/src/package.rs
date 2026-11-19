@@ -70,12 +70,15 @@ pub struct ManifestSequence {
     pub active: bool,
 }
 
-/// Conteúdo de um arquivo `.nvegseq`.
+/// Conteúdo de um arquivo `.nvegseq` (dentro do pacote `.neoveg` ou avulso).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SequenceFile {
     pub format: String,
     pub version: u32,
     pub sequence: Sequence,
+    /// Mídias referenciadas pela sequência quando exportada como `.nvegseq` avulso.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<crate::model::MediaItem>,
 }
 
 /// Os bytes são um pacote ZIP (e não o JSON antigo)?
@@ -164,6 +167,7 @@ pub fn write_package(p: &Project) -> Result<Vec<u8>, String> {
             format: SEQUENCE_FORMAT.to_string(),
             version: PACKAGE_VERSION,
             sequence,
+            media: Vec::new(),
         };
         let json = serde_json::to_vec_pretty(&file)
             .map_err(|e| format!("erro ao serializar sequência: {e}"))?;
@@ -357,6 +361,242 @@ pub fn read_package(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
     }
     p.sequences = others;
     Ok((p, fixes))
+}
+
+/// Exporta uma sequência do projeto (ativa ou inativa) para um arquivo `.nvegseq`
+/// avulso contendo a sequência e as definições de mídia que seus eventos referenciam.
+pub fn export_standalone_sequence(p: &Project, seq_id: Id) -> Result<Vec<u8>, String> {
+    let mut copy = p.clone();
+    copy.ensure_sequences();
+    let seq = if copy.active_sequence_id == Some(seq_id) {
+        copy.take_active_sequence(crate::time::Ticks::ZERO, crate::time::Ticks::ZERO, 100.0)
+    } else {
+        copy.sequences
+            .into_iter()
+            .find(|s| s.id == seq_id)
+            .ok_or_else(|| format!("sequência {seq_id} não encontrada no projeto"))?
+    };
+
+    let mut used_media = HashSet::new();
+    for tr in &seq.tracks {
+        for ev in &tr.events {
+            used_media.insert(ev.media_id);
+            for tk in &ev.alt_takes {
+                used_media.insert(tk.media_id);
+            }
+        }
+    }
+    let media: Vec<crate::model::MediaItem> = p
+        .media
+        .iter()
+        .filter(|m| used_media.contains(&m.id))
+        .cloned()
+        .collect();
+
+    let file = SequenceFile {
+        format: SEQUENCE_FORMAT.to_string(),
+        version: PACKAGE_VERSION,
+        sequence: seq,
+        media,
+    };
+    serde_json::to_vec_pretty(&file).map_err(|e| format!("erro ao serializar .nvegseq: {e}"))
+}
+
+/// Grava a sequência `seq_id` (ou a ativa se `None`) em um arquivo `.nvegseq` avulso.
+pub fn export_standalone_sequence_file(
+    p: &Project,
+    seq_id: Option<Id>,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let mut c = p.clone();
+    c.ensure_sequences();
+    let id = seq_id
+        .or(c.active_sequence_id)
+        .ok_or_else(|| "projeto sem sequência ativa".to_string())?;
+    let bytes = export_standalone_sequence(&c, id)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("não foi possível criar pasta de destino: {e}"))?;
+        }
+    }
+    let tmp = path.with_extension("nvegseq.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("erro ao gravar .nvegseq: {e}"))?;
+    std::fs::rename(&tmp, path)
+        .or_else(|_| std::fs::write(path, &bytes))
+        .map_err(|e| format!("erro ao finalizar .nvegseq: {e}"))
+}
+
+/// Lê e valida um arquivo `.nvegseq` avulso tratando toda entrada como hostil (§0.4).
+pub fn read_standalone_sequence(
+    bytes: &[u8],
+) -> Result<(Sequence, Vec<crate::model::MediaItem>), String> {
+    if bytes.is_empty() {
+        return Err("arquivo .nvegseq vazio".into());
+    }
+    if (bytes.len() as u64) > MAX_ENTRY_BYTES {
+        return Err(format!(
+            "arquivo .nvegseq excede o limite de {} MiB",
+            MAX_ENTRY_BYTES / (1024 * 1024)
+        ));
+    }
+    let file: SequenceFile =
+        serde_json::from_slice(bytes).map_err(|e| format!("arquivo .nvegseq inválido: {e}"))?;
+    if file.format != SEQUENCE_FORMAT {
+        return Err("o arquivo não é uma sequência .nvegseq do Neoveg".into());
+    }
+    if file.version > PACKAGE_VERSION {
+        return Err(format!(
+            "sequência salva por uma versão mais nova do Neoveg (versão {})",
+            file.version
+        ));
+    }
+    let mut seq = file.sequence;
+    if seq.tracks.len() > 256 {
+        seq.tracks.truncate(256);
+    }
+    if seq.markers.len() > 10_000 {
+        seq.markers.truncate(10_000);
+    }
+    if seq.regions.len() > 10_000 {
+        seq.regions.truncate(10_000);
+    }
+    let mut media = file.media;
+    if media.len() > 4096 {
+        media.truncate(4096);
+    }
+    Ok((seq, media))
+}
+
+/// Importa uma sequência `.nvegseq` avulsa em `p`, remapeando todos os IDs e
+/// incorporando/reaproveitando mídias referenciadas sem colisões. Devolve o novo ID.
+pub fn import_standalone_sequence_into(
+    p: &mut Project,
+    mut seq: Sequence,
+    media_items: Vec<crate::model::MediaItem>,
+) -> Result<Id, String> {
+    use std::collections::HashMap;
+    p.ensure_sequences();
+    let total = 1 + p.sequences.len();
+    if total >= MAX_SEQUENCES {
+        return Err(format!(
+            "limite máximo de {MAX_SEQUENCES} sequências no projeto atingido"
+        ));
+    }
+
+    // Mapeia IDs de mídia antigos → existentes no projeto (mesmo `source`) ou novos.
+    let mut media_map: HashMap<Id, Id> = HashMap::new();
+    for mut m in media_items {
+        let old_id = m.id;
+        let m_src = serde_json::to_string(&m.source).ok();
+        if let Some(existing) = p
+            .media
+            .iter()
+            .find(|em| m_src.is_some() && serde_json::to_string(&em.source).ok() == m_src)
+        {
+            media_map.insert(old_id, existing.id);
+        } else {
+            let nid = crate::model::new_id();
+            m.id = nid;
+            p.media.push(m);
+            media_map.insert(old_id, nid);
+        }
+    }
+
+    // Remapeia IDs de trilhas, eventos, grupos, sync links, marcadores e regiões.
+    let mut track_map: HashMap<Id, Id> = HashMap::new();
+    let mut event_map: HashMap<Id, Id> = HashMap::new();
+    let mut group_map: HashMap<Id, Id> = HashMap::new();
+    for tr in &mut seq.tracks {
+        let nid = crate::model::new_id();
+        track_map.insert(tr.id, nid);
+        tr.id = nid;
+        for ev in &mut tr.events {
+            let neid = crate::model::new_id();
+            event_map.insert(ev.id, neid);
+            ev.id = neid;
+            if let Some(&nm) = media_map.get(&ev.media_id) {
+                ev.media_id = nm;
+            }
+            for tk in &mut ev.alt_takes {
+                if let Some(&nm) = media_map.get(&tk.media_id) {
+                    tk.media_id = nm;
+                }
+            }
+            if let Some(g) = ev.group {
+                let ng = *group_map.entry(g).or_insert_with(crate::model::new_id);
+                ev.group = Some(ng);
+            }
+            for fx in &mut ev.fx {
+                fx.id = crate::model::new_id();
+            }
+        }
+        for fx in &mut tr.fx {
+            fx.id = crate::model::new_id();
+        }
+        tr.output_bus = None;
+        tr.sends.clear();
+    }
+    for tr in &mut seq.tracks {
+        tr.parent_track_id = tr
+            .parent_track_id
+            .and_then(|pid| track_map.get(&pid).copied());
+        for ev in &mut tr.events {
+            ev.sync_link_master = ev
+                .sync_link_master
+                .and_then(|mid| event_map.get(&mid).copied());
+        }
+    }
+    for m in &mut seq.markers {
+        m.id = crate::model::new_id();
+    }
+    for r in &mut seq.regions {
+        r.id = crate::model::new_id();
+    }
+
+    // Garante nome único entre as sequências do projeto.
+    let base_name = seq.name.trim().chars().take(64).collect::<String>();
+    let base_name = if base_name.is_empty() {
+        "Sequência importada".to_string()
+    } else {
+        base_name
+    };
+    let existing_names: HashSet<String> = p
+        .sequences
+        .iter()
+        .map(|s| s.name.to_lowercase())
+        .chain(p.active_sequence_name.iter().map(|n| n.to_lowercase()))
+        .collect();
+    let mut final_name = base_name.clone();
+    let mut suffix = 2u32;
+    while existing_names.contains(&final_name.to_lowercase()) {
+        final_name = format!("{base_name} ({suffix})");
+        suffix = suffix.saturating_add(1);
+    }
+
+    let new_seq_id = crate::model::new_id();
+    seq.id = new_seq_id;
+    seq.name = final_name;
+    p.sequences.push(seq);
+    if !p.sequence_order.contains(&new_seq_id) {
+        p.sequence_order.push(new_seq_id);
+    }
+    p.sanitize();
+    Ok(new_seq_id)
+}
+
+/// Lê um arquivo `.nvegseq` do disco (com limite de tamanho) e o importa no projeto `p`.
+pub fn import_standalone_sequence_file(
+    p: &mut Project,
+    path: &std::path::Path,
+) -> Result<Id, String> {
+    let f = std::fs::File::open(path).map_err(|e| format!("erro ao abrir .nvegseq: {e}"))?;
+    let mut bytes = Vec::new();
+    f.take(MAX_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("erro ao ler .nvegseq: {e}"))?;
+    let (seq, media) = read_standalone_sequence(&bytes)?;
+    import_standalone_sequence_into(p, seq, media)
 }
 
 #[cfg(test)]
@@ -571,5 +811,97 @@ mod tests {
             3
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sequencia_avulsa_nvegseq_ida_e_volta_e_reimportacao_sem_colisao() {
+        use crate::model::{Event, GenSpec, MediaItem, MediaSource};
+
+        let mut src = Project::new_default();
+        src.active_sequence_name = Some("Corte Principal".into());
+        let media = MediaItem {
+            id: crate::model::new_id(),
+            name: "Cor".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [0.2, 0.4, 0.8, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(5)),
+            has_video: true,
+            has_audio: false,
+            width: 1920,
+            height: 1080,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mut ev = Event::new(&media, Ticks::from_secs_i64(1), Ticks::from_secs_i64(3));
+        ev.group = Some(crate::model::new_id());
+        src.media.push(media);
+        src.tracks[0].events.push(ev);
+        src.markers.push(Marker {
+            id: crate::model::new_id(),
+            t: Ticks::from_secs_i64(2),
+            label: "M1".into(),
+            ..Default::default()
+        });
+
+        let seq_id = src.active_sequence_id.unwrap();
+        let bytes = export_standalone_sequence(&src, seq_id).unwrap();
+
+        let mut dst = Project::new_default();
+        dst.active_sequence_name = Some("Corte Principal".into());
+        let (s1, m1) = read_standalone_sequence(&bytes).unwrap();
+        assert_eq!(m1.len(), 1);
+        let id1 = import_standalone_sequence_into(&mut dst, s1, m1).unwrap();
+        assert_eq!(dst.sequences.len(), 1);
+        assert_eq!(dst.media.len(), 1);
+        assert_eq!(dst.sequences[0].name, "Corte Principal (2)");
+        assert_eq!(dst.sequences[0].id, id1);
+        assert_eq!(
+            dst.sequences[0].tracks[0].events[0].media_id,
+            dst.media[0].id
+        );
+
+        // Reimportar o mesmo arquivo reutiliza a mídia sem duplicá-la e dá novo nome/IDs
+        let (s2, m2) = read_standalone_sequence(&bytes).unwrap();
+        let id2 = import_standalone_sequence_into(&mut dst, s2, m2).unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(dst.media.len(), 1);
+        assert_eq!(dst.sequences.len(), 2);
+        assert_eq!(dst.sequences[1].name, "Corte Principal (3)");
+        assert_ne!(
+            dst.sequences[0].tracks[0].events[0].id,
+            dst.sequences[1].tracks[0].events[0].id
+        );
+    }
+
+    #[test]
+    fn sequencia_avulsa_nvegseq_entradas_hostis_e_fuzz() {
+        assert!(read_standalone_sequence(b"").is_err());
+        assert!(read_standalone_sequence(br#"{"format":"outro","version":1}"#).is_err());
+        let p = Project::new_default();
+        let valid = export_standalone_sequence(&p, p.active_sequence_id.unwrap()).unwrap();
+        // Versão futura
+        let newer = String::from_utf8_lossy(&valid).replace("\"version\": 1", "\"version\": 99");
+        assert!(read_standalone_sequence(newer.as_bytes()).is_err());
+
+        // Mutações por truncamento e inversão de bits nunca causam pânico (§0.8)
+        for cut in [
+            1usize,
+            5,
+            17,
+            valid.len() / 2,
+            valid.len().saturating_sub(1),
+        ] {
+            let slice = &valid[..cut.min(valid.len())];
+            let res = std::panic::catch_unwind(|| read_standalone_sequence(slice));
+            assert!(res.is_ok());
+        }
+        for i in (0..valid.len()).step_by(29) {
+            let mut mutated = valid.clone();
+            mutated[i] ^= 0x5A;
+            let res = std::panic::catch_unwind(|| read_standalone_sequence(&mutated));
+            assert!(res.is_ok());
+        }
     }
 }
