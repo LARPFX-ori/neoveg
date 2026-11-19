@@ -3003,13 +3003,16 @@ name = "neoveg"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "eframe",
  "neoveg_common",
  "neoveg_engine",
  "neoveg_scripting",
  "neoveg_ui",
  "rayon",
+ "rfd",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

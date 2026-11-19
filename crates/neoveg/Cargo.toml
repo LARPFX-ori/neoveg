@@ -9,6 +9,12 @@ description = "Neoveg - editor de vídeo não-linear em Rust puro com semântica
 name = "neoveg"
 path = "src/main.rs"
 
+# Instalador próprio (Windows): setup.exe com o pacote do programa anexado ao
+# fim do executável. Montado por tools/build_installer.py.
+[[bin]]
+name = "neoveg-setup"
+path = "src/setup/main.rs"
+
 [dependencies]
 neoveg_common.workspace = true
 neoveg_engine.workspace = true
@@ -18,6 +24,9 @@ anyhow.workspace = true
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+eframe.workspace = true
+zip.workspace = true
+rfd.workspace = true
 
 [lints]
 workspace = true
