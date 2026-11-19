@@ -68,7 +68,7 @@ pub fn track_rows_in(track: &Track, tol: Ticks, lang: neoveg_common::Language) -
             kind: KfRowKind::Fx(fx.id),
             label,
             times: group_times(anim.chain(ofx), tol),
-            has_curve: false,
+            has_curve: true,
         });
     }
     rows
@@ -154,7 +154,7 @@ pub fn delete_key(track: &mut Track, row: &KfRowKind, t: Ticks, tol: Ticks) -> b
             };
             let mut removed = false;
             for p in &mut fx.params {
-                if let Some(last) = remove_near(&mut p.keys, t, tol) {
+                if let Some(last) = p.remove_key_near(t, tol) {
                     removed = true;
                     if p.keys.is_empty() {
                         p.value = last;
@@ -230,7 +230,7 @@ pub fn move_key(
         KfRowKind::Fx(id) => {
             let fx = track.fx.iter_mut().find(|f| f.id == *id)?;
             for p in &mut fx.params {
-                retime(&mut p.keys, anchor, target, tol);
+                p.retime(anchor, target, tol);
             }
             if let Some(o) = &mut fx.ofx {
                 for p in &mut o.params {
@@ -273,6 +273,53 @@ pub fn motion_curve(track: &Track, t: Ticks, tol: Ticks) -> Option<Curve> {
         .iter()
         .find(|k| k.t.abs_diff(t) <= tol)
         .map(|k| k.curve)
+}
+
+/// Muda a curva de interpolação do quadro-chave em `t` para o efeito da trilha `fx_id`.
+pub fn set_fx_curve(track: &mut Track, fx_id: Id, t: Ticks, curve: Curve, tol: Ticks) -> bool {
+    let Some(fx) = track.fx.iter_mut().find(|f| f.id == fx_id) else {
+        return false;
+    };
+    let mut found = false;
+    for p in &mut fx.params {
+        if p.set_curve(t, curve, tol) {
+            found = true;
+        }
+    }
+    found
+}
+
+/// Curva do quadro-chave do efeito da trilha `fx_id` em `t`, se houver.
+pub fn fx_curve(track: &Track, fx_id: Id, t: Ticks, tol: Ticks) -> Option<Curve> {
+    let fx = track.fx.iter().find(|f| f.id == fx_id)?;
+    for p in &fx.params {
+        if let Some(c) = p.curve_at(t, tol) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Muda a curva de interpolação de qualquer linha de quadros-chave (Motion ou Fx).
+pub fn set_key_curve(
+    track: &mut Track,
+    row: &KfRowKind,
+    t: Ticks,
+    curve: Curve,
+    tol: Ticks,
+) -> bool {
+    match row {
+        KfRowKind::Motion => set_motion_curve(track, t, curve, tol),
+        KfRowKind::Fx(id) => set_fx_curve(track, *id, t, curve, tol),
+    }
+}
+
+/// Curva de interpolação de qualquer linha de quadros-chave (Motion ou Fx).
+pub fn key_curve(track: &Track, row: &KfRowKind, t: Ticks, tol: Ticks) -> Option<Curve> {
+    match row {
+        KfRowKind::Motion => motion_curve(track, t, tol),
+        KfRowKind::Fx(id) => fx_curve(track, *id, t, tol),
+    }
 }
 
 #[cfg(test)]
@@ -428,5 +475,38 @@ mod tests {
         assert!(set_motion_curve(&mut t, secs(2), Curve::Hold, TOL));
         assert_eq!(motion_curve(&t, secs(2), TOL), Some(Curve::Hold));
         assert!(!set_motion_curve(&mut t, secs(9), Curve::Hold, TOL));
+    }
+
+    #[test]
+    fn fx_curve_is_set_on_the_key_and_evaluates_curved() {
+        let mut t = video_track();
+        let fx = fx_with_keys(&[(0, 0.0), (4, 1.0)]);
+        let id = fx.id;
+        t.fx.push(fx);
+
+        let rows = track_rows(&t, TOL);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].has_curve, "linhas de efeito agora suportam curva");
+
+        assert!(set_fx_curve(&mut t, id, secs(0), Curve::Fast, TOL));
+        assert_eq!(fx_curve(&t, id, secs(0), TOL), Some(Curve::Fast));
+
+        // Curva Rápida (Fast) em x=0.5 resulta em 1 - (1 - 0.5)^3 = 0.875
+        let mid = t.fx[0].params[0].eval(secs(2));
+        assert!((mid - 0.875).abs() < 1e-4, "valor intermediário={mid}");
+
+        // set_key_curve e key_curve unificados
+        assert!(set_key_curve(
+            &mut t,
+            &KfRowKind::Fx(id),
+            secs(0),
+            Curve::Hold,
+            TOL
+        ));
+        assert_eq!(
+            key_curve(&t, &KfRowKind::Fx(id), secs(0), TOL),
+            Some(Curve::Hold)
+        );
+        assert_eq!(t.fx[0].params[0].eval(secs(2)), 0.0);
     }
 }

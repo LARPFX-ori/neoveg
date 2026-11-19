@@ -633,6 +633,7 @@
   "Espelhar": "Miroir",
   "Esquerda": "Gauche",
   "Essa pasta já está mapeada ou a lista está cheia.": "Ce dossier est déjà ajouté ou la liste est pleine.",
+  "Esta linha de quadros-chave não suporta curvas de interpolação.": "Cette piste d'images clés ne prend pas en charge les courbes d'interpolation.",
   "Estabilizador de Vídeo": "Stabilisateur vidéo",
   "Estabilização": "Stabilisation",
   "Estado atual:": "État actuel :",
@@ -2043,4 +2044,4 @@
   "★ Favoritos": "★ Favoris",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marqueur au curseur"
-}
+}

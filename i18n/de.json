@@ -633,6 +633,7 @@
   "Espelhar": "Spiegeln",
   "Esquerda": "Links",
   "Essa pasta já está mapeada ou a lista está cheia.": "Dieser Ordner ist bereits zugeordnet oder die Liste ist voll.",
+  "Esta linha de quadros-chave não suporta curvas de interpolação.": "Diese Keyframe-Spur unterstützt keine Interpolationskurven.",
   "Estabilizador de Vídeo": "Videostabilisierer",
   "Estabilização": "Stabilisierung",
   "Estado atual:": "Aktueller Status:",
@@ -2043,4 +2044,4 @@
   "★ Favoritos": "★ Favoriten",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker am Cursor"
-}
+}
