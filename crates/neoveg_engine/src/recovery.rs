@@ -35,8 +35,44 @@ pub fn find_existing_recovery() -> Option<PathBuf> {
     None
 }
 
-/// Grava o projeto no arquivo de recuperação.
+/// Retorna o caminho de uma cópia histórica do salvamento automático no índice `idx`.
+pub fn recovery_history_path(idx: usize) -> PathBuf {
+    if idx == 0 {
+        recovery_path()
+    } else {
+        util::base_dir()
+            .join("autosave")
+            .join(format!("recuperacao.{idx}.neoveg"))
+    }
+}
+
+/// Rotaciona os arquivos de recuperação preservando até `copies` instâncias.
+pub fn rotate_recovery_files(copies: usize) {
+    if copies <= 1 {
+        return;
+    }
+    let max_idx = copies.saturating_sub(1);
+    let oldest = recovery_history_path(max_idx);
+    if oldest.exists() {
+        let _ = std::fs::remove_file(&oldest);
+    }
+    for i in (1..=max_idx).rev() {
+        let prev = recovery_history_path(i - 1);
+        let curr = recovery_history_path(i);
+        if prev.exists() {
+            let _ = std::fs::rename(&prev, &curr)
+                .or_else(|_| std::fs::copy(&prev, &curr).and_then(|_| std::fs::remove_file(&prev)));
+        }
+    }
+}
+
+/// Grava o projeto no arquivo de recuperação com histórico padrão (3 cópias).
 pub fn write_recovery(p: &Project) -> Result<(), String> {
+    write_recovery_with_history(p, 3)
+}
+
+/// Grava o projeto no arquivo de recuperação mantendo histórico rotativo.
+pub fn write_recovery_with_history(p: &Project, history_copies: usize) -> Result<(), String> {
     let path = recovery_path();
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
@@ -44,11 +80,16 @@ pub fn write_recovery(p: &Project) -> Result<(), String> {
     let json = serde_json::to_string(p).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    if path.exists() && history_copies > 1 {
+        rotate_recovery_files(history_copies);
+    }
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 pub fn clear_recovery() {
-    let _ = std::fs::remove_file(recovery_path());
+    for idx in 0..10 {
+        let _ = std::fs::remove_file(recovery_history_path(idx));
+    }
     let _ = std::fs::remove_file(legacy_recovery_path());
 }
 

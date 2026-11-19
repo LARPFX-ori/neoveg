@@ -120,11 +120,17 @@ pub enum Icon {
     Stereo3d,
     RenderTrack,
     TimelineGrid,
+    SyncCursor,
+    KeyframeDelete,
+    ScaleAboutCenter,
+    MoveFree,
+    MoveXOnly,
+    MoveYOnly,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 112] = [
+    pub const ALL: [Icon; 118] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -237,6 +243,12 @@ impl Icon {
         Icon::Stereo3d,
         Icon::RenderTrack,
         Icon::TimelineGrid,
+        Icon::SyncCursor,
+        Icon::KeyframeDelete,
+        Icon::ScaleAboutCenter,
+        Icon::MoveFree,
+        Icon::MoveXOnly,
+        Icon::MoveYOnly,
     ];
 }
 
@@ -1593,6 +1605,65 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.polyline(&[(0.50, 0.44), (0.50, 0.64)], pal.green, 0.09);
             c.poly(&[(0.38, 0.56), (0.62, 0.56), (0.50, 0.70)], pal.green, None);
             c.p.rect_filled(c.rect(0.14, 0.74, 0.86, 0.90), c.u(0.04), pal.blue);
+        }
+        Icon::SyncCursor => {
+            // dois cursores verticais ligados por uma corrente
+            c.line(0.24, 0.12, 0.24, 0.88, pal.red, 0.08);
+            c.line(0.76, 0.12, 0.76, 0.88, pal.red, 0.08);
+            c.p.rect_stroke(
+                c.rect(0.30, 0.38, 0.56, 0.62),
+                c.u(0.12),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.p.rect_stroke(
+                c.rect(0.44, 0.38, 0.70, 0.62),
+                c.u(0.12),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+        }
+        Icon::KeyframeDelete => {
+            c.poly(
+                &[(0.42, 0.14), (0.72, 0.44), (0.42, 0.74), (0.12, 0.44)],
+                pal.amber,
+                Some((0.05, pal.ink)),
+            );
+            c.line(0.62, 0.62, 0.88, 0.88, pal.red, 0.10);
+            c.line(0.88, 0.62, 0.62, 0.88, pal.red, 0.10);
+        }
+        Icon::ScaleAboutCenter => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.12, 0.88, 0.88),
+                0.0,
+                c.stroke(0.06, pal.muted),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.50, 0.20, 0.20, pal.blue, 0.08);
+            c.line(0.50, 0.50, 0.80, 0.80, pal.blue, 0.08);
+            c.poly(&[(0.16, 0.16), (0.38, 0.20), (0.20, 0.38)], pal.blue, None);
+            c.poly(&[(0.84, 0.84), (0.62, 0.80), (0.80, 0.62)], pal.blue, None);
+            c.p.circle_filled(c.pt(0.50, 0.50), c.u(0.08), pal.amber);
+        }
+        Icon::MoveFree => {
+            c.line(0.50, 0.14, 0.50, 0.86, pal.ink, 0.08);
+            c.line(0.14, 0.50, 0.86, 0.50, pal.ink, 0.08);
+            c.poly(&[(0.50, 0.08), (0.62, 0.24), (0.38, 0.24)], pal.blue, None);
+            c.poly(&[(0.50, 0.92), (0.62, 0.76), (0.38, 0.76)], pal.blue, None);
+            c.poly(&[(0.08, 0.50), (0.24, 0.38), (0.24, 0.62)], pal.blue, None);
+            c.poly(&[(0.92, 0.50), (0.76, 0.38), (0.76, 0.62)], pal.blue, None);
+        }
+        Icon::MoveXOnly => {
+            c.line(0.14, 0.50, 0.86, 0.50, pal.ink, 0.09);
+            c.poly(&[(0.06, 0.50), (0.26, 0.34), (0.26, 0.66)], pal.blue, None);
+            c.poly(&[(0.94, 0.50), (0.74, 0.34), (0.74, 0.66)], pal.blue, None);
+            c.line(0.50, 0.24, 0.50, 0.76, pal.muted, 0.05);
+        }
+        Icon::MoveYOnly => {
+            c.line(0.50, 0.14, 0.50, 0.86, pal.ink, 0.09);
+            c.poly(&[(0.50, 0.06), (0.34, 0.26), (0.66, 0.26)], pal.blue, None);
+            c.poly(&[(0.50, 0.94), (0.34, 0.74), (0.66, 0.74)], pal.blue, None);
+            c.line(0.24, 0.50, 0.76, 0.50, pal.muted, 0.05);
         }
         Icon::TimelineGrid => {
             c.p.rect_stroke(

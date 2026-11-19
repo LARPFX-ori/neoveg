@@ -27,7 +27,10 @@ mod fx_browser;
 mod gen_browser;
 mod icons;
 pub mod integrations_ui;
+mod kf_window;
 pub mod layout;
+mod pan_crop_geom;
+mod pan_crop_window;
 mod panels;
 mod plugin_manager;
 mod preview_overlays;
@@ -38,6 +41,7 @@ mod splash;
 mod surround_panel;
 pub mod theme;
 mod timeline;
+mod transcript_panel;
 mod trimmer_panel;
 mod welcome;
 

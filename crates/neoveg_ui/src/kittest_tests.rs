@@ -4,6 +4,7 @@ use super::*;
 use crate::dock::{find_pane_tile, DockPane};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
+use neoveg_common::Ticks;
 
 fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
     let _lock = lock_test_prefs();
@@ -2381,7 +2382,10 @@ fn kittest_trimmer_barra_reproduzir_e_botoes_visiveis() {
         .get_by_label("Editar conjunto de botões visíveis...")
         .click();
     harness.run_steps(2);
-    harness.get_by_label("Pausar").click();
+    // com o diálogo aberto, "Pausar" é o botão da barra e a caixa de marcar
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::CheckBox, "Pausar")
+        .click();
     harness.run_steps(1);
     harness.get_by_label("OK").click();
     harness.run_steps(2);
@@ -2391,4 +2395,116 @@ fn kittest_trimmer_barra_reproduzir_e_botoes_visiveis() {
     );
     assert!(harness.query_by_label("Pausar").is_none());
     assert!(harness.query_by_label("Reproduzir").is_some());
+}
+
+#[test]
+fn kittest_transcricao_de_fala_e_edicao_timeline() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .build_eframe(|cc| {
+            let mut app = build_ready_app(cc);
+            // Insere evento de áudio na timeline
+            let m = crate::model::MediaItem {
+                id: crate::model::new_id(),
+                name: "audio.wav".into(),
+                source: crate::model::MediaSource::Generated(crate::model::GenSpec::ColorBars),
+                duration: Some(Ticks::from_secs_i64(10)),
+                has_video: false,
+                has_audio: true,
+                width: 0,
+                height: 0,
+                fps: None,
+                info: String::new(),
+                proxy_path: None,
+            };
+            app.project.media.push(m.clone());
+            let ev = crate::model::Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(8));
+            app.project.tracks[1].events = vec![ev];
+            app.closed_tabs.remove(&DockTab::Transcript);
+            app.dock_visible = true;
+            app.dock_tab = DockTab::Transcript;
+            app.pending_dock_focus = Some(DockTab::Transcript);
+            app
+        });
+
+    harness.run_steps(2);
+
+    // Clica no botão de transcrição da timeline
+    harness
+        .get_by_label("Transcrever Áudio da Timeline")
+        .click();
+    harness.run_steps(2);
+
+    // Verifica que a transcrição foi gerada e está presente
+    assert!(harness.state().project.transcript.is_some());
+    let words_cnt = harness
+        .state()
+        .project
+        .transcript
+        .as_ref()
+        .unwrap()
+        .word_count();
+    assert!(words_cnt > 0);
+
+    // Clica em gerar legendas como regiões
+    harness.get_by_label("Gerar Legendas como Regiões").click();
+    harness.run_steps(2);
+    assert!(!harness.state().project.regions.is_empty());
+
+    // Clica em remover silêncios
+    harness
+        .get_by_label("Remover Silêncios e Pausas (> 1,2s)")
+        .click();
+    harness.run_steps(2);
+}
+
+/// Janela Pan/Crop no layout do VEGAS Pro (manual do VEGAS Pro 21, pp.
+/// 250–251): grade de propriedades com seções recolhíveis, barra de
+/// ferramentas vertical e linha de quadros-chave na mesma janela.
+#[test]
+fn kittest_pan_crop_grade_de_propriedades_recolhivel() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.4, 0.8, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        let eid = app
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .map(|e| e.id)
+            .next()
+            .expect("evento gerado");
+        app.dlg.pan_crop = Some(eid);
+    }
+    harness.run_steps(3);
+    for label in [
+        "Posição",
+        "Rotação",
+        "Área de trabalho",
+        "Largura:",
+        "Zoom (%):",
+    ] {
+        assert!(
+            harness.query_by_label(label).is_some(),
+            "falta '{label}' na janela Pan/Crop"
+        );
+    }
+    // seção recolhida esconde as linhas dela
+    harness.get_by_label("Posição").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Largura:").is_none());
+    harness.get_by_label("Posição").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Largura:").is_some());
+    // fechar a janela limpa o estado
+    harness.state_mut().dlg.pan_crop = None;
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Área de trabalho").is_none());
 }

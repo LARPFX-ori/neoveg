@@ -36,6 +36,18 @@ pub struct ProjectSettings {
     /// Tempo musical em batidas por minuto para régua e grade de compassos (p. 232).
     #[serde(default = "default_bpm")]
     pub bpm: f64,
+    /// Formato de pixel do projeto (8-bit ou 32-bit ponto flutuante).
+    #[serde(default)]
+    pub pixel_format: crate::color::PixelFormat,
+    /// Gama de composição (2,222 vídeo ou 1,000 linear).
+    #[serde(default)]
+    pub compositing_gamma: crate::color::CompositingGamma,
+    /// Espaço de cor do projeto / ACES.
+    #[serde(default)]
+    pub color_space: crate::color::ProjectColorSpace,
+    /// Transformação de visualização na prévia (View Transform).
+    #[serde(default)]
+    pub view_transform: crate::color::ViewTransform,
 }
 
 fn default_bpm() -> f64 {
@@ -246,6 +258,10 @@ impl Default for ProjectSettings {
             channel_layout: ChannelLayout::Stereo,
             stereo_3d: Stereo3dMode::Off,
             bpm: default_bpm(),
+            pixel_format: crate::color::PixelFormat::Bits8,
+            compositing_gamma: crate::color::CompositingGamma::Gamma2_222,
+            color_space: crate::color::ProjectColorSpace::DefaultSrgb,
+            view_transform: crate::color::ViewTransform::Off,
         }
     }
 }
@@ -294,6 +310,52 @@ pub struct Project {
     /// Sequências de *storyboard* para montagem rápida na timeline.
     #[serde(default)]
     pub storyboards: Vec<Storyboard>,
+    /// Sequências em abas na timeline (item 13 do backlog / VEGAS Pro).
+    #[serde(default)]
+    pub sequences: Vec<Sequence>,
+    /// ID da sequência ativa no momento.
+    #[serde(default)]
+    pub active_sequence_id: Option<Id>,
+    /// Transcrição de fala por IA (AI Speech to Text / VEGAS Pro manual p. 674).
+    #[serde(default)]
+    pub transcript: Option<crate::speech::Transcript>,
+}
+
+/// Sequência em aba na timeline (item 13 do backlog / VEGAS Pro).
+///
+/// Cada sequência mantém sua própria coleção de trilhas, eventos, marcadores,
+/// regiões e região de loop, permitindo múltiplos cortes e montagens no mesmo projeto.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Sequence {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+    #[serde(default)]
+    pub regions: Vec<Region>,
+    #[serde(default)]
+    pub loop_region: Option<(Ticks, Ticks)>,
+    #[serde(default)]
+    pub cursor: Ticks,
+    #[serde(default)]
+    pub transcript: Option<crate::speech::Transcript>,
+}
+
+impl Sequence {
+    pub fn new(id: Id, name: &str) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            tracks: Vec::new(),
+            markers: Vec::new(),
+            regions: Vec::new(),
+            loop_region: None,
+            cursor: Ticks::ZERO,
+            transcript: None,
+        }
+    }
 }
 
 impl Project {
@@ -301,7 +363,139 @@ impl Project {
         let mut p = Project::default();
         p.tracks.push(Track::new(TrackKind::Video, "Vídeo 1"));
         p.tracks.push(Track::new(TrackKind::Audio, "Áudio 1"));
+        p.ensure_sequences();
         p
+    }
+
+    /// Garante que o projeto tenha pelo menos uma sequência configurada e sincronizada.
+    pub fn ensure_sequences(&mut self) {
+        if self.sequences.is_empty() {
+            let seq_id = new_id();
+            let seq = Sequence {
+                id: seq_id,
+                name: "Sequência 1".to_string(),
+                tracks: self.tracks.clone(),
+                markers: self.markers.clone(),
+                regions: self.regions.clone(),
+                loop_region: self.loop_region,
+                cursor: Ticks::ZERO,
+                transcript: self.transcript.clone(),
+            };
+            self.sequences.push(seq);
+            self.active_sequence_id = Some(seq_id);
+        } else if self.active_sequence_id.is_none() {
+            self.active_sequence_id = self.sequences.first().map(|s| s.id);
+        }
+    }
+
+    /// Sincroniza o estado atual das trilhas/marcadores com a sequência ativa.
+    pub fn sync_to_active_sequence(&mut self) {
+        self.ensure_sequences();
+        if let Some(active_id) = self.active_sequence_id {
+            if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == active_id) {
+                seq.tracks = self.tracks.clone();
+                seq.markers = self.markers.clone();
+                seq.regions = self.regions.clone();
+                seq.loop_region = self.loop_region;
+                seq.transcript = self.transcript.clone();
+            }
+        }
+    }
+
+    /// Alterna para uma sequência diferente pelo ID, sincronizando antes a atual.
+    pub fn switch_sequence(&mut self, target_id: Id) -> bool {
+        self.sync_to_active_sequence();
+        if let Some(target) = self.sequences.iter().find(|s| s.id == target_id).cloned() {
+            self.tracks = target.tracks;
+            self.markers = target.markers;
+            self.regions = target.regions;
+            self.loop_region = target.loop_region;
+            self.transcript = target.transcript;
+            self.active_sequence_id = Some(target_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cria uma nova sequência no projeto e a torna ativa.
+    pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
+        self.sync_to_active_sequence();
+        let new_id = new_id();
+        let seq_name = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Sequência {}", self.sequences.len() + 1));
+        let seq = Sequence {
+            id: new_id,
+            name: seq_name,
+            tracks: vec![
+                Track::new(TrackKind::Video, "Vídeo 1"),
+                Track::new(TrackKind::Audio, "Áudio 1"),
+            ],
+            markers: Vec::new(),
+            regions: Vec::new(),
+            loop_region: None,
+            cursor: Ticks::ZERO,
+            transcript: None,
+        };
+        self.tracks = seq.tracks.clone();
+        self.markers.clear();
+        self.regions.clear();
+        self.loop_region = None;
+        self.transcript = None;
+        self.sequences.push(seq);
+        self.active_sequence_id = Some(new_id);
+        new_id
+    }
+
+    /// Duplica uma sequência existente com todo o seu conteúdo.
+    pub fn duplicate_sequence(&mut self, source_id: Id) -> Option<Id> {
+        self.sync_to_active_sequence();
+        let source = self.sequences.iter().find(|s| s.id == source_id)?.clone();
+        let new_id = new_id();
+        let dup = Sequence {
+            id: new_id,
+            name: format!("{} (Cópia)", source.name),
+            tracks: source.tracks,
+            markers: source.markers,
+            regions: source.regions,
+            loop_region: source.loop_region,
+            cursor: source.cursor,
+            transcript: source.transcript,
+        };
+        self.sequences.push(dup);
+        Some(new_id)
+    }
+
+    /// Remove uma sequência se houver mais de uma.
+    pub fn delete_sequence(&mut self, seq_id: Id) -> bool {
+        self.ensure_sequences();
+        if self.sequences.len() <= 1 {
+            return false;
+        }
+        let was_active = self.active_sequence_id == Some(seq_id);
+        self.sequences.retain(|s| s.id != seq_id);
+        if was_active {
+            if let Some(first) = self.sequences.first().cloned() {
+                self.tracks = first.tracks;
+                self.markers = first.markers;
+                self.regions = first.regions;
+                self.loop_region = first.loop_region;
+                self.transcript = first.transcript;
+                self.active_sequence_id = Some(first.id);
+            }
+        }
+        true
+    }
+
+    /// Renomeia uma sequência.
+    pub fn rename_sequence(&mut self, seq_id: Id, new_name: &str) -> bool {
+        if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == seq_id) {
+            seq.name = new_name.to_string();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn duration(&self) -> Ticks {
@@ -1213,15 +1407,76 @@ impl Project {
         Self::from_json(&txt)
     }
 
-    /// Salva o projeto em disco gravando em arquivo temporário e renomeando atomicamente.
+    /// Salva o projeto em disco com rotação de backup padrão (ativo, 3 cópias).
     pub fn save_file(&self, path: &std::path::Path) -> Result<(), String> {
+        self.save_file_with_backup(path, true, 3)
+    }
+
+    /// Salva o projeto em disco gravando em arquivo temporário, rotacionando cópias
+    /// de segurança existentes (.bak, .bak1, .bak2) e renomeando atomicamente.
+    pub fn save_file_with_backup(
+        &self,
+        path: &std::path::Path,
+        backup_enabled: bool,
+        backup_copies: usize,
+    ) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("erro ao serializar projeto: {e}"))?;
         let tmp = path.with_extension("neoveg.tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("erro ao gravar {}: {e}", tmp.display()))?;
+
+        if backup_enabled && path.exists() {
+            if let Err(e) = rotate_project_backups(path, backup_copies) {
+                // Em caso de falha na rotação (ex.: permissão temporária de leitura),
+                // não aborta o salvamento do projeto atual.
+                eprintln!("falha ao rotacionar backups de {}: {e}", path.display());
+            }
+        }
+
         std::fs::rename(&tmp, path)
             .map_err(|e| format!("erro ao finalizar {}: {e}", path.display()))
     }
+}
+
+/// Gera o caminho para a cópia de backup do projeto no índice `idx` (0-indexado).
+///
+/// O primeiro backup (índice 0) recebe a extensão canônica `.bak` (ex.: `projeto.neoveg.bak`).
+/// Os backups históricos subsequentes recebem sufixos numerados `.bak1`, `.bak2`, etc.
+pub fn backup_path_for(path: &std::path::Path, idx: usize) -> std::path::PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|f| f.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("projeto.neoveg"));
+    let suffix = if idx == 0 {
+        format!("{file_name}.bak")
+    } else {
+        format!("{file_name}.bak{idx}")
+    };
+    path.with_file_name(suffix)
+}
+
+/// Rotaciona as cópias de segurança existentes preservando até `copies` arquivos de backup.
+pub fn rotate_project_backups(path: &std::path::Path, copies: usize) -> Result<(), String> {
+    if copies == 0 || !path.exists() {
+        return Ok(());
+    }
+    let max_idx = copies.saturating_sub(1);
+    let oldest = backup_path_for(path, max_idx);
+    if oldest.exists() {
+        let _ = std::fs::remove_file(&oldest);
+    }
+    for i in (1..=max_idx).rev() {
+        let prev = backup_path_for(path, i - 1);
+        let curr = backup_path_for(path, i);
+        if prev.exists() {
+            let _ = std::fs::rename(&prev, &curr)
+                .or_else(|_| std::fs::copy(&prev, &curr).and_then(|_| std::fs::remove_file(&prev)));
+        }
+    }
+    let first = backup_path_for(path, 0);
+    std::fs::copy(path, &first)
+        .map_err(|e| format!("erro ao criar cópia de backup {}: {e}", first.display()))?;
+    Ok(())
 }
 
 /// Extensões reconhecidas para arquivos de projeto do Neoveg (`.neoveg` padrão + `.nvp` legado).
@@ -1540,6 +1795,19 @@ pub struct TextSpec {
     /// Duração de referência para animações (segundos).
     pub anim_duration: f32,
     pub line_spacing: f32,
+    /// Espaçamento entre caracteres (tracking/kerning manual, em fração do tamanho da fonte).
+    #[serde(default)]
+    pub tracking: f32,
+    /// Quebra automática de linha baseada na largura da caixa.
+    #[serde(default)]
+    pub wrap: bool,
+    /// Largura máxima para quebra automática de linha (% da largura do quadro).
+    #[serde(default = "default_wrap_width")]
+    pub wrap_width: f32,
+}
+
+fn default_wrap_width() -> f32 {
+    80.0
 }
 
 impl Default for TextSpec {
@@ -1559,6 +1827,9 @@ impl Default for TextSpec {
             anim: TextAnim::None,
             anim_duration: 5.0,
             line_spacing: 1.2,
+            tracking: 0.0,
+            wrap: false,
+            wrap_width: default_wrap_width(),
         }
     }
 }
@@ -2261,6 +2532,18 @@ pub struct PanCropKey {
     pub size: f32,
     /// Rotação em graus.
     pub rot: f32,
+    /// Altura do enquadramento em relação à que teria com a proporção do
+    /// quadro (1 = mesma proporção do quadro; 2 = o dobro da altura). Permite
+    /// largura e altura independentes com *Travar proporção* desligado
+    /// (manual do VEGAS Pro 21, p. 250).
+    #[serde(default = "one")]
+    pub ratio: f32,
+    /// Espelhamento horizontal/vertical do enquadramento (menu de contexto
+    /// da área de trabalho do Pan/Crop, p. 251).
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
 }
 
 impl Default for PanCropKey {
@@ -2270,17 +2553,40 @@ impl Default for PanCropKey {
             cy: 0.5,
             size: 1.0,
             rot: 0.0,
+            ratio: 1.0,
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+}
+
+impl PanCropKey {
+    /// Proporção usável: finita e dentro de um limite que não zera a altura.
+    pub fn ratio_safe(&self) -> f32 {
+        if self.ratio.is_finite() {
+            self.ratio.clamp(0.01, 100.0)
+        } else {
+            1.0
         }
     }
 }
 
 impl Lerp for PanCropKey {
     fn lerp(&self, o: &Self, t: f32) -> Self {
+        // espelhamento não se interpola: vale o do quadro-chave anterior
+        let (flip_h, flip_v) = if t < 1.0 {
+            (self.flip_h, self.flip_v)
+        } else {
+            (o.flip_h, o.flip_v)
+        };
         PanCropKey {
             cx: self.cx.lerp(&o.cx, t),
             cy: self.cy.lerp(&o.cy, t),
             size: self.size.lerp(&o.size, t),
             rot: self.rot.lerp(&o.rot, t),
+            ratio: self.ratio.lerp(&o.ratio, t),
+            flip_h,
+            flip_v,
         }
     }
 }
@@ -2637,6 +2943,7 @@ pub enum FxKind {
     Posterize,
     Colorize,
     Stabilization,
+    BezierMasking,
     // áudio
     Gain,
     ParametricEq,
@@ -2954,7 +3261,7 @@ impl FxKind {
                 Some(FxCategory::Stylize)
             }
             FxKind::Stabilization => Some(FxCategory::Transform),
-            FxKind::ChromaKeyer => Some(FxCategory::Key),
+            FxKind::ChromaKeyer | FxKind::BezierMasking => Some(FxCategory::Key),
             FxKind::Gain
             | FxKind::ParametricEq
             | FxKind::HighPass
@@ -2971,7 +3278,7 @@ impl FxKind {
         }
     }
 
-    pub const VIDEO: [FxKind; 19] = [
+    pub const VIDEO: [FxKind; 20] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
         FxKind::ColorCorrector,
@@ -2991,6 +3298,7 @@ impl FxKind {
         FxKind::Posterize,
         FxKind::Colorize,
         FxKind::Stabilization,
+        FxKind::BezierMasking,
     ];
     pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
@@ -3031,6 +3339,7 @@ impl FxKind {
             FxKind::Posterize => "Posterize",
             FxKind::Colorize => "Colorize",
             FxKind::Stabilization => "Stabilization",
+            FxKind::BezierMasking => "BezierMasking",
             FxKind::Gain => "Gain",
             FxKind::ParametricEq => "ParametricEq",
             FxKind::HighPass => "HighPass",
@@ -3076,6 +3385,7 @@ impl FxKind {
             FxKind::Posterize => "Posterizar",
             FxKind::Colorize => "Colorir (Tint)",
             FxKind::Stabilization => "Estabilizador de Vídeo",
+            FxKind::BezierMasking => "Máscara Bézier",
             FxKind::Gain => "Ganho",
             FxKind::ParametricEq => "EQ Paramétrico",
             FxKind::HighPass => "Passa-Altas",
@@ -3202,6 +3512,17 @@ impl FxKind {
                         p("Suavização (%)", 0.0, 100.0, 65.0),
                         p("Zoom de borda", 1.0, 1.5, 1.12),
                         p("Compensar rotação", 0.0, 1.0, 0.35),
+                    ]
+                }
+            }
+            FxKind::BezierMasking => {
+                const {
+                    &[
+                        p("Modo (0:Add, 1:Sub, 2:Mul, 3:Inv)", 0.0, 3.0, 0.0),
+                        p("Suavização (Feather)", 0.0, 100.0, 0.0),
+                        p("Opacidade", 0.0, 1.0, 1.0),
+                        p("Expansão", -100.0, 100.0, 0.0),
+                        p("Inverter (0:Não, 1:Sim)", 0.0, 1.0, 0.0),
                     ]
                 }
             }
@@ -3471,10 +3792,18 @@ pub struct FxInstance {
     /// Curvas RGB/HSL e LUT (.cube) para `FxKind::ColorCorrector`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_grade: Option<Box<ColorGradeCurves>>,
+    /// Dados e quadros-chave para `FxKind::BezierMasking`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bezier_mask: Option<Box<crate::mask::BezierMaskData>>,
 }
 
 impl FxInstance {
     pub fn new(kind: FxKind) -> Self {
+        let bezier_mask = if kind == FxKind::BezierMasking {
+            Some(Box::new(crate::mask::BezierMaskData::default()))
+        } else {
+            None
+        };
         FxInstance {
             id: new_id(),
             kind,
@@ -3490,6 +3819,7 @@ impl FxInstance {
             ofx: None,
             vst3: None,
             color_grade: None,
+            bezier_mask,
         }
     }
 
@@ -3956,5 +4286,117 @@ mod tests {
 
         let order = p.topological_bus_order();
         assert_eq!(order.len(), MAX_AUDIO_BUSES);
+    }
+
+    #[test]
+    fn rotacao_de_backups_do_projeto_ao_salvar() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_dir = std::env::temp_dir().join(format!("neoveg_test_bak_{nanos}"));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("meu_projeto.neoveg");
+
+        let mut p = Project::new_default();
+        p.notes = "v1".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v1");
+        assert!(path.exists());
+        assert!(!backup_path_for(&path, 0).exists());
+
+        // Salva v2: v1 vai para .bak
+        p.notes = "v2".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v2");
+        assert!(path.exists());
+        assert!(backup_path_for(&path, 0).exists());
+        let (bak0, _) = Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0.notes, "v1");
+        let (cur, _) = Project::load_file(&path).expect("abre cur");
+        assert_eq!(cur.notes, "v2");
+
+        // Salva v3: v2 vai para .bak, v1 para .bak1
+        p.notes = "v3".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v3");
+        assert!(backup_path_for(&path, 1).exists());
+        let (bak0, _) = Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0.notes, "v2");
+        let (bak1, _) = Project::load_file(&backup_path_for(&path, 1)).expect("abre bak1");
+        assert_eq!(bak1.notes, "v1");
+
+        // Salva v4: v3 -> .bak, v2 -> .bak1, v1 -> .bak2
+        p.notes = "v4".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v4");
+        assert!(backup_path_for(&path, 2).exists());
+        let (bak2, _) = Project::load_file(&backup_path_for(&path, 2)).expect("abre bak2");
+        assert_eq!(bak2.notes, "v1");
+
+        // Salva v5: rotação mantém no máximo 3 cópias (.bak, .bak1, .bak2)
+        p.notes = "v5".to_string();
+        p.save_file_with_backup(&path, true, 3).expect("salva v5");
+        assert!(!backup_path_for(&path, 3).exists());
+        let (bak0, _) = Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0.notes, "v4");
+        let (bak2, _) = Project::load_file(&backup_path_for(&path, 2)).expect("abre bak2");
+        assert_eq!(bak2.notes, "v2");
+
+        // Salva sem backup ativado
+        p.notes = "v6".to_string();
+        p.save_file_with_backup(&path, false, 3)
+            .expect("salva v6 sem backup");
+        let (bak0_unchanged, _) =
+            Project::load_file(&backup_path_for(&path, 0)).expect("abre bak0");
+        assert_eq!(bak0_unchanged.notes, "v4"); // mantido
+        let (cur, _) = Project::load_file(&path).expect("abre cur");
+        assert_eq!(cur.notes, "v6");
+
+        // Entrada hostil de caminho não entra em pânico
+        let hostile = std::path::Path::new("");
+        assert!(p.save_file_with_backup(hostile, true, 3).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn sequencias_multiplas_e_gerenciamento() {
+        let mut p = Project::new_default();
+        assert_eq!(p.sequences.len(), 1);
+        assert!(p.active_sequence_id.is_some());
+        let seq1_id = p.active_sequence_id.unwrap();
+        assert_eq!(p.sequences[0].name, "Sequência 1");
+
+        // Cria nova sequência
+        let seq2_id = p.create_sequence(Some("Corte Diretor"));
+        assert_eq!(p.sequences.len(), 2);
+        assert_eq!(p.active_sequence_id, Some(seq2_id));
+        assert_eq!(p.sequences[1].name, "Corte Diretor");
+
+        // Altera nome da sequência 2
+        assert!(p.rename_sequence(seq2_id, "Corte Final"));
+        assert_eq!(p.sequences[1].name, "Corte Final");
+
+        // Duplica sequência 2
+        let seq3_id = p.duplicate_sequence(seq2_id).expect("duplica sequencia");
+        assert_eq!(p.sequences.len(), 3);
+        assert_eq!(p.sequences[2].name, "Corte Final (Cópia)");
+
+        // Alterna de volta para sequência 1
+        assert!(p.switch_sequence(seq1_id));
+        assert_eq!(p.active_sequence_id, Some(seq1_id));
+
+        // Tenta alternar para ID inexistente
+        assert!(!p.switch_sequence(999999));
+
+        // Exclui sequência 3
+        assert!(p.delete_sequence(seq3_id));
+        assert_eq!(p.sequences.len(), 2);
+
+        // Exclui sequência ativa (seq1): ativa deve mudar para a primeira restante
+        assert!(p.delete_sequence(seq1_id));
+        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.active_sequence_id, Some(seq2_id));
+
+        // Tenta excluir última sequência: deve recusar para nunca deixar projeto sem sequência
+        assert!(!p.delete_sequence(seq2_id));
+        assert_eq!(p.sequences.len(), 1);
     }
 }

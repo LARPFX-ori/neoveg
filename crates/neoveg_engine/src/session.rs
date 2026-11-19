@@ -456,7 +456,8 @@ impl EditorSession {
         Self::new_in(project, neoveg_common::active_language())
     }
 
-    pub fn new_in(project: Project, lang: Language) -> Self {
+    pub fn new_in(mut project: Project, lang: Language) -> Self {
+        project.ensure_sequences();
         let snapshot = Arc::new(project.clone());
         crate::recovery::remember_snapshot(snapshot.clone());
         let sel_track = if project.tracks.is_empty() {
@@ -604,7 +605,8 @@ impl EditorSession {
         self.prerendered_ranges.clear();
     }
 
-    pub fn reset_project(&mut self, project: Project, path: Option<PathBuf>) {
+    pub fn reset_project(&mut self, mut project: Project, path: Option<PathBuf>) {
+        project.ensure_sequences();
         self.project = project;
         self.path = path;
         self.dirty = false;
@@ -623,6 +625,71 @@ impl EditorSession {
         self.generation += 1;
         self.sent_generation = 0;
         self.refresh_snapshot();
+    }
+
+    /// Alterna para outra sequência pelo ID, sincronizando o estado atual e
+    /// reiniciando cursor e seleções da timeline.
+    pub fn switch_sequence(&mut self, seq_id: Id) -> bool {
+        if self.project.switch_sequence(seq_id) {
+            self.cursor = Ticks::ZERO;
+            self.sel_events.clear();
+            self.sel_track = if self.project.tracks.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+            self.time_sel = None;
+            self.refresh_snapshot();
+            self.changed();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cria uma nova sequência no projeto e a torna ativa.
+    pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
+        let id = self.project.create_sequence(name);
+        self.cursor = Ticks::ZERO;
+        self.sel_events.clear();
+        self.sel_track = if self.project.tracks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.time_sel = None;
+        self.refresh_snapshot();
+        self.changed();
+        id
+    }
+
+    /// Duplica uma sequência existente com todo o seu conteúdo.
+    pub fn duplicate_sequence(&mut self, seq_id: Id) -> Option<Id> {
+        let id = self.project.duplicate_sequence(seq_id);
+        if id.is_some() {
+            self.refresh_snapshot();
+            self.changed();
+        }
+        id
+    }
+
+    /// Remove uma sequência se houver mais de uma no projeto.
+    pub fn delete_sequence(&mut self, seq_id: Id) -> bool {
+        if self.project.delete_sequence(seq_id) {
+            self.cursor = Ticks::ZERO;
+            self.sel_events.clear();
+            self.sel_track = if self.project.tracks.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+            self.time_sel = None;
+            self.refresh_snapshot();
+            self.changed();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn insert_track(&mut self, kind: TrackKind) -> usize {
@@ -5288,8 +5355,7 @@ impl EditorSession {
                     PanCropKey {
                         cx: (base.cx + dx).clamp(-1.0, 2.0),
                         cy: (base.cy + dy).clamp(-1.0, 2.0),
-                        size: base.size,
-                        rot: base.rot,
+                        ..base.clone()
                     },
                     tol,
                 );
