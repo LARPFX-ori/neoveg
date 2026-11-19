@@ -1897,6 +1897,7 @@ fn sanitize_fx(f: &mut FxInstance) {
         f.params.push(AnimParam {
             value: d,
             keys: vec![],
+            curves: vec![],
         });
     }
     for (p, spec) in f.params.iter_mut().zip(specs.iter()) {
@@ -4249,12 +4250,15 @@ impl FxKind {
 }
 
 /// Parâmetro de efeito animável por keyframes.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnimParam {
     pub value: f32,
     /// (tempo local em ticks, valor). Vazio = valor constante.
     #[serde(default)]
     pub keys: Vec<(Ticks, f32)>,
+    /// Curvas de interpolação por quadro-chave até o próximo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curves: Vec<Curve>,
 }
 
 impl AnimParam {
@@ -4266,20 +4270,94 @@ impl AnimParam {
         if t <= k[0].0 {
             return k[0].1;
         }
-        for w in k.windows(2) {
+        for (i, w) in k.windows(2).enumerate() {
             if t >= w[0].0 && t < w[1].0 {
                 let x = Ticks::lerp_factor(t, w[0].0, w[1].0);
-                return w[0].1 + (w[1].1 - w[0].1) * x;
+                let curve = self.curves.get(i).copied().unwrap_or(Curve::Linear);
+                let shaped_x = curve.shape(x);
+                return w[0].1 + (w[1].1 - w[0].1) * shaped_x;
             }
         }
         k.last().map(|x| x.1).unwrap_or(self.value)
     }
+
     pub fn set_key(&mut self, t: Ticks, v: f32, tol: Ticks) {
         if let Some(k) = self.keys.iter_mut().find(|k| k.0.abs_diff(t) <= tol) {
             k.1 = v;
         } else {
-            self.keys.push((t, v));
-            self.keys.sort_by_key(|a| a.0);
+            let at = self.keys.partition_point(|k| k.0 < t);
+            self.keys.insert(at, (t, v));
+            if !self.curves.is_empty() {
+                let insert_at = at.min(self.curves.len());
+                self.curves.insert(insert_at, Curve::Linear);
+            }
+        }
+    }
+
+    pub fn curve_at(&self, t: Ticks, tol: Ticks) -> Option<Curve> {
+        let i = self.keys.iter().position(|k| k.0.abs_diff(t) <= tol)?;
+        Some(self.curves.get(i).copied().unwrap_or(Curve::Linear))
+    }
+
+    pub fn set_curve(&mut self, t: Ticks, curve: Curve, tol: Ticks) -> bool {
+        let Some(i) = self.keys.iter().position(|k| k.0.abs_diff(t) <= tol) else {
+            return false;
+        };
+        while self.curves.len() < self.keys.len() {
+            self.curves.push(Curve::Linear);
+        }
+        if let Some(c) = self.curves.get_mut(i) {
+            *c = curve;
+        }
+        if self.curves.iter().all(|&c| c == Curve::Linear) {
+            self.curves.clear();
+        }
+        true
+    }
+
+    pub fn remove_key_near(&mut self, t: Ticks, tol: Ticks) -> Option<f32> {
+        let mut last = None;
+        let mut i = 0;
+        while i < self.keys.len() {
+            if self.keys.get(i).is_some_and(|k| k.0.abs_diff(t) <= tol) {
+                last = Some(self.keys.remove(i).1);
+                if i < self.curves.len() {
+                    self.curves.remove(i);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if self.curves.iter().all(|&c| c == Curve::Linear) {
+            self.curves.clear();
+        }
+        last
+    }
+
+    pub fn retime(&mut self, anchor: Ticks, target: Ticks, tol: Ticks) {
+        let mut pairs: Vec<((Ticks, f32), Curve)> = self
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| {
+                let c = self.curves.get(i).copied().unwrap_or(Curve::Linear);
+                let t = if k.0.abs_diff(anchor) <= tol {
+                    target
+                } else {
+                    k.0
+                };
+                ((t, k.1), c)
+            })
+            .collect();
+        pairs.sort_by_key(|p| (p.0).0);
+        self.keys = pairs.iter().map(|p| p.0).collect();
+        if self.curves.is_empty() && pairs.iter().all(|p| p.1 == Curve::Linear) {
+            // mantém vazio
+        } else {
+            self.curves = pairs.iter().map(|p| p.1).collect();
+            if self.curves.iter().all(|&c| c == Curve::Linear) {
+                self.curves.clear();
+            }
         }
     }
 }
@@ -4443,6 +4521,7 @@ impl FxInstance {
                 .map(|s| AnimParam {
                     value: s.default,
                     keys: vec![],
+                    curves: vec![],
                 })
                 .collect(),
             ofx: None,

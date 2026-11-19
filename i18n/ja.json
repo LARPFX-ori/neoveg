@@ -645,6 +645,7 @@
   "Espelhar": "ミラー",
   "Esquerda": "左",
   "Essa pasta já está mapeada ou a lista está cheia.": "そのフォルダーは割り当て済みか、リストがいっぱいです。",
+  "Esta linha de quadros-chave não suporta curvas de interpolação.": "このキーフレームレーンは補間曲線をサポートしていません。",
   "Estabilizador de Vídeo": "ビデオスタビライザー",
   "Estabilização": "手ぶれ補正",
   "Estado atual:": "現在の状態:",
@@ -2092,4 +2093,4 @@
   "★ Favoritos": "★ お気に入り",
   "＋ Barramento": "+ バス",
   "＋ Marcador no Cursor": "+ カーソル位置にマーカー"
-}
+}

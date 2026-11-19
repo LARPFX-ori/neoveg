@@ -645,6 +645,7 @@
   "Espelhar": "Mirror",
   "Esquerda": "Left",
   "Essa pasta já está mapeada ou a lista está cheia.": "That folder is already mapped or the list is full.",
+  "Esta linha de quadros-chave não suporta curvas de interpolação.": "This keyframe lane does not support interpolation curves.",
   "Estabilizador de Vídeo": "Video Stabilizer",
   "Estabilização": "Stabilization",
   "Estado atual:": "Current status:",
@@ -2092,4 +2093,4 @@
   "★ Favoritos": "★ Favorites",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker at Cursor"
-}
+}

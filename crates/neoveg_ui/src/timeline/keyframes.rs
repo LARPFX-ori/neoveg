@@ -253,11 +253,14 @@ impl App {
                     .tracks
                     .iter()
                     .find(|x| x.id == track)
-                    .and_then(|tr| tkf::motion_curve(tr, k, tol));
+                    .and_then(|tr| tkf::key_curve(tr, &row, k, tol));
                 ui.label(egui::RichText::new(tr(lang, "Interpolação até o próximo")).small());
                 for c in Curve::ALL {
                     if ui.radio(current == Some(c), c.name_in(lang)).clicked() {
-                        self.edit_track_keyframes(track, |tr| tkf::set_motion_curve(tr, k, c, tol));
+                        let r = row.clone();
+                        self.edit_track_keyframes(track, |tr| {
+                            tkf::set_key_curve(tr, &r, k, c, tol)
+                        });
                         ui.close_menu();
                     }
                 }
@@ -275,8 +278,7 @@ impl App {
                     .add_enabled(false, egui::Button::new(tr(lang, "Interpolação")))
                     .on_disabled_hover_text(tr(
                         lang,
-                        "Os parâmetros dos efeitos ainda interpolam só em linha reta; \
-                         a curva por quadro-chave existe só no Movimento da trilha.",
+                        "Esta linha de quadros-chave não suporta curvas de interpolação.",
                     ));
             }
         }

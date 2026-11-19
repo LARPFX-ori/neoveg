@@ -645,6 +645,7 @@
   "Espelhar": "Espejo",
   "Esquerda": "Izquierda",
   "Essa pasta já está mapeada ou a lista está cheia.": "Esa carpeta ya está asignada o la lista está llena.",
+  "Esta linha de quadros-chave não suporta curvas de interpolação.": "Esta fila de fotogramas clave no admite curvas de interpolación.",
   "Estabilizador de Vídeo": "Estabilizador de vídeo",
   "Estabilização": "Estabilización",
   "Estado atual:": "Estado actual:",
@@ -2092,4 +2093,4 @@
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marcador en cursor"
-}
+}
