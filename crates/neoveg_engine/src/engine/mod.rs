@@ -4,6 +4,7 @@ pub mod afx;
 pub mod audio;
 pub mod fx_preview;
 pub mod loudness;
+pub mod motion3d;
 pub mod scene_detect;
 pub mod surround;
 pub mod transition;

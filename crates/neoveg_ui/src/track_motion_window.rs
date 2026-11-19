@@ -39,6 +39,13 @@ pub(crate) struct TrackMotionUi {
     pub about_center: bool,
     pub prevent_scale_x: bool,
     pub prevent_scale_y: bool,
+    /// Modo 3D: impedir movimento em Z.
+    pub prevent_move_z: bool,
+    /// Modo 3D: disposição das vistas.
+    pub layout: Layout3d,
+    /// Modo 3D: área de trabalho de cada vista (Topo, Esquerda, Frente,
+    /// Perspectiva).
+    pub views: [Workspace; 4],
     pub sync_cursor: bool,
     /// Cursor próprio da linha de quadros-chave quando não sincronizado
     /// (tempo da timeline).
@@ -64,6 +71,9 @@ impl Default for TrackMotionUi {
             about_center: true,
             prevent_scale_x: false,
             prevent_scale_y: false,
+            prevent_move_z: false,
+            layout: Layout3d::FourViews,
+            views: [Workspace::default(); 4],
             sync_cursor: true,
             local: Ticks::ZERO,
             snap_rotation: 5.0,
@@ -80,6 +90,95 @@ impl Default for TrackMotionUi {
 
 const PRESETS: [&str; 2] = ["(Padrão)", "Picture-in-picture"];
 
+/// Disposição das vistas do modo 3D (lista *Layout*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layout3d {
+    /// Topo, Esquerda e Frente em cima, Perspectiva grande embaixo.
+    FourViews,
+    Perspective,
+    Front,
+}
+
+impl Layout3d {
+    const ALL: [Layout3d; 3] = [Layout3d::FourViews, Layout3d::Perspective, Layout3d::Front];
+
+    fn name(self) -> &'static str {
+        match self {
+            Layout3d::FourViews => "Quatro vistas",
+            Layout3d::Perspective => "Só perspectiva",
+            Layout3d::Front => "Só frente",
+        }
+    }
+}
+
+/// Vistas da área de trabalho no modo 3D.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum View3d {
+    Top,
+    Left,
+    Front,
+    Perspective,
+}
+
+impl View3d {
+    fn name(self) -> &'static str {
+        match self {
+            View3d::Top => "Topo",
+            View3d::Left => "Esquerda",
+            View3d::Front => "Frente",
+            View3d::Perspective => "Perspectiva",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            View3d::Top => 0,
+            View3d::Left => 1,
+            View3d::Front => 2,
+            View3d::Perspective => 3,
+        }
+    }
+}
+
+/// Ponto do mundo (pixels, centro do quadro na origem) na vista, também
+/// com o centro na origem. Topo: Z para cima; Esquerda: Z para a esquerda.
+pub(crate) fn view_point(view: View3d, p: [f32; 3], frame: Vec2) -> Option<Vec2> {
+    match view {
+        View3d::Front => Some(vec2(p[0], p[1])),
+        View3d::Top => Some(vec2(p[0], -p[2])),
+        View3d::Left => Some(vec2(-p[2], p[1])),
+        View3d::Perspective => neoveg_engine::engine::motion3d::project(p, frame.x, frame.y)
+            .map(|(x, y)| vec2(x - frame.x * 0.5, y - frame.y * 0.5)),
+    }
+}
+
+/// Arrasto de `delta` pixels numa vista vira deslocamento em X/Y/Z
+/// (frações do quadro), respeitando as travas.
+pub(crate) fn view_drag(
+    view: View3d,
+    delta: Vec2,
+    frame: Vec2,
+    st: &TrackMotionUi,
+) -> (f32, f32, f32) {
+    let d = vec2(finite_or(delta.x, 0.0), finite_or(delta.y, 0.0));
+    let (mut dx, mut dy, mut dz) = match view {
+        View3d::Front | View3d::Perspective => (d.x, d.y, 0.0),
+        View3d::Top => (d.x, 0.0, -d.y),
+        View3d::Left => (0.0, d.y, -d.x),
+    };
+    if st.prevent_move_x {
+        dx = 0.0;
+    }
+    if st.prevent_move_y {
+        dy = 0.0;
+    }
+    if st.prevent_move_z {
+        dz = 0.0;
+    }
+    let fw = frame.x.max(1.0);
+    (dx / fw, dy / frame.y.max(1.0), dz / fw)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum TmAction {
     Restore,
@@ -91,6 +190,8 @@ enum TmAction {
     DeleteKey(usize),
     SetCurve(usize, Curve),
     Blend(BlendMode),
+    /// *Alfa da origem 3D* ligado/desligado.
+    Mode3d(bool),
 }
 
 fn finite_or(v: f32, d: f32) -> f32 {
@@ -113,7 +214,7 @@ pub(crate) fn motion_to_geom(k: &MotionKey, frame: Vec2) -> BoxGeom {
 }
 
 /// Quadro-chave a partir do retângulo da camada.
-pub(crate) fn geom_to_motion(g: &BoxGeom, frame: Vec2) -> MotionKey {
+pub(crate) fn geom_to_motion(g: &BoxGeom, frame: Vec2, base: &MotionKey) -> MotionKey {
     let fw = frame.x.max(1.0);
     let fh = frame.y.max(1.0);
     MotionKey {
@@ -122,6 +223,7 @@ pub(crate) fn geom_to_motion(g: &BoxGeom, frame: Vec2) -> MotionKey {
         scale_x: finite_or(g.half.x * 2.0 / fw, 1.0).clamp(0.001, MAX_SCALE),
         scale_y: finite_or(g.half.y * 2.0 / fh, 1.0).clamp(0.001, MAX_SCALE),
         rot: finite_or(g.rot_deg, 0.0),
+        ..base.clone()
     }
 }
 
@@ -214,6 +316,8 @@ impl App {
             track.motion.clone()
         };
         let blend = track.blend;
+        // o 3D vale para o movimento da trilha; o Pai/Filho segue 2D
+        let is_3d = track.motion_3d && !st.parent_mode;
         let name = track.name.clone();
         let cur = motion.eval(t);
         let length = self
@@ -259,7 +363,7 @@ impl App {
                         }
                     });
             });
-            self.tm_toolbar(ui, &mut st, blend, has_children, &mut actions, lang);
+            self.tm_toolbar(ui, &mut st, blend, is_3d, has_children, &mut actions);
             ui.separator();
             let strip_h = 150.0;
             let top_h = (ui.available_height() - strip_h).max(200.0);
@@ -278,6 +382,7 @@ impl App {
                                     &cur,
                                     key_idx,
                                     frame,
+                                    is_3d,
                                     &mut st,
                                     &mut actions,
                                     lang,
@@ -287,9 +392,12 @@ impl App {
                             });
                     });
                     let canvas = vec2(ui.available_width(), top_h);
-                    if let Some(k) =
+                    let edited = if is_3d {
+                        self.tm_workspace_3d(ui, canvas, &cur, frame, &mut st, &mut actions, lang)
+                    } else {
                         self.tm_workspace(ui, canvas, &cur, frame, &mut st, &mut actions, lang)
-                    {
+                    };
+                    if let Some(k) = edited {
                         new_key = Some(k);
                     }
                 });
@@ -368,24 +476,43 @@ impl App {
         ui: &mut egui::Ui,
         st: &mut TrackMotionUi,
         blend: BlendMode,
+        is_3d: bool,
         has_children: bool,
         actions: &mut Vec<TmAction>,
-        lang: Language,
     ) {
+        let lang = self.lang();
         let th = &self.theme;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            let label_3d = tr(lang, "Alfa da origem 3D");
             egui::ComboBox::from_id_salt("tm_blend")
-                .selected_text(blend.name_in(lang))
+                .selected_text(if is_3d { label_3d } else { blend.name_in(lang) })
                 .show_ui(ui, |ui| {
+                    if !st.parent_mode && ui.selectable_label(is_3d, label_3d).clicked() {
+                        actions.push(TmAction::Mode3d(true));
+                    }
                     for b in BlendMode::ALL {
-                        if ui.selectable_label(b == blend, b.name_in(lang)).clicked() {
+                        if ui
+                            .selectable_label(!is_3d && b == blend, b.name_in(lang))
+                            .clicked()
+                        {
                             actions.push(TmAction::Blend(b));
                         }
                     }
                 })
                 .response
                 .on_hover_text(tr(lang, "Modo de composição da trilha"));
+            if is_3d {
+                egui::ComboBox::from_id_salt("tm_layout3d")
+                    .selected_text(tr(lang, st.layout.name()))
+                    .show_ui(ui, |ui| {
+                        for l in Layout3d::ALL {
+                            ui.selectable_value(&mut st.layout, l, tr(lang, l.name()));
+                        }
+                    })
+                    .response
+                    .on_hover_text(tr(lang, "Disposição das vistas"));
+            }
             ui.separator();
             let toggle = |ui: &mut egui::Ui, icon: Icon, on: &mut bool, tip: &str| {
                 if icons::icon_button(ui, icon, None, *on, true, th)
@@ -421,6 +548,14 @@ impl App {
                 &mut st.prevent_move_y,
                 "Impedir movimento (Y)",
             );
+            if is_3d {
+                toggle(
+                    ui,
+                    Icon::MoveZOnly,
+                    &mut st.prevent_move_z,
+                    "Impedir movimento (Z)",
+                );
+            }
             ui.separator();
             toggle(
                 ui,
@@ -466,6 +601,7 @@ impl App {
         cur: &MotionKey,
         key_idx: usize,
         frame: Vec2,
+        is_3d: bool,
         st: &mut TrackMotionUi,
         actions: &mut Vec<TmAction>,
         lang: Language,
@@ -482,11 +618,20 @@ impl App {
             let mut ng = g;
             if kf_window::prop_num(ui, "X:", &mut x, 1.0, 2, -big..=big) {
                 ng.center.x = x + frame.x * 0.5;
-                out = Some(geom_to_motion(&ng, frame));
+                out = Some(geom_to_motion(&ng, frame, cur));
             }
             if kf_window::prop_num(ui, "Y:", &mut y, 1.0, 2, -big..=big) {
                 ng.center.y = y + frame.y * 0.5;
-                out = Some(geom_to_motion(&ng, frame));
+                out = Some(geom_to_motion(&ng, frame, cur));
+            }
+            if is_3d {
+                let mut z = cur.z * frame.x;
+                if kf_window::prop_num(ui, "Z:", &mut z, 1.0, 2, -big..=big) {
+                    out = Some(MotionKey {
+                        z: z / frame.x.max(1.0),
+                        ..out.clone().unwrap_or_else(|| cur.clone())
+                    });
+                }
             }
             if kf_window::prop_num(ui, tr(lang, "Largura:"), &mut w, 1.0, 2, 1.0..=big) {
                 let k = w / (g.half.x * 2.0).max(1e-3);
@@ -495,7 +640,7 @@ impl App {
                 } else {
                     vec2(w * 0.5, g.half.y)
                 };
-                out = Some(geom_to_motion(&ng, frame));
+                out = Some(geom_to_motion(&ng, frame, cur));
             }
             if kf_window::prop_num(ui, tr(lang, "Altura:"), &mut h, 1.0, 2, 1.0..=big) {
                 let k = h / (g.half.y * 2.0).max(1e-3);
@@ -504,10 +649,25 @@ impl App {
                 } else {
                     vec2(g.half.x, h * 0.5)
                 };
-                out = Some(geom_to_motion(&ng, frame));
+                out = Some(geom_to_motion(&ng, frame, cur));
             }
         });
         kf_window::prop_section(ui, sec("rot"), tr(lang, "Rotação"), true, th, |ui| {
+            if is_3d {
+                let (mut ax, mut ay) = (cur.rot_x, cur.rot_y);
+                if kf_window::prop_num(ui, "X:", &mut ax, 0.5, 1, -3600.0..=3600.0) {
+                    out = Some(MotionKey {
+                        rot_x: ax,
+                        ..out.clone().unwrap_or_else(|| cur.clone())
+                    });
+                }
+                if kf_window::prop_num(ui, "Y:", &mut ay, 0.5, 1, -3600.0..=3600.0) {
+                    out = Some(MotionKey {
+                        rot_y: ay,
+                        ..out.clone().unwrap_or_else(|| cur.clone())
+                    });
+                }
+            }
             let mut a = cur.rot;
             if kf_window::prop_num(ui, tr(lang, "Ângulo:"), &mut a, 0.5, 1, -3600.0..=3600.0) {
                 out = Some(MotionKey {
@@ -712,7 +872,7 @@ impl App {
                     Hit::Rotate => None,
                 };
                 if let Some(ng) = ng {
-                    out = Some(geom_to_motion(&ng, frame));
+                    out = Some(geom_to_motion(&ng, frame, cur));
                 }
             }
         }
@@ -728,6 +888,195 @@ impl App {
         icons::paint(ui.painter(), fit_btn, Icon::ZoomGlass, &self.theme, true);
         if fit_resp.clicked() {
             st.ws.fit(rect, frame);
+        }
+        resp.context_menu(|ui| {
+            for (a, label) in [
+                (TmAction::Restore, "Restaurar"),
+                (TmAction::Center, "Centralizar"),
+                (TmAction::MatchOutput, "Combinar proporção de saída"),
+            ] {
+                if ui.button(tr(lang, label)).clicked() {
+                    actions.push(a);
+                    ui.close_menu();
+                }
+            }
+        });
+        out
+    }
+
+    /// Área de trabalho do modo 3D: uma ou quatro vistas (lista *Layout*).
+    #[allow(clippy::too_many_arguments)]
+    fn tm_workspace_3d(
+        &self,
+        ui: &mut egui::Ui,
+        size: Vec2,
+        cur: &MotionKey,
+        frame: Vec2,
+        st: &mut TrackMotionUi,
+        actions: &mut Vec<TmAction>,
+        lang: Language,
+    ) -> Option<MotionKey> {
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let views: Vec<(View3d, egui::Rect)> = match st.layout {
+            Layout3d::FourViews => {
+                let top_h = rect.height() * 0.36;
+                let w3 = rect.width() / 3.0;
+                let mut v: Vec<(View3d, egui::Rect)> = [View3d::Top, View3d::Left, View3d::Front]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, view)| {
+                        let r = egui::Rect::from_min_size(
+                            rect.min + vec2(w3 * i as f32, 0.0),
+                            vec2(w3, top_h),
+                        );
+                        (view, r.shrink(2.0))
+                    })
+                    .collect();
+                v.push((
+                    View3d::Perspective,
+                    egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + top_h), rect.max)
+                        .shrink(2.0),
+                ));
+                v
+            }
+            Layout3d::Perspective => vec![(View3d::Perspective, rect)],
+            Layout3d::Front => vec![(View3d::Front, rect)],
+        };
+        let mut out = None;
+        for (view, r) in views {
+            if let Some(k) = self.tm_view(ui, view, r, cur, frame, st, actions, lang) {
+                out = Some(k);
+            }
+        }
+        out
+    }
+
+    /// Uma vista do 3D: o quadro de saída (Frente e Perspectiva), o plano da
+    /// camada e os eixos X/Y/Z do objeto. Arrastar move nos eixos da vista.
+    #[allow(clippy::too_many_arguments)]
+    fn tm_view(
+        &self,
+        ui: &mut egui::Ui,
+        view: View3d,
+        rect: egui::Rect,
+        cur: &MotionKey,
+        frame: Vec2,
+        st: &mut TrackMotionUi,
+        actions: &mut Vec<TmAction>,
+        lang: Language,
+    ) -> Option<MotionKey> {
+        use neoveg_engine::engine::motion3d;
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("tm_view", view.index())),
+            Sense::click_and_drag(),
+        );
+        let painter = ui.painter_at(rect);
+        let vi = view.index();
+        if !st.views[vi].fitted {
+            st.views[vi].fit(rect, frame);
+        }
+        let ws = st.views[vi];
+        let edges = matches!(view, View3d::Front | View3d::Perspective);
+        ws.paint_background_opt(&painter, rect, frame, &self.theme, edges);
+        let to_s = |v: Vec2| ws.to_screen(rect, frame, v + frame * 0.5);
+        let ink = if self.theme.high_contrast {
+            self.theme.text_primary
+        } else {
+            Color32::from_gray(40)
+        };
+        let thin = Stroke::new(1.0_f32, ink);
+        if edges {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(to_s(-frame * 0.5), to_s(frame * 0.5)),
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_gray(90)),
+                egui::StrokeKind::Middle,
+            );
+        }
+        let (w, h) = (frame.x, frame.y);
+        let corners = motion3d::corners_world(cur, w, h);
+        let pts: Vec<Pos2> = corners
+            .iter()
+            .filter_map(|c| view_point(view, *c, frame))
+            .map(to_s)
+            .collect();
+        if pts.len() == 4 {
+            painter.add(egui::Shape::closed_line(pts, thin));
+        }
+        // eixos do objeto: X e Y no plano, Z pela normal
+        let c0 = motion3d::layer_to_world(cur, w, h, 0.0, 0.0);
+        let ex = motion3d::layer_to_world(cur, w, h, w * 0.2, 0.0);
+        let ey = motion3d::layer_to_world(cur, w, h, 0.0, -h * 0.3);
+        let a = [ex[0] - c0[0], ex[1] - c0[1], ex[2] - c0[2]];
+        let b = [ey[0] - c0[0], ey[1] - c0[1], ey[2] - c0[2]];
+        let n = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+        let len = w * 0.15;
+        // a normal aponta para quem assiste (Z positivo) sem rotação
+        let ez = [
+            c0[0] - n[0] / nl * len,
+            c0[1] - n[1] / nl * len,
+            c0[2] - n[2] / nl * len,
+        ];
+        let label_col = Color32::from_rgb(170, 110, 90);
+        let font = egui::FontId::proportional(10.0);
+        if let Some(c) = view_point(view, c0, frame).map(to_s) {
+            painter.circle_stroke(c, 4.0, thin);
+            for (end, name) in [(ex, "X"), (ey, "Y"), (ez, "Z")] {
+                if let Some(e) = view_point(view, end, frame).map(to_s) {
+                    if (e - c).length() > 3.0 {
+                        painter.line_segment([c, e], thin);
+                        painter.text(e, egui::Align2::LEFT_BOTTOM, name, font.clone(), label_col);
+                    }
+                }
+            }
+        }
+        painter.text(
+            rect.left_top() + vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            tr(lang, view.name()),
+            egui::FontId::proportional(11.0),
+            ink,
+        );
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0_f32, self.theme.border),
+            egui::StrokeKind::Inside,
+        );
+
+        // interação: roda = zoom da vista, botão do meio = deslocar a vista
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll != 0.0 {
+                if let Some(hp) = resp.hover_pos() {
+                    st.views[vi].zoom_at(rect, frame, hp, (1.0 + scroll * 0.0015).clamp(0.5, 2.0));
+                }
+            }
+            ui.ctx().set_cursor_icon(CursorIcon::Move);
+        }
+        if resp.dragged_by(egui::PointerButton::Middle) {
+            let d = resp.drag_delta();
+            st.views[vi].offset -= vec2(ws.frame_len(d.x), ws.frame_len(d.y));
+        }
+        let mut out = None;
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            let d = resp.drag_delta();
+            let (dx, dy, dz) =
+                view_drag(view, vec2(ws.frame_len(d.x), ws.frame_len(d.y)), frame, st);
+            if dx != 0.0 || dy != 0.0 || dz != 0.0 {
+                out = Some(MotionKey {
+                    x: cur.x + dx,
+                    y: cur.y + dy,
+                    z: cur.z + dz,
+                    ..cur.clone()
+                });
+            }
         }
         resp.context_menu(|ui| {
             for (a, label) in [
@@ -783,8 +1132,19 @@ impl App {
         }
         for a in actions {
             if let TmAction::Blend(b) = a {
-                if track.blend != *b {
+                if track.blend != *b || track.motion_3d {
                     track.blend = *b;
+                    track.motion_3d = false;
+                    changed = true;
+                }
+                continue;
+            }
+            if let TmAction::Mode3d(on) = a {
+                if track.motion_3d != *on {
+                    track.motion_3d = *on;
+                    if *on {
+                        track.blend = BlendMode::SourceAlpha;
+                    }
                     changed = true;
                 }
                 continue;
@@ -813,7 +1173,7 @@ impl App {
                         half: vec2(g.half.x, g.half.x * frame.y / frame.x.max(1.0)),
                         ..g
                     };
-                    m.set(t, geom_to_motion(&ng, frame), tol);
+                    m.set(t, geom_to_motion(&ng, frame, &cur), tol);
                 }
                 TmAction::Preset(0) => *m = Keyframes::default(),
                 TmAction::Preset(1) => m.set(
@@ -823,11 +1183,11 @@ impl App {
                         y: 0.3,
                         scale_x: 0.33,
                         scale_y: 0.33,
-                        rot: 0.0,
+                        ..MotionKey::default()
                     },
                     tol,
                 ),
-                TmAction::Preset(_) | TmAction::Blend(_) => continue,
+                TmAction::Preset(_) | TmAction::Blend(_) | TmAction::Mode3d(_) => continue,
                 TmAction::Nav(KfNav::Add) => m.set(t, cur, tol),
                 TmAction::Nav(KfNav::Delete) => {
                     if m.keys.len() > 1 && m.keys.iter().any(|k| k.t.abs_diff(t) <= tol) {
@@ -887,12 +1247,15 @@ mod tests {
             scale_x: 0.5,
             scale_y: 0.25,
             rot: 30.0,
+            z: 0.5,
+            ..MotionKey::default()
         };
         let g = motion_to_geom(&k, F);
         assert!((g.center - vec2(960.0 + 192.0, 540.0 - 216.0)).length() < 0.01);
         assert!((g.half - vec2(480.0, 135.0)).length() < 0.01);
-        let back = geom_to_motion(&g, F);
+        let back = geom_to_motion(&g, F, &k);
         assert!((back.x - k.x).abs() < 1e-5 && (back.scale_y - k.scale_y).abs() < 1e-5);
+        assert_eq!(back.z, 0.5, "editar em 2D não zera o Z");
         let hostil = MotionKey {
             x: f32::NAN,
             scale_x: f32::INFINITY,
@@ -900,7 +1263,7 @@ mod tests {
             ..MotionKey::default()
         };
         let g = motion_to_geom(&hostil, F);
-        let back = geom_to_motion(&g, F);
+        let back = geom_to_motion(&g, F, &hostil);
         assert!(back.x.is_finite() && back.scale_x.is_finite() && back.rot.is_finite());
     }
 
@@ -1062,5 +1425,89 @@ mod tests {
             None,
             &[TmAction::Nav(KfNav::Next)]
         ));
+    }
+
+    #[test]
+    fn vistas_3d_e_arrasto_nos_eixos_de_cada_vista() {
+        let p = [10.0, 20.0, 30.0];
+        assert_eq!(view_point(View3d::Front, p, F), Some(vec2(10.0, 20.0)));
+        assert_eq!(view_point(View3d::Top, p, F), Some(vec2(10.0, -30.0)));
+        assert_eq!(view_point(View3d::Left, p, F), Some(vec2(-30.0, 20.0)));
+        assert!(view_point(View3d::Perspective, [0.0, 0.0, 1e9], F).is_none());
+        let st = TrackMotionUi::default();
+        // na vista de cima, arrastar para cima aproxima (Z positivo)
+        let (dx, dy, dz) = view_drag(View3d::Top, vec2(0.0, -192.0), F, &st);
+        assert_eq!((dx, dy), (0.0, 0.0));
+        assert!((dz - 0.1).abs() < 1e-6);
+        let st = TrackMotionUi {
+            prevent_move_z: true,
+            ..TrackMotionUi::default()
+        };
+        assert_eq!(
+            view_drag(View3d::Left, vec2(50.0, 0.0), F, &st),
+            (0.0, 0.0, 0.0)
+        );
+        let (dx, _, _) = view_drag(View3d::Front, vec2(f32::NAN, 0.0), F, &st);
+        assert_eq!(dx, 0.0);
+    }
+
+    #[test]
+    fn ligar_e_desligar_o_3d() {
+        let (mut app, tid) = app_with_track();
+        let tol = Ticks::from_millis_i64(10);
+        let len = Ticks::from_secs_i64(10);
+        let track = |app: &App| {
+            app.project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .cloned()
+                .unwrap()
+        };
+        app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Blend(BlendMode::Multiply)],
+        );
+        assert!(app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Mode3d(true)]
+        ));
+        let t = track(&app);
+        assert!(t.motion_3d);
+        assert_eq!(t.blend, BlendMode::SourceAlpha, "3D usa alfa da origem");
+        assert!(!app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Mode3d(true)]
+        ));
+        app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Blend(BlendMode::Screen)],
+        );
+        let t = track(&app);
+        assert!(!t.motion_3d && t.blend == BlendMode::Screen);
     }
 }

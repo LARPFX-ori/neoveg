@@ -209,6 +209,19 @@ impl Workspace {
         frame: Vec2,
         theme: &ThemeColors,
     ) {
+        self.paint_background_opt(painter, area, frame, theme, true);
+    }
+
+    /// Como [`Self::paint_background`]; `edges = false` omite as linhas das
+    /// bordas do quadro (vistas de cima e de lado do 3D).
+    pub(crate) fn paint_background_opt(
+        &self,
+        painter: &egui::Painter,
+        area: Rect,
+        frame: Vec2,
+        theme: &ThemeColors,
+        edges: bool,
+    ) {
         let (bg, dot, edge) = if theme.high_contrast {
             (theme.extreme_bg, theme.text_muted, theme.border)
         } else {
@@ -244,6 +257,9 @@ impl Workspace {
                     }
                 }
             }
+        }
+        if !edges {
+            return;
         }
         let a = self.to_screen(area, frame, Vec2::ZERO);
         let b = self.to_screen(area, frame, frame);

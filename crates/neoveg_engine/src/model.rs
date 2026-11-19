@@ -959,6 +959,9 @@ impl Project {
                     v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
                     v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
                     v.rot = fin32(v.rot, 0.0) % 3600.0;
+                    v.z = clampf(fin32(v.z, 0.0), -100.0, 100.0);
+                    v.rot_x = fin32(v.rot_x, 0.0) % 3600.0;
+                    v.rot_y = fin32(v.rot_y, 0.0) % 3600.0;
                 }
                 mk.keys.sort_by_key(|k| k.t);
                 if mk.keys.is_empty() {
@@ -2155,8 +2158,18 @@ pub struct MotionKey {
     pub y: f32,
     pub scale_x: f32,
     pub scale_y: f32,
-    /// Rotação em graus.
+    /// Rotação em graus (em torno do eixo Z, a única do modo 2D).
     pub rot: f32,
+    /// Modo 3D (*Alfa da origem 3D*, manual do VEGAS Pro 21, pp. 748–756):
+    /// deslocamento em Z em fração da largura do quadro (positivo = mais
+    /// perto de quem assiste). Ignorado no modo 2D.
+    #[serde(default)]
+    pub z: f32,
+    /// Modo 3D: rotação em torno dos eixos X e Y, em graus.
+    #[serde(default)]
+    pub rot_x: f32,
+    #[serde(default)]
+    pub rot_y: f32,
 }
 
 impl Default for MotionKey {
@@ -2167,6 +2180,9 @@ impl Default for MotionKey {
             scale_x: 1.0,
             scale_y: 1.0,
             rot: 0.0,
+            z: 0.0,
+            rot_x: 0.0,
+            rot_y: 0.0,
         }
     }
 }
@@ -2179,6 +2195,9 @@ impl Lerp for MotionKey {
             scale_x: self.scale_x.lerp(&o.scale_x, t),
             scale_y: self.scale_y.lerp(&o.scale_y, t),
             rot: self.rot.lerp(&o.rot, t),
+            z: self.z.lerp(&o.z, t),
+            rot_x: self.rot_x.lerp(&o.rot_x, t),
+            rot_y: self.rot_y.lerp(&o.rot_y, t),
         }
     }
 }
@@ -2289,6 +2308,10 @@ pub struct Track {
     /// Movimento 2D/3D do grupo Pai/Filho (Parent Track Motion, p. 740).
     #[serde(default)]
     pub parent_motion: Keyframes<MotionKey>,
+    /// Composição *Alfa da origem 3D* do movimento da trilha (pp. 748–756):
+    /// a camada vira um plano no espaço, com Z e rotação em X/Y.
+    #[serde(default)]
+    pub motion_3d: bool,
     /// Trilha marcada como multicâmera (angles em takes).
     #[serde(default, skip_serializing_if = "is_false")]
     pub multicam: bool,
@@ -2475,6 +2498,7 @@ impl Track {
             parent_track_id: None,
             mask_mode: TrackMaskMode::None,
             parent_motion: Keyframes::default(),
+            motion_3d: false,
             multicam: false,
             automation_mode: AutomationMode::Read,
         }
