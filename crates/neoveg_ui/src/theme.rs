@@ -435,33 +435,49 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
     v.selection.stroke = Stroke::new(if c.high_contrast { 1.5_f32 } else { 1.0_f32 }, sel_fg);
 
     let border_w = if c.high_contrast { 1.5_f32 } else { 1.0_f32 };
+    let cr = if c.high_contrast { 0.into() } else { 1.into() };
+
     v.widgets.noninteractive.bg_fill = c.panel_fill;
     v.widgets.noninteractive.bg_stroke = Stroke::new(border_w, c.border);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, c.text_primary);
+    v.widgets.noninteractive.corner_radius = cr;
 
     v.widgets.inactive.bg_fill = c.widget_bg;
     v.widgets.inactive.weak_bg_fill = c.widget_bg;
     v.widgets.inactive.bg_stroke = Stroke::new(border_w, c.border);
     v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, c.text_primary);
+    v.widgets.inactive.corner_radius = cr;
 
     v.widgets.hovered.bg_fill = c.widget_hover_bg;
     v.widgets.hovered.weak_bg_fill = c.widget_hover_bg;
     v.widgets.hovered.bg_stroke = Stroke::new(border_w, c.accent);
     v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, c.text_primary);
+    v.widgets.hovered.corner_radius = cr;
 
     v.widgets.active.bg_fill = c.selection_bg;
     v.widgets.active.weak_bg_fill = c.selection_bg;
     v.widgets.active.bg_stroke = Stroke::new(border_w, sel_fg);
     v.widgets.active.fg_stroke = Stroke::new(1.5_f32, sel_fg);
+    v.widgets.active.corner_radius = cr;
 
     v.widgets.open.bg_fill = c.widget_hover_bg;
     v.widgets.open.bg_stroke = Stroke::new(border_w, c.accent);
     v.widgets.open.fg_stroke = Stroke::new(1.0_f32, c.text_primary);
+    v.widgets.open.corner_radius = cr;
+
+    v.window_corner_radius = if c.high_contrast { 0.into() } else { 2.into() };
+    v.menu_corner_radius = if c.high_contrast { 0.into() } else { 2.into() };
+    v.window_stroke = Stroke::new(border_w, c.border);
+    v.window_highlight_topmost = true;
 
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.item_spacing = egui::vec2(5.0, 3.0);
+    style.spacing.button_padding = egui::vec2(4.0, 2.0);
+    style.spacing.window_margin = egui::Margin::same(6);
+    style.spacing.indent = 12.0;
+    style.spacing.interact_size = egui::vec2(16.0, 16.0);
     style.spacing.scroll = egui::style::ScrollStyle {
         bar_width: 10.0,
         ..egui::style::ScrollStyle::solid()
