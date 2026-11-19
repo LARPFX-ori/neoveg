@@ -50,6 +50,16 @@ pub fn set_context(ctx: &egui::Context, lang: Language, icon: &Arc<egui::IconDat
     });
 }
 
+/// Traz para a frente a janela própria do diálogo de id `id` (o mesmo
+/// passado em `.id(...)`).
+pub fn focus(ctx: &egui::Context, id: Id) {
+    ctx.send_viewport_cmd_to(viewport_id(id), ViewportCommand::Focus);
+}
+
+fn viewport_id(key: Id) -> ViewportId {
+    ViewportId::from_hash_of(key.with("neoveg_dialog_viewport"))
+}
+
 /// Arraste da janela nativa pelo `:::` (decide se ela acopla ao parar).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GripDrag {
@@ -215,6 +225,9 @@ struct DlgState {
     dock_pos: Option<Pos2>,
     /// Arraste acumulado do `:::` da janela acoplada.
     drag_acc: Vec2,
+    /// Largura natural do conteúdo, medida numa passada invisível ao abrir
+    /// (separadores e afins não se esticam nela).
+    natural_w: Option<f32>,
 }
 
 /// Barra de título própria: `:::`, área vazia com o título e fechar.
@@ -414,6 +427,42 @@ impl<'open> DialogWindow<'open> {
         w
     }
 
+    /// As mesmas opções, sem o `open` (para montar a janela dentro de closures).
+    fn config(&self) -> DialogWindow<'static> {
+        DialogWindow {
+            title: self.title.clone(),
+            id: self.id,
+            open: None,
+            resizable: self.resizable,
+            collapsible: self.collapsible,
+            default_width: self.default_width,
+            default_height: self.default_height,
+            min_width: self.min_width,
+            min_height: self.min_height,
+            max_size: self.max_size,
+            anchor: self.anchor,
+            pivot: self.pivot,
+            default_pos: self.default_pos,
+            constrain_to: self.constrain_to,
+        }
+    }
+
+    /// A `egui::Window` de sempre, sem o `open`.
+    fn plain_window<'a>(&self) -> egui::Window<'a> {
+        let mut w = self.sized(egui::Window::new(self.title.clone()).id(self.key()));
+        w = w.collapsible(self.collapsible);
+        if let Some((a, off)) = self.anchor {
+            w = w.anchor(a, off);
+        }
+        if let Some(p) = self.pivot {
+            w = w.pivot(p);
+        }
+        if let Some(p) = self.default_pos {
+            w = w.default_pos(p);
+        }
+        w
+    }
+
     /// Mostra o diálogo. Devolve o resultado do conteúdo quando ele foi
     /// desenhado neste quadro.
     pub fn show<R>(
@@ -436,6 +485,7 @@ impl<'open> DialogWindow<'open> {
             st.grip = None;
             st.hint = false;
             st.drag_acc = Vec2::ZERO;
+            st.natural_w = None;
         }
         let lang = ctx
             .data_mut(|d| d.get_temp::<Language>(Id::new(LANG_KEY)))
@@ -455,17 +505,7 @@ impl<'open> DialogWindow<'open> {
         ctx: &egui::Context,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
-        let mut w = self.sized(egui::Window::new(self.title.clone()).id(self.key()));
-        w = w.collapsible(self.collapsible);
-        if let Some((a, off)) = self.anchor {
-            w = w.anchor(a, off);
-        }
-        if let Some(p) = self.pivot {
-            w = w.pivot(p);
-        }
-        if let Some(p) = self.default_pos {
-            w = w.default_pos(p);
-        }
+        let w = self.plain_window();
         match self.open {
             Some(open) => w.open(open).show(ctx, add_contents),
             None => w.show(ctx, add_contents),
@@ -575,11 +615,10 @@ impl<'open> DialogWindow<'open> {
             self.min_width.unwrap_or(160.0) + 2.0 * MARGIN,
             self.min_height.unwrap_or(40.0) + 2.0 * MARGIN + BAR_H,
         );
-        let vid = ViewportId::from_hash_of(key.with("neoveg_dialog_viewport"));
+        let vid = viewport_id(key);
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("{} - Neoveg", self.title))
             .with_decorations(false)
-            .with_taskbar(false)
             .with_resizable(self.resizable)
             .with_min_inner_size(min_inner)
             .with_position([geom[0], geom[1]])
@@ -595,6 +634,7 @@ impl<'open> DialogWindow<'open> {
             .unwrap_or(AUTO_WIDTH)
             .min(self.max_size.map_or(f32::INFINITY, |m| m.x));
         let resizable = self.resizable;
+        let fallback = self.config();
         let has_close = self.open.is_some();
         let title = self.title.clone();
         let mut open = self.open;
@@ -604,6 +644,8 @@ impl<'open> DialogWindow<'open> {
         let frames = st.frames;
         let mut grip = st.grip;
         let mut hint = false;
+        let natural_w = st.natural_w;
+        let mut new_natural_w = None;
         // mede o conteúdo: sempre nos de tamanho fixo, só ao abrir nos outros
         let measure = (auto_w || auto_h) && (!resizable || frames < 3);
         // maior janela que o ajuste ao conteúdo cria: cabe no monitor
@@ -613,9 +655,7 @@ impl<'open> DialogWindow<'open> {
         ctx.show_viewport_immediate(vid, builder, |vctx, class| {
             if class == egui::ViewportClass::Embedded {
                 // o sistema não abriu a janela: a de sempre, dentro da origem
-                let mut w = egui::Window::new(title.clone())
-                    .id(key)
-                    .resizable(resizable);
+                let mut w = fallback.plain_window();
                 if let Some(o) = open.as_deref_mut() {
                     w = w.open(o);
                 }
@@ -699,11 +739,25 @@ impl<'open> DialogWindow<'open> {
                     if measure {
                         // mede o conteúdo numa largura fixa (o texto quebra
                         // sempre do mesmo jeito, sem oscilar)
-                        let w = if auto_w { fit_w } else { ui.available_width() };
+                        let sizing = auto_w && natural_w.is_none();
+                        let w = match (auto_w, natural_w) {
+                            (true, Some(n)) => n,
+                            (true, None) => fit_w,
+                            (false, _) => ui.available_width(),
+                        };
                         let max = Rect::from_min_size(ui.cursor().min, vec2(w, max_inner.y));
-                        let r = ui.scope_builder(egui::UiBuilder::new().max_rect(max), f);
+                        let mut ub = egui::UiBuilder::new().max_rect(max);
+                        if sizing {
+                            ub = ub.sizing_pass();
+                        }
+                        let r = ui.scope_builder(ub, f);
                         result = Some(r.inner);
-                        Some(r.response.rect.size())
+                        let size = r.response.rect.size();
+                        if sizing {
+                            new_natural_w = Some(size.x.clamp(1.0, fit_w.max(1.0)));
+                            ui.ctx().request_repaint();
+                        }
+                        Some(size)
                     } else {
                         result = Some(f(ui));
                         None
@@ -747,6 +801,9 @@ impl<'open> DialogWindow<'open> {
         st.frames = frames.saturating_add(1);
         st.grip = grip;
         st.hint = hint;
+        if new_natural_w.is_some() {
+            st.natural_w = new_natural_w;
+        }
         if st.grip.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }

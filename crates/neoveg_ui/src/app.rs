@@ -2583,7 +2583,9 @@ impl App {
             UiAction::BlenderImportCameraDialog => self.blender_import_camera_dialog(),
             UiAction::ExitApp => {
                 if let Some(c) = ctx {
-                    c.send_viewport_cmd(egui::ViewportCommand::Close);
+                    // sempre a janela principal (o comando pode vir de um
+                    // diálogo na própria janela)
+                    c.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
                 }
             }
             UiAction::SelectDock(panel) if crate::layout::window_only(panel) => {
@@ -4663,6 +4665,10 @@ impl App {
         let lang = self.lang();
         if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.confirm_close {
+                // a confirmação já está aberta (talvez atrás da janela principal)
+                crate::dialog_window::focus(ctx, egui::Id::new("confirm_close_win"));
+            }
             self.confirm_close = true;
         }
         if self.confirm_close {
