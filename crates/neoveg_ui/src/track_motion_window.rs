@@ -363,7 +363,7 @@ impl App {
                         }
                     });
             });
-            self.tm_toolbar(ui, &mut st, blend, is_3d, has_children, &mut actions, lang);
+            self.tm_toolbar(ui, &mut st, blend, is_3d, has_children, &mut actions);
             ui.separator();
             let strip_h = 150.0;
             let top_h = (ui.available_height() - strip_h).max(200.0);
@@ -479,8 +479,8 @@ impl App {
         is_3d: bool,
         has_children: bool,
         actions: &mut Vec<TmAction>,
-        lang: Language,
     ) {
+        let lang = self.lang();
         let th = &self.theme;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -966,7 +966,11 @@ impl App {
         lang: Language,
     ) -> Option<MotionKey> {
         use neoveg_engine::engine::motion3d;
-        let resp = ui.interact(rect, ui.id().with(("tm_view", view.index())), Sense::click_and_drag());
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("tm_view", view.index())),
+            Sense::click_and_drag(),
+        );
         let painter = ui.painter_at(rect);
         let vi = view.index();
         if !st.views[vi].fitted {
@@ -1014,7 +1018,11 @@ impl App {
         let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
         let len = w * 0.15;
         // a normal aponta para quem assiste (Z positivo) sem rotação
-        let ez = [c0[0] - n[0] / nl * len, c0[1] - n[1] / nl * len, c0[2] - n[2] / nl * len];
+        let ez = [
+            c0[0] - n[0] / nl * len,
+            c0[1] - n[1] / nl * len,
+            c0[2] - n[2] / nl * len,
+        ];
         let label_col = Color32::from_rgb(170, 110, 90);
         let font = egui::FontId::proportional(10.0);
         if let Some(c) = view_point(view, c0, frame).map(to_s) {
@@ -1035,7 +1043,12 @@ impl App {
             egui::FontId::proportional(11.0),
             ink,
         );
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, self.theme.border), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0_f32, self.theme.border),
+            egui::StrokeKind::Inside,
+        );
 
         // interação: roda = zoom da vista, botão do meio = deslocar a vista
         if resp.hovered() {
@@ -1430,7 +1443,10 @@ mod tests {
             prevent_move_z: true,
             ..TrackMotionUi::default()
         };
-        assert_eq!(view_drag(View3d::Left, vec2(50.0, 0.0), F, &st), (0.0, 0.0, 0.0));
+        assert_eq!(
+            view_drag(View3d::Left, vec2(50.0, 0.0), F, &st),
+            (0.0, 0.0, 0.0)
+        );
         let (dx, _, _) = view_drag(View3d::Front, vec2(f32::NAN, 0.0), F, &st);
         assert_eq!(dx, 0.0);
     }
@@ -1440,14 +1456,57 @@ mod tests {
         let (mut app, tid) = app_with_track();
         let tol = Ticks::from_millis_i64(10);
         let len = Ticks::from_secs_i64(10);
-        let track = |app: &App| app.project.tracks.iter().find(|t| t.id == tid).cloned().unwrap();
-        app.apply_track_motion(tid, false, Ticks::ZERO, tol, F, len, None, &[TmAction::Blend(BlendMode::Multiply)]);
-        assert!(app.apply_track_motion(tid, false, Ticks::ZERO, tol, F, len, None, &[TmAction::Mode3d(true)]));
+        let track = |app: &App| {
+            app.project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .cloned()
+                .unwrap()
+        };
+        app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Blend(BlendMode::Multiply)],
+        );
+        assert!(app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Mode3d(true)]
+        ));
         let t = track(&app);
         assert!(t.motion_3d);
         assert_eq!(t.blend, BlendMode::SourceAlpha, "3D usa alfa da origem");
-        assert!(!app.apply_track_motion(tid, false, Ticks::ZERO, tol, F, len, None, &[TmAction::Mode3d(true)]));
-        app.apply_track_motion(tid, false, Ticks::ZERO, tol, F, len, None, &[TmAction::Blend(BlendMode::Screen)]);
+        assert!(!app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Mode3d(true)]
+        ));
+        app.apply_track_motion(
+            tid,
+            false,
+            Ticks::ZERO,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Blend(BlendMode::Screen)],
+        );
         let t = track(&app);
         assert!(!t.motion_3d && t.blend == BlendMode::Screen);
     }

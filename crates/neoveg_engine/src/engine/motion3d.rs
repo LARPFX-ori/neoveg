@@ -64,11 +64,7 @@ pub fn layer_to_world(m: &MotionKey, w: f32, h: f32, u: f32, v: f32) -> [f32; 3]
     let r = rotation(m);
     let su = u * fin(m.scale_x, 1.0).clamp(0.001, 100.0);
     let sv = v * fin(m.scale_y, 1.0).clamp(0.001, 100.0);
-    let t = [
-        fin(m.x, 0.0) * w,
-        fin(m.y, 0.0) * h,
-        fin(m.z, 0.0) * w,
-    ];
+    let t = [fin(m.x, 0.0) * w, fin(m.y, 0.0) * h, fin(m.z, 0.0) * w];
     [
         r[0][0] * su + r[0][1] * sv + t[0],
         r[1][0] * su + r[1][1] * sv + t[1],
@@ -150,25 +146,28 @@ pub fn apply_motion_3d(f: &Frame, m: &MotionKey) -> Frame {
     let Some(inv) = invert3(homography(m, wf, hf)) else {
         return out;
     };
-    out.px.par_chunks_mut(w.max(1)).enumerate().for_each(|(y, row)| {
-        let py = y as f32 + 0.5;
-        for (x, p) in row.iter_mut().enumerate() {
-            let px = x as f32 + 0.5;
-            let a = inv[0][0] * px + inv[0][1] * py + inv[0][2];
-            let b = inv[1][0] * px + inv[1][1] * py + inv[1][2];
-            let c = inv[2][0] * px + inv[2][1] * py + inv[2][2];
-            // c ≤ 0: o raio passa atrás da câmera para este pixel
-            if c.is_nan() || c <= 1e-9 {
-                continue;
+    out.px
+        .par_chunks_mut(w.max(1))
+        .enumerate()
+        .for_each(|(y, row)| {
+            let py = y as f32 + 0.5;
+            for (x, p) in row.iter_mut().enumerate() {
+                let px = x as f32 + 0.5;
+                let a = inv[0][0] * px + inv[0][1] * py + inv[0][2];
+                let b = inv[1][0] * px + inv[1][1] * py + inv[1][2];
+                let c = inv[2][0] * px + inv[2][1] * py + inv[2][2];
+                // c ≤ 0: o raio passa atrás da câmera para este pixel
+                if c.is_nan() || c <= 1e-9 {
+                    continue;
+                }
+                let (u, v) = (a / c, b / c);
+                let (lx, ly) = (u + wf * 0.5, v + hf * 0.5);
+                if lx < -0.5 || ly < -0.5 || lx > wf + 0.5 || ly > hf + 0.5 {
+                    continue;
+                }
+                *p = f.sample(lx, ly);
             }
-            let (u, v) = (a / c, b / c);
-            let (lx, ly) = (u + wf * 0.5, v + hf * 0.5);
-            if lx < -0.5 || ly < -0.5 || lx > wf + 0.5 || ly > hf + 0.5 {
-                continue;
-            }
-            *p = f.sample(lx, ly);
-        }
-    });
+        });
     out
 }
 
@@ -266,10 +265,9 @@ mod tests {
 
     #[test]
     fn projeto_antigo_sem_campos_3d_abre_igual() {
-        let k: MotionKey = serde_json::from_str(
-            r#"{"x":0.1,"y":0.0,"scale_x":1.0,"scale_y":1.0,"rot":5.0}"#,
-        )
-        .unwrap();
+        let k: MotionKey =
+            serde_json::from_str(r#"{"x":0.1,"y":0.0,"scale_x":1.0,"scale_y":1.0,"rot":5.0}"#)
+                .unwrap();
         assert_eq!((k.z, k.rot_x, k.rot_y), (0.0, 0.0, 0.0));
         let mut v = serde_json::to_value(crate::model::Track::new(
             crate::model::TrackKind::Video,
