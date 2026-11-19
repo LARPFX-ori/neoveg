@@ -1636,9 +1636,13 @@ fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
 
 /// Ferramentas da barra da Prévia que não cabem na largura do painel ficam no
 /// menu "⋯" (preview_toolbar.rs): abre o menu quando o botão não está na barra.
+/// O menu abre com clique de ponteiro (`simulate_click`), como o do usuário: o
+/// clique de acessibilidade do kittest (`click`) não abriu o menu na CI.
 fn reach_preview_tool(harness: &mut Harness<'_, App>, label: &str) {
     if harness.query_by_label(label).is_none() {
-        harness.get_by_label("Mais ferramentas da prévia").click();
+        harness
+            .get_by_label("Mais ferramentas da prévia")
+            .simulate_click();
         harness.run_steps(2);
     }
 }
@@ -1708,7 +1712,9 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     assert!(harness.query_by_label("Limpar RAM").is_some());
     if in_menu {
         // fecha o menu "⋯" antes de medir a barra
-        harness.get_by_label("Mais ferramentas da prévia").click();
+        harness
+            .get_by_label("Mais ferramentas da prévia")
+            .simulate_click();
         harness.run_steps(2);
     }
     assert_eq!(
