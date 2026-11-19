@@ -926,6 +926,8 @@ pub struct Dialogs {
     pub shortcuts: bool,
     pub prefs_open: bool,
     pub prefs_tab: PrefsCategory,
+    /// Aba aberta nas Propriedades do projeto (0 Vídeo … 4 CD de áudio).
+    pub project_props_tab: u8,
     prefs_draft: Option<Preferences>,
     prefs_orig: Option<(String, EditLayoutPrefs, String)>,
     prefs_orig_metrics: Option<(f32, f32)>,
@@ -990,6 +992,219 @@ const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
     ("Quadrado 1080x1080 30", 1080, 1080, FrameRate::FPS_30),
     ("SD 640x480 29,97", 640, 480, FrameRate::FPS_29_97),
 ];
+
+/// Aba *Vídeo* das Propriedades do projeto. Devolve `true` se algo mudou.
+fn project_video_tab(
+    ui: &mut egui::Ui,
+    lang: neoveg_common::Language,
+    s: &mut crate::model::ProjectSettings,
+) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_label(tr(lang, "Modelo"))
+        .selected_text(tr(lang, "Escolher modelo..."))
+        .show_ui(ui, |ui| {
+            for (name, w, h, fps) in PRESETS {
+                if ui.selectable_label(false, tr(lang, name)).clicked() {
+                    s.width = w;
+                    s.height = h;
+                    s.fps = fps;
+                    changed = true;
+                }
+            }
+        });
+    egui::Grid::new("pp").num_columns(2).show(ui, |ui| {
+        ui.label(tr(lang, "Largura"));
+        changed |= ui
+            .add(egui::DragValue::new(&mut s.width).range(16..=8192))
+            .changed();
+        ui.end_row();
+        ui.label(tr(lang, "Altura"));
+        changed |= ui
+            .add(egui::DragValue::new(&mut s.height).range(16..=8192))
+            .changed();
+        ui.end_row();
+        ui.label(tr(lang, "Quadros por segundo"));
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("fps_std")
+                .selected_text(s.fps.label_in(lang))
+                .show_ui(ui, |ui| {
+                    for f in FrameRate::STANDARD {
+                        changed |= ui
+                            .selectable_value(&mut s.fps, f, f.label_in(lang))
+                            .changed();
+                    }
+                });
+            let (mut num, mut den) = (s.fps.num, s.fps.den);
+            let c_n = ui
+                .add(egui::DragValue::new(&mut num).range(1..=240_000))
+                .changed();
+            ui.label("/");
+            let c_d = ui
+                .add(egui::DragValue::new(&mut den).range(1..=1001))
+                .changed();
+            if c_n || c_d {
+                if let Some(fr) = FrameRate::new(num, den) {
+                    let fv = fr.as_f64();
+                    if (1.0..=240.0).contains(&fv) {
+                        s.fps = fr;
+                        changed = true;
+                    }
+                }
+            }
+            ui.add_enabled_ui(s.fps.is_ntsc_drop_eligible(), |ui| {
+                changed |= ui
+                    .checkbox(&mut s.drop_frame, tr(lang, "Drop-frame (;)"))
+                    .on_hover_text(tr(lang, "SMPTE Drop-Frame para 29,97 / 59,94 qps"))
+                    .changed();
+            });
+        });
+        ui.end_row();
+        ui.label(tr(lang, "Ordem dos campos"));
+        egui::ComboBox::from_id_salt("pp_field_order")
+            .selected_text(s.field_order.name_in(lang))
+            .show_ui(ui, |ui| {
+                for f in FieldOrder::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.field_order, f, f.name_in(lang))
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Proporção do pixel"));
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut s.pixel_aspect)
+                    .range(0.1..=4.0)
+                    .speed(0.001)
+                    .fixed_decimals(4),
+            )
+            .changed();
+        ui.end_row();
+        ui.label(tr(lang, "Formato de pixel"));
+        egui::ComboBox::from_id_salt("pixel_format")
+            .selected_text(s.pixel_format.label())
+            .show_ui(ui, |ui| {
+                for pf in neoveg_engine::color::PixelFormat::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.pixel_format, pf, pf.label())
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Gama de composição"));
+        egui::ComboBox::from_id_salt("compositing_gamma")
+            .selected_text(s.compositing_gamma.label())
+            .show_ui(ui, |ui| {
+                for cg in neoveg_engine::color::CompositingGamma::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.compositing_gamma, cg, cg.label())
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Espaço de cor (ACES)"));
+        egui::ComboBox::from_id_salt("project_color_space")
+            .selected_text(s.color_space.label())
+            .show_ui(ui, |ui| {
+                for cs in neoveg_engine::color::ProjectColorSpace::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.color_space, cs, cs.label())
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Transformação de visualização"));
+        egui::ComboBox::from_id_salt("view_transform")
+            .selected_text(s.view_transform.label())
+            .show_ui(ui, |ui| {
+                for vt in neoveg_engine::color::ViewTransform::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.view_transform, vt, vt.label())
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Qualidade de renderização em resolução total"));
+        egui::ComboBox::from_id_salt("pp_render_quality")
+            .selected_text(s.render_quality.name_in(lang))
+            .show_ui(ui, |ui| {
+                for q in RenderQuality::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.render_quality, q, q.name_in(lang))
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Método de desentrelaçamento"));
+        egui::ComboBox::from_id_salt("pp_deinterlace")
+            .selected_text(s.deinterlace.name_in(lang))
+            .show_ui(ui, |ui| {
+                for d in DeinterlaceMethod::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.deinterlace, d, d.name_in(lang))
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Modo 3D Estereoscópico"));
+        egui::ComboBox::from_id_salt("stereo_3d_mode")
+            .selected_text(s.stereo_3d.label())
+            .show_ui(ui, |ui| {
+                for m3d in Stereo3dMode::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.stereo_3d, m3d, m3d.label())
+                        .changed();
+                }
+            });
+        ui.end_row();
+        if s.stereo_3d != Stereo3dMode::Off {
+            ui.label(tr(lang, "Distância interocular 3D"));
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut s.stereo_3d_interocular)
+                        .range(0.0..=0.25)
+                        .speed(0.002)
+                        .fixed_decimals(3),
+                )
+                .changed();
+            ui.end_row();
+            ui.label(tr(lang, "Convergência 3D (Z)"));
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut s.stereo_3d_convergence)
+                        .range(-1.0..=1.0)
+                        .speed(0.01)
+                        .fixed_decimals(3),
+                )
+                .changed();
+            ui.end_row();
+        }
+        ui.label(tr(lang, "Cor de fundo"));
+        changed |= ui.color_edit_button_rgb(&mut s.background).changed();
+        ui.end_row();
+    });
+    changed |= ui
+        .checkbox(
+            &mut s.adapt_source_media,
+            tr(
+                lang,
+                "Ajustar a mídia de origem para combinar com o projeto",
+            ),
+        )
+        .changed();
+    s.width = (s.width / 2).max(8) * 2;
+    s.height = (s.height / 2).max(8) * 2;
+    ui.separator();
+    ui.label(
+        egui::RichText::new(tr(
+            lang,
+            "Dimensões pares são exigidas pelos formatos 4:2:0.",
+        ))
+        .small()
+        .weak(),
+    );
+    changed
+}
 
 impl Dialogs {
     pub fn open_prefs(&mut self, current: &Preferences) {
@@ -2368,200 +2583,200 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut changed = false;
+        let mut tab = self.dlg.project_props_tab.min(4);
+        let mut time_format = self.opts.time_format;
+        let bus_count = self.project.audio_buses.len();
         crate::dialog_window::DialogWindow::new(tr(lang, "Propriedades do projeto"))
             .id(egui::Id::new("project_props_win"))
             .open(&mut open)
             .resizable(false)
+            .default_width(460.0)
             .show(ctx, |ui| {
+                // abas na ordem do VEGAS Pro: Vídeo, Áudio, Régua, Resumo, CD de áudio
+                ui.horizontal(|ui| {
+                    for (i, name) in ["Vídeo", "Áudio", "Régua", "Resumo", "CD de áudio"]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        ui.selectable_value(&mut tab, i as u8, tr(lang, name));
+                    }
+                });
+                ui.separator();
                 let s = &mut self.project.settings;
-                egui::ComboBox::from_label(tr(lang, "Modelo"))
-                    .selected_text(tr(lang, "Escolher modelo..."))
-                    .show_ui(ui, |ui| {
-                        for (name, w, h, fps) in PRESETS {
-                            if ui.selectable_label(false, tr(lang, name)).clicked() {
-                                s.width = w;
-                                s.height = h;
-                                s.fps = fps;
+                match tab {
+                    0 => changed |= project_video_tab(ui, lang, s),
+                    1 => {
+                        egui::Grid::new("pp_audio").num_columns(2).show(ui, |ui| {
+                            ui.label(tr(lang, "Taxa de amostragem (áudio)"));
+                            egui::ComboBox::from_id_salt("sr")
+                                .selected_text(format!("{} Hz", s.sample_rate))
+                                .show_ui(ui, |ui| {
+                                    for r in [44100, 48000, 88200, 96000] {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut s.sample_rate,
+                                                r,
+                                                format!("{r} Hz"),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr(lang, "Profundidade de bits"));
+                            egui::ComboBox::from_id_salt("pp_bits")
+                                .selected_text(format!("{}", s.audio_bit_depth))
+                                .show_ui(ui, |ui| {
+                                    for b in [16u16, 24, 32] {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut s.audio_bit_depth,
+                                                b,
+                                                format!("{b}"),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr(lang, "Modo do Master (áudio)"));
+                            egui::ComboBox::from_id_salt("master_layout")
+                                .selected_text(s.channel_layout.name_in(lang))
+                                .show_ui(ui, |ui| {
+                                    for l in crate::model::ChannelLayout::ALL {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut s.channel_layout,
+                                                l,
+                                                l.name_in(lang),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr(lang, "Qualidade da reamostragem e do esticamento"));
+                            egui::ComboBox::from_id_salt("pp_resample")
+                                .selected_text(s.resample_quality.name_in(lang))
+                                .show_ui(ui, |ui| {
+                                    for q in RenderQuality::ALL {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut s.resample_quality,
+                                                q,
+                                                q.name_in(lang),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr(lang, "Barramentos de áudio"));
+                            ui.label(format!("{bus_count}"));
+                            ui.end_row();
+                        });
+                    }
+                    2 => {
+                        egui::Grid::new("pp_ruler").num_columns(2).show(ui, |ui| {
+                            ui.label(tr(lang, "Formato de tempo da régua"));
+                            egui::ComboBox::from_id_salt("pp_time_fmt")
+                                .selected_text(time_format.name_in(lang))
+                                .show_ui(ui, |ui| {
+                                    for f in TimeFormat::ALL {
+                                        ui.selectable_value(&mut time_format, f, f.name_in(lang));
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr(lang, "Tempo musical (BPM)"));
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut s.bpm)
+                                        .range(20.0..=300.0)
+                                        .speed(0.5)
+                                        .suffix(" BPM"),
+                                )
+                                .changed();
+                            ui.end_row();
+                            ui.label(tr(lang, "Batidas por compasso"));
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut s.beats_per_measure).range(1..=32))
+                                .changed();
+                            ui.end_row();
+                            ui.label(tr(lang, "Figura da batida"));
+                            egui::ComboBox::from_id_salt("pp_beat_note")
+                                .selected_text(format!("1/{}", s.beat_note))
+                                .show_ui(ui, |ui| {
+                                    for n in [2u32, 4, 8, 16] {
+                                        changed |= ui
+                                            .selectable_value(&mut s.beat_note, n, format!("1/{n}"))
+                                            .changed();
+                                    }
+                                });
+                            ui.end_row();
+                        });
+                    }
+                    3 => {
+                        let sm = &mut s.summary;
+                        egui::Grid::new("pp_summary").num_columns(2).show(ui, |ui| {
+                            for (label, field) in [
+                                ("Título", &mut sm.title),
+                                ("Artista", &mut sm.artist),
+                                ("Engenheiro", &mut sm.engineer),
+                                ("Direitos autorais", &mut sm.copyright),
+                            ] {
+                                ui.label(tr(lang, label));
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::singleline(field)
+                                            .char_limit(SUMMARY_FIELD_MAX)
+                                            .desired_width(280.0),
+                                    )
+                                    .changed();
+                                ui.end_row();
+                            }
+                            ui.label(tr(lang, "Comentários"));
+                            changed |= ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut sm.comments)
+                                        .char_limit(SUMMARY_FIELD_MAX)
+                                        .desired_rows(4)
+                                        .desired_width(280.0),
+                                )
+                                .changed();
+                            ui.end_row();
+                        });
+                    }
+                    _ => {
+                        let cd = &mut s.audio_cd;
+                        egui::Grid::new("pp_cd").num_columns(2).show(ui, |ui| {
+                            ui.label(tr(lang, "Código UPC/EAN do disco"));
+                            let r = ui.add(
+                                egui::TextEdit::singleline(&mut cd.upc)
+                                    .char_limit(13)
+                                    .desired_width(160.0),
+                            );
+                            if r.changed() {
+                                cd.upc.retain(|c| c.is_ascii_digit());
                                 changed = true;
                             }
-                        }
-                    });
-                egui::Grid::new("pp").num_columns(2).show(ui, |ui| {
-                    ui.label(tr(lang, "Largura"));
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut s.width).range(16..=8192))
-                        .changed();
-                    ui.end_row();
-                    ui.label(tr(lang, "Altura"));
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut s.height).range(16..=8192))
-                        .changed();
-                    ui.end_row();
-                    ui.label(tr(lang, "Quadros por segundo"));
-                    ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("fps_std")
-                            .selected_text(s.fps.label_in(lang))
-                            .show_ui(ui, |ui| {
-                                for f in FrameRate::STANDARD {
-                                    changed |= ui
-                                        .selectable_value(&mut s.fps, f, f.label_in(lang))
-                                        .changed();
-                                }
-                            });
-                        let (mut num, mut den) = (s.fps.num, s.fps.den);
-                        let c_n = ui
-                            .add(egui::DragValue::new(&mut num).range(1..=240_000))
-                            .changed();
-                        ui.label("/");
-                        let c_d = ui
-                            .add(egui::DragValue::new(&mut den).range(1..=1001))
-                            .changed();
-                        if c_n || c_d {
-                            if let Some(fr) = FrameRate::new(num, den) {
-                                let fv = fr.as_f64();
-                                if (1.0..=240.0).contains(&fv) {
-                                    s.fps = fr;
-                                    changed = true;
-                                }
-                            }
-                        }
-                        ui.add_enabled_ui(s.fps.is_ntsc_drop_eligible(), |ui| {
+                            ui.end_row();
+                            ui.label(tr(lang, "Primeira faixa"));
                             changed |= ui
-                                .checkbox(&mut s.drop_frame, tr(lang, "Drop-frame (;)"))
-                                .on_hover_text(tr(lang, "SMPTE Drop-Frame para 29,97 / 59,94 qps"))
+                                .add(egui::DragValue::new(&mut cd.first_track).range(1..=99))
                                 .changed();
+                            ui.end_row();
                         });
-                    });
-                    ui.end_row();
-                    ui.label(tr(lang, "Taxa de amostragem (áudio)"));
-                    egui::ComboBox::from_id_salt("sr")
-                        .selected_text(format!("{} Hz", s.sample_rate))
-                        .show_ui(ui, |ui| {
-                            for r in [44100, 48000, 88200, 96000] {
-                                changed |= ui
-                                    .selectable_value(&mut s.sample_rate, r, format!("{r} Hz"))
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-                    ui.label(tr(lang, "Modo do Master (áudio)"));
-                    egui::ComboBox::from_id_salt("master_layout")
-                        .selected_text(s.channel_layout.name_in(lang))
-                        .show_ui(ui, |ui| {
-                            for l in crate::model::ChannelLayout::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut s.channel_layout, l, l.name_in(lang))
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-                    ui.label(tr(lang, "Modo 3D Estereoscópico"));
-                    egui::ComboBox::from_id_salt("stereo_3d_mode")
-                        .selected_text(s.stereo_3d.label())
-                        .show_ui(ui, |ui| {
-                            for m3d in Stereo3dMode::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut s.stereo_3d, m3d, m3d.label())
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-                    if s.stereo_3d != Stereo3dMode::Off {
-                        ui.label(tr(lang, "Distância interocular 3D"));
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut s.stereo_3d_interocular)
-                                    .range(0.0..=0.25)
-                                    .speed(0.002)
-                                    .fixed_decimals(3),
-                            )
-                            .changed();
-                        ui.end_row();
-                        ui.label(tr(lang, "Convergência 3D (Z)"));
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut s.stereo_3d_convergence)
-                                    .range(-1.0..=1.0)
-                                    .speed(0.01)
-                                    .fixed_decimals(3),
-                            )
-                            .changed();
-                        ui.end_row();
+                        ui.label(
+                            egui::RichText::new(tr(
+                                lang,
+                                "O código e a numeração vão para a folha .cue exportada.",
+                            ))
+                            .small()
+                            .weak(),
+                        );
                     }
-                    ui.label(tr(lang, "Tempo musical (BPM)"));
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut s.bpm)
-                                .range(20.0..=300.0)
-                                .speed(0.5)
-                                .suffix(" BPM"),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label(tr(lang, "Cor de fundo"));
-                    changed |= ui.color_edit_button_rgb(&mut s.background).changed();
-                    ui.end_row();
-
-                    ui.label(tr(lang, "Formato de pixel"));
-                    egui::ComboBox::from_id_salt("pixel_format")
-                        .selected_text(s.pixel_format.label())
-                        .show_ui(ui, |ui| {
-                            for pf in neoveg_engine::color::PixelFormat::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut s.pixel_format, pf, pf.label())
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label(tr(lang, "Gama de composição"));
-                    egui::ComboBox::from_id_salt("compositing_gamma")
-                        .selected_text(s.compositing_gamma.label())
-                        .show_ui(ui, |ui| {
-                            for cg in neoveg_engine::color::CompositingGamma::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut s.compositing_gamma, cg, cg.label())
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label(tr(lang, "Espaço de cor (ACES)"));
-                    egui::ComboBox::from_id_salt("project_color_space")
-                        .selected_text(s.color_space.label())
-                        .show_ui(ui, |ui| {
-                            for cs in neoveg_engine::color::ProjectColorSpace::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut s.color_space, cs, cs.label())
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label(tr(lang, "Transformação de visualização"));
-                    egui::ComboBox::from_id_salt("view_transform")
-                        .selected_text(s.view_transform.label())
-                        .show_ui(ui, |ui| {
-                            for vt in neoveg_engine::color::ViewTransform::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut s.view_transform, vt, vt.label())
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-                });
-                s.width = (s.width / 2).max(8) * 2;
-                s.height = (s.height / 2).max(8) * 2;
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(tr(
-                        lang,
-                        "Dimensões pares são exigidas pelos formatos 4:2:0.",
-                    ))
-                    .small()
-                    .weak(),
-                );
+                }
             });
+        self.dlg.project_props_tab = tab;
+        if time_format != self.opts.time_format {
+            self.opts.time_format = time_format;
+        }
         if changed {
             self.session.project.settings.manually_configured = true;
             self.dialog_change();

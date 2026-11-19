@@ -1837,8 +1837,24 @@ impl EditorSession {
         } else {
             audio_filename.trim()
         };
-        let mut out = format!("FILE \"{safe_file}\" WAVE\n");
-        let mut track_num = 0usize;
+        let cue_text = |t: &str| t.replace(['"', '\r', '\n'], " ").trim().to_string();
+        let s = &self.project.settings;
+        let mut out = String::new();
+        if let Some(cat) = s.audio_cd.catalog() {
+            out.push_str(&format!("CATALOG {cat}\n"));
+        }
+        let performer = cue_text(&s.summary.artist);
+        if !performer.is_empty() {
+            out.push_str(&format!("PERFORMER \"{performer}\"\n"));
+        }
+        let title = cue_text(&s.summary.title);
+        if !title.is_empty() {
+            out.push_str(&format!("TITLE \"{title}\"\n"));
+        }
+        out.push_str(&format!("FILE \"{safe_file}\" WAVE\n"));
+        // a numeração começa em "Primeira faixa" (aba CD de áudio)
+        let first = s.audio_cd.first_track.clamp(1, 99) as usize;
+        let mut track_num = first - 1;
         let mut index_num = 1usize;
         for m in cd_marks {
             let secs_total = m.t.as_secs_f64().max(0.0);
@@ -1848,16 +1864,16 @@ impl EditorSession {
             let ff = total_cd_frames % 75;
             match m.kind {
                 MarkerKind::CdTrack => {
-                    track_num += 1;
+                    track_num = (track_num + 1).min(99);
                     index_num = 1;
                     out.push_str(&format!("  TRACK {track_num:02} AUDIO\n"));
                     out.push_str(&format!("    TITLE \"{}\"\n", m.label.replace('"', "'")));
                     out.push_str(&format!("    INDEX 01 {mm:02}:{ss:02}:{ff:02}\n"));
                 }
                 MarkerKind::CdIndex => {
-                    if track_num == 0 {
-                        track_num = 1;
-                        out.push_str("  TRACK 01 AUDIO\n");
+                    if track_num < first {
+                        track_num = first;
+                        out.push_str(&format!("  TRACK {track_num:02} AUDIO\n"));
                     }
                     index_num = (index_num + 1).min(99);
                     out.push_str(&format!(
@@ -6988,6 +7004,36 @@ mod tests {
         assert!(cue.contains("TRACK 01 AUDIO"));
         assert!(cue.contains("INDEX 01 00:02:00"));
         assert!(cue.contains("INDEX 02 00:04:00"));
+        assert!(!cue.contains("CATALOG"), "sem UPC, sem CATALOG");
+
+        // Abas Resumo e CD de áudio alimentam o cabeçalho e a numeração.
+        sess.project.settings.summary.title = "Meu \"Álbum\"".into();
+        sess.project.settings.summary.artist = "Banda\nX".into();
+        sess.project.settings.audio_cd.upc = "012345678905".into();
+        sess.project.settings.audio_cd.first_track = 5;
+        let cue = sess.export_cd_cue_sheet("album.wav");
+        assert!(cue.starts_with("CATALOG 0012345678905\n"), "{cue}");
+        assert!(cue.contains("PERFORMER \"Banda X\""), "{cue}");
+        assert!(cue.contains("TITLE \"Meu  Álbum\""), "{cue}");
+        assert!(cue.contains("TRACK 05 AUDIO"), "{cue}");
+        assert!(!cue.contains("TRACK 01 AUDIO"), "{cue}");
+
+        // entrada hostil nas abas novas é saneada ao abrir o projeto
+        let mut hp = Project::new_default();
+        hp.settings.audio_cd.upc = "12a34-5".repeat(10);
+        hp.settings.audio_cd.first_track = 0;
+        hp.settings.beat_note = 3;
+        hp.settings.audio_bit_depth = 7;
+        hp.settings.pixel_aspect = f32::NAN;
+        hp.settings.summary.comments = "é".repeat(SUMMARY_FIELD_MAX);
+        hp.sanitize();
+        let hs = &hp.settings;
+        assert!(hs.audio_cd.upc.len() <= 13 && hs.audio_cd.upc.chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(hs.audio_cd.first_track, 1);
+        assert_eq!(hs.beat_note, 4);
+        assert_eq!(hs.audio_bit_depth, 16);
+        assert!((hs.pixel_aspect - 1.0).abs() < 1e-6);
+        assert!(hs.summary.comments.len() <= SUMMARY_FIELD_MAX);
 
         // Automação: Touch grava ponto visível; Off desativa leitura sem apagar pontos.
         assert_eq!(

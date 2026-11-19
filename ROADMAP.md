@@ -144,6 +144,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Janela, Automação e Preferências
 
+- **Propriedades do projeto com as 5 abas do VEGAS Pro** (*Vídeo*, *Áudio*, *Régua*, *Resumo* e *CD de áudio*): ordem dos campos, proporção do pixel, qualidade de renderização, desentrelaçamento, ajuste da mídia de origem, profundidade de bits, qualidade da reamostragem, formato de tempo da régua, batidas por compasso e figura da batida, título/artista/engenheiro/direitos/comentários e código UPC/EAN + primeira faixa. O Resumo e o CD de áudio entram na folha `.cue` exportada (`CATALOG`, `PERFORMER`, `TITLE` e numeração das faixas).
 - **Barra de ferramentas personalizável** (`options.customize_toolbar`, adicionar/remover/reordenar comandos da Tabela Única e separadores persistidos nas Preferências, p. 75) implementado.
 - **Grade da régua e Encaixar na grade** (`RulerGridSpacing` — Automático, Quadro, Subdivisões em segundos e Batidas/BPM — mais `options.snap_to_grid` / `Ctrl+F8`, pp. 86, 232) implementado.
 - **Marcadores de CD (faixa/índice + exportação `.cue`) e Marcadores de comando** (`insert.marker_cd_track` / `N`, `insert.marker_cd_index`, `insert.marker_command`, pp. 131, 495, 725) implementados.
