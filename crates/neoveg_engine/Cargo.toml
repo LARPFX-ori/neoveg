@@ -39,5 +39,6 @@ vst3.workspace = true
 
 [lints.rust]
 # AGENTS.md §0.3: unsafe proibido em todo o crate, exceto nos módulos de
-# fronteira FFI isolados `media::mf` e `plugin_host` (hosts de plug-ins).
+# fronteira FFI isolados `media::mf`, `media::vaapi`, `media::videotoolbox`
+# e `plugin_host` (hosts de plug-ins).
 unsafe_code = "deny"
