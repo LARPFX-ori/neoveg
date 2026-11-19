@@ -231,6 +231,93 @@ struct Laid {
     h: usize,
 }
 
+/// Processa quebra de linha inteligente (UAX #14) e reordenação bidirecional (UAX #9).
+pub fn layout_text_lines(
+    text: &str,
+    font: &FontArc,
+    scale: PxScale,
+    tracking_px: f32,
+    wrap: bool,
+    max_line_width_px: f32,
+) -> Vec<(String, f32)> {
+    let sf = font.as_scaled(scale);
+    let measure_str = |s: &str| -> f32 {
+        let mut x = 0.0f32;
+        let mut prev = None;
+        for (count, c) in s.chars().enumerate() {
+            let g = font.glyph_id(c);
+            if let Some(p) = prev {
+                x += sf.kern(p, g);
+            }
+            x += sf.h_advance(g);
+            if count > 0 {
+                x += tracking_px;
+            }
+            prev = Some(g);
+        }
+        x
+    };
+
+    let mut final_lines = Vec::new();
+
+    // Divide primeiramente por quebras de linha explícitas
+    for raw_line in text.split('\n') {
+        let trimmed = raw_line.trim_end_matches('\r');
+        if wrap && max_line_width_px > 10.0 {
+            // Usa unicode-linebreak (UAX #14) para encontrar pontos de quebra válidos
+            let mut current_start = 0;
+            let mut last_break_idx = 0;
+
+            for (break_idx, break_type) in unicode_linebreak::linebreaks(trimmed) {
+                let candidate = &trimmed[current_start..break_idx];
+                let w = measure_str(candidate.trim_end());
+                if w > max_line_width_px && last_break_idx > current_start {
+                    // Quebra na oportunidade anterior
+                    let sub = trimmed[current_start..last_break_idx].trim_end();
+                    if !sub.is_empty() {
+                        final_lines.push(sub);
+                    }
+                    current_start = last_break_idx;
+                }
+                last_break_idx = break_idx;
+                if break_type == unicode_linebreak::BreakOpportunity::Mandatory {
+                    let sub = trimmed[current_start..break_idx].trim_end();
+                    if !sub.is_empty() {
+                        final_lines.push(sub);
+                    }
+                    current_start = break_idx;
+                }
+            }
+            let rem = trimmed[current_start..].trim_end();
+            if !rem.is_empty() || final_lines.is_empty() {
+                final_lines.push(rem);
+            }
+        } else {
+            final_lines.push(trimmed);
+        }
+    }
+
+    // Aplica UAX #9 Bidirectional Algorithm (unicode-bidi) em cada linha final
+    let mut out = Vec::with_capacity(final_lines.len());
+    for line in final_lines {
+        let bidi_info = unicode_bidi::BidiInfo::new(line, None);
+        let visual_text = if bidi_info.has_rtl() {
+            let mut reordered = String::with_capacity(line.len());
+            for para in &bidi_info.paragraphs {
+                let line_str = bidi_info.reorder_line(para, para.range.clone());
+                reordered.push_str(&line_str);
+            }
+            reordered
+        } else {
+            line.to_string()
+        };
+        let w = measure_str(&visual_text);
+        out.push((visual_text, w));
+    }
+
+    out
+}
+
 /// Rasteriza linhas de texto numa máscara de cobertura do tamanho do quadro.
 fn layout_mask(
     ts: &TextSpec,
@@ -245,31 +332,18 @@ fn layout_mask(
     let px = (ts.size / 100.0 * h as f32).max(4.0);
     let scale = PxScale::from(px);
     let sf = font.as_scaled(scale);
+    let tracking_px = ts.tracking * px;
+    let max_wrap_w = (ts.wrap_width / 100.0 * w as f32).max(50.0);
     let line_h = (sf.ascent() - sf.descent() + sf.line_gap()) * ts.line_spacing.max(0.5);
-    let lines: Vec<&str> = text.split('\n').collect();
-    let widths: Vec<f32> = lines
-        .iter()
-        .map(|l| {
-            let mut x = 0.0;
-            let mut prev = None;
-            for c in l.chars() {
-                let g = font.glyph_id(c);
-                if let Some(p) = prev {
-                    x += sf.kern(p, g);
-                }
-                x += sf.h_advance(g);
-                prev = Some(g);
-            }
-            x
-        })
-        .collect();
-    let block_w = widths.iter().cloned().fold(0.0, f32::max);
-    let block_h = line_h * lines.len() as f32;
+
+    let laid_lines = layout_text_lines(text, font, scale, tracking_px, ts.wrap, max_wrap_w);
+    let block_w = laid_lines.iter().map(|(_, w)| *w).fold(0.0, f32::max);
+    let block_h = line_h * laid_lines.len() as f32;
     let cx = ts.x * w as f32 + offset.0;
     let cy = ts.y * h as f32 + offset.1;
     let top = cy - block_h / 2.0;
-    for (li, line) in lines.iter().enumerate() {
-        let lw = widths[li];
+
+    for (li, (line, lw)) in laid_lines.iter().enumerate() {
         let x0 = match ts.align {
             TextAlign::Left => cx - block_w / 2.0,
             TextAlign::Center => cx - lw / 2.0,
@@ -281,10 +355,13 @@ fn layout_mask(
         }
         let mut x = x0;
         let mut prev = None;
-        for c in line.chars() {
+        for (count, c) in line.chars().enumerate() {
             let gid = font.glyph_id(c);
             if let Some(p) = prev {
                 x += sf.kern(p, gid);
+            }
+            if count > 0 {
+                x += tracking_px;
             }
             let glyph = gid.with_scale_and_position(scale, point(x, baseline));
             x += sf.h_advance(gid);
@@ -475,4 +552,36 @@ fn render_text(ts: &TextSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
         px.copy_from_slice(&[to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3])]);
     }
     img
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_texto_tracking_bidi_e_quebra_de_linha() {
+        let fonts = Fonts::default();
+        let font = fonts.get("").expect("fonte padrão deve carregar");
+        let scale = PxScale::from(24.0);
+
+        // 1. Tracking aumenta a largura medida do texto
+        let normal = layout_text_lines("NEOVEG", &font, scale, 0.0, false, 1000.0);
+        let tracked = layout_text_lines("NEOVEG", &font, scale, 5.0, false, 1000.0);
+        assert_eq!(normal.len(), 1);
+        assert_eq!(tracked.len(), 1);
+        assert!(tracked[0].1 > normal[0].1);
+
+        // 2. Quebra de linha inteligente UAX #14 quebra texto longo em múltiplas linhas
+        let long_text =
+            "O rápido cachorro marrom pula sobre o cão preguiçoso na timeline do editor";
+        let wrapped = layout_text_lines(long_text, &font, scale, 0.0, true, 200.0);
+        assert!(wrapped.len() > 1, "deve quebrar em múltiplas linhas");
+
+        // 3. Suporte Bidirecional UAX #9 para textos em árabe / hebraico
+        let hebrew_text = "שלום עולם 123";
+        let bidi_lines = layout_text_lines(hebrew_text, &font, scale, 0.0, false, 1000.0);
+        assert_eq!(bidi_lines.len(), 1);
+        assert!(!bidi_lines[0].0.is_empty());
+        assert!(bidi_lines[0].1 > 0.0);
+    }
 }

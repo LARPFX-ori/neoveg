@@ -20,6 +20,8 @@ pub mod aaf;
 #[forbid(unsafe_code)]
 mod aaf_metadict;
 #[forbid(unsafe_code)]
+pub mod color;
+#[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
 pub mod edl;
@@ -34,6 +36,8 @@ pub mod fcp7xml;
 pub mod fcpxml;
 #[forbid(unsafe_code)]
 pub mod integrations;
+#[forbid(unsafe_code)]
+pub mod mask;
 pub mod media;
 #[forbid(unsafe_code)]
 pub mod model;
@@ -53,6 +57,8 @@ pub mod render;
 pub mod scopes;
 #[forbid(unsafe_code)]
 pub mod session;
+#[forbid(unsafe_code)]
+pub mod speech;
 #[forbid(unsafe_code)]
 pub mod subtitles;
 #[forbid(unsafe_code)]
