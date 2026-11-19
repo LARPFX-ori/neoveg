@@ -49,13 +49,14 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
 ## Fase 4 — Próximos Marcos *(Em andamento)*
 
 - **Concluído:**
+  - **Acoplar arrastando** uma janela destacada para a área de janelas, com contorno de destino e a preferência *Permitir que janelas flutuantes acoplem* (`Ctrl` inverte, manual do VEGAS Pro 21, pp. 42-43; `float_dock.rs`), e os atalhos alternativos ``Alt+` `` / ``Ctrl+Alt+` `` / ``Shift+Alt+` `` (= `F11` / `Ctrl+F11` / `Shift+F11`, também pela tecla física no ABNT2);
   - **Efeitos e envelopes na API de scripts** (`ScriptPortal.Vegas`, nomes da *VEGAS Pro Scripting API Summary*): `Track.Effects`, `VideoEvent.Effects`/`AudioEvent.Effects`, `Effect` (`Bypass`, `PlugIn`, `Description`, `Index`), `Effects.AddEffect`, árvores `Vegas.VideoFX`/`AudioFX`/`PlugIns` com `PlugInNode.FindChildByName`/`FindChildByUniqueID`, `Track.Envelopes` (`HasEnvelope`, `FindByType`), `Envelope` (`Points`, `Min`/`Max`/`Neutral`, `ValueAt`), `EnvelopePoint` e `CurveType`; validados ao aplicar (protocolo 5 da ponte, `vegas_cs.rs`);
   - **Janelas destacadas lembram posição e tamanho** (Prévia, Master Bus e painéis): a janela reaberta volta ao último lugar na sessão e o `.neoveglayout` salvo leva e traz as posições, saneadas contra valores não finitos e fora de faixa (`layout.rs`, `panels.rs`);
   - **Travar envelopes nos eventos** (*Opções → Travar envelopes nos eventos*, `options.lock_envelopes`, pp. 389, 710 e 1014): arrastar eventos leva junto os pontos de envelope da trilha e os quadros-chave de Track Motion, de movimento do pai e dos efeitos da trilha no trecho de cada evento, recalculados a partir de uma foto do começo do arraste (`env_lock.rs`);
   - *Surround Panner* 5.1 (`engine/surround.rs`, painel `surround_panel.rs`): modo do Master estéreo/5.1, posição 2D por trilha e barramento no anel ITU-R BS.775, LFE, downmix para monitoração e render WAV de 6 canais (`WAVE_FORMAT_EXTENSIBLE`);
   - **Takes múltiplos por evento** (`takes.rs`): adicionar como take, próximo/anterior (`T`/`Shift+T`), escolher/excluir o ativo e *Slip em todos os takes*, com divisão e aparo sincronizados;
   - Importação e exportação de **Final Cut Pro 7 XML** (`xmeml`, `fcp7xml.rs`) e **AAF** (`.aaf`, `aaf.rs`, `aaf_metadict.rs`, `file.import_aaf` / `file.export_aaf` em Sala Limpa);
-  - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores*;
+  - *Adjustment Track*, menu `More (...)`, painéis *Plug-In Manager* e *Compositores* (nas trilhas, como no VEGAS, e também por evento: com eventos de vídeo selecionados o modo vale só para eles, e *Usar o da trilha* volta ao da trilha — extensão do Neoveg, `Event::blend` / `Track::blend_at`);
   - Descoberta de plug-ins VST3/OFX nas pastas padrão e em **pastas mapeadas pelo usuário** (ex.: uma pasta do Google Drive, salvas nas Preferências e varridas de novo ao reabrir; cada pasta procura VST3 e OFX, com estado por pasta e *Localizar...* quando ela some; varredura fora da thread da interface) (`plugins.rs`, `plugin_manager.rs`) e efeitos de vídeo OFX aplicados a eventos pelo host isolado `neoveg --plugin-host` (`plugin_host.rs`, `plugin_host/ofx.rs`);
   - Efeitos OFX com **keyframes de parâmetros** (linear; Boolean/Choice seguram o valor; Integer arredonda), avaliação completa de curvas no host (`getValueAtTime`, `getDerivative`, `getIntegral`, consultas `getNumKeys`/`getKeyTime`/`getKeyIndex`), clipes opcionais desconectados no contexto *General* e tempo na **taxa de quadros do projeto**;
   - **Host VST3 para efeitos de áudio** (`plugin_host/vst3.rs`, VST 3 SDK 3.8 sob MIT pelos bindings `vst3`): efeitos aplicados a eventos, trilhas, barramentos e Master pelo subprocesso `neoveg --plugin-host serve-vst3`, uma instância por mixer e por efeito, abertura assíncrona na reprodução (o sinal passa seco até o plug-in abrir) e síncrona no render, tempo limite de 2 s por bloco com recriação do host, **persistência do estado completo (`IComponent::getState`/`setState`)**, **compensação automática de latência (PDC)** entre ramos paralelos e pré-roll no render offline/loudness, e editor de parâmetros normalizados no diálogo de FX;
@@ -64,8 +65,8 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
   - **Backends nativos Linux e macOS:** contrato comum `SystemVideoReader` (`media/system.rs`) e leitor/demuxer de contêineres MP4/MOV/MKV/WEBM em Rust puro (`media/demux/`, ISO/IEC 14496-12, QTFF, RFC 8794, RFC 9559) concluídos; faltam as bridges FFI isoladas para VA-API (Linux; sem GStreamer, que é LGPL — `AGENTS.md` §2.3) e VideoToolbox/AVFoundation (macOS) + decodificador fallback em Rust puro sem dependência do SO. Os portões de CI em macOS e Linux estão no PR #12.
   - **Plug-ins externos restantes:** OFX com tiles e múltiplas entradas em contexto *General*; VST3 com editor gráfico do plug-in (`IPlugView`), automação de parâmetros em tempo real e instrumentos (MIDI).
   - **API de scripts:** parâmetros e quadros-chave dos efeitos (`Effect.Keyframes`, presets), efeitos OFX/VST3 criados por script e envelopes de evento.
-  - **Quadros-chave de trilha:** curva por quadro-chave nos parâmetros de efeito (manual do VEGAS Pro 21, p. 389); *Travar envelopes nos eventos* ao mover por teclado e ao recortar/colar (o arraste já está feito).
-  - **Área de janelas:** docas flutuantes com várias abas na mesma janela, `Ctrl` + arrastar uma janela flutuante de volta para a área, a preferência *Permitir que janelas flutuantes acoplem* e os atalhos alternativos ``Alt+` ``, ``Shift+Alt+` `` e ``Ctrl+Alt+` `` (a crase é tecla morta no ABNT2).
+  - **Quadros-chave de trilha:** curva por quadro-chave nos parâmetros de efeito (manual do VEGAS Pro 21, p. 389).
+  - **Área de janelas:** docas flutuantes com várias abas na mesma janela (arrastar abas entre janelas nativas não existe no egui).
 
 ## Paridade de UI/UX com o manual do VEGAS Pro 21
 
@@ -118,6 +119,7 @@ Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21
 
 ### Efeitos, cor e legendas
 
+- **Miniaturas na janela Transições** (cada transição entre dois quadros de amostra no meio do progresso, animando de 0 a 100% ao passar o mouse) e **prévia dos efeitos OFX de terceiros** na categoria *Terceiros* de Efeitos de Vídeo, renderizada no host isolado sob demanda, uma de cada vez, com "sem prévia" quando o plug-in falha (`fx_preview.rs`, `fx_browser.rs`).
 - **Pacotes e cadeias de efeitos salvos** para reutilizar (salvar/carregar/exportar `.neovegfxchain`, p. 514) implementado.
 - **Presets próprios por efeito** e **miniatura animada ao passar o mouse** nas janelas *Efeitos de Vídeo* e *Geradores de Mídia* (pp. 54–56) implementados.
 - **Rastreamento de movimento** planar quadro a quadro para *Pan/Crop* ou *Track Motion* (`tools.motion_track`, p. 713) implementado.

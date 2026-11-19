@@ -497,6 +497,11 @@ pub struct Preferences {
     /// VEGAS Pro); desligado, usa as fontes embutidas.
     #[serde(default = "default_system_ui_font")]
     pub system_ui_font: bool,
+    /// Permitir que janelas flutuantes acoplem (manual do VEGAS Pro 21,
+    /// p. 43): ligada, arrastar uma janela destacada para a área de janelas
+    /// a acopla, e `Ctrl` impede; desligada, só acopla com `Ctrl`.
+    #[serde(default = "default_allow_floating_dock")]
+    pub allow_floating_dock: bool,
     /// Escala da interface em porcentagem (tamanho de textos, botões e
     /// painéis), de `UI_SCALE_MIN` a `UI_SCALE_MAX`.
     #[serde(default = "default_ui_scale_pct")]
@@ -1008,6 +1013,10 @@ fn default_system_ui_font() -> bool {
     true
 }
 
+fn default_allow_floating_dock() -> bool {
+    true
+}
+
 fn default_ui_scale_pct() -> u16 {
     100
 }
@@ -1137,6 +1146,7 @@ impl Default for Preferences {
             track_header: TrackHeaderPrefs::default(),
             show_splash: default_show_splash(),
             system_ui_font: default_system_ui_font(),
+            allow_floating_dock: default_allow_floating_dock(),
             ui_scale_pct: default_ui_scale_pct(),
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),

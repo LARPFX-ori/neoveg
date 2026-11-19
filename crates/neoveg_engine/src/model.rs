@@ -2433,6 +2433,18 @@ const TRACK_COLORS: [[u8; 3]; 8] = [
 ];
 
 impl Track {
+    /// Modo de composição da camada da trilha no tempo `t`: o do evento ativo
+    /// que tiver um próprio (numa transição, o que entra, de início mais
+    /// tardio), senão o da trilha.
+    pub fn blend_at(&self, t: Ticks) -> BlendMode {
+        self.events
+            .iter()
+            .filter(|e| !e.mute && e.start <= t && t < e.end())
+            .max_by_key(|e| e.start)
+            .and_then(|e| e.blend)
+            .unwrap_or(self.blend)
+    }
+
     pub fn new(kind: TrackKind, name: &str) -> Self {
         let id = new_id();
         Track {
@@ -2688,6 +2700,11 @@ pub struct Event {
     /// Parâmetros 3D estereoscópicos do evento (disposição L/R, inversão e deslocamento).
     #[serde(default, skip_serializing_if = "Stereo3dClip::is_default")]
     pub stereo_3d: Stereo3dClip,
+    /// Modo de composição só deste evento (painel Compositores). `None` usa o
+    /// da trilha. Extensão do Neoveg: o manual do VEGAS Pro 21 (pp. 58 e
+    /// 746) aplica compositores só a trilhas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<BlendMode>,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -2733,6 +2750,7 @@ impl Event {
             lock_pitch_to_stretch: false,
             sync_link_master: None,
             stereo_3d: Stereo3dClip::default(),
+            blend: None,
         }
     }
 
@@ -3938,6 +3956,60 @@ pub fn lin_to_db(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn media_teste() -> MediaItem {
+        MediaItem {
+            id: new_id(),
+            name: "m".into(),
+            source: MediaSource::File {
+                path: "m.avi".into(),
+            },
+            duration: Some(Ticks::from_secs_i64(60)),
+            has_video: true,
+            has_audio: false,
+            width: 64,
+            height: 36,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        }
+    }
+
+    /// Compositor por evento (extensão do Neoveg; o VEGAS só tem na trilha):
+    /// vale o do evento ativo; sem ele, o da trilha; na transição, o do
+    /// evento que entra; evento mudo não conta; arquivos antigos abrem sem o
+    /// campo e o campo vazio nem é gravado.
+    #[test]
+    fn compositor_do_evento_vale_so_no_trecho_dele() {
+        let s = Ticks::from_secs_i64;
+        let m = media_teste();
+        let mut t = Track::new(TrackKind::Video, "V");
+        t.blend = BlendMode::Screen;
+        let a = Event::new(&m, s(0), s(4));
+        let mut b = Event::new(&m, s(3), s(4));
+        b.blend = Some(BlendMode::Multiply);
+        t.events = vec![a, b];
+        assert_eq!(
+            t.blend_at(s(1)),
+            BlendMode::Screen,
+            "evento sem modo próprio"
+        );
+        assert_eq!(
+            t.blend_at(s(3)),
+            BlendMode::Multiply,
+            "transição: o que entra"
+        );
+        assert_eq!(t.blend_at(s(5)), BlendMode::Multiply);
+        assert_eq!(t.blend_at(s(9)), BlendMode::Screen, "fora dos eventos");
+        t.events[1].mute = true;
+        assert_eq!(t.blend_at(s(5)), BlendMode::Screen, "evento mudo não conta");
+
+        let json = serde_json::to_string(&t.events[0]).expect("json");
+        assert!(!json.contains("\"blend\""), "None não é gravado");
+        let json = serde_json::to_string(&t.events[1]).expect("json");
+        let volta: Event = serde_json::from_str(&json).expect("volta");
+        assert_eq!(volta.blend, Some(BlendMode::Multiply));
+    }
 
     /// Keyframes de parâmetros OFX: interpolação linear, `hold` para Boolean
     /// e Choice, arredondamento para Integer, e saneamento de entrada hostil.

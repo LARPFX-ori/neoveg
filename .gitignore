@@ -14,6 +14,8 @@
 /.obsidian
 /filmcraft-main
 filmcraft-main.zip
+/.claude
+
 # cache de bytecode Python (suíte tests/e2e)
 __pycache__/
 *.pyc

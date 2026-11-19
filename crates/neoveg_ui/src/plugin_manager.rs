@@ -1181,12 +1181,55 @@ impl App {
 
     pub(crate) fn compositors_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
+        // eventos de vídeo selecionados: o compositor vale só para eles
+        let evs = self.selected_video_events();
+        if !evs.is_empty() {
+            let modes: Vec<Option<BlendMode>> = evs
+                .iter()
+                .filter_map(|id| self.project.event(*id).map(|e| e.blend))
+                .collect();
+            let common = modes
+                .first()
+                .copied()
+                .filter(|m| modes.iter().all(|x| x == m));
+            let n = evs.len().to_string();
+            ui.label(
+                egui::RichText::new(tr_args(lang, "Eventos selecionados: {n}", &[("n", &n)]))
+                    .strong(),
+            )
+            .on_hover_text(tr(
+                lang,
+                "O modo vale só para estes eventos; \"Usar o da trilha\" volta ao modo da trilha",
+            ));
+            ui.separator();
+            egui::Grid::new("compositors_events_grid")
+                .num_columns(1)
+                .striped(true)
+                .show(ui, |ui| {
+                    if ui
+                        .selectable_label(common == Some(None), tr(lang, "Usar o da trilha"))
+                        .clicked()
+                        && common != Some(None)
+                    {
+                        self.apply_event_compositor(&evs, None);
+                    }
+                    ui.end_row();
+                    for b in BlendMode::ALL {
+                        let on = common == Some(Some(b));
+                        if ui.selectable_label(on, b.name_in(lang)).clicked() && !on {
+                            self.apply_event_compositor(&evs, Some(b));
+                        }
+                        ui.end_row();
+                    }
+                });
+            return;
+        }
         let Some(ti) = self.selected_video_track() else {
             ui.label(
                 egui::RichText::new(tr(
                     lang,
-                    "Selecione uma trilha de vídeo para escolher o modo de composição \
-                     (Compositing Mode).",
+                    "Selecione uma trilha de vídeo, ou eventos de vídeo, para escolher o \
+                     modo de composição (Compositing Mode).",
                 ))
                 .small()
                 .color(self.theme.text_muted),
@@ -1330,6 +1373,25 @@ impl App {
     pub(crate) fn selected_video_track(&self) -> Option<usize> {
         self.sel_track
             .filter(|&t| self.project.tracks.get(t).map(|x| x.kind) == Some(TrackKind::Video))
+    }
+
+    /// Modo de composição só dos eventos `ids` (`None` volta ao da trilha),
+    /// num passo de Desfazer.
+    pub(crate) fn apply_event_compositor(
+        &mut self,
+        ids: &[crate::model::Id],
+        b: Option<BlendMode>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for id in ids {
+            if let Some(e) = self.project.event_mut(*id) {
+                e.blend = b;
+            }
+        }
+        self.changed();
     }
 
     fn apply_compositor(&mut self, b: BlendMode) {

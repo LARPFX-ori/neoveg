@@ -36,6 +36,8 @@ struct FloatingOutcome {
     reattach: bool,
     /// Posição e tamanho reais da janela neste quadro (só janela nativa).
     geom: Option<crate::layout::FloatingGeom>,
+    /// `Ctrl` apertado na janela (para acoplar ou não ao soltar).
+    ctrl: bool,
 }
 
 fn show_floating_viewport(
@@ -49,6 +51,7 @@ fn show_floating_viewport(
         open: true,
         reattach: false,
         geom: None,
+        ctrl: false,
     };
     let vid = egui::ViewportId::from_hash_of(&id_salt);
     let builder = egui::ViewportBuilder::default()
@@ -92,6 +95,7 @@ fn show_floating_viewport(
                 out.open = false;
             }
             let (outer, inner) = v_ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+            out.ctrl = v_ctx.input(|i| i.modifiers.ctrl);
             if let (Some(o), Some(r)) = (outer, inner) {
                 out.geom = crate::layout::sanitize_floating_geom([
                     o.min.x,
@@ -284,11 +288,71 @@ impl App {
 
     pub fn floating_panel_windows(&mut self, ctx: &egui::Context) {
         self.floating_shown.clear();
+        self.float_dock_hint = false;
         self.floating_panel_windows_inner(ctx);
         // janela fechada: a próxima abertura parte da última posição
         let shown = std::mem::take(&mut self.floating_shown);
         self.floating_open.retain(|k, _| shown.contains(k));
+        self.float_dock.retain(&shown);
         self.floating_shown = shown;
+        // contorno da área de janelas enquanto uma janela vai acoplar
+        if let (true, Some(r)) = (self.float_dock_hint, self.dock_rect) {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("neoveg_float_dock_hint"),
+            ));
+            painter.rect_filled(r, 2.0, self.theme.accent.gamma_multiply(0.12));
+            painter.rect_stroke(
+                r,
+                2.0,
+                Stroke::new(2.0_f32, self.theme.accent),
+                StrokeKind::Inside,
+            );
+        }
+    }
+
+    /// Acoplar arrastando (ver `float_dock`): `true` quando a janela `key`
+    /// acabou de ser solta sobre a área de janelas e deve acoplar.
+    fn float_dock_check(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        geom: Option<crate::layout::FloatingGeom>,
+        ctrl: bool,
+    ) -> bool {
+        use crate::float_dock::{grab_point, wants_dock, MoveState};
+        let Some([x, y, w, h]) = geom else {
+            return false;
+        };
+        let state = self
+            .float_dock
+            .update(key, pos2(x, y), std::time::Instant::now());
+        if state == MoveState::Idle {
+            return false;
+        }
+        // ainda vai decidir: precisa de quadros depois que a janela para
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        let (Some(dock), Some(main)) = (self.dock_rect, ctx.input(|i| i.viewport().inner_rect))
+        else {
+            return false;
+        };
+        let screen_dock = dock.translate(main.min.to_vec2());
+        let over = screen_dock.contains(grab_point(Rect::from_min_size(pos2(x, y), vec2(w, h))));
+        let ctrl = ctrl || ctx.input(|i| i.modifiers.ctrl);
+        let want = over && wants_dock(self.prefs.allow_floating_dock, ctrl);
+        match state {
+            MoveState::Moving => {
+                self.float_dock_hint |= want;
+                false
+            }
+            MoveState::Settled => {
+                if want {
+                    self.float_dock.forget(key);
+                }
+                want
+            }
+            MoveState::Idle => false,
+        }
     }
 
     fn floating_panel_windows_inner(&mut self, ctx: &egui::Context) {
@@ -315,9 +379,16 @@ impl App {
                 |ui| self.preview_panel(ui, true),
             );
             self.remember_floating_geom(crate::layout::FLOATING_PREVIEW_KEY, out.geom);
-            if !out.open || out.reattach {
+            let reattach = out.reattach
+                || self.float_dock_check(
+                    ctx,
+                    crate::layout::FLOATING_PREVIEW_KEY,
+                    out.geom,
+                    out.ctrl,
+                );
+            if !out.open || reattach {
                 self.preview_detached = false;
-                if out.reattach {
+                if reattach {
                     self.preview_visible = true;
                     self.dock_visible = true;
                 } else {
@@ -345,9 +416,16 @@ impl App {
                 |ui| self.master_bus_panel(ui, true),
             );
             self.remember_floating_geom(crate::layout::FLOATING_MASTER_KEY, out.geom);
-            if !out.open || out.reattach {
+            let reattach = out.reattach
+                || self.float_dock_check(
+                    ctx,
+                    crate::layout::FLOATING_MASTER_KEY,
+                    out.geom,
+                    out.ctrl,
+                );
+            if !out.open || reattach {
                 self.master_bus_detached = false;
-                if out.reattach {
+                if reattach {
                     self.master_bus_visible = true;
                     self.dock_visible = true;
                 } else {
@@ -389,7 +467,10 @@ impl App {
                 },
             );
             self.remember_floating_geom(key, out.geom);
-            if out.reattach {
+            let reattach = out.reattach
+                || (!crate::layout::window_only(tab)
+                    && self.float_dock_check(ctx, key, out.geom, out.ctrl));
+            if reattach {
                 self.detached_tabs.remove(&tab);
                 self.dock_visible = true;
                 self.dock_tab = tab;
@@ -1785,21 +1866,49 @@ impl App {
         );
         ui.separator();
         let sel: Vec<Id> = self.sel_events.iter().cloned().collect();
+        let thumb_sz = vec2(
+            neoveg_engine::engine::fx_preview::THUMB_W as f32,
+            neoveg_engine::engine::fx_preview::THUMB_H as f32,
+        );
         egui::Grid::new("tr_grid")
             .num_columns(2)
             .striped(true)
             .show(ui, |ui| {
-                for k in TransitionKind::ALL {
+                for (i, k) in TransitionKind::ALL.into_iter().enumerate() {
                     let id = egui::Id::new(("tr", k as u32));
-                    ui.dnd_drag_source(id, DndPayload::Transition(k), |ui| {
-                        icons::icon_label(
-                            ui,
-                            Icon::TransitionSplit,
-                            14.0,
-                            k.name_in(lang),
-                            &self.theme,
-                        );
-                    });
+                    // miniatura (meio do progresso; anima ao passar o mouse)
+                    let hover_id = egui::Id::new(("tr_hover", i));
+                    let hovered = ui
+                        .ctx()
+                        .data(|d| d.get_temp::<bool>(hover_id))
+                        .unwrap_or(false);
+                    let ctx = ui.ctx().clone();
+                    let tex = self.fx_browser.transitions.texture(&ctx, i, hovered);
+                    let resp = ui
+                        .dnd_drag_source(id, DndPayload::Transition(k), |ui| {
+                            ui.vertical(|ui| {
+                                match &tex {
+                                    Some(t) => {
+                                        ui.image((t.id(), thumb_sz));
+                                    }
+                                    None => {
+                                        let (r, _) =
+                                            ui.allocate_exact_size(thumb_sz, Sense::hover());
+                                        ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                                    }
+                                }
+                                icons::icon_label(
+                                    ui,
+                                    Icon::TransitionSplit,
+                                    14.0,
+                                    k.name_in(lang),
+                                    &self.theme,
+                                );
+                            });
+                        })
+                        .response;
+                    let now_hover = resp.hovered();
+                    ui.ctx().data_mut(|d| d.insert_temp(hover_id, now_hover));
                     if ui
                         .add_enabled(!sel.is_empty(), egui::Button::new(tr(lang, "Aplicar")))
                         .clicked()

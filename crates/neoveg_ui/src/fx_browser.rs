@@ -62,6 +62,211 @@ pub(crate) struct FxBrowser {
     hover_anim: Option<FxHoverAnim>,
     rx: Option<Receiver<(FxKind, egui::ColorImage)>>,
     started: bool,
+    /// Miniaturas da janela Transições.
+    pub(crate) transitions: TransitionThumbs,
+    /// Miniaturas dos efeitos OFX de terceiros.
+    pub(crate) ofx: OfxThumbs,
+}
+
+/// Miniaturas da janela Transições (índice em `TransitionKind::ALL`), geradas
+/// uma vez fora da thread da interface; passar o mouse anima a transição.
+#[derive(Default)]
+pub(crate) struct TransitionThumbs {
+    thumbs: HashMap<usize, egui::TextureHandle>,
+    rx: Option<Receiver<(usize, egui::ColorImage)>>,
+    started: bool,
+    hover: Option<(usize, egui::TextureHandle, std::time::Instant, u64)>,
+}
+
+impl TransitionThumbs {
+    fn start(&mut self) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        let spawned = crate::util::spawn("miniaturas-transicoes", move || {
+            for (i, k) in neoveg_engine::model::TransitionKind::ALL
+                .into_iter()
+                .enumerate()
+            {
+                let img = crate::util::guard("miniatura de transição", || {
+                    let f = neoveg_engine::engine::fx_preview::render_transition_preview(
+                        k, 0.5, THUMB_W, THUMB_H,
+                    );
+                    egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8())
+                });
+                if let Ok(img) = img {
+                    if tx.send((i, img)).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        if spawned.is_err() {
+            self.rx = None;
+        }
+    }
+
+    /// Miniatura da transição `i`: animada (progresso 0..1 em 1,5 s) quando
+    /// `hovered`, senão a fixa no meio do progresso.
+    pub(crate) fn texture(
+        &mut self,
+        ctx: &egui::Context,
+        i: usize,
+        hovered: bool,
+    ) -> Option<egui::TextureHandle> {
+        self.start();
+        if let Some(rx) = &self.rx {
+            while let Ok((k, img)) = rx.try_recv() {
+                let tex =
+                    ctx.load_texture(format!("tr_thumb_{k}"), img, egui::TextureOptions::LINEAR);
+                self.thumbs.insert(k, tex);
+            }
+        }
+        if self.thumbs.len() < neoveg_engine::model::TransitionKind::ALL.len() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if !hovered {
+            if self.hover.as_ref().is_some_and(|h| h.0 == i) {
+                self.hover = None;
+            }
+            return self.thumbs.get(&i).cloned();
+        }
+        let kind = neoveg_engine::model::TransitionKind::ALL.get(i).copied()?;
+        let now = std::time::Instant::now();
+        let started = match &self.hover {
+            Some((hi, _, at, _)) if *hi == i => *at,
+            _ => now,
+        };
+        let secs = now.saturating_duration_since(started).as_secs_f32();
+        let p = (secs / 1.5).fract();
+        // ~15 quadros por segundo bastam para a miniatura
+        let bucket = (secs * 15.0) as u64;
+        let need = !matches!(&self.hover, Some((hi, _, _, b)) if *hi == i && *b == bucket);
+        if need {
+            let f = neoveg_engine::engine::fx_preview::render_transition_preview(
+                kind, p, THUMB_W, THUMB_H,
+            );
+            let img = egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8());
+            match &mut self.hover {
+                Some((hi, tex, _, b)) if *hi == i => {
+                    tex.set(img, egui::TextureOptions::LINEAR);
+                    *b = bucket;
+                }
+                _ => {
+                    let tex = ctx.load_texture("tr_thumb_hover", img, egui::TextureOptions::LINEAR);
+                    self.hover = Some((i, tex, started, bucket));
+                }
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(66));
+        self.hover.as_ref().map(|h| h.1.clone())
+    }
+}
+
+/// Estado da miniatura de um efeito OFX de terceiros.
+pub(crate) enum OfxThumb {
+    Pending,
+    Ready(egui::TextureHandle),
+    Failed(String),
+}
+
+/// Miniaturas dos efeitos OFX de terceiros: renderizadas uma de cada vez no
+/// host isolado de plug-ins, numa thread só, quando a categoria Terceiros é
+/// aberta (carregamento sob demanda, §3.6). Um plug-in que trava ou falha
+/// fica "sem prévia" e não derruba a janela (§0.6).
+#[derive(Default)]
+pub(crate) struct OfxThumbs {
+    state: HashMap<(String, String), OfxThumb>,
+    jobs: Option<std::sync::mpsc::Sender<(String, String)>>,
+    rx: Option<Receiver<OfxThumbResult>>,
+}
+
+/// Resultado de uma miniatura OFX: (binário, id) e a imagem ou o erro.
+type OfxThumbResult = ((String, String), Result<egui::ColorImage, String>);
+
+/// Limite de miniaturas OFX guardadas (uma por plug-in consultado).
+const MAX_OFX_THUMBS: usize = 512;
+
+impl OfxThumbs {
+    fn ensure_worker(&mut self) {
+        if self.jobs.is_some() {
+            return;
+        }
+        let (job_tx, job_rx) = channel::<(String, String)>();
+        let (res_tx, res_rx) = channel();
+        let spawned = crate::util::spawn("miniaturas-ofx", move || {
+            while let Ok((bin, id)) = job_rx.recv() {
+                let r = neoveg_engine::model::OfxFxRef {
+                    binary: bin.clone(),
+                    plugin_id: id.clone(),
+                    label: String::new(),
+                    params: Vec::new(),
+                };
+                let res = crate::util::guard("miniatura OFX", || {
+                    neoveg_engine::engine::fx_preview::render_ofx_preview(&r, THUMB_W, THUMB_H).map(
+                        |f| egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8()),
+                    )
+                })
+                .unwrap_or_else(|_| Err("o plug-in travou ao gerar a prévia".into()));
+                if res_tx.send(((bin, id), res)).is_err() {
+                    return;
+                }
+            }
+        });
+        if spawned.is_ok() {
+            self.jobs = Some(job_tx);
+            self.rx = Some(res_rx);
+        }
+    }
+
+    /// Estado da miniatura do plug-in (`binário`, `id`); pede a geração na
+    /// primeira vez.
+    pub(crate) fn get(&mut self, ctx: &egui::Context, bin: &str, id: &str) -> &OfxThumb {
+        if let Some(rx) = &self.rx {
+            while let Ok((key, res)) = rx.try_recv() {
+                let st = match res {
+                    Ok(img) => OfxThumb::Ready(ctx.load_texture(
+                        format!("ofx_thumb_{}_{}", key.0, key.1),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    )),
+                    Err(e) => OfxThumb::Failed(e),
+                };
+                self.state.insert(key, st);
+            }
+        }
+        let key = (bin.to_string(), id.to_string());
+        if !self.state.contains_key(&key) {
+            if self.state.len() >= MAX_OFX_THUMBS {
+                self.state
+                    .insert(key.clone(), OfxThumb::Failed("prévias demais".into()));
+            } else {
+                self.ensure_worker();
+                let sent = self
+                    .jobs
+                    .as_ref()
+                    .is_some_and(|tx| tx.send(key.clone()).is_ok());
+                self.state.insert(
+                    key.clone(),
+                    if sent {
+                        OfxThumb::Pending
+                    } else {
+                        OfxThumb::Failed("não foi possível gerar a prévia".into())
+                    },
+                );
+            }
+        }
+        if self.state.values().any(|s| matches!(s, OfxThumb::Pending)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
+        match self.state.get(&key) {
+            Some(s) => s,
+            None => &OfxThumb::Pending,
+        }
+    }
 }
 
 /// Presets de um efeito (padrão + presets salvos pelo usuário nas Preferências).
@@ -472,23 +677,62 @@ impl App {
             return;
         }
         let can_apply = !self.selected_video_events().is_empty();
+        let thumb_sz = egui::vec2(THUMB_W as f32, THUMB_H as f32);
         egui::ScrollArea::vertical()
             .id_salt("fxb_terceiros")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (bin, info) in &list {
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(can_apply, egui::Button::new(tr(lang, "Aplicar")).small())
-                            .on_disabled_hover_text(tr(
-                                lang,
-                                "Selecione eventos de vídeo na timeline",
-                            ))
-                            .clicked()
-                        {
-                            self.apply_ofx_to_selection(bin, &info.identifier);
+                        // prévia no quadro de amostra, gerada no host isolado
+                        let bin_s = bin.to_string_lossy().to_string();
+                        let ctx = ui.ctx().clone();
+                        match self.fx_browser.ofx.get(&ctx, &bin_s, &info.identifier) {
+                            OfxThumb::Ready(tex) => {
+                                ui.image((tex.id(), thumb_sz));
+                            }
+                            OfxThumb::Pending => {
+                                let (r, _) = ui.allocate_exact_size(thumb_sz, egui::Sense::hover());
+                                ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                                ui.painter().text(
+                                    r.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    tr(lang, "Gerando prévia..."),
+                                    egui::FontId::proportional(9.0),
+                                    self.theme.text_muted,
+                                );
+                            }
+                            OfxThumb::Failed(e) => {
+                                let e = e.clone();
+                                let (r, resp) =
+                                    ui.allocate_exact_size(thumb_sz, egui::Sense::hover());
+                                ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                                ui.painter().text(
+                                    r.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    tr(lang, "sem prévia"),
+                                    egui::FontId::proportional(9.0),
+                                    self.theme.text_muted,
+                                );
+                                resp.on_hover_text(e);
+                            }
                         }
-                        ui.label(egui::RichText::new(&info.identifier).small());
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&info.identifier).small());
+                            if ui
+                                .add_enabled(
+                                    can_apply,
+                                    egui::Button::new(tr(lang, "Aplicar")).small(),
+                                )
+                                .on_disabled_hover_text(tr(
+                                    lang,
+                                    "Selecione eventos de vídeo na timeline",
+                                ))
+                                .clicked()
+                            {
+                                self.apply_ofx_to_selection(bin, &info.identifier);
+                            }
+                        });
                     });
                 }
             });
