@@ -757,7 +757,7 @@ impl App {
         }
         let lang = self.lang();
         let mut choice = None;
-        egui::Window::new(tr(lang, "Recuperar projeto"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Recuperar projeto"))
             .id(egui::Id::new("recovery_offer_win"))
             .collapsible(false)
             .resizable(false)
@@ -4544,6 +4544,8 @@ impl App {
     }
 
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
+        // idioma e ícone das janelas próprias dos diálogos (dialog_window)
+        crate::dialog_window::set_context(ctx, self.lang(), &self.window_icon);
         // escala da interface (Exibir > Escala da interface, Preferências)
         let want_zoom = self.prefs.ui_scale_factor();
         if (ctx.zoom_factor() - want_zoom).abs() > 0.001 {
@@ -4664,8 +4666,11 @@ impl App {
             self.confirm_close = true;
         }
         if self.confirm_close {
-            egui::Window::new(tr(lang, "Alterações não salvas"))
+            // o fechar da janela do diálogo é o mesmo que Cancelar
+            let mut keep = true;
+            crate::dialog_window::DialogWindow::new(tr(lang, "Alterações não salvas"))
                 .id(egui::Id::new("confirm_close_win"))
+                .open(&mut keep)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -4677,17 +4682,26 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui.button(tr(lang, "Salvar")).clicked() && self.save_project(false) {
                             self.allow_close = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            ctx.send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::Close,
+                            );
                         }
                         if ui.button(tr(lang, "Descartar")).clicked() {
                             self.allow_close = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            ctx.send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::Close,
+                            );
                         }
                         if ui.button(tr(lang, "Cancelar")).clicked() {
                             self.confirm_close = false;
                         }
                     });
                 });
+            if !keep {
+                self.confirm_close = false;
+            }
         }
     }
 }

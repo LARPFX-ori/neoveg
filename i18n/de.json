@@ -206,6 +206,7 @@
   "Arraste até um evento de vídeo para usar no crossfade ou fade.": "Auf Video-Event ziehen für Blende/Überblendung.",
   "Arraste para a timeline": "In die Timeline ziehen",
   "Arraste para posicionar a origem na sala (frente no topo)": "Ziehen zum Positionieren im Raum (vorne oben)",
+  "Arraste para soltar a janela ou acoplá-la na janela do Neoveg": "Ziehen, um das Fenster zu lösen oder im Neoveg-Fenster anzudocken",
   "Arraste para um evento ou trilha de vídeo": "Auf Video-Event oder -Spur ziehen",
   "Arraste um efeito até um evento ou trilha, ou use os botões para aplicar à seleção / trilha selecionada / master.": "Effekt auf Event oder Spur ziehen oder über Schaltflächen auf Auswahl / Spur / Master anwenden.",
   "Arraste uma mídia para a timeline, ou dê um duplo clique para adicionar no cursor.": "Medium in Timeline ziehen oder doppelklicken zum Einfügen am Cursor.",
@@ -2042,4 +2043,4 @@
   "★ Favoritos": "★ Favoriten",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker am Cursor"
-}
+}

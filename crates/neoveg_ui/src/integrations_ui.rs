@@ -1145,7 +1145,8 @@ impl App {
             580.0
         };
 
-        egui::Window::new("Integrações (ArtCraft & Blender)")
+        crate::dialog_window::DialogWindow::new("Integrações (ArtCraft & Blender)")
+            .id(egui::Id::new("integrations_win"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
