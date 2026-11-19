@@ -490,6 +490,10 @@ pub struct Preferences {
     /// Botões visíveis nos cabeçalhos de faixa (botão Mais).
     #[serde(default)]
     pub track_header: TrackHeaderPrefs,
+    /// Botões ocultos na barra do Trimmer (*Editar conjunto de botões
+    /// visíveis*), pelo identificador de cada botão.
+    #[serde(default)]
+    pub trimmer_hidden_buttons: Vec<String>,
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
@@ -1127,6 +1131,7 @@ impl Default for Preferences {
             window_layout: None,
             edit_layout: EditLayoutPrefs::default(),
             track_header: TrackHeaderPrefs::default(),
+            trimmer_hidden_buttons: Vec::new(),
             show_splash: default_show_splash(),
             system_ui_font: default_system_ui_font(),
             allow_floating_dock: default_allow_floating_dock(),

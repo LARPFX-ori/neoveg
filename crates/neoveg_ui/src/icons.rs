@@ -107,6 +107,11 @@ pub enum Icon {
     MuteAudio,
     MuteVideo,
     ExternalMonitor,
+    MarkIn,
+    MarkOut,
+    AddFromCursor,
+    AddUpToCursor,
+    MoreDots,
     TrackFolder,
     ParentChild,
     TrackMask,
@@ -119,7 +124,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 107] = [
+    pub const ALL: [Icon; 112] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -219,6 +224,11 @@ impl Icon {
         Icon::MuteAudio,
         Icon::MuteVideo,
         Icon::ExternalMonitor,
+        Icon::MarkIn,
+        Icon::MarkOut,
+        Icon::AddFromCursor,
+        Icon::AddUpToCursor,
+        Icon::MoreDots,
         Icon::TrackFolder,
         Icon::ParentChild,
         Icon::TrackMask,
@@ -1481,6 +1491,39 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.50, 0.68, 0.50, 0.84, pal.ink, 0.08);
             c.line(0.30, 0.84, 0.70, 0.84, pal.ink, 0.08);
         }
+        Icon::MarkIn => {
+            // colchete de entrada
+            c.polyline(
+                &[(0.42, 0.14), (0.22, 0.14), (0.22, 0.86), (0.42, 0.86)],
+                pal.green,
+                0.10,
+            );
+            c.poly(&[(0.48, 0.30), (0.84, 0.50), (0.48, 0.70)], pal.ink, None);
+        }
+        Icon::MarkOut => {
+            c.polyline(
+                &[(0.58, 0.14), (0.78, 0.14), (0.78, 0.86), (0.58, 0.86)],
+                pal.red,
+                0.10,
+            );
+            c.poly(&[(0.16, 0.30), (0.52, 0.50), (0.16, 0.70)], pal.ink, None);
+        }
+        Icon::AddFromCursor => {
+            // trecho entrando na linha do tempo a partir do cursor
+            c.line(0.20, 0.10, 0.20, 0.90, pal.red, 0.08);
+            c.p.rect_filled(c.rect(0.26, 0.58, 0.90, 0.84), c.u(0.04), pal.blue);
+            c.poly(&[(0.40, 0.14), (0.66, 0.30), (0.40, 0.46)], pal.green, None);
+        }
+        Icon::AddUpToCursor => {
+            c.line(0.80, 0.10, 0.80, 0.90, pal.red, 0.08);
+            c.p.rect_filled(c.rect(0.10, 0.58, 0.74, 0.84), c.u(0.04), pal.blue);
+            c.poly(&[(0.34, 0.14), (0.60, 0.30), (0.34, 0.46)], pal.green, None);
+        }
+        Icon::MoreDots => {
+            for x in [0.22, 0.50, 0.78] {
+                c.p.circle_filled(c.pt(x, 0.52), c.u(0.09), pal.ink);
+            }
+        }
         Icon::TrackFolder => {
             c.p.rect_filled(c.rect(0.12, 0.22, 0.44, 0.34), c.u(0.04), pal.amber);
             c.p.rect_filled(
@@ -1600,6 +1643,8 @@ struct BtnOpts<'a> {
     active: bool,
     enabled: bool,
     draggable: bool,
+    /// Nome para leitores de tela quando o botão não mostra texto.
+    a11y: Option<&'a str>,
 }
 
 fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egui::Response {
@@ -1611,6 +1656,7 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
         active,
         enabled,
         draggable,
+        a11y,
     } = opts;
     let sel_fg = crate::theme::contrast_on(theme.selection_bg);
     let label_fg = if !enabled {
@@ -1640,7 +1686,7 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
     };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), sense);
     resp.widget_info(|| {
-        if let Some(lbl) = label {
+        if let Some(lbl) = label.or(a11y) {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, lbl)
         } else {
             egui::WidgetInfo::new(egui::WidgetType::Button)
@@ -1715,9 +1761,37 @@ pub fn icon_button(
             active,
             enabled,
             draggable: false,
+            a11y: None,
         },
         theme,
     )
+}
+
+/// Botão só de ícone com nome acessível (o mesmo texto da dica), para
+/// barras no estilo do VEGAS Pro em que os botões não mostram rótulo.
+pub fn icon_button_named(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    name: &str,
+    active: bool,
+    enabled: bool,
+    theme: &ThemeColors,
+) -> egui::Response {
+    draw_button(
+        ui,
+        BtnOpts {
+            icon,
+            label: None,
+            icon_size: 16.0,
+            pad: vec2(4.0, 3.0),
+            active,
+            enabled,
+            draggable: false,
+            a11y: Some(name),
+        },
+        theme,
+    )
+    .on_hover_text(name)
 }
 
 pub fn small_icon_button(
@@ -1737,6 +1811,7 @@ pub fn small_icon_button(
             active,
             enabled: ui.is_enabled(),
             draggable: false,
+            a11y: None,
         },
         theme,
     )
@@ -1759,6 +1834,7 @@ pub fn small_icon_drag_button(
             active,
             enabled: ui.is_enabled(),
             draggable: true,
+            a11y: None,
         },
         theme,
     )
