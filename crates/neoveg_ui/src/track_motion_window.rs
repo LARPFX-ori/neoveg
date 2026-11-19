@@ -1,0 +1,1066 @@
+//! Janela *Movimento da Trilha* 2D com a disposição do VEGAS Pro (manual do
+//! VEGAS Pro 21, pp. 412–413; `docs_obsidian/ui_references/
+//! referencia_visual_janelas.md`): predefinição no alto, barra de
+//! ferramentas com a composição da trilha e as travas, grade de
+//! propriedades, área de trabalho clara com o retângulo e os eixos do
+//! objeto e a linha do tempo de quadros-chave embaixo.
+//!
+//! Reaproveita as peças de `kf_window` e a geometria de `pan_crop_geom`.
+
+use crate::icons::{self, Icon};
+use crate::kf_window::{self, KfNav, KfRow, Workspace};
+use crate::pan_crop_geom::{BoxGeom, Hit};
+use crate::App;
+use eframe::egui::{self, vec2, Color32, CursorIcon, Pos2, Sense, Stroke, Vec2};
+use neoveg_common::curve::{Curve, Id, Keyframes};
+use neoveg_common::i18n::{tr, tr_args, Language};
+use neoveg_common::time::Ticks;
+use neoveg_engine::model::{BlendMode, MotionKey};
+
+/// Maior escala aceita (a mesma faixa da janela antiga, com folga).
+const MAX_SCALE: f32 = 100.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TmDrag {
+    hit: Hit,
+    start: BoxGeom,
+    start_ptr: Vec2,
+}
+
+/// Estado da janela (não vai para o projeto).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TrackMotionUi {
+    pub enable_rotation: bool,
+    pub snap: bool,
+    pub object_space: bool,
+    pub prevent_move_x: bool,
+    pub prevent_move_y: bool,
+    pub lock_aspect: bool,
+    pub about_center: bool,
+    pub prevent_scale_x: bool,
+    pub prevent_scale_y: bool,
+    pub sync_cursor: bool,
+    /// Cursor próprio da linha de quadros-chave quando não sincronizado
+    /// (tempo da timeline).
+    pub local: Ticks,
+    /// Passo do encaixe da rotação, em graus.
+    pub snap_rotation: f32,
+    /// Editando o movimento Pai/Filho do grupo em vez do da trilha.
+    pub parent_mode: bool,
+    pub preset: usize,
+    pub ws: Workspace,
+    drag: Option<TmDrag>,
+}
+
+impl Default for TrackMotionUi {
+    fn default() -> Self {
+        TrackMotionUi {
+            enable_rotation: true,
+            snap: false,
+            object_space: false,
+            prevent_move_x: false,
+            prevent_move_y: false,
+            lock_aspect: true,
+            about_center: true,
+            prevent_scale_x: false,
+            prevent_scale_y: false,
+            sync_cursor: true,
+            local: Ticks::ZERO,
+            snap_rotation: 5.0,
+            parent_mode: false,
+            preset: 0,
+            ws: Workspace {
+                grid: 10.0,
+                ..Workspace::default()
+            },
+            drag: None,
+        }
+    }
+}
+
+const PRESETS: [&str; 2] = ["(Padrão)", "Picture-in-picture"];
+
+#[derive(Clone, Debug, PartialEq)]
+enum TmAction {
+    Restore,
+    Center,
+    MatchOutput,
+    Preset(usize),
+    Nav(KfNav),
+    MoveKey(usize, Ticks),
+    DeleteKey(usize),
+    SetCurve(usize, Curve),
+    Blend(BlendMode),
+}
+
+fn finite_or(v: f32, d: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        d
+    }
+}
+
+/// Retângulo da camada no quadro (pixels), a partir do quadro-chave.
+pub(crate) fn motion_to_geom(k: &MotionKey, frame: Vec2) -> BoxGeom {
+    let sx = finite_or(k.scale_x, 1.0).clamp(0.001, MAX_SCALE);
+    let sy = finite_or(k.scale_y, 1.0).clamp(0.001, MAX_SCALE);
+    BoxGeom {
+        center: frame * 0.5 + vec2(finite_or(k.x, 0.0) * frame.x, finite_or(k.y, 0.0) * frame.y),
+        half: vec2(frame.x * sx * 0.5, frame.y * sy * 0.5),
+        rot_deg: finite_or(k.rot, 0.0),
+    }
+}
+
+/// Quadro-chave a partir do retângulo da camada.
+pub(crate) fn geom_to_motion(g: &BoxGeom, frame: Vec2) -> MotionKey {
+    let fw = frame.x.max(1.0);
+    let fh = frame.y.max(1.0);
+    MotionKey {
+        x: finite_or((g.center.x - fw * 0.5) / fw, 0.0),
+        y: finite_or((g.center.y - fh * 0.5) / fh, 0.0),
+        scale_x: finite_or(g.half.x * 2.0 / fw, 1.0).clamp(0.001, MAX_SCALE),
+        scale_y: finite_or(g.half.y * 2.0 / fh, 1.0).clamp(0.001, MAX_SCALE),
+        rot: finite_or(g.rot_deg, 0.0),
+    }
+}
+
+/// Desloca o centro respeitando as travas de movimento, no espaço do
+/// objeto (eixos girados) ou no da câmera, e o encaixe na grade.
+pub(crate) fn constrained_move(g: &BoxGeom, delta: Vec2, st: &TrackMotionUi) -> BoxGeom {
+    let d = vec2(finite_or(delta.x, 0.0), finite_or(delta.y, 0.0));
+    let (sn, cs) = g.rot_deg.to_radians().sin_cos();
+    // no espaço do objeto as travas valem nos eixos do objeto
+    let mut l = if st.object_space {
+        vec2(d.x * cs + d.y * sn, -d.x * sn + d.y * cs)
+    } else {
+        d
+    };
+    if st.prevent_move_x {
+        l.x = 0.0;
+    }
+    if st.prevent_move_y {
+        l.y = 0.0;
+    }
+    let d = if st.object_space {
+        vec2(l.x * cs - l.y * sn, l.x * sn + l.y * cs)
+    } else {
+        l
+    };
+    let mut c = g.center + d;
+    if st.snap && st.ws.grid.is_finite() && st.ws.grid >= 1.0 {
+        let gs = st.ws.grid;
+        if !st.prevent_move_x {
+            c.x = (c.x / gs).round() * gs;
+        }
+        if !st.prevent_move_y {
+            c.y = (c.y / gs).round() * gs;
+        }
+    }
+    BoxGeom { center: c, ..*g }
+}
+
+/// Redimensiona pela alça `i` respeitando as travas de escala.
+pub(crate) fn constrained_resize(g: &BoxGeom, i: usize, p: Vec2, st: &TrackMotionUi) -> BoxGeom {
+    let mut r = g.resize(i, p, st.lock_aspect, st.about_center);
+    // eixo travado: volta ao tamanho original e o centro não anda nele
+    let mut cl = g.to_local(r.center);
+    if st.prevent_scale_x {
+        r.half.x = g.half.x;
+        cl.x = 0.0;
+    }
+    if st.prevent_scale_y {
+        r.half.y = g.half.y;
+        cl.y = 0.0;
+    }
+    r.center = g.to_frame(cl);
+    r
+}
+
+/// Gira com o encaixe de rotação, quando ligado.
+pub(crate) fn constrained_rotate(g: &BoxGeom, from: Vec2, to: Vec2, st: &TrackMotionUi) -> BoxGeom {
+    let mut r = g.rotate(from, to);
+    if st.snap && st.snap_rotation.is_finite() && st.snap_rotation >= 0.1 {
+        r.rot_deg = (r.rot_deg / st.snap_rotation).round() * st.snap_rotation;
+    }
+    r
+}
+
+impl App {
+    pub(crate) fn track_motion_window(&mut self, ctx: &egui::Context) {
+        let Some(tid) = self.dlg.track_motion else {
+            return;
+        };
+        let Some(ti) = self.project.tracks.iter().position(|t| t.id == tid) else {
+            self.dlg.track_motion = None;
+            return;
+        };
+        let s = self.project.settings.clone();
+        let frame = vec2(s.width.max(1) as f32, s.height.max(1) as f32);
+        let tol = s.frame_dur().div_i64(2);
+        let mut st = self.dlg.tm.clone();
+        let has_children = self.project.has_track_children(tid);
+        if !has_children {
+            st.parent_mode = false;
+        }
+        if st.sync_cursor {
+            st.local = self.cursor;
+        }
+        let t = st.local.max(Ticks::ZERO);
+        let track = &self.project.tracks[ti];
+        let motion = if st.parent_mode {
+            track.parent_motion.clone()
+        } else {
+            track.motion.clone()
+        };
+        let blend = track.blend;
+        let name = track.name.clone();
+        let cur = motion.eval(t);
+        let length = self
+            .project
+            .duration()
+            .max(t)
+            .max(motion.keys.iter().map(|k| k.t).max().unwrap_or(Ticks::ZERO))
+            .max(Ticks::from_secs_i64(10));
+        let key_idx = motion
+            .keys
+            .iter()
+            .rposition(|k| k.t <= t + tol)
+            .unwrap_or(0);
+        let lang = self.lang();
+        let theme = self.theme.clone();
+        let mut open = true;
+        let mut new_key: Option<MotionKey> = None;
+        let mut actions: Vec<TmAction> = Vec::new();
+        let mut seek: Option<Ticks> = None;
+        egui::Window::new(tr_args(
+            lang,
+            "Movimento da trilha — {name}",
+            &[("name", &name)],
+        ))
+        .id(egui::Id::new("track_motion_win"))
+        .open(&mut open)
+        .default_size([1080.0, 700.0])
+        .min_size([640.0, 420.0])
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(tr(lang, "Predefinição:"));
+                let sel = PRESETS.get(st.preset).copied().unwrap_or(PRESETS[0]);
+                egui::ComboBox::from_id_salt("tm_preset")
+                    .width(ui.available_width() - 8.0)
+                    .selected_text(tr(lang, sel))
+                    .show_ui(ui, |ui| {
+                        for (i, p) in PRESETS.iter().enumerate() {
+                            if ui.selectable_label(st.preset == i, tr(lang, p)).clicked() {
+                                st.preset = i;
+                                actions.push(TmAction::Preset(i));
+                            }
+                        }
+                    });
+            });
+            self.tm_toolbar(ui, &mut st, blend, has_children, &mut actions, lang);
+            ui.separator();
+            let strip_h = 150.0;
+            let top_h = (ui.available_height() - strip_h).max(200.0);
+            let top_w = ui.available_width();
+            ui.allocate_ui(vec2(top_w, top_h), |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui(vec2(230.0, top_h), |ui| {
+                        ui.set_width(230.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("tm_props")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if let Some(k) = self.tm_properties(
+                                    ui,
+                                    &motion,
+                                    &cur,
+                                    key_idx,
+                                    frame,
+                                    &mut st,
+                                    &mut actions,
+                                    lang,
+                                ) {
+                                    new_key = Some(k);
+                                }
+                            });
+                    });
+                    let canvas = vec2(ui.available_width(), top_h);
+                    if let Some(k) =
+                        self.tm_workspace(ui, canvas, &cur, frame, &mut st, &mut actions, lang)
+                    {
+                        new_key = Some(k);
+                    }
+                });
+            });
+            ui.add_space(2.0);
+            let rows = [KfRow {
+                label: tr(lang, "Posição"),
+                keys: motion.keys.iter().map(|k| (k.t, k.curve)).collect(),
+            }];
+            let mut sync = st.sync_cursor;
+            let fmt = |x: Ticks| self.fmt_time(x);
+            let out = kf_window::keyframe_strip(
+                ui,
+                egui::Id::new("tm_strip"),
+                &rows,
+                length,
+                t,
+                &mut sync,
+                &fmt,
+                &theme,
+                lang,
+            );
+            if sync != st.sync_cursor {
+                st.sync_cursor = sync;
+                if sync {
+                    seek = Some(t);
+                }
+            }
+            if let Some(x) = out.seek {
+                seek = Some(x);
+            }
+            if let Some(n) = out.nav {
+                actions.push(TmAction::Nav(n));
+            }
+            if let Some((_, ki, x)) = out.move_key {
+                actions.push(TmAction::MoveKey(ki, x));
+            }
+            if let Some((_, ki, c)) = out.set_curve {
+                actions.push(TmAction::SetCurve(ki, c));
+            }
+            if let Some((_, ki)) = out.delete_key {
+                actions.push(TmAction::DeleteKey(ki));
+            }
+        });
+        let times: Vec<Ticks> = motion.keys.iter().map(|k| k.t).collect();
+        for a in &actions {
+            if let TmAction::Nav(n) = a {
+                if let Some(x) = kf_window::nav_target(&times, t, *n) {
+                    seek = Some(x);
+                }
+            }
+        }
+        if let Some(x) = seek {
+            let x = s.fps.quantize(x.max(Ticks::ZERO));
+            st.local = x;
+            if st.sync_cursor {
+                self.set_cursor(x);
+            }
+        }
+        let parent = st.parent_mode;
+        let changed =
+            self.apply_track_motion(tid, parent, t, tol, frame, length, new_key, &actions);
+        self.dlg.tm = st;
+        if changed {
+            self.dialog_change();
+        }
+        if !open {
+            self.dlg.track_motion = None;
+            self.dlg.tm.drag = None;
+        }
+    }
+
+    /// Barra de ferramentas (manual do VEGAS Pro 21, pp. 412–413).
+    fn tm_toolbar(
+        &self,
+        ui: &mut egui::Ui,
+        st: &mut TrackMotionUi,
+        blend: BlendMode,
+        has_children: bool,
+        actions: &mut Vec<TmAction>,
+        lang: Language,
+    ) {
+        let th = &self.theme;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            egui::ComboBox::from_id_salt("tm_blend")
+                .selected_text(blend.name_in(lang))
+                .show_ui(ui, |ui| {
+                    for b in BlendMode::ALL {
+                        if ui.selectable_label(b == blend, b.name_in(lang)).clicked() {
+                            actions.push(TmAction::Blend(b));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(tr(lang, "Modo de composição da trilha"));
+            ui.separator();
+            let toggle = |ui: &mut egui::Ui, icon: Icon, on: &mut bool, tip: &str| {
+                if icons::icon_button(ui, icon, None, *on, true, th)
+                    .on_hover_text(tr(lang, tip))
+                    .clicked()
+                {
+                    *on = !*on;
+                }
+            };
+            toggle(
+                ui,
+                Icon::ResetSpin,
+                &mut st.enable_rotation,
+                "Habilitar rotação",
+            );
+            toggle(ui, Icon::MagnetSnap, &mut st.snap, "Encaixar na grade");
+            toggle(
+                ui,
+                Icon::ObjectSpace,
+                &mut st.object_space,
+                "Editar no espaço do objeto",
+            );
+            ui.separator();
+            toggle(
+                ui,
+                Icon::MoveYOnly,
+                &mut st.prevent_move_x,
+                "Impedir movimento (X)",
+            );
+            toggle(
+                ui,
+                Icon::MoveXOnly,
+                &mut st.prevent_move_y,
+                "Impedir movimento (Y)",
+            );
+            ui.separator();
+            toggle(
+                ui,
+                Icon::LockClosed,
+                &mut st.lock_aspect,
+                "Travar proporção",
+            );
+            toggle(
+                ui,
+                Icon::ScaleAboutCenter,
+                &mut st.about_center,
+                "Dimensionar em torno do centro",
+            );
+            toggle(
+                ui,
+                Icon::PreventScaleX,
+                &mut st.prevent_scale_x,
+                "Impedir dimensionar (X)",
+            );
+            toggle(
+                ui,
+                Icon::PreventScaleY,
+                &mut st.prevent_scale_y,
+                "Impedir dimensionar (Y)",
+            );
+            if has_children {
+                ui.separator();
+                ui.selectable_value(&mut st.parent_mode, false, tr(lang, "Movimento da trilha"));
+                ui.selectable_value(
+                    &mut st.parent_mode,
+                    true,
+                    tr(lang, "Movimento Pai/Filho (Grupo)"),
+                );
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tm_properties(
+        &self,
+        ui: &mut egui::Ui,
+        motion: &Keyframes<MotionKey>,
+        cur: &MotionKey,
+        key_idx: usize,
+        frame: Vec2,
+        st: &mut TrackMotionUi,
+        actions: &mut Vec<TmAction>,
+        lang: Language,
+    ) -> Option<MotionKey> {
+        let th = &self.theme;
+        let g = motion_to_geom(cur, frame);
+        let mut out = None;
+        let sec = |name: &str| egui::Id::new(("tm_sec", name.to_string()));
+        let big = frame.x.max(frame.y) * 50.0;
+        kf_window::prop_section(ui, sec("pos"), tr(lang, "Posição"), true, th, |ui| {
+            let mut x = g.center.x - frame.x * 0.5;
+            let mut y = g.center.y - frame.y * 0.5;
+            let (mut w, mut h) = (g.half.x * 2.0, g.half.y * 2.0);
+            let mut ng = g;
+            if kf_window::prop_num(ui, "X:", &mut x, 1.0, 2, -big..=big) {
+                ng.center.x = x + frame.x * 0.5;
+                out = Some(geom_to_motion(&ng, frame));
+            }
+            if kf_window::prop_num(ui, "Y:", &mut y, 1.0, 2, -big..=big) {
+                ng.center.y = y + frame.y * 0.5;
+                out = Some(geom_to_motion(&ng, frame));
+            }
+            if kf_window::prop_num(ui, tr(lang, "Largura:"), &mut w, 1.0, 2, 1.0..=big) {
+                let k = w / (g.half.x * 2.0).max(1e-3);
+                ng.half = if st.lock_aspect {
+                    g.half * k
+                } else {
+                    vec2(w * 0.5, g.half.y)
+                };
+                out = Some(geom_to_motion(&ng, frame));
+            }
+            if kf_window::prop_num(ui, tr(lang, "Altura:"), &mut h, 1.0, 2, 1.0..=big) {
+                let k = h / (g.half.y * 2.0).max(1e-3);
+                ng.half = if st.lock_aspect {
+                    g.half * k
+                } else {
+                    vec2(g.half.x, h * 0.5)
+                };
+                out = Some(geom_to_motion(&ng, frame));
+            }
+        });
+        kf_window::prop_section(ui, sec("rot"), tr(lang, "Rotação"), true, th, |ui| {
+            let mut a = cur.rot;
+            if kf_window::prop_num(ui, tr(lang, "Ângulo:"), &mut a, 0.5, 1, -3600.0..=3600.0) {
+                out = Some(MotionKey {
+                    rot: a,
+                    ..out.clone().unwrap_or_else(|| cur.clone())
+                });
+            }
+        });
+        kf_window::prop_section(ui, sec("kf"), tr(lang, "Quadro-chave"), true, th, |ui| {
+            kf_window::prop_row(ui, tr(lang, "Tipo:"), |ui| {
+                let current = motion.keys.get(key_idx).map(|k| k.curve);
+                let mut c = current.unwrap_or_default();
+                egui::ComboBox::from_id_salt("tm_curve")
+                    .selected_text(c.name_in(lang))
+                    .show_ui(ui, |ui| {
+                        for k in Curve::ALL.iter().take(6) {
+                            ui.selectable_value(&mut c, *k, k.name_in(lang));
+                        }
+                    });
+                if current.is_some() && Some(c) != current {
+                    actions.push(TmAction::SetCurve(key_idx, c));
+                }
+            });
+        });
+        kf_window::prop_section(
+            ui,
+            sec("ws"),
+            tr(lang, "Área de trabalho"),
+            true,
+            th,
+            |ui| {
+                let mut z = st.ws.zoom_pct;
+                if kf_window::prop_num(
+                    ui,
+                    tr(lang, "Zoom (%):"),
+                    &mut z,
+                    0.5,
+                    2,
+                    kf_window::WS_MIN_ZOOM..=kf_window::WS_MAX_ZOOM,
+                ) {
+                    st.ws.zoom_pct = z;
+                }
+                kf_window::prop_num(
+                    ui,
+                    tr(lang, "Deslocamento X:"),
+                    &mut st.ws.offset.x,
+                    1.0,
+                    2,
+                    -1e5..=1e5,
+                );
+                kf_window::prop_num(
+                    ui,
+                    tr(lang, "Deslocamento Y:"),
+                    &mut st.ws.offset.y,
+                    1.0,
+                    2,
+                    -1e5..=1e5,
+                );
+            },
+        );
+        kf_window::prop_section(ui, sec("snap"), tr(lang, "Encaixe"), true, th, |ui| {
+            kf_window::prop_num(
+                ui,
+                tr(lang, "Espaçamento da grade:"),
+                &mut st.ws.grid,
+                1.0,
+                0,
+                1.0..=1024.0,
+            );
+            kf_window::prop_num(
+                ui,
+                tr(lang, "Rotação:"),
+                &mut st.snap_rotation,
+                0.5,
+                0,
+                0.1..=180.0,
+            );
+        });
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tm_workspace(
+        &self,
+        ui: &mut egui::Ui,
+        size: Vec2,
+        cur: &MotionKey,
+        frame: Vec2,
+        st: &mut TrackMotionUi,
+        actions: &mut Vec<TmAction>,
+        lang: Language,
+    ) -> Option<MotionKey> {
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        if !st.ws.fitted {
+            st.ws.fit(rect, frame);
+        }
+        let ws = st.ws;
+        // a grade de pontos do VEGAS Pro aqui segue o espaçamento de encaixe
+        ws.paint_background(&painter, rect, frame, &self.theme);
+        let sc = |p: Vec2| ws.to_screen(rect, frame, p);
+        let ink = if self.theme.high_contrast {
+            self.theme.text_primary
+        } else {
+            Color32::from_gray(40)
+        };
+        let thin = Stroke::new(1.0_f32, ink);
+        // quadro de saída
+        painter.rect_stroke(
+            egui::Rect::from_min_max(sc(Vec2::ZERO), sc(frame)),
+            0.0,
+            Stroke::new(1.0_f32, Color32::from_gray(90)),
+            egui::StrokeKind::Middle,
+        );
+        // camada: retângulo, círculo e eixos X/Y do objeto
+        let g = motion_to_geom(cur, frame);
+        let corners: Vec<Pos2> = g.corners().iter().map(|p| sc(*p)).collect();
+        painter.add(egui::Shape::closed_line(corners, thin));
+        let r = (g.half.x.min(g.half.y) * 0.5).max(1.0);
+        let ring: Vec<Pos2> = (0..72)
+            .map(|i| {
+                let a = i as f32 / 72.0 * std::f32::consts::TAU;
+                sc(g.to_frame(vec2(a.cos() * r, a.sin() * r)))
+            })
+            .collect();
+        painter.add(egui::Shape::closed_line(ring, thin));
+        let c = sc(g.center);
+        painter.circle_stroke(c, 5.0, thin);
+        let ax = sc(g.to_frame(vec2(r, 0.0)));
+        let ay = sc(g.to_frame(vec2(0.0, -r)));
+        painter.line_segment([c, ax], thin);
+        painter.line_segment([c, ay], thin);
+        let font = egui::FontId::proportional(10.0);
+        let label_col = Color32::from_rgb(170, 110, 90);
+        painter.text(
+            ax + vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "X",
+            font.clone(),
+            label_col,
+        );
+        painter.text(
+            ay - vec2(0.0, 4.0),
+            egui::Align2::CENTER_BOTTOM,
+            "Y",
+            font,
+            label_col,
+        );
+
+        // interação
+        let tol = ws.frame_len(6.0);
+        if let Some(p) = resp.hover_pos().map(|p| ws.to_frame(rect, frame, p)) {
+            let hit = st.drag.map(|d| d.hit).unwrap_or_else(|| g.hit(p, tol));
+            let icon = match hit {
+                Hit::Inside => CursorIcon::Move,
+                Hit::Handle(1 | 5) => CursorIcon::ResizeVertical,
+                Hit::Handle(3 | 7) => CursorIcon::ResizeHorizontal,
+                Hit::Handle(0 | 4) => CursorIcon::ResizeNwSe,
+                Hit::Handle(_) => CursorIcon::ResizeNeSw,
+                Hit::Rotate if st.enable_rotation => CursorIcon::Alias,
+                Hit::Rotate => CursorIcon::Default,
+            };
+            ui.ctx().set_cursor_icon(icon);
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll != 0.0 {
+                if let Some(hp) = resp.hover_pos() {
+                    st.ws
+                        .zoom_at(rect, frame, hp, (1.0 + scroll * 0.0015).clamp(0.5, 2.0));
+                }
+            }
+        }
+        if resp.dragged_by(egui::PointerButton::Middle) {
+            let d = resp.drag_delta();
+            st.ws.offset -= vec2(ws.frame_len(d.x), ws.frame_len(d.y));
+        }
+        let mut out = None;
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(p) = resp
+                .interact_pointer_pos()
+                .map(|p| ws.to_frame(rect, frame, p))
+            {
+                st.drag = Some(TmDrag {
+                    hit: g.hit(p, tol),
+                    start: g,
+                    start_ptr: p,
+                });
+            }
+        }
+        if let (Some(d), true) = (st.drag, resp.dragged_by(egui::PointerButton::Primary)) {
+            if let Some(p) = resp
+                .interact_pointer_pos()
+                .map(|p| ws.to_frame(rect, frame, p))
+            {
+                let ng = match d.hit {
+                    Hit::Inside => Some(constrained_move(&d.start, p - d.start_ptr, st)),
+                    Hit::Handle(i) => Some(constrained_resize(&d.start, i, p, st)),
+                    Hit::Rotate if st.enable_rotation => {
+                        Some(constrained_rotate(&d.start, d.start_ptr, p, st))
+                    }
+                    Hit::Rotate => None,
+                };
+                if let Some(ng) = ng {
+                    out = Some(geom_to_motion(&ng, frame));
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            st.drag = None;
+        }
+        // lupa e mão no canto, como no VEGAS Pro: ajustar a área ao quadro
+        let fit_btn =
+            egui::Rect::from_min_size(rect.right_bottom() - vec2(22.0, 22.0), vec2(18.0, 18.0));
+        let fit_resp = ui
+            .interact(fit_btn, ui.id().with("tm_fit"), Sense::click())
+            .on_hover_text(tr(lang, "Ajustar a área de trabalho ao quadro"));
+        icons::paint(ui.painter(), fit_btn, Icon::ZoomGlass, &self.theme, true);
+        if fit_resp.clicked() {
+            st.ws.fit(rect, frame);
+        }
+        resp.context_menu(|ui| {
+            for (a, label) in [
+                (TmAction::Restore, "Restaurar"),
+                (TmAction::Center, "Centralizar"),
+                (TmAction::MatchOutput, "Combinar proporção de saída"),
+            ] {
+                if ui.button(tr(lang, label)).clicked() {
+                    actions.push(a);
+                    ui.close_menu();
+                }
+            }
+        });
+        out
+    }
+
+    /// Aplica o quadro-chave editado e os comandos. Devolve `true` se o
+    /// projeto mudou.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_track_motion(
+        &mut self,
+        tid: Id,
+        parent: bool,
+        t: Ticks,
+        tol: Ticks,
+        frame: Vec2,
+        length: Ticks,
+        new_key: Option<MotionKey>,
+        actions: &[TmAction],
+    ) -> bool {
+        let navigation_only = actions.iter().all(|a| {
+            matches!(
+                a,
+                TmAction::Nav(KfNav::First | KfNav::Prev | KfNav::Next | KfNav::Last)
+            )
+        });
+        if new_key.is_none() && navigation_only {
+            return false;
+        }
+        let Some(track) = self.project.tracks.iter_mut().find(|x| x.id == tid) else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(k) = new_key {
+            let m = if parent {
+                &mut track.parent_motion
+            } else {
+                &mut track.motion
+            };
+            // como no VEGAS Pro: editar fora de um quadro-chave cria um novo
+            m.set(t, k, tol);
+            changed = true;
+        }
+        for a in actions {
+            if let TmAction::Blend(b) = a {
+                if track.blend != *b {
+                    track.blend = *b;
+                    changed = true;
+                }
+                continue;
+            }
+            let m = if parent {
+                &mut track.parent_motion
+            } else {
+                &mut track.motion
+            };
+            let cur = m.eval(t);
+            match a {
+                TmAction::Restore => m.set(t, MotionKey::default(), tol),
+                TmAction::Center => m.set(
+                    t,
+                    MotionKey {
+                        x: 0.0,
+                        y: 0.0,
+                        ..cur
+                    },
+                    tol,
+                ),
+                TmAction::MatchOutput => {
+                    let g = motion_to_geom(&cur, frame);
+                    // proporção do quadro, mantendo a largura
+                    let ng = BoxGeom {
+                        half: vec2(g.half.x, g.half.x * frame.y / frame.x.max(1.0)),
+                        ..g
+                    };
+                    m.set(t, geom_to_motion(&ng, frame), tol);
+                }
+                TmAction::Preset(0) => *m = Keyframes::default(),
+                TmAction::Preset(1) => m.set(
+                    t,
+                    MotionKey {
+                        x: 0.3,
+                        y: 0.3,
+                        scale_x: 0.33,
+                        scale_y: 0.33,
+                        rot: 0.0,
+                    },
+                    tol,
+                ),
+                TmAction::Preset(_) | TmAction::Blend(_) => continue,
+                TmAction::Nav(KfNav::Add) => m.set(t, cur, tol),
+                TmAction::Nav(KfNav::Delete) => {
+                    if m.keys.len() > 1 && m.keys.iter().any(|k| k.t.abs_diff(t) <= tol) {
+                        m.keys.retain(|k| k.t.abs_diff(t) > tol);
+                    } else {
+                        continue;
+                    }
+                }
+                TmAction::Nav(_) => continue,
+                TmAction::MoveKey(ki, nt) => {
+                    let nt = (*nt).clamp_safe(Ticks::ZERO, length);
+                    let clash = m
+                        .keys
+                        .iter()
+                        .enumerate()
+                        .any(|(j, k)| j != *ki && k.t.abs_diff(nt) <= tol);
+                    let Some(k) = m.keys.get_mut(*ki) else {
+                        continue;
+                    };
+                    if clash || k.t == nt {
+                        continue;
+                    }
+                    k.t = nt;
+                    m.keys.sort_by_key(|k| k.t);
+                }
+                TmAction::DeleteKey(ki) => {
+                    if m.keys.len() > 1 && *ki < m.keys.len() {
+                        m.keys.remove(*ki);
+                    } else {
+                        continue;
+                    }
+                }
+                TmAction::SetCurve(ki, c) => {
+                    let Some(k) = m.keys.get_mut(*ki) else {
+                        continue;
+                    };
+                    k.curve = *c;
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const F: Vec2 = Vec2::new(1920.0, 1080.0);
+
+    #[test]
+    fn conversao_ida_e_volta_e_valores_hostis() {
+        let k = MotionKey {
+            x: 0.1,
+            y: -0.2,
+            scale_x: 0.5,
+            scale_y: 0.25,
+            rot: 30.0,
+        };
+        let g = motion_to_geom(&k, F);
+        assert!((g.center - vec2(960.0 + 192.0, 540.0 - 216.0)).length() < 0.01);
+        assert!((g.half - vec2(480.0, 135.0)).length() < 0.01);
+        let back = geom_to_motion(&g, F);
+        assert!((back.x - k.x).abs() < 1e-5 && (back.scale_y - k.scale_y).abs() < 1e-5);
+        let hostil = MotionKey {
+            x: f32::NAN,
+            scale_x: f32::INFINITY,
+            rot: f32::NAN,
+            ..MotionKey::default()
+        };
+        let g = motion_to_geom(&hostil, F);
+        let back = geom_to_motion(&g, F);
+        assert!(back.x.is_finite() && back.scale_x.is_finite() && back.rot.is_finite());
+    }
+
+    #[test]
+    fn travas_de_movimento_na_camera_e_no_objeto() {
+        let g = motion_to_geom(&MotionKey::default(), F);
+        let st = TrackMotionUi {
+            prevent_move_y: true,
+            ..TrackMotionUi::default()
+        };
+        let m = constrained_move(&g, vec2(10.0, 50.0), &st);
+        assert!((m.center - vec2(970.0, 540.0)).length() < 0.01);
+        // girado 90° no espaço do objeto, travar Y do objeto trava X da tela
+        let mut gr = g;
+        gr.rot_deg = 90.0;
+        let st = TrackMotionUi {
+            prevent_move_y: true,
+            object_space: true,
+            ..TrackMotionUi::default()
+        };
+        let m = constrained_move(&gr, vec2(10.0, 50.0), &st);
+        assert!(
+            (m.center - vec2(960.0, 590.0)).length() < 0.01,
+            "{:?}",
+            m.center
+        );
+        let m = constrained_move(&g, vec2(f32::NAN, 1.0), &TrackMotionUi::default());
+        assert!(m.center.x.is_finite());
+    }
+
+    #[test]
+    fn travas_de_escala_e_encaixe_da_rotacao() {
+        let g = motion_to_geom(&MotionKey::default(), F);
+        let st = TrackMotionUi {
+            prevent_scale_y: true,
+            lock_aspect: false,
+            ..TrackMotionUi::default()
+        };
+        let r = constrained_resize(&g, 4, vec2(960.0 + 100.0, 540.0 + 100.0), &st);
+        assert!(
+            (r.half - vec2(100.0, 540.0)).length() < 0.01,
+            "{:?}",
+            r.half
+        );
+        let st = TrackMotionUi {
+            snap: true,
+            snap_rotation: 15.0,
+            ..TrackMotionUi::default()
+        };
+        // de 0° para ~20°: encaixa em 15°
+        let from = g.center + vec2(100.0, 0.0);
+        let to = g.center + vec2(100.0, 36.4);
+        let r = constrained_rotate(&g, from, to, &st);
+        assert!((r.rot_deg - 15.0).abs() < 1e-3, "{}", r.rot_deg);
+    }
+
+    fn app_with_track() -> (App, Id) {
+        let ctx = egui::Context::default();
+        let app = {
+            let _prefs = crate::tests::PREFS_LOCK
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            App::with_context(&ctx, None)
+        };
+        let tid = app
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.kind == neoveg_engine::model::TrackKind::Video)
+            .map(|t| t.id)
+            .expect("trilha de vídeo");
+        (app, tid)
+    }
+
+    fn motion(app: &App, tid: Id) -> Keyframes<MotionKey> {
+        app.project
+            .tracks
+            .iter()
+            .find(|t| t.id == tid)
+            .map(|t| t.motion.clone())
+            .expect("trilha")
+    }
+
+    #[test]
+    fn comandos_e_quadros_chave() {
+        let (mut app, tid) = app_with_track();
+        let tol = Ticks::from_millis_i64(10);
+        let len = Ticks::from_secs_i64(10);
+        let t2 = Ticks::from_secs_i64(2);
+        let k = MotionKey {
+            x: 0.25,
+            ..MotionKey::default()
+        };
+        assert!(app.apply_track_motion(tid, false, t2, tol, F, len, Some(k), &[]));
+        assert_eq!(
+            motion(&app, tid).keys.len(),
+            2,
+            "editar fora cria quadro-chave"
+        );
+        app.apply_track_motion(tid, false, t2, tol, F, len, None, &[TmAction::Center]);
+        assert_eq!(motion(&app, tid).eval(t2).x, 0.0);
+        app.apply_track_motion(
+            tid,
+            false,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::MoveKey(1, len.saturating_mul(2))],
+        );
+        assert_eq!(motion(&app, tid).keys[1].t, len);
+        assert!(!app.apply_track_motion(
+            tid,
+            false,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::SetCurve(9, Curve::Hold)]
+        ));
+        app.apply_track_motion(tid, false, t2, tol, F, len, None, &[TmAction::DeleteKey(1)]);
+        assert_eq!(motion(&app, tid).keys.len(), 1);
+        assert!(!app.apply_track_motion(
+            tid,
+            false,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::DeleteKey(0)]
+        ));
+        app.apply_track_motion(
+            tid,
+            false,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Blend(BlendMode::Multiply)],
+        );
+        let blend = app
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.id == tid)
+            .map(|t| t.blend);
+        assert_eq!(blend, Some(BlendMode::Multiply));
+        assert!(!app.apply_track_motion(
+            tid,
+            false,
+            t2,
+            tol,
+            F,
+            len,
+            None,
+            &[TmAction::Nav(KfNav::Next)]
+        ));
+    }
+}

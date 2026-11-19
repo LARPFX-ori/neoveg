@@ -126,11 +126,14 @@ pub enum Icon {
     MoveFree,
     MoveXOnly,
     MoveYOnly,
+    ObjectSpace,
+    PreventScaleX,
+    PreventScaleY,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 118] = [
+    pub const ALL: [Icon; 121] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -249,6 +252,9 @@ impl Icon {
         Icon::MoveFree,
         Icon::MoveXOnly,
         Icon::MoveYOnly,
+        Icon::ObjectSpace,
+        Icon::PreventScaleX,
+        Icon::PreventScaleY,
     ];
 }
 
@@ -1664,6 +1670,38 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.poly(&[(0.50, 0.06), (0.34, 0.26), (0.66, 0.26)], pal.blue, None);
             c.poly(&[(0.50, 0.94), (0.34, 0.74), (0.66, 0.74)], pal.blue, None);
             c.line(0.24, 0.50, 0.76, 0.50, pal.muted, 0.05);
+        }
+        Icon::ObjectSpace => {
+            // eixos girados do objeto sobre os eixos da câmera
+            c.line(0.14, 0.86, 0.86, 0.86, pal.muted, 0.06);
+            c.line(0.14, 0.86, 0.14, 0.14, pal.muted, 0.06);
+            c.line(0.30, 0.78, 0.84, 0.40, pal.blue, 0.09);
+            c.line(0.30, 0.78, 0.32, 0.22, pal.green, 0.09);
+            c.p.circle_filled(c.pt(0.30, 0.78), c.u(0.08), pal.amber);
+        }
+        Icon::PreventScaleX => {
+            c.p.rect_stroke(
+                c.rect(0.30, 0.20, 0.70, 0.80),
+                0.0,
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.06, 0.50, 0.26, 0.50, pal.red, 0.09);
+            c.line(0.74, 0.50, 0.94, 0.50, pal.red, 0.09);
+            c.line(0.10, 0.36, 0.10, 0.64, pal.red, 0.07);
+            c.line(0.90, 0.36, 0.90, 0.64, pal.red, 0.07);
+        }
+        Icon::PreventScaleY => {
+            c.p.rect_stroke(
+                c.rect(0.20, 0.30, 0.80, 0.70),
+                0.0,
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.06, 0.50, 0.26, pal.red, 0.09);
+            c.line(0.50, 0.74, 0.50, 0.94, pal.red, 0.09);
+            c.line(0.36, 0.10, 0.64, 0.10, pal.red, 0.07);
+            c.line(0.36, 0.90, 0.64, 0.90, pal.red, 0.07);
         }
         Icon::TimelineGrid => {
             c.p.rect_stroke(
