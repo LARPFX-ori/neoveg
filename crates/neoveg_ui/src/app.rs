@@ -481,7 +481,8 @@ impl App {
         );
         let (loader_tx, loader_rx) = channel();
         let explorer_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let recovery_offer = recovery::find_existing_recovery().is_some()
+        let recovery_offer = (recovery::find_existing_recovery().is_some()
+            || recovery::nested_recovery_path().exists())
             && !neoveg_engine::session_marker::other_instance_active();
         let splash = crate::splash::SplashState::startup(prefs.show_splash && !recovery_offer);
         let want_welcome = prefs.show_welcome && open.is_none() && !recovery_offer;
@@ -778,7 +779,7 @@ impl App {
     fn autosave(&mut self) {
         if self.recovery_offer
             || !self.prefs.autosave_enabled
-            || !self.main_session().dirty
+            || !self.any_doc_dirty()
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
             return;
@@ -794,6 +795,10 @@ impl App {
                 "Falha no salvamento automático: {err}",
                 &[("err", &err_s)],
             ));
+        }
+        let nested_dirty = self.collect_dirty_nested_recovery();
+        if let Err(e) = recovery::write_nested_recovery(&nested_dirty) {
+            util::log_warn(&format!("falha no salvamento automático de aninhados: {e}"));
         }
     }
 
@@ -838,6 +843,16 @@ impl App {
                 self.open_project_path(p);
                 self.path = None;
                 self.dirty = true;
+            }
+            let nested_n = self.restore_nested_recovery_tabs();
+            if nested_n > 0 {
+                let n_str = nested_n.to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Projeto recuperado com {n} aba(s) de projeto aninhado. Salve-os antes de fechar.",
+                    &[("n", &n_str)],
+                ));
+            } else {
                 self.set_status(tr(lang, "Projeto recuperado. Salve-o com Salvar como..."));
             }
         } else {
@@ -923,6 +938,7 @@ impl App {
         }
         self.session.project.sort_events();
         self.session.refresh_snapshot();
+        self.sync_nested_recovery_snapshots();
         let audio_map = self.media.audio_map();
         let mut s = util::lock(&self.audio.shared);
         s.project = self.session.snapshot.clone();
@@ -1503,6 +1519,100 @@ impl App {
         }
     }
 
+    pub fn import_nvegseq_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Sequência Neoveg", &["nvegseq"])
+            .pick_file()
+        {
+            self.import_nvegseq_path(&p);
+        }
+    }
+
+    pub fn import_nvegseq_path(&mut self, path: &std::path::Path) {
+        let lang = self.lang();
+        self.checkpoint();
+        let prev_media: std::collections::HashSet<Id> =
+            self.session.project.media.iter().map(|m| m.id).collect();
+        match neoveg_engine::package::import_standalone_sequence_file(
+            &mut self.session.project,
+            path,
+        ) {
+            Ok(seq_id) => {
+                let name = self
+                    .session
+                    .project
+                    .sequence_name(seq_id)
+                    .unwrap_or_else(|| "Sequência".to_string());
+                let added: Vec<_> = self
+                    .session
+                    .project
+                    .media
+                    .iter()
+                    .filter(|m| !prev_media.contains(&m.id))
+                    .cloned()
+                    .collect();
+                for m in added {
+                    if !matches!(m.source, MediaSource::Sequence { .. }) {
+                        self.spawn_media_load(m);
+                    }
+                }
+                self.switch_sequence_app(seq_id);
+                self.set_status(tr_args(
+                    lang,
+                    "Sequência importada: {name}",
+                    &[("name", &name)],
+                ));
+            }
+            Err(e) => {
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao importar sequência (.nvegseq): {err}",
+                    &[("err", &e)],
+                ));
+            }
+        }
+    }
+
+    pub fn export_nvegseq_dialog(&mut self) {
+        let lang = self.lang();
+        let active_name = self
+            .session
+            .project
+            .active_sequence_name
+            .as_deref()
+            .unwrap_or(neoveg_engine::model::DEFAULT_SEQUENCE_NAME);
+        let default_name = neoveg_engine::model::sequence_file_label(active_name);
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Sequência Neoveg", &["nvegseq"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.session.project.sort_events();
+        match neoveg_engine::package::export_standalone_sequence_file(
+            &self.session.project,
+            None,
+            &p,
+        ) {
+            Ok(()) => {
+                let p_s = p.display().to_string();
+                self.set_status(tr_args(
+                    lang,
+                    "Sequência exportada: {path}",
+                    &[("path", &p_s)],
+                ));
+            }
+            Err(e) => {
+                self.set_status(tr_args(
+                    lang,
+                    "Erro ao exportar sequência (.nvegseq): {err}",
+                    &[("err", &e)],
+                ));
+            }
+        }
+    }
+
     pub fn import_edl_path(&mut self, path: &std::path::Path) {
         let fps = self.session.project.settings.fps;
         let res = neoveg_engine::edl::import_edl_file(path, fps);
@@ -1720,7 +1830,10 @@ impl App {
             Ok(()) => {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
-                recovery::clear_recovery();
+                if !self.any_doc_dirty() {
+                    recovery::clear_recovery();
+                    self.sync_nested_recovery_snapshots();
+                }
                 self.prefs.record_recent_project(path);
                 let _ = self.prefs.save();
                 let p_s = path.display().to_string();
@@ -2649,6 +2762,8 @@ impl App {
             UiAction::ExportFcp7Dialog => self.export_fcp7_dialog(),
             UiAction::ImportAafDialog => self.import_aaf_dialog(),
             UiAction::ExportAafDialog => self.export_aaf_dialog(),
+            UiAction::ImportNvegseqDialog => self.import_nvegseq_dialog(),
+            UiAction::ExportNvegseqDialog => self.export_nvegseq_dialog(),
             UiAction::OpenRenderDialog => self
                 .dlg
                 .open_render(&self.session.project, self.session.path.as_deref()),
@@ -3217,6 +3332,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.import_media");
                 self.cmd_menu_btn(ui, "file.import_sequence");
+                self.cmd_menu_btn(ui, "sequence.import_nvegseq");
+                self.cmd_menu_btn(ui, "sequence.export_nvegseq");
                 self.cmd_menu_btn(ui, "file.convert_media");
                 self.cmd_menu_btn(ui, "file.import_otio");
                 self.cmd_menu_btn(ui, "file.export_otio");
@@ -4631,6 +4748,21 @@ impl App {
             return;
         }
         let t = self.cursor;
+        let nvegseqs: Vec<PathBuf> = files
+            .iter()
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("nvegseq"))
+            })
+            .cloned()
+            .collect();
+        if !nvegseqs.is_empty() {
+            for p in nvegseqs {
+                self.import_nvegseq_path(&p);
+            }
+            return;
+        }
         let projects: Vec<PathBuf> = files
             .iter()
             .filter(|p| {

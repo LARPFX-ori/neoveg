@@ -10,10 +10,12 @@
 //!
 //! - **Salvar** (`Ctrl+S`) grava o projeto principal e depois todo projeto
 //!   aninhado alterado.
-//! - Ao voltar para o projeto principal, os eventos dos projetos aninhados
-//!   editados são reconstruídos a partir do projeto em memória (num worker),
-//!   antes mesmo de salvar.
-//! - A recuperação automática guarda sempre o projeto principal.
+//! - Ao trocar de aba (para o projeto principal ou para um aninhado
+//!   intermediário), os eventos dos projetos aninhados editados — inclusive
+//!   netos abertos em outras abas — são reconstruídos a partir da memória
+//!   (num worker), antes mesmo de salvar.
+//! - A recuperação automática guarda o projeto principal e as abas de projetos
+//!   aninhados modificados.
 
 use crate::app::{App, LoadMsg};
 use crate::model::{Id, MediaSource, Project};
@@ -21,9 +23,13 @@ use crate::timeline::TimelineState;
 use neoveg_common::{tr, tr_args, util};
 use neoveg_engine::media::{self, MediaCache};
 use neoveg_engine::session::EditorSession;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+
+static NESTED_REBUILD_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Mais abas de documento abertas ao mesmo tempo (a principal incluída):
 /// cada uma guarda cache de mídia e desfazer próprios (§3.6).
@@ -202,9 +208,7 @@ impl App {
         s.generation = s.generation.wrapping_add(1);
         s.sent_generation = 0;
         self.sync_snapshot();
-        if i == 0 {
-            self.rebuild_edited_nested();
-        }
+        self.rebuild_edited_nested(false);
     }
 
     /// Abre o projeto `.neoveg` aninhado `path` numa aba (ou mostra a aba
@@ -378,26 +382,22 @@ impl App {
         let Some(key) = tab.key else {
             return;
         };
-        if discarded
-            || tab
-                .stash
-                .as_ref()
-                .is_some_and(|s| s.session.edit_count != tab.synced_edits)
-        {
-            // o principal volta a ler o projeto aninhado do arquivo
-            if self.active_doc == 0 {
-                let items: Vec<_> = self
-                    .project
-                    .media
-                    .iter()
-                    .filter(|m| self.media_is_nested(m.id, &key))
-                    .cloned()
-                    .collect();
-                for m in items {
-                    self.spawn_media_load(m);
-                }
+        if discarded || tab.stash.as_ref().is_some_and(|s| s.session.edit_count > 0) {
+            // o documento ativo volta a ler o projeto fechado do arquivo e
+            // remonta aninhados intermediários que o referenciavam em memória
+            let items: Vec<_> = self
+                .project
+                .media
+                .iter()
+                .filter(|m| self.media_is_nested(m.id, &key))
+                .cloned()
+                .collect();
+            for m in items {
+                self.spawn_media_load(m);
             }
+            self.rebuild_edited_nested(true);
         }
+        self.sync_nested_recovery_snapshots();
     }
 
     fn media_is_nested(&self, id: Id, key: &Path) -> bool {
@@ -405,31 +405,43 @@ impl App {
             .is_some_and(|p| canonical(&p) == key)
     }
 
-    /// Ao voltar para o principal: remonta, num worker, a mídia dos projetos
-    /// aninhados editados desde a última vez.
-    fn rebuild_edited_nested(&mut self) {
-        if self.active_doc != 0 {
-            return;
-        }
-        let mut jobs = Vec::new();
-        for t in self.doc_tabs.iter_mut().skip(1) {
+    /// Ao trocar para o projeto principal (ou para um aninhado intermediário):
+    /// remonta, num worker, toda mídia de projeto aninhado cujo conteúdo (ou o
+    /// de algum neto aberto em outra aba) mudou em memória desde a última vez.
+    pub(crate) fn rebuild_edited_nested(&mut self, force: bool) {
+        let mut total_other_edits: u64 = 0;
+        let mut overrides: HashMap<PathBuf, Project> = HashMap::new();
+        let mut open_nested: Vec<(PathBuf, PathBuf, Project)> = Vec::new();
+        for (idx, t) in self.doc_tabs.iter().enumerate().skip(1) {
+            if idx == self.active_doc {
+                continue;
+            }
             let (Some(key), Some(st)) = (&t.key, &t.stash) else {
                 continue;
             };
-            if st.session.edit_count == t.synced_edits {
-                continue;
-            }
-            t.synced_edits = st.session.edit_count;
+            total_other_edits = total_other_edits.wrapping_add(st.session.edit_count);
+            overrides.insert(key.clone(), st.session.project.clone());
             if let Some(path) = st.session.path.clone() {
-                jobs.push((
-                    key.clone(),
-                    path,
-                    st.session.project.clone(),
-                    t.synced_edits,
-                ));
+                open_nested.push((key.clone(), path, st.session.project.clone()));
             }
         }
-        for (key, path, project, edits) in jobs {
+        if open_nested.is_empty() {
+            return;
+        }
+        let prev_synced = self
+            .doc_tabs
+            .get(self.active_doc)
+            .map(|t| t.synced_edits)
+            .unwrap_or(0);
+        if !force && total_other_edits == prev_synced {
+            return;
+        }
+        if let Some(active_tab) = self.doc_tabs.get_mut(self.active_doc) {
+            active_tab.synced_edits = total_other_edits;
+        }
+
+        let overrides = Arc::new(overrides);
+        for (key, path, project) in open_nested {
             let items: Vec<_> = self
                 .project
                 .media
@@ -439,7 +451,13 @@ impl App {
                 .collect();
             for item in items {
                 let tx = self.loader_tx.clone();
-                let (project, path, key) = (project.clone(), path.clone(), key.clone());
+                let (project, path, key, ov) = (
+                    project.clone(),
+                    path.clone(),
+                    key.clone(),
+                    Arc::clone(&overrides),
+                );
+                let edits = NESTED_REBUILD_SEQ.fetch_add(1, Ordering::Relaxed);
                 self.loading += 1;
                 let spawned = util::spawn("aninhado-em-aba", move || {
                     let id = item.id;
@@ -447,8 +465,10 @@ impl App {
                     let result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                             let mut item = item;
-                            media::load_nested_from_project(&mut item, project, &path)
-                                .map_err(|e| format!("{e:#}"))
+                            media::load_nested_from_project_with_overrides(
+                                &mut item, project, &path, &ov,
+                            )
+                            .map_err(|e| format!("{e:#}"))
                         }))
                         .unwrap_or_else(|_| Err("falha ao montar o projeto aninhado".to_string()));
                     let _ = tx.send(LoadMsg::NestedRebuilt(Box::new(NestedRebuilt {
@@ -464,6 +484,95 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Coleta os projetos aninhados com alterações não salvas para o autosave.
+    pub(crate) fn collect_dirty_nested_recovery(&self) -> Vec<(PathBuf, Project)> {
+        let mut out = Vec::new();
+        for (i, t) in self.doc_tabs.iter().enumerate().skip(1) {
+            let s = if i == self.active_doc {
+                &self.session
+            } else if let Some(st) = t.stash.as_ref() {
+                &st.session
+            } else {
+                continue;
+            };
+            if s.dirty {
+                if let Some(p) = &s.path {
+                    out.push((p.clone(), s.project.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Mantém os snapshots dos aninhados modificados disponíveis ao hook de pânico (§0.7).
+    pub(crate) fn sync_nested_recovery_snapshots(&self) {
+        let mut out = Vec::new();
+        for (i, t) in self.doc_tabs.iter().enumerate().skip(1) {
+            let s = if i == self.active_doc {
+                &self.session
+            } else if let Some(st) = t.stash.as_ref() {
+                &st.session
+            } else {
+                continue;
+            };
+            if s.dirty {
+                if let Some(p) = &s.path {
+                    out.push((p.clone(), s.snapshot.clone()));
+                }
+            }
+        }
+        neoveg_engine::recovery::remember_nested_snapshots(out);
+    }
+
+    /// Restaura abas de projetos aninhados modificados da recuperação automática.
+    pub(crate) fn restore_nested_recovery_tabs(&mut self) -> usize {
+        self.ensure_doc_tabs();
+        let recovered = neoveg_engine::recovery::read_nested_recovery();
+        if recovered.is_empty() {
+            return 0;
+        }
+        let lang = self.lang();
+        let main_key = self.main_session().path.as_deref().map(canonical);
+        let mut restored = 0usize;
+        for tab in recovered {
+            if self.doc_tabs.len() >= MAX_DOC_TABS {
+                break;
+            }
+            let key = canonical(&tab.path);
+            if main_key.as_ref() == Some(&key)
+                || self.doc_tabs.iter().any(|t| t.key.as_ref() == Some(&key))
+            {
+                continue;
+            }
+            let mut session = EditorSession::new_nested(tab.project, lang);
+            session.path = Some(tab.path);
+            session.dirty = true;
+            session.edit_count = 1;
+            let media = Arc::new(MediaCache::default());
+            media.configure_limits(self.prefs.frame_cache_cap, self.prefs.ram_preview_mb);
+            let (loader_tx, loader_rx) = channel();
+            self.doc_tabs.push(DocTab {
+                key: Some(key),
+                stash: Some(Box::new(DocStash {
+                    session,
+                    media,
+                    loader_tx,
+                    loader_rx,
+                    loading: 0,
+                    tl: TimelineState::default(),
+                    project_media: Default::default(),
+                })),
+                synced_edits: 0,
+            });
+            restored += 1;
+        }
+        if restored > 0 {
+            self.sync_nested_recovery_snapshots();
+            self.rebuild_edited_nested(true);
+        }
+        restored
     }
 
     /// Resultado do worker de [`Self::rebuild_edited_nested`]: aplica só o
@@ -500,7 +609,6 @@ impl App {
                 ok &= save_stashed(&mut st.session, &self.prefs);
                 if !st.session.dirty {
                     if let Some(p) = st.session.path.clone() {
-                        neoveg_engine::recovery::clear_recovery();
                         self.prefs.record_recent_project(&p);
                         let _ = self.prefs.save();
                     }
@@ -533,6 +641,10 @@ impl App {
                 "Erro ao salvar projetos aninhados: eles continuam com alterações não salvas.",
             ));
         } else if ok {
+            if !self.any_doc_dirty() {
+                neoveg_engine::recovery::clear_recovery();
+                self.sync_nested_recovery_snapshots();
+            }
             self.set_status(tr(lang, "Projeto e projetos aninhados salvos."));
         }
         ok

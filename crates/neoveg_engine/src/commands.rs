@@ -458,6 +458,8 @@ pub enum UiAction {
     ExportFcp7Dialog,
     ImportAafDialog,
     ExportAafDialog,
+    ImportNvegseqDialog,
+    ExportNvegseqDialog,
     OpenRenderDialog,
     SendToEncoder,
     EncoderStartQueue,
@@ -2687,6 +2689,38 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "sequence.import_nvegseq",
+        label: "Importar sequência (.nvegseq)...",
+        menu_path: "Arquivo/Importar sequência (.nvegseq)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportNvegseqDialog, h),
+    },
+    CommandDef {
+        id: "sequence.export_nvegseq",
+        label: "Exportar sequência (.nvegseq)...",
+        menu_path: "Arquivo/Exportar sequência (.nvegseq)...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.active_sequence_id.is_some(),
+        run: |s, h| {
+            if h.supports_ui() {
+                ui_action(UiAction::ExportNvegseqDialog, h)
+            } else if let Some(p) = s.path.as_ref() {
+                let out_path = p.with_extension("nvegseq");
+                crate::package::export_standalone_sequence_file(&s.project, None, &out_path)?;
+                Ok(CommandOutcome::Executed)
+            } else {
+                Err(tr_args(
+                    s.lang,
+                    "projeto ainda não tem caminho definido para exportar {label} sem diálogo",
+                    &[("label", &"NVEGSEQ")],
+                ))
+            }
+        },
+    },
+    CommandDef {
         id: "insert.env_volume",
         label: "Envelope de Volume / Nível",
         menu_path: "Inserir/Volume / Nível de composição",
@@ -4325,6 +4359,28 @@ mod tests {
             .project
             .validate_no_sequence_cycle(nested_seq_id, nested_seq_id)
             .is_err());
+
+        // Comandos .nvegseq em modo headless (parâmetros hostis §0.8)
+        assert!(run_command("sequence.import_nvegseq", &mut s2, &mut h).is_err());
+        // Sem caminho salvo, exportar sem diálogo retorna erro controlado
+        s2.path = None;
+        assert!(run_command("sequence.export_nvegseq", &mut s2, &mut h).is_err());
+        // Com active_sequence_id = None, exportar fica desabilitado
+        let mut s_no_seq = EditorSession::new(Project::new_default());
+        s_no_seq.project.active_sequence_id = None;
+        assert!(run_command("sequence.export_nvegseq", &mut s_no_seq, &mut h).is_err());
+        // Com caminho temporário válido, exporta .nvegseq com sucesso
+        let tmp_dir =
+            std::env::temp_dir().join(format!("neoveg_cmd_nvegseq_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        s2.path = Some(tmp_dir.join("proj.neoveg"));
+        run_command("sequence.export_nvegseq", &mut s2, &mut h).unwrap();
+        let exported = tmp_dir.join("proj.nvegseq");
+        assert!(exported.exists());
+        let mut dst = Project::new_default();
+        crate::package::import_standalone_sequence_file(&mut dst, &exported).unwrap();
+        assert_eq!(dst.sequences.len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     #[test]

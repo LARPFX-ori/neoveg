@@ -927,16 +927,18 @@ pub fn import_nested_project(path: &Path) -> Result<Imported> {
 /// decodificadores são isolados e viram erro (§0.6).
 pub fn load_entry(item: &mut MediaItem) -> Result<Imported> {
     let mut stack = std::collections::HashSet::new();
-    load_entry_with_stack(item, &mut stack, 0)
+    let empty_overrides = std::collections::HashMap::new();
+    load_entry_with_stack(item, &mut stack, 0, &empty_overrides)
 }
 
 fn load_entry_with_stack(
     item: &mut MediaItem,
     stack: &mut std::collections::HashSet<PathBuf>,
     depth: usize,
+    overrides: &std::collections::HashMap<PathBuf, crate::model::Project>,
 ) -> Result<Imported> {
     match crate::util::guard("importação de mídia", || {
-        load_entry_inner(item, stack, depth)
+        load_entry_inner(item, stack, depth, overrides)
     }) {
         Ok(r) => r,
         Err(e) => bail!("{e}"),
@@ -947,6 +949,7 @@ fn load_entry_inner(
     item: &mut MediaItem,
     stack: &mut std::collections::HashSet<PathBuf>,
     depth: usize,
+    overrides: &std::collections::HashMap<PathBuf, crate::model::Project>,
 ) -> Result<Imported> {
     let mut warning = None;
     let entry = match item.source.clone() {
@@ -1116,14 +1119,15 @@ fn load_entry_inner(
                 );
             }
             let p = PathBuf::from(&path);
-            if !p.exists() {
+            let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if !p.exists() && !overrides.contains_key(&canon) {
                 bail!("projeto aninhado não encontrado: {path}");
             }
-            let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
             if !stack.insert(canon.clone()) {
                 bail!("referência cíclica detectada no projeto aninhado: {path}");
             }
-            let res = load_nested_project_entry(&p, item, stack, depth + 1, &mut warning);
+            let res =
+                load_nested_project_entry(&p, item, stack, depth + 1, &mut warning, overrides);
             stack.remove(&canon);
             res?
         }
@@ -1141,9 +1145,17 @@ fn load_nested_project_entry(
     stack: &mut std::collections::HashSet<PathBuf>,
     next_depth: usize,
     warning: &mut Option<String>,
+    overrides: &std::collections::HashMap<PathBuf, crate::model::Project>,
 ) -> Result<MediaEntry> {
-    let (sub_proj, _) = crate::model::Project::load_file(p).map_err(anyhow::Error::msg)?;
-    nested_entry_from_project(sub_proj, p, item, stack, next_depth, warning)
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let sub_proj = if let Some(mem_proj) = overrides.get(&canon) {
+        mem_proj.clone()
+    } else {
+        crate::model::Project::load_file(p)
+            .map_err(anyhow::Error::msg)?
+            .0
+    };
+    nested_entry_from_project(sub_proj, p, item, stack, next_depth, warning, overrides)
 }
 
 /// Monta a mídia de um projeto aninhado a partir do projeto já em memória
@@ -1155,11 +1167,25 @@ pub fn load_nested_from_project(
     project: crate::model::Project,
     path: &Path,
 ) -> Result<Imported> {
+    let empty_overrides = std::collections::HashMap::new();
+    load_nested_from_project_with_overrides(item, project, path, &empty_overrides)
+}
+
+/// Variante de [`load_nested_from_project`] que também aceita projetos netos
+/// abertos em abas em memória (`overrides`, chaveado por caminho canônico),
+/// propagando edições de aninhados dentro de aninhados antes de salvar.
+pub fn load_nested_from_project_with_overrides(
+    item: &mut MediaItem,
+    project: crate::model::Project,
+    path: &Path,
+    overrides: &std::collections::HashMap<PathBuf, crate::model::Project>,
+) -> Result<Imported> {
     let mut stack = std::collections::HashSet::new();
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     stack.insert(canon);
     let mut warning = None;
-    let entry = nested_entry_from_project(project, path, item, &mut stack, 1, &mut warning)?;
+    let entry =
+        nested_entry_from_project(project, path, item, &mut stack, 1, &mut warning, overrides)?;
     Ok(Imported {
         item: item.clone(),
         entry,
@@ -1174,6 +1200,7 @@ fn nested_entry_from_project(
     stack: &mut std::collections::HashSet<PathBuf>,
     next_depth: usize,
     warning: &mut Option<String>,
+    overrides: &std::collections::HashMap<PathBuf, crate::model::Project>,
 ) -> Result<MediaEntry> {
     let base_dir = p.parent().unwrap_or_else(|| Path::new("."));
     let sub_cache = Arc::new(MediaCache::default());
@@ -1190,7 +1217,7 @@ fn nested_entry_from_project(
                 }
             }
         }
-        match load_entry_with_stack(sm, stack, next_depth) {
+        match load_entry_with_stack(sm, stack, next_depth, overrides) {
             Ok(imp) => {
                 if let Some(w) = imp.warning {
                     sub_warnings.push(w);
@@ -1621,6 +1648,76 @@ mod system_contract_tests {
         let res = load_entry(&mut root_item);
         assert!(res.is_ok());
         assert!(res.unwrap().warning.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn projeto_aninhado_neto_usa_override_em_memoria() {
+        let dir = std::env::temp_dir().join(format!("neoveg_grandchild_test_{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let neto_path = dir.join("neto.neoveg");
+        let filho_path = dir.join("filho.neoveg");
+
+        // Neto no disco é vermelho
+        let mut neto = crate::model::Project::new_default();
+        neto.settings.width = 32;
+        neto.settings.height = 18;
+        let red_m = import_generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        })
+        .item;
+        let red_ev = crate::model::Event::new(&red_m, Ticks::ZERO, Ticks::from_secs_i64(2));
+        neto.media.push(red_m);
+        neto.tracks[0].events.push(red_ev);
+        neto.save_file(&neto_path).unwrap();
+
+        // Filho referencia o neto
+        let mut filho = crate::model::Project::new_default();
+        filho.settings.width = 32;
+        filho.settings.height = 18;
+        let neto_item = base_item(
+            "neto.neoveg".into(),
+            MediaSource::NestedProject {
+                path: neto_path.to_string_lossy().to_string(),
+            },
+        );
+        let filho_ev = crate::model::Event::new(&neto_item, Ticks::ZERO, Ticks::from_secs_i64(2));
+        filho.media.push(neto_item);
+        filho.tracks[0].events.push(filho_ev);
+        filho.save_file(&filho_path).unwrap();
+
+        // Edição em memória no neto (sem salvar no disco): verde
+        let mut neto_editado = neto.clone();
+        neto_editado.media[0].source = MediaSource::Generated(GenSpec::SolidColor {
+            color: [0.0, 1.0, 0.0, 1.0],
+        });
+        let canon_neto = std::fs::canonicalize(&neto_path).unwrap_or_else(|_| neto_path.clone());
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(canon_neto, neto_editado);
+
+        let mut filho_item = base_item(
+            "filho.neoveg".into(),
+            MediaSource::NestedProject {
+                path: filho_path.to_string_lossy().to_string(),
+            },
+        );
+        let imp = load_nested_from_project_with_overrides(
+            &mut filho_item,
+            filho,
+            &filho_path,
+            &overrides,
+        )
+        .expect("recarrega filho usando neto editado em memória");
+        let cache = MediaCache::default();
+        cache.insert(filho_item.id, imp.entry);
+        let frame = cache
+            .video_frame(&filho_item, Ticks::from_secs_i64(1), 32, 18)
+            .expect("renderiza quadro do filho");
+        let px = frame.get_pixel(16, 9).0;
+        assert_eq!(px[0], 0);
+        assert_eq!(px[1], 255);
+        assert_eq!(px[2], 0);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
