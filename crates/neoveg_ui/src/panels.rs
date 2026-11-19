@@ -40,6 +40,12 @@ struct FloatingOutcome {
     ctrl: bool,
 }
 
+enum FloatDockAction {
+    None,
+    DockToMain,
+    MergeInto(String),
+}
+
 fn show_floating_viewport(
     ctx: &egui::Context,
     id_salt: impl std::hash::Hash,
@@ -312,172 +318,367 @@ impl App {
     }
 
     /// Acoplar arrastando (ver `float_dock`): `true` quando a janela `key`
-    /// acabou de ser solta sobre a área de janelas e deve acoplar.
-    fn float_dock_check(
+    /// Ação resultante de soltar ou mover uma janela destacada.
+    fn float_dock_target(
         &mut self,
         ctx: &egui::Context,
         key: &str,
         geom: Option<crate::layout::FloatingGeom>,
         ctrl: bool,
-    ) -> bool {
+    ) -> FloatDockAction {
         use crate::float_dock::{grab_point, wants_dock, MoveState};
         let Some([x, y, w, h]) = geom else {
-            return false;
+            return FloatDockAction::None;
         };
         let state = self
             .float_dock
             .update(key, pos2(x, y), std::time::Instant::now());
         if state == MoveState::Idle {
-            return false;
+            return FloatDockAction::None;
         }
         // ainda vai decidir: precisa de quadros depois que a janela para
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        let (Some(dock), Some(main)) = (self.dock_rect, ctx.input(|i| i.viewport().inner_rect))
-        else {
-            return false;
+
+        let pt = grab_point(Rect::from_min_size(pos2(x, y), vec2(w, h)));
+        let over_dock = if let (Some(dock), Some(main)) =
+            (self.dock_rect, ctx.input(|i| i.viewport().inner_rect))
+        {
+            let screen_dock = dock.translate(main.min.to_vec2());
+            screen_dock.contains(pt)
+        } else {
+            false
         };
-        let screen_dock = dock.translate(main.min.to_vec2());
-        let over = screen_dock.contains(grab_point(Rect::from_min_size(pos2(x, y), vec2(w, h))));
+
         let ctrl = ctrl || ctx.input(|i| i.modifiers.ctrl);
-        let want = over && wants_dock(self.prefs.allow_floating_dock, ctrl);
+        let want_dock = over_dock && wants_dock(self.prefs.allow_floating_dock, ctrl);
+
         match state {
             MoveState::Moving => {
-                self.float_dock_hint |= want;
-                false
+                self.float_dock_hint |= want_dock;
+                FloatDockAction::None
             }
             MoveState::Settled => {
-                if want {
+                if want_dock {
                     self.float_dock.forget(key);
+                    FloatDockAction::DockToMain
+                } else {
+                    for other in &self.floating_docks {
+                        if other.id != key {
+                            if let Some(og) = self.floating_geom.get(&other.id) {
+                                let other_rect =
+                                    Rect::from_min_size(pos2(og[0], og[1]), vec2(og[2], og[3]));
+                                if other_rect.contains(pt) {
+                                    self.float_dock.forget(key);
+                                    return FloatDockAction::MergeInto(other.id.clone());
+                                }
+                            }
+                        }
+                    }
+                    FloatDockAction::None
                 }
-                want
             }
-            MoveState::Idle => false,
+            MoveState::Idle => FloatDockAction::None,
         }
     }
 
     fn floating_panel_windows_inner(&mut self, ctx: &egui::Context) {
+        self.sync_floating_docks();
         let lang = self.lang();
         let icon = self.window_icon.clone();
         let theme = self.theme.clone();
 
-        if self.preview_detached {
-            let spec = FloatingViewportSpec {
-                title: tr(lang, "Prévia de Vídeo"),
-                inner_size: [560.0, 380.0],
-                min_size: [280.0, 200.0],
-                icon: icon.clone(),
-                theme: &theme,
-                lang,
-                can_dock: true,
-                geom: self.floating_open_geom(crate::layout::FLOATING_PREVIEW_KEY),
-            };
-            let out = show_floating_viewport(
-                ctx,
-                "neoveg_floating_preview_viewport",
-                "floating_preview_window",
-                &spec,
-                |ui| self.preview_panel(ui, true),
-            );
-            self.remember_floating_geom(crate::layout::FLOATING_PREVIEW_KEY, out.geom);
-            let reattach = out.reattach
-                || self.float_dock_check(
-                    ctx,
-                    crate::layout::FLOATING_PREVIEW_KEY,
-                    out.geom,
-                    out.ctrl,
-                );
-            if !out.open || reattach {
-                self.preview_detached = false;
-                if reattach {
-                    self.preview_visible = true;
-                    self.dock_visible = true;
-                } else {
-                    self.preview_visible = false;
-                }
-            }
-        }
+        let groups = self.floating_docks.clone();
+        let mut to_dock_groups: Vec<String> = Vec::new();
+        let mut to_close_groups: Vec<String> = Vec::new();
+        let mut to_dock_panes: Vec<crate::dock::DockPane> = Vec::new();
+        let mut to_pop_out_panes: Vec<crate::dock::DockPane> = Vec::new();
+        let mut to_add_panes: Vec<(crate::dock::DockPane, crate::dock::DockPane)> = Vec::new();
+        let mut to_close_panes: Vec<crate::dock::DockPane> = Vec::new();
+        let mut to_set_active: Vec<(String, usize)> = Vec::new();
+        let mut to_merge: Vec<(String, String)> = Vec::new();
 
-        if self.master_bus_detached {
-            let spec = FloatingViewportSpec {
-                title: tr(lang, "Master Bus"),
-                inner_size: [220.0, 420.0],
-                min_size: [140.0, 260.0],
-                icon: icon.clone(),
-                theme: &theme,
-                lang,
-                can_dock: true,
-                geom: self.floating_open_geom(crate::layout::FLOATING_MASTER_KEY),
+        for grp in groups {
+            let Some(active_pane) = grp.active_pane() else {
+                continue;
             };
-            let out = show_floating_viewport(
-                ctx,
-                "neoveg_floating_master_bus_viewport",
-                "floating_master_bus_window",
-                &spec,
-                |ui| self.master_bus_panel(ui, true),
-            );
-            self.remember_floating_geom(crate::layout::FLOATING_MASTER_KEY, out.geom);
-            let reattach = out.reattach
-                || self.float_dock_check(
-                    ctx,
-                    crate::layout::FLOATING_MASTER_KEY,
-                    out.geom,
-                    out.ctrl,
-                );
-            if !out.open || reattach {
-                self.master_bus_detached = false;
-                if reattach {
-                    self.master_bus_visible = true;
-                    self.dock_visible = true;
-                } else {
-                    self.master_bus_visible = false;
-                }
-            }
-        }
+            let key = grp.id.as_str();
 
-        let detached: Vec<DockTab> = DockTab::ALL
-            .into_iter()
-            .filter(|t| self.detached_tabs.contains(t))
-            .collect();
-        for tab in detached {
-            let key = crate::layout::panel_key(tab);
-            let (inner_size, min_size) = match tab {
-                DockTab::Encoder => ([1120.0, 680.0], [740.0, 440.0]),
-                _ => ([520.0, 360.0], [260.0, 180.0]),
+            let has_encoder = grp
+                .panes
+                .iter()
+                .any(|p| matches!(p, crate::dock::DockPane::Tab(DockTab::Encoder)));
+            let has_preview = grp
+                .panes
+                .iter()
+                .any(|p| matches!(p, crate::dock::DockPane::Preview));
+            let has_master = grp
+                .panes
+                .iter()
+                .any(|p| matches!(p, crate::dock::DockPane::MasterBus));
+            let is_single_master = has_master && grp.panes.len() == 1;
+
+            let (inner_size, min_size) = if has_encoder {
+                ([1120.0, 680.0], [740.0, 440.0])
+            } else if has_preview {
+                ([560.0, 400.0], [280.0, 220.0])
+            } else if is_single_master {
+                ([220.0, 420.0], [140.0, 260.0])
+            } else {
+                ([540.0, 380.0], [280.0, 200.0])
             };
+
+            let can_dock = grp.panes.iter().any(
+                |p| !matches!(p, crate::dock::DockPane::Tab(t) if crate::layout::window_only(*t)),
+            );
+            let title = if grp.panes.len() > 1 {
+                format!("{} (+{})", active_pane.title_in(lang), grp.panes.len() - 1)
+            } else {
+                active_pane.title_in(lang).to_string()
+            };
+
             let spec = FloatingViewportSpec {
-                title: tab.name_in(lang),
+                title: &title,
                 inner_size,
                 min_size,
                 icon: icon.clone(),
                 theme: &theme,
                 lang,
-                can_dock: !crate::layout::window_only(tab),
+                can_dock,
                 geom: self.floating_open_geom(key),
             };
+
+            let mut tab_action_set_active = None;
+            let mut tab_action_dock_pane = None;
+            let mut tab_action_pop_out = None;
+            let mut tab_action_close_pane = None;
+            let mut tab_action_add_pane = None;
+
             let out = show_floating_viewport(
                 ctx,
                 ("neoveg_floating_dock_viewport", key),
-                ("floating_dock", tab.command_id()),
+                ("floating_dock_window", key),
                 &spec,
                 |ui| {
-                    egui::ScrollArea::both()
-                        .id_salt(("floating_os_scroll", tab.command_id()))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
+                    if grp.panes.len() > 1 {
+                        ui.horizontal_wrapped(|ui| {
+                            let active_idx = grp.active.min(grp.panes.len().saturating_sub(1));
+                            for (i, &pane) in grp.panes.iter().enumerate() {
+                                let is_active = i == active_idx;
+                                let label = pane.title_in(lang);
+                                let resp = icons::small_icon_drag_button(
+                                    ui,
+                                    pane.icon(),
+                                    Some(label),
+                                    is_active,
+                                    &theme,
+                                )
+                                .on_hover_text(tr(
+                                    lang,
+                                    "Clique para selecionar; clique com botão direito para opções",
+                                ));
+
+                                if resp.clicked() {
+                                    tab_action_set_active = Some(i);
+                                }
+
+                                if is_active
+                                    && icons::small_icon_button(
+                                        ui,
+                                        Icon::CloseX,
+                                        None,
+                                        false,
+                                        &theme,
+                                    )
+                                    .on_hover_text(tr(lang, "Fechar aba"))
+                                    .clicked()
+                                {
+                                    tab_action_close_pane = Some(pane);
+                                }
+
+                                resp.context_menu(|ui| {
+                                    if ui
+                                        .button(tr(lang, "Destacar aba em janela própria"))
+                                        .clicked()
+                                    {
+                                        tab_action_pop_out = Some(pane);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button(tr(lang, "Acoplar esta aba")).clicked() {
+                                        tab_action_dock_pane = Some(pane);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button(tr(lang, "Acoplar todas as abas")).clicked() {
+                                        tab_action_dock_pane = None;
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button(tr(lang, "Fechar aba")).clicked() {
+                                        tab_action_close_pane = Some(pane);
+                                        ui.close_menu();
+                                    }
+                                });
+                            }
+
+                            ui.menu_button(tr(lang, "Adicionar aba a esta janela"), |ui| {
+                                for p in crate::dock::DockPane::all_canonical() {
+                                    if !grp.panes.contains(&p) {
+                                        ui.horizontal(|ui| {
+                                            let (r, _) = ui.allocate_exact_size(
+                                                vec2(14.0, 14.0),
+                                                Sense::hover(),
+                                            );
+                                            icons::paint(ui.painter(), r, p.icon(), &theme, true);
+                                            if ui.button(p.title_in(lang)).clicked() {
+                                                tab_action_add_pane = Some(p);
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.menu_button(tr(lang, "Adicionar aba a esta janela"), |ui| {
+                                for p in crate::dock::DockPane::all_canonical() {
+                                    if !grp.panes.contains(&p) {
+                                        ui.horizontal(|ui| {
+                                            let (r, _) = ui.allocate_exact_size(
+                                                vec2(14.0, 14.0),
+                                                Sense::hover(),
+                                            );
+                                            icons::paint(ui.painter(), r, p.icon(), &theme, true);
+                                            if ui.button(p.title_in(lang)).clicked() {
+                                                tab_action_add_pane = Some(p);
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+                    }
+
+                    match active_pane {
+                        crate::dock::DockPane::Preview => {
+                            self.preview_panel(ui, true);
+                        }
+                        crate::dock::DockPane::MasterBus => {
+                            self.master_bus_panel(ui, true);
+                        }
+                        crate::dock::DockPane::Tab(tab) => {
+                            egui::ScrollArea::both()
+                                .id_salt(("floating_os_scroll", tab.command_id(), key))
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| self.show_dock_tab_contents(ui, tab));
+                        }
+                    }
                 },
             );
+
             self.remember_floating_geom(key, out.geom);
-            let reattach = out.reattach
-                || (!crate::layout::window_only(tab)
-                    && self.float_dock_check(ctx, key, out.geom, out.ctrl));
-            if reattach {
-                self.detached_tabs.remove(&tab);
-                self.dock_visible = true;
-                self.dock_tab = tab;
-                self.pending_dock_focus = Some(tab);
+
+            let dock_action = if can_dock {
+                self.float_dock_target(ctx, key, out.geom, out.ctrl)
+            } else {
+                FloatDockAction::None
+            };
+
+            if out.reattach || matches!(dock_action, FloatDockAction::DockToMain) {
+                to_dock_groups.push(grp.id.clone());
+            } else if let FloatDockAction::MergeInto(other_id) = dock_action {
+                to_merge.push((grp.id.clone(), other_id));
             } else if !out.open {
-                // fechar a janela fecha o painel (volta pelo menu Exibir)
-                self.close_dock_tab(tab);
+                to_close_groups.push(grp.id.clone());
+            }
+
+            if let Some(idx) = tab_action_set_active {
+                to_set_active.push((grp.id.clone(), idx));
+            }
+            if let Some(p) = tab_action_dock_pane {
+                to_dock_panes.push(p);
+            }
+            if let Some(p) = tab_action_pop_out {
+                to_pop_out_panes.push(p);
+            }
+            if let Some(p) = tab_action_close_pane {
+                to_close_panes.push(p);
+            }
+            if let Some(p) = tab_action_add_pane {
+                to_add_panes.push((active_pane, p));
+            }
+        }
+
+        for (src_id, dst_id) in to_merge {
+            if let (Some(src_grp), Some(dst_grp)) = (
+                self.floating_docks.iter().find(|g| g.id == src_id).cloned(),
+                self.floating_docks.iter().find(|g| g.id == dst_id).cloned(),
+            ) {
+                if let Some(dst_pane) = dst_grp.active_pane() {
+                    for pane in src_grp.panes {
+                        self.group_floating_panes(dst_pane, pane);
+                    }
+                }
+            }
+        }
+
+        for (grp_id, idx) in to_set_active {
+            if let Some(grp) = self.floating_docks.iter_mut().find(|g| g.id == grp_id) {
+                if idx < grp.panes.len() {
+                    grp.active = idx;
+                }
+            }
+        }
+
+        for p in to_dock_panes {
+            self.dock_pane(p);
+        }
+
+        for p in to_pop_out_panes {
+            self.detach_pane_to_own_window(p);
+        }
+
+        for (target, to_add) in to_add_panes {
+            self.group_floating_panes(target, to_add);
+        }
+
+        for p in to_close_panes {
+            match p {
+                crate::dock::DockPane::Tab(t) => self.close_dock_tab(t),
+                crate::dock::DockPane::Preview => {
+                    self.preview_detached = false;
+                    self.preview_visible = false;
+                }
+                crate::dock::DockPane::MasterBus => {
+                    self.master_bus_detached = false;
+                    self.master_bus_visible = false;
+                }
+            }
+            self.sync_floating_docks();
+        }
+
+        for grp_id in to_dock_groups {
+            self.dock_floating_group(&grp_id);
+        }
+
+        for grp_id in to_close_groups {
+            if let Some(grp) = self.floating_docks.iter().find(|g| g.id == grp_id).cloned() {
+                for pane in grp.panes {
+                    match pane {
+                        crate::dock::DockPane::Tab(t) => self.close_dock_tab(t),
+                        crate::dock::DockPane::Preview => {
+                            self.preview_detached = false;
+                            self.preview_visible = false;
+                        }
+                        crate::dock::DockPane::MasterBus => {
+                            self.master_bus_detached = false;
+                            self.master_bus_visible = false;
+                        }
+                    }
+                }
+                self.sync_floating_docks();
             }
         }
 

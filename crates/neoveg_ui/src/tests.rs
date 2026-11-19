@@ -1984,3 +1984,96 @@ fn master_bus_nas_tres_posicoes_da_area_de_janelas() {
     assert_eq!(with_pv.len(), 2);
     assert!(with_pv[1].contains(&DockPane::Preview) && with_pv[1].contains(&DockPane::MasterBus));
 }
+
+#[test]
+fn floating_docks_layout_serialization_and_sanitize() {
+    use crate::dock::DockPane;
+    use crate::layout::{FloatingDockGroup, WindowLayout};
+
+    let mut layout = WindowLayout::default();
+    layout.floating_docks.push(FloatingDockGroup {
+        id: "group1".to_string(),
+        panes: vec![
+            DockPane::Tab(crate::DockTab::ProjectMedia),
+            DockPane::Tab(crate::DockTab::Explorer),
+            DockPane::Tab(crate::DockTab::ProjectMedia),
+        ],
+        active: 99,
+    });
+    layout.floating_docks.push(FloatingDockGroup {
+        id: "   ".to_string(),
+        panes: vec![DockPane::Preview],
+        active: 0,
+    });
+    layout.floating_docks.push(FloatingDockGroup {
+        id: "vazio".to_string(),
+        panes: vec![],
+        active: 0,
+    });
+
+    layout.sanitize();
+
+    assert_eq!(layout.floating_docks.len(), 2);
+    assert_eq!(layout.floating_docks[0].id, "group1");
+    assert_eq!(layout.floating_docks[0].panes.len(), 2);
+    assert_eq!(layout.floating_docks[0].active, 0);
+    assert_eq!(layout.floating_docks[1].id, "preview");
+    assert_eq!(layout.floating_docks[1].panes, vec![DockPane::Preview]);
+    assert!(layout.detached_tabs.iter().any(|s| s == "project_media"));
+    assert!(layout.detached_tabs.iter().any(|s| s == "explorer"));
+    assert!(layout.preview_detached);
+
+    let json = serde_json::to_string(&layout).expect("serialização json");
+    let loaded: WindowLayout = serde_json::from_str(&json).expect("desserialização json");
+    assert_eq!(loaded.floating_docks.len(), 2);
+    assert_eq!(loaded.floating_docks[0].panes.len(), 2);
+}
+
+#[test]
+fn app_floating_docks_grouping_detaching_and_docking() {
+    use crate::dock::DockPane;
+
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+
+    assert!(app.floating_docks.is_empty());
+
+    app.detach_dock_tab(crate::DockTab::ProjectMedia);
+    app.preview_detached = true;
+    app.sync_floating_docks();
+    assert_eq!(app.floating_docks.len(), 2);
+
+    let target = DockPane::Tab(crate::DockTab::ProjectMedia);
+    let to_add = DockPane::Preview;
+    app.group_floating_panes(target, to_add);
+
+    assert_eq!(app.floating_docks.len(), 1);
+    let grp = &app.floating_docks[0];
+    assert_eq!(grp.panes.len(), 2);
+    assert_eq!(grp.panes[0], target);
+    assert_eq!(grp.panes[1], to_add);
+    assert_eq!(grp.active, 1);
+
+    app.detach_pane_to_own_window(DockPane::Preview);
+    assert_eq!(app.floating_docks.len(), 2);
+    let preview_grp = app
+        .floating_docks
+        .iter()
+        .find(|g| g.panes.contains(&DockPane::Preview))
+        .expect("grupo com prévia");
+    assert_eq!(preview_grp.panes.len(), 1);
+
+    app.dock_pane(DockPane::Preview);
+    assert!(!app.preview_detached);
+    assert_eq!(app.floating_docks.len(), 1);
+
+    let remaining_id = app.floating_docks[0].id.clone();
+    app.dock_floating_group(&remaining_id);
+    assert!(app.floating_docks.is_empty());
+    assert!(!app.detached_tabs.contains(&crate::DockTab::ProjectMedia));
+}

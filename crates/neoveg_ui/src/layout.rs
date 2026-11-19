@@ -73,6 +73,35 @@ pub struct WindowLayout {
     /// painéis), por chave: `[x, y, largura, altura]` em pontos.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub floating_windows: BTreeMap<String, FloatingGeom>,
+    /// Grupos de janelas flutuantes com múltiplas abas (docas flutuantes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floating_docks: Vec<FloatingDockGroup>,
+}
+
+/// Grupo de painéis em uma mesma janela flutuante (doca flutuante multi-abas).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FloatingDockGroup {
+    pub id: String,
+    pub panes: Vec<crate::dock::DockPane>,
+    #[serde(default)]
+    pub active: usize,
+}
+
+impl FloatingDockGroup {
+    pub fn new(id: impl Into<String>, panes: Vec<crate::dock::DockPane>) -> Self {
+        Self {
+            id: id.into(),
+            panes,
+            active: 0,
+        }
+    }
+
+    pub fn active_pane(&self) -> Option<crate::dock::DockPane> {
+        self.panes
+            .get(self.active)
+            .copied()
+            .or_else(|| self.panes.first().copied())
+    }
 }
 
 /// Posição (canto de fora) e tamanho interno de uma janela destacada:
@@ -100,7 +129,10 @@ pub fn sanitize_floating_geom(g: FloatingGeom) -> Option<FloatingGeom> {
 }
 
 fn floating_key_ok(k: &str) -> bool {
-    k == FLOATING_PREVIEW_KEY || k == FLOATING_MASTER_KEY || panel_from_key(k).is_some()
+    k == FLOATING_PREVIEW_KEY
+        || k == FLOATING_MASTER_KEY
+        || panel_from_key(k).is_some()
+        || k.starts_with("float_")
 }
 
 /// Painéis do grupo à esquerda da Prévia num layout novo. O Trimmer fica no
@@ -162,6 +194,7 @@ impl Default for WindowLayout {
             tile_tree: None,
             closed_tabs: None,
             floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
         }
     }
 }
@@ -215,6 +248,38 @@ impl WindowLayout {
             .filter_map(|(k, g)| sanitize_floating_geom(g).map(|g| (k, g)))
             .take(MAX_FLOATING_WINDOWS)
             .collect();
+        let mut pane_seen = HashSet::new();
+        self.floating_docks.retain_mut(|grp| {
+            grp.panes.retain(|p| pane_seen.insert(*p));
+            if grp.panes.is_empty() {
+                return false;
+            }
+            if grp.active >= grp.panes.len() {
+                grp.active = 0;
+            }
+            if grp.id.trim().is_empty() {
+                grp.id = grp.panes[0].key().to_string();
+            }
+            true
+        });
+        for grp in &self.floating_docks {
+            for pane in &grp.panes {
+                match pane {
+                    crate::dock::DockPane::Tab(t) => {
+                        let k = panel_key(*t).to_string();
+                        if !self.detached_tabs.contains(&k) {
+                            self.detached_tabs.push(k);
+                        }
+                    }
+                    crate::dock::DockPane::Preview => {
+                        self.preview_detached = true;
+                    }
+                    crate::dock::DockPane::MasterBus => {
+                        self.master_bus_detached = true;
+                    }
+                }
+            }
+        }
         self.px_per_sec = self
             .px_per_sec
             .filter(|v| v.is_finite() && *v > 0.0)
@@ -278,6 +343,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             tile_tree: None,
             closed_tabs: None,
             floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
         },
         WindowLayout {
             name: "Mixagem de Áudio".into(),
@@ -295,6 +361,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             tile_tree: None,
             closed_tabs: None,
             floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
         },
         WindowLayout {
             name: "Timeline Ampla".into(),
@@ -312,6 +379,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
             tile_tree: None,
             closed_tabs: None,
             floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
         },
     ]
 }
@@ -420,6 +488,7 @@ mod tests {
             tile_tree: None,
             closed_tabs: None,
             floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
         };
         bad.sanitize();
         assert_eq!(bad.dock_height, 320.0);

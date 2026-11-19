@@ -284,6 +284,8 @@ pub struct App {
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
+    /// Grupos de janelas flutuantes com múltiplas abas (docas flutuantes).
+    pub floating_docks: Vec<crate::layout::FloatingDockGroup>,
     /// Painéis fechados (fora da área de janelas); voltam pelo menu Exibir.
     pub closed_tabs: HashSet<DockTab>,
     /// Última posição e tamanho de cada janela destacada (`.neoveglayout`).
@@ -501,6 +503,7 @@ impl App {
             },
             detached_tabs: initial_layout.detached_panels(),
             closed_tabs: initial_layout.closed_panels(),
+            floating_docks: initial_layout.floating_docks.clone(),
             floating_geom: initial_layout.floating_windows.clone(),
             floating_open: HashMap::new(),
             floating_shown: HashSet::new(),
@@ -585,6 +588,7 @@ impl App {
             recording_peaks: HashMap::new(),
             project_media: crate::project_media::ProjectMediaState::default(),
         };
+        app.sync_floating_docks();
         app.ram_preview =
             neoveg_engine::playback::RamPreviewCache::new(app.prefs.ram_preview_mb as usize);
         if let Some(e) = app.preview.error.clone() {
@@ -5067,6 +5071,7 @@ impl App {
             tile_tree: Some(self.dock_tree.clone()),
             closed_tabs: Some(closed),
             floating_windows: self.floating_geom.clone(),
+            floating_docks: self.floating_docks.clone(),
         };
         l.sanitize();
         l
@@ -5082,6 +5087,8 @@ impl App {
         self.dock_tab = l.active_panel();
         self.detached_tabs = l.detached_panels();
         self.closed_tabs = l.closed_panels();
+        self.floating_docks = l.floating_docks.clone();
+        self.sync_floating_docks();
         self.floating_geom = l.floating_windows.clone();
         // janelas abertas reabrem no lugar do layout novo
         self.floating_open.clear();
@@ -5143,6 +5150,178 @@ impl App {
                 ));
             }
         }
+    }
+
+    /// Sincroniza `floating_docks` com `detached_tabs`, `preview_detached` e `master_bus_detached`.
+    pub fn sync_floating_docks(&mut self) {
+        use crate::dock::DockPane;
+        let mut detached_set: HashSet<DockPane> = self
+            .detached_tabs
+            .iter()
+            .map(|&t| DockPane::Tab(t))
+            .collect();
+        if self.preview_detached {
+            detached_set.insert(DockPane::Preview);
+        }
+        if self.master_bus_detached {
+            detached_set.insert(DockPane::MasterBus);
+        }
+
+        let mut seen_panes = HashSet::new();
+        self.floating_docks.retain_mut(|grp| {
+            grp.panes
+                .retain(|p| detached_set.contains(p) && seen_panes.insert(*p));
+            if grp.panes.is_empty() {
+                return false;
+            }
+            if grp.active >= grp.panes.len() {
+                grp.active = grp.panes.len().saturating_sub(1);
+            }
+            true
+        });
+
+        for pane in detached_set {
+            if !seen_panes.contains(&pane) {
+                self.floating_docks.push(crate::layout::FloatingDockGroup {
+                    id: pane.key().to_string(),
+                    panes: vec![pane],
+                    active: 0,
+                });
+            }
+        }
+    }
+
+    /// Agrupa o painel `pane_to_add` na mesma janela flutuante que `target_pane`.
+    pub fn group_floating_panes(
+        &mut self,
+        target_pane: crate::dock::DockPane,
+        pane_to_add: crate::dock::DockPane,
+    ) {
+        use crate::dock::DockPane;
+        if target_pane == pane_to_add {
+            return;
+        }
+        self.sync_floating_docks();
+
+        for grp in &mut self.floating_docks {
+            if let Some(pos) = grp.panes.iter().position(|&p| p == pane_to_add) {
+                grp.panes.remove(pos);
+                if grp.active >= grp.panes.len() {
+                    grp.active = grp.panes.len().saturating_sub(1);
+                }
+            }
+        }
+        self.floating_docks.retain(|g| !g.panes.is_empty());
+
+        match pane_to_add {
+            DockPane::Tab(t) => {
+                self.closed_tabs.remove(&t);
+                self.detached_tabs.insert(t);
+            }
+            DockPane::Preview => self.preview_detached = true,
+            DockPane::MasterBus => self.master_bus_detached = true,
+        }
+
+        let mut found = false;
+        for grp in &mut self.floating_docks {
+            if grp.panes.contains(&target_pane) {
+                if !grp.panes.contains(&pane_to_add) {
+                    grp.panes.push(pane_to_add);
+                    grp.active = grp.panes.len().saturating_sub(1);
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            match target_pane {
+                DockPane::Tab(t) => {
+                    self.closed_tabs.remove(&t);
+                    self.detached_tabs.insert(t);
+                }
+                DockPane::Preview => self.preview_detached = true,
+                DockPane::MasterBus => self.master_bus_detached = true,
+            }
+            self.floating_docks.push(crate::layout::FloatingDockGroup {
+                id: target_pane.key().to_string(),
+                panes: vec![target_pane, pane_to_add],
+                active: 1,
+            });
+        }
+    }
+
+    /// Destaca um painel de um grupo para sua própria janela flutuante independente.
+    pub fn detach_pane_to_own_window(&mut self, pane: crate::dock::DockPane) {
+        self.sync_floating_docks();
+        for grp in &mut self.floating_docks {
+            if grp.panes.len() > 1 {
+                if let Some(pos) = grp.panes.iter().position(|&p| p == pane) {
+                    grp.panes.remove(pos);
+                    if grp.active >= grp.panes.len() {
+                        grp.active = grp.panes.len().saturating_sub(1);
+                    }
+                    self.floating_docks.push(crate::layout::FloatingDockGroup {
+                        id: format!("float_{}", pane.key()),
+                        panes: vec![pane],
+                        active: 0,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Acopla todos os painéis de um grupo flutuante na área principal de janelas.
+    pub fn dock_floating_group(&mut self, group_id: &str) {
+        use crate::dock::DockPane;
+        if let Some(grp) = self
+            .floating_docks
+            .iter()
+            .find(|g| g.id == group_id)
+            .cloned()
+        {
+            for pane in grp.panes {
+                match pane {
+                    DockPane::Tab(t) => {
+                        self.detached_tabs.remove(&t);
+                        self.dock_tab = t;
+                        self.pending_dock_focus = Some(t);
+                    }
+                    DockPane::Preview => {
+                        self.preview_detached = false;
+                        self.preview_visible = true;
+                    }
+                    DockPane::MasterBus => {
+                        self.master_bus_detached = false;
+                        self.master_bus_visible = true;
+                    }
+                }
+            }
+            self.dock_visible = true;
+            self.sync_floating_docks();
+        }
+    }
+
+    /// Acopla um único painel de volta na área de janelas.
+    pub fn dock_pane(&mut self, pane: crate::dock::DockPane) {
+        use crate::dock::DockPane;
+        match pane {
+            DockPane::Tab(t) => {
+                self.detached_tabs.remove(&t);
+                self.dock_tab = t;
+                self.pending_dock_focus = Some(t);
+            }
+            DockPane::Preview => {
+                self.preview_detached = false;
+                self.preview_visible = true;
+            }
+            DockPane::MasterBus => {
+                self.master_bus_detached = false;
+                self.master_bus_visible = true;
+            }
+        }
+        self.dock_visible = true;
+        self.sync_floating_docks();
     }
 
     pub fn build_proxy_for_media(&mut self, media_id: Id) {
