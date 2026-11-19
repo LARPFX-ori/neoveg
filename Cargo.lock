@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "neoveg"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "neoveg_common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -3026,7 +3026,7 @@ dependencies = [
 
 [[package]]
 name = "neoveg_engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "neoveg_scripting"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neoveg_common",
  "neoveg_engine",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "neoveg_ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
