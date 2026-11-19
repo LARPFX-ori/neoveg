@@ -2382,6 +2382,54 @@ impl App {
                     ui.label(tr(lang, "Cor de fundo"));
                     changed |= ui.color_edit_button_rgb(&mut s.background).changed();
                     ui.end_row();
+
+                    ui.label(tr(lang, "Formato de pixel"));
+                    egui::ComboBox::from_id_salt("pixel_format")
+                        .selected_text(s.pixel_format.label())
+                        .show_ui(ui, |ui| {
+                            for pf in neoveg_engine::color::PixelFormat::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.pixel_format, pf, pf.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(tr(lang, "Gama de composição"));
+                    egui::ComboBox::from_id_salt("compositing_gamma")
+                        .selected_text(s.compositing_gamma.label())
+                        .show_ui(ui, |ui| {
+                            for cg in neoveg_engine::color::CompositingGamma::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.compositing_gamma, cg, cg.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(tr(lang, "Espaço de cor (ACES)"));
+                    egui::ComboBox::from_id_salt("project_color_space")
+                        .selected_text(s.color_space.label())
+                        .show_ui(ui, |ui| {
+                            for cs in neoveg_engine::color::ProjectColorSpace::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.color_space, cs, cs.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(tr(lang, "Transformação de visualização"));
+                    egui::ComboBox::from_id_salt("view_transform")
+                        .selected_text(s.view_transform.label())
+                        .show_ui(ui, |ui| {
+                            for vt in neoveg_engine::color::ViewTransform::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut s.view_transform, vt, vt.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
                 });
                 s.width = (s.width / 2).max(8) * 2;
                 s.height = (s.height / 2).max(8) * 2;
@@ -3368,6 +3416,19 @@ impl App {
                         ui.end_row();
                         ui.label(tr(lang, "Espaçamento de linha"));
                         ui.add(egui::Slider::new(&mut t.line_spacing, 0.6..=3.0));
+                        ui.end_row();
+                        ui.label(tr(lang, "Espaçamento de caracteres (Tracking)"));
+                        ui.add(egui::Slider::new(&mut t.tracking, -0.2..=1.0).step_by(0.01));
+                        ui.end_row();
+                        ui.label(tr(lang, "Quebra automática de linha"));
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut t.wrap, "");
+                            if t.wrap {
+                                ui.add(
+                                    egui::Slider::new(&mut t.wrap_width, 10.0..=100.0).suffix("%"),
+                                );
+                            }
+                        });
                         ui.end_row();
                         ui.label(tr(lang, "Animação"));
                         egui::ComboBox::from_id_salt("anim")
@@ -6025,6 +6086,20 @@ fn prefs_autosave(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Pref
                     );
                     ui.label(tr(lang, "segundos  (15–600 s)"));
                 });
+                prefs_row(
+                    ui,
+                    inner_lw,
+                    tr(lang, "Histórico de recuperação:"),
+                    |ui| {
+                        ui.add_sized(
+                            [72.0, 20.0],
+                            egui::DragValue::new(&mut draft.autosave_history_copies)
+                                .range(1..=10)
+                                .speed(1),
+                        );
+                        ui.label(tr(lang, "versões mantidas"));
+                    },
+                );
             });
 
             let summary = if draft.autosave_enabled {
@@ -6060,6 +6135,40 @@ fn prefs_autosave(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Pref
                 cx.pref_path,
                 true,
             );
+        },
+    );
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        tr(lang, "Cópia de Segurança do Projeto (.bak)"),
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.project_backup_enabled,
+                    tr(
+                        lang,
+                        "Criar cópia de segurança (.bak) ao salvar manualmente o projeto",
+                    ),
+                );
+            });
+
+            ui.add_enabled_ui(draft.project_backup_enabled, |ui| {
+                prefs_row(
+                    ui,
+                    inner_lw,
+                    tr(lang, "Cópias históricas mantidas:"),
+                    |ui| {
+                        ui.add_sized(
+                            [72.0, 20.0],
+                            egui::DragValue::new(&mut draft.project_backup_copies)
+                                .range(1..=10)
+                                .speed(1),
+                        );
+                        ui.label(tr(lang, "cópias (.bak, .bak1, .bak2...)"));
+                    },
+                );
+            });
         },
     );
 }

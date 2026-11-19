@@ -356,10 +356,11 @@ pub enum DockPanel {
     Scopes,
     Notes,
     Encoder,
+    Transcript,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 17] = [
+    pub const ALL: [DockPanel; 18] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -377,6 +378,7 @@ impl DockPanel {
         DockPanel::Scopes,
         DockPanel::Notes,
         DockPanel::Encoder,
+        DockPanel::Transcript,
     ];
 
     pub fn name_in(self, lang: Language) -> &'static str {
@@ -398,6 +400,7 @@ impl DockPanel {
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
             DockPanel::Encoder => "Neoveg Encoder",
+            DockPanel::Transcript => "Transcrição de fala",
         };
         tr(lang, pt)
     }
@@ -425,6 +428,7 @@ impl DockPanel {
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
             DockPanel::Encoder => "view.tab.encoder",
+            DockPanel::Transcript => "view.tab.transcript",
         }
     }
 }
@@ -2036,6 +2040,54 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
     },
     CommandDef {
+        id: "view.tab.transcript",
+        label: "Transcrição de fala",
+        menu_path: "Exibir/Transcrição de fala",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Transcript), h),
+    },
+    CommandDef {
+        id: "speech.remove_silences",
+        label: "Remover silêncios e pausas",
+        menu_path: "Editar/Fala/Remover silêncios e pausas",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.project
+                .transcript
+                .as_ref()
+                .map(|t| !t.segments.is_empty())
+                .unwrap_or(false)
+        },
+        run: |s, h| {
+            crate::speech::remove_transcript_silences(
+                s,
+                crate::time::Ticks::from_millis_i64(1200),
+            )?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "speech.generate_subtitles",
+        label: "Legendas a partir da fala",
+        menu_path: "Inserir/Legendas a partir da fala",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| {
+            s.project
+                .transcript
+                .as_ref()
+                .map(|t| !t.segments.is_empty())
+                .unwrap_or(false)
+        },
+        run: |s, h| {
+            crate::speech::generate_regions_from_transcript(s);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "view.envelopes",
         label: "Mostrar envelopes",
         menu_path: "Exibir/Mostrar envelopes",
@@ -2528,6 +2580,49 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.insert_empty_event();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "sequence.new",
+        label: "Nova sequência",
+        menu_path: "Inserir/Nova sequência",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.checkpoint();
+            s.create_sequence(None);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "sequence.duplicate",
+        label: "Duplicar sequência ativa",
+        menu_path: "Editar/Sequência/Duplicar sequência ativa",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.active_sequence_id.is_some(),
+        run: |s, h| {
+            if let Some(id) = s.project.active_sequence_id {
+                s.checkpoint();
+                s.duplicate_sequence(id);
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "sequence.delete",
+        label: "Excluir sequência ativa",
+        menu_path: "Editar/Sequência/Excluir sequência ativa",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.sequences.len() > 1,
+        run: |s, h| {
+            if let Some(id) = s.project.active_sequence_id {
+                s.checkpoint();
+                s.delete_sequence(id);
+            }
             ok_mutated(s, h)
         },
     },
@@ -3987,6 +4082,11 @@ mod tests {
                 assert!(!panel.name_in(lang).is_empty());
             }
         }
+        for panel in DockPanel::ALL {
+            for lang in Language::ALL {
+                assert!(!panel.name_in(lang).is_empty());
+            }
+        }
         assert_eq!(ShortcutKey::Space.label_in(Language::Ja), "スペース");
         assert_eq!(
             DockPanel::ProjectMedia.name_in(Language::De),
@@ -4066,5 +4166,13 @@ mod tests {
         assert!(s.opts.preview_mute_audio);
         run_command("preview.mute_video", &mut s, &mut h).unwrap();
         assert!(s.opts.preview_mute_video);
+
+        // Comandos de sequência
+        run_command("sequence.new", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 2);
+        run_command("sequence.duplicate", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 3);
+        run_command("sequence.delete", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 2);
     }
 }
