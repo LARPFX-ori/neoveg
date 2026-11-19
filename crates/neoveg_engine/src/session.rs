@@ -1386,6 +1386,46 @@ impl EditorSession {
         n
     }
 
+    /// Adiciona a mídia como take ativo do evento indicado. O take anterior continua.
+    pub fn add_media_as_take(&mut self, event_id: Id, media_id: Id) -> bool {
+        let Some(m) = self.project.media(media_id).cloned() else {
+            return false;
+        };
+        let mut probe = self.project.clone();
+        let mut ok = false;
+        for t in &mut probe.tracks {
+            let fits = match t.kind {
+                TrackKind::Video => m.has_video,
+                TrackKind::Audio => m.has_audio,
+            };
+            if !fits {
+                continue;
+            }
+            for e in &mut t.events {
+                if e.id == event_id && !e.locked {
+                    let take = crate::model::Take {
+                        media_id,
+                        offset: Ticks::ZERO,
+                        name: String::new(),
+                    };
+                    if crate::takes::add_take(e, take, true) {
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                break;
+            }
+        }
+        if ok {
+            self.checkpoint();
+            self.project = probe;
+            self.changed();
+        }
+        ok
+    }
+
     /// Torna ativo o take `k` do evento `id` (escolha no submenu Take).
     pub fn set_active_take(&mut self, id: Id, k: usize) -> bool {
         let mut probe = self.project.clone();

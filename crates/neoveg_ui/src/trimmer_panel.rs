@@ -347,37 +347,61 @@ impl App {
     }
 
     fn trimmer_button(&mut self, b: TrimBtn, media_id: Id, dur: Ticks, frame_dur: Ticks) {
-        let t = &mut self.trimmer;
-        let has_sel = t.sel_out > t.sel_in && (t.sel_in > Ticks::ZERO || t.sel_out < dur);
+        let has_sel = self.trimmer.sel_out > self.trimmer.sel_in
+            && (self.trimmer.sel_in > Ticks::ZERO || self.trimmer.sel_out < dur);
         match b {
-            TrimBtn::Loop => t.loop_play = !t.loop_play,
+            TrimBtn::Loop => {
+                self.trimmer.loop_play = !self.trimmer.loop_play;
+                if self.trimmer.playing {
+                    self.trimmer_play();
+                }
+            }
             TrimBtn::PlayFromStart => {
-                t.cursor = if has_sel { t.sel_in } else { Ticks::ZERO };
-                t.play_origin = t.cursor;
-                t.playing = true;
+                self.trimmer.cursor = if has_sel {
+                    self.trimmer.sel_in
+                } else {
+                    Ticks::ZERO
+                };
+                self.trimmer.play_origin = self.trimmer.cursor;
+                self.trimmer_play();
             }
             TrimBtn::Play => {
-                if !t.playing {
-                    if t.cursor >= dur {
-                        t.cursor = Ticks::ZERO;
+                if !self.trimmer.playing {
+                    if self.trimmer.cursor >= dur {
+                        self.trimmer.cursor = Ticks::ZERO;
                     }
-                    t.play_origin = t.cursor;
-                    t.playing = true;
+                    self.trimmer.play_origin = self.trimmer.cursor;
+                    self.trimmer_play();
                 }
             }
-            TrimBtn::Pause => t.playing = false,
-            TrimBtn::Stop => {
-                if t.playing {
-                    t.cursor = t.play_origin;
+            TrimBtn::Pause => self.trimmer_pause(),
+            TrimBtn::Stop => self.trimmer_stop(),
+            TrimBtn::GoStart => {
+                self.trimmer.cursor = Ticks::ZERO;
+                if self.trimmer.playing {
+                    self.trimmer_play();
                 }
-                t.playing = false;
             }
-            TrimBtn::GoStart => t.cursor = Ticks::ZERO,
-            TrimBtn::GoEnd => t.cursor = dur,
-            TrimBtn::PrevFrame => t.cursor = (t.cursor - frame_dur).max(Ticks::ZERO),
-            TrimBtn::NextFrame => t.cursor = (t.cursor + frame_dur).min(dur),
-            TrimBtn::SetIn => t.set_in(frame_dur, dur),
-            TrimBtn::SetOut => t.set_out(frame_dur),
+            TrimBtn::GoEnd => {
+                self.trimmer.cursor = dur;
+                if self.trimmer.playing {
+                    self.trimmer_pause();
+                }
+            }
+            TrimBtn::PrevFrame => {
+                self.trimmer.cursor = (self.trimmer.cursor - frame_dur).max(Ticks::ZERO);
+                if self.trimmer.playing {
+                    self.trimmer_play();
+                }
+            }
+            TrimBtn::NextFrame => {
+                self.trimmer.cursor = (self.trimmer.cursor + frame_dur).min(dur);
+                if self.trimmer.playing {
+                    self.trimmer_play();
+                }
+            }
+            TrimBtn::SetIn => self.trimmer.set_in(frame_dur, dur),
+            TrimBtn::SetOut => self.trimmer.set_out(frame_dur),
             TrimBtn::AddFromCursor => self.trimmer_add_to_timeline(media_id, false),
             TrimBtn::AddUpToCursor => self.trimmer_add_to_timeline(media_id, true),
         }
@@ -389,7 +413,7 @@ impl App {
             if self.project.media(id).is_none() {
                 self.trimmer.media_id = None;
                 self.trimmer.last_frame = None;
-                self.trimmer.playing = false;
+                self.trimmer_pause();
             }
         }
         let project_ids: std::collections::HashSet<Id> =
@@ -416,19 +440,32 @@ impl App {
         let dur = self.media_trimmer_duration(media_id);
         self.trimmer.clamp_bounds(dur, frame_dur);
 
-        // reprodução da prévia (só imagem)
+        // reprodução da prévia no Trimmer (áudio via streaming e vídeo sincronizado)
         if self.trimmer.playing {
-            let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
-            let (c, go) = play_step(
-                self.trimmer.cursor,
-                Ticks::from_secs_f64_clamped(f64::from(dt)),
-                (self.trimmer.sel_in, self.trimmer.sel_out),
-                self.trimmer.loop_play,
-                dur,
-            );
-            self.trimmer.cursor = c;
-            self.trimmer.playing = go;
-            ui.ctx().request_repaint();
+            let sr = self.audio.sr;
+            let audio_info = {
+                let s = crate::util::lock(&self.audio.shared);
+                s.trimmer_audio.clone()
+            };
+            if let Some(trim) = audio_info.filter(|t| t.media_id == media_id && t.playing) {
+                self.trimmer.cursor = Ticks::from_samples(trim.pos.max(0), sr);
+                self.trimmer.playing = trim.playing;
+                ui.ctx().request_repaint();
+            } else if !item.has_audio {
+                let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
+                let (c, go) = play_step(
+                    self.trimmer.cursor,
+                    Ticks::from_secs_f64_clamped(f64::from(dt)),
+                    (self.trimmer.sel_in, self.trimmer.sel_out),
+                    self.trimmer.loop_play,
+                    dur,
+                );
+                self.trimmer.cursor = c;
+                self.trimmer.playing = go;
+                ui.ctx().request_repaint();
+            } else {
+                self.trimmer.playing = false;
+            }
         }
 
         let ruler_h = 22.0;
@@ -551,9 +588,10 @@ impl App {
             self.trimmer.history.clear();
             self.trimmer.media_id = None;
             self.trimmer.last_frame = None;
-            self.trimmer.playing = false;
+            self.trimmer_pause();
         }
         if let Some(id) = picked {
+            self.trimmer_pause();
             let dur = self.media_trimmer_duration(id);
             self.trimmer.load_media(id, dur);
         }

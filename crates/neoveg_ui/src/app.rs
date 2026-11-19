@@ -959,6 +959,10 @@ impl App {
         s.speed = rate;
         s.reset_dsp();
         s.playing = true;
+        if let Some(ref mut trim) = s.trimmer_audio {
+            trim.playing = false;
+        }
+        self.trimmer.playing = false;
         self.shuttle = rate;
     }
 
@@ -978,6 +982,10 @@ impl App {
         s.speed = speed;
         s.playing = true;
         s.reset_dsp();
+        if let Some(ref mut trim) = s.trimmer_audio {
+            trim.playing = false;
+        }
+        self.trimmer.playing = false;
         self.shuttle = speed;
     }
 
@@ -999,6 +1007,51 @@ impl App {
             self.cursor = Ticks::from_samples(pos.max(0), self.audio.sr);
         } else {
             self.cursor = self.play_start;
+        }
+    }
+
+    pub fn trimmer_play(&mut self) {
+        if self.is_playing() {
+            self.stop(true);
+        }
+        let Some(mid) = self.trimmer.media_id else {
+            return;
+        };
+        self.sync_snapshot();
+        let sr = self.audio.sr;
+        let loop_range = if self.trimmer.loop_play && self.trimmer.sel_in < self.trimmer.sel_out {
+            Some((
+                self.trimmer.sel_in.to_samples_round(sr),
+                self.trimmer.sel_out.to_samples_round(sr),
+            ))
+        } else {
+            None
+        };
+        let mut s = crate::util::lock(&self.audio.shared);
+        s.trimmer_audio = Some(neoveg_engine::playback::TrimmerAudioPlayback {
+            media_id: mid,
+            pos: self.trimmer.cursor.to_samples_round(sr),
+            loop_range,
+            playing: true,
+        });
+        self.trimmer.playing = true;
+    }
+
+    pub fn trimmer_pause(&mut self) {
+        self.trimmer.playing = false;
+        let mut s = crate::util::lock(&self.audio.shared);
+        if let Some(ref mut trim) = s.trimmer_audio {
+            trim.playing = false;
+        }
+    }
+
+    pub fn trimmer_stop(&mut self) {
+        self.trimmer.playing = false;
+        self.trimmer.cursor = self.trimmer.play_origin;
+        let mut s = crate::util::lock(&self.audio.shared);
+        if let Some(ref mut trim) = s.trimmer_audio {
+            trim.playing = false;
+            trim.pos = self.trimmer.play_origin.to_samples_round(self.audio.sr);
         }
     }
 
