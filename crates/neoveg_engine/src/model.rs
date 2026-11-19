@@ -387,7 +387,10 @@ impl Sequence {
 
 impl Project {
     pub fn new_default() -> Self {
-        let mut p = Project::default();
+        let mut p = Project {
+            format_version: 1,
+            ..Default::default()
+        };
         p.tracks.push(Track::new(TrackKind::Video, "Vídeo 1"));
         p.tracks.push(Track::new(TrackKind::Audio, "Áudio 1"));
         p.ensure_sequences();
@@ -396,6 +399,9 @@ impl Project {
 
     /// Garante que o projeto tenha pelo menos uma sequência ativa configurada.
     pub fn ensure_sequences(&mut self) {
+        if self.format_version == 0 {
+            self.format_version = 1;
+        }
         if self.active_sequence_id.is_none() {
             let seq_id = new_id();
             self.active_sequence_id = Some(seq_id);
