@@ -680,6 +680,14 @@ impl Exporter<'_> {
                 ));
                 return;
             }
+            MediaSource::Sequence { id } => {
+                self.out.push_str(&format!(
+                    "          <!-- sequencia aninhada: {} (id: {}) -->\n",
+                    escape_xml(&e.name).replace("--", "- -"),
+                    id
+                ));
+                return;
+            }
         };
         let fps = self.fps;
         let media_rate = m.fps.unwrap_or(fps);

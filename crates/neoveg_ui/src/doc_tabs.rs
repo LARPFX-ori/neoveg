@@ -310,6 +310,15 @@ impl App {
         Some(p)
     }
 
+    /// ID da sequência interna do projeto caso a mídia seja `MediaSource::Sequence`.
+    pub(crate) fn nested_sequence_id(&self, media_id: Id) -> Option<Id> {
+        let m = self.project.media.iter().find(|m| m.id == media_id)?;
+        match m.source {
+            MediaSource::Sequence { id } => Some(id),
+            _ => None,
+        }
+    }
+
     /// Comando *Abrir projeto aninhado em aba*: o do evento selecionado, ou
     /// a mídia ativa no painel Mídia do Projeto.
     pub(crate) fn open_nested_from_selection(&mut self) {

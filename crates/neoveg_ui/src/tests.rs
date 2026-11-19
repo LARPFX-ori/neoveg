@@ -2077,3 +2077,111 @@ fn app_floating_docks_grouping_detaching_and_docking() {
     assert!(app.floating_docks.is_empty());
     assert!(!app.detached_tabs.contains(&crate::DockTab::ProjectMedia));
 }
+
+#[test]
+fn teste_aninhar_selecao_fluxo_completo_e_desfazer() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let m = MediaItem {
+        id: new_id(),
+        name: "Video Teste".into(),
+        source: MediaSource::Generated(GenSpec::ColorBars),
+        duration: Some(Ticks::from_secs_i64(20)),
+        has_video: true,
+        has_audio: false,
+        width: 1920,
+        height: 1080,
+        fps: Some(FrameRate::FPS_30),
+        info: String::new(),
+        proxy_path: None,
+    };
+    app.project.media.push(m.clone());
+
+    let ev1 = crate::model::Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(4));
+    let ev2 = crate::model::Event::new(&m, Ticks::from_secs_i64(4), Ticks::from_secs_i64(5));
+    let ev1_id = ev1.id;
+    let ev2_id = ev2.id;
+    app.project.tracks[0].events.push(ev1);
+    app.project.tracks[0].events.push(ev2);
+
+    app.session.sel_events.insert(ev1_id);
+    app.session.sel_events.insert(ev2_id);
+    app.sel_events = app.session.sel_events.clone();
+
+    // Executa comando de aninhamento
+    app.exec_cmd(Some(&ctx), "sequence.nest_selection");
+
+    // Na timeline ativa resta 1 evento aninhado
+    assert_eq!(app.project.tracks[0].events.len(), 1);
+    let nested_clip = &app.project.tracks[0].events[0];
+    assert_eq!(nested_clip.start, Ticks::from_secs_i64(2));
+    assert_eq!(nested_clip.length, Ticks::from_secs_i64(7)); // de 2s a 9s
+
+    // Nova sequência criada
+    assert_eq!(app.project.sequences.len(), 1);
+    let seq = &app.project.sequences[0];
+    assert_eq!(seq.tracks[0].events.len(), 2);
+    assert_eq!(seq.tracks[0].events[0].start, Ticks::ZERO);
+    assert_eq!(seq.tracks[0].events[1].start, Ticks::from_secs_i64(2));
+
+    // Desfazer restaura os 2 eventos originais
+    app.exec_cmd(None, "edit.undo");
+    assert_eq!(app.project.tracks[0].events.len(), 2);
+    assert!(app.project.tracks[0].events.iter().any(|e| e.id == ev1_id));
+    assert!(app.project.tracks[0].events.iter().any(|e| e.id == ev2_id));
+
+    // Refazer volta a ter o clipe aninhado
+    app.exec_cmd(None, "edit.redo");
+    assert_eq!(app.project.tracks[0].events.len(), 1);
+}
+
+#[test]
+fn teste_aninhar_selecao_deteccao_de_ciclo_e_duplo_clique() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let m = MediaItem {
+        id: new_id(),
+        name: "Clipe A".into(),
+        source: MediaSource::Generated(GenSpec::ColorBars),
+        duration: Some(Ticks::from_secs_i64(10)),
+        has_video: true,
+        has_audio: false,
+        width: 1920,
+        height: 1080,
+        fps: Some(FrameRate::FPS_30),
+        info: String::new(),
+        proxy_path: None,
+    };
+    app.project.media.push(m.clone());
+
+    let ev = crate::model::Event::new(&m, Ticks::from_secs_i64(1), Ticks::from_secs_i64(3));
+    let ev_id = ev.id;
+    app.project.tracks[0].events.push(ev);
+    app.session.sel_events.insert(ev_id);
+
+    let active_id = app.project.active_sequence_id.unwrap_or(1);
+    let nested_id = app
+        .session
+        .nest_selection(Some("Sequência Sub"))
+        .unwrap_or(0);
+    assert_ne!(nested_id, 0);
+
+    // Verificação de ciclo: aninhar a ativa dentro da sub criada deve ser proibido
+    assert!(app
+        .project
+        .validate_no_sequence_cycle(nested_id, active_id)
+        .is_err());
+    // Auto-referência direta também proibida
+    assert!(app
+        .project
+        .validate_no_sequence_cycle(nested_id, nested_id)
+        .is_err());
+
+    // Duplo clique / alternância pelo ID da sequência aninhada
+    let clip_media_id = app.project.tracks[0].events[0].media_id;
+    let found_seq_id = app.nested_sequence_id(clip_media_id);
+    assert_eq!(found_seq_id, Some(nested_id));
+
+    assert!(app.switch_sequence_app(nested_id));
+    assert_eq!(app.project.active_sequence_id, Some(nested_id));
+}

@@ -768,6 +768,199 @@ impl EditorSession {
         self.rename_sequence(id, new_name)
     }
 
+    /// Aninha a seleção atual de eventos numa nova sequência (Premiere Pro ref. pp. 290–291).
+    ///
+    /// Remove os eventos selecionados da timeline ativa, cria uma nova [`Sequence`],
+    /// coloca nela os eventos selecionados (com offset ajustado para iniciarem em Ticks::ZERO),
+    /// e insere na timeline ativa um clipe apontando para a nova sequência no intervalo exato.
+    pub fn nest_selection(&mut self, custom_name: Option<&str>) -> Result<Id> {
+        if self.sel_events.is_empty() {
+            return Err(NeovegError::InvalidInput(
+                tr(self.lang, "Nenhum evento selecionado para aninhar").to_string(),
+            ));
+        }
+
+        self.project.ensure_sequences();
+        if self.project.sequences.len() >= MAX_SEQUENCES {
+            return Err(NeovegError::InvalidInput(
+                tr(self.lang, "Limite máximo de sequências atingido").to_string(),
+            ));
+        }
+
+        // 1. Localiza todos os eventos selecionados nas trilhas ativas
+        let mut selected_events = Vec::new();
+        let mut min_start = Ticks::MAX;
+        let mut max_end = Ticks::ZERO;
+        let mut has_video = false;
+        let mut has_audio = false;
+
+        for (ti, t) in self.project.tracks.iter().enumerate() {
+            for (ei, e) in t.events.iter().enumerate() {
+                if self.sel_events.contains(&e.id) {
+                    selected_events.push((ti, ei, e.clone(), t.kind));
+                    min_start = min_start.min(e.start);
+                    max_end = max_end.max(e.end());
+                    if t.kind == TrackKind::Video {
+                        has_video = true;
+                    } else if t.kind == TrackKind::Audio {
+                        has_audio = true;
+                    }
+                }
+            }
+        }
+
+        if selected_events.is_empty() || min_start >= max_end {
+            return Err(NeovegError::InvalidInput(
+                tr(self.lang, "Seleção inválida para aninhar").to_string(),
+            ));
+        }
+
+        let nest_dur = max_end - min_start;
+        self.checkpoint();
+
+        // 2. Cria a nova sequência com id estável
+        let new_seq_id = new_id();
+        let seq_num = self.project.sequences.len() + 2;
+        let seq_name = custom_name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Sequência Aninhada {seq_num:02}"));
+
+        // 3. Monta as trilhas da nova sequência e remapeia IDs (§3.1)
+        let mut new_tracks = Vec::new();
+        let mut track_idx_map: HashMap<usize, usize> = HashMap::new();
+        let mut event_id_map: HashMap<Id, Id> = HashMap::new();
+
+        for &(orig_ti, _, ref ev, _) in &selected_events {
+            event_id_map.insert(ev.id, new_id());
+            if let std::collections::hash_map::Entry::Vacant(e) = track_idx_map.entry(orig_ti) {
+                let orig_track = &self.project.tracks[orig_ti];
+                let mut new_track = Track::new(orig_track.kind, &orig_track.name);
+                new_track.id = new_id();
+                e.insert(new_tracks.len());
+                new_tracks.push(new_track);
+            }
+        }
+
+        for &(orig_ti, _, ref ev, _) in &selected_events {
+            let target_ti = track_idx_map[&orig_ti];
+            let mut new_ev = ev.clone();
+            new_ev.id = event_id_map[&ev.id];
+            new_ev.start = if ev.start >= min_start {
+                ev.start - min_start
+            } else {
+                Ticks::ZERO
+            };
+            if let Some(orig_master) = ev.sync_link_master {
+                new_ev.sync_link_master = event_id_map.get(&orig_master).copied();
+            }
+            new_tracks[target_ti].events.push(new_ev);
+        }
+
+        // 4. Remove os eventos selecionados das trilhas ativas
+        for t in &mut self.project.tracks {
+            t.events.retain(|e| !self.sel_events.contains(&e.id));
+        }
+
+        // 5. Cria o MediaItem correspondente à sequência aninhada no projeto
+        let media_id = new_id();
+        let media_item = MediaItem {
+            id: media_id,
+            name: seq_name.clone(),
+            source: MediaSource::Sequence { id: new_seq_id },
+            duration: Some(nest_dur),
+            has_video,
+            has_audio,
+            width: self.project.settings.width,
+            height: self.project.settings.height,
+            fps: Some(self.project.settings.fps),
+            info: format!("Sequência aninhada {seq_name}"),
+            proxy_path: None,
+        };
+        self.project.media.push(media_item.clone());
+
+        // 6. Insere o clipe aninhado na timeline ativa na posição min_start com duração nest_dur
+        let mut new_sel = HashSet::new();
+        let mut created_video_ev: Option<Id> = None;
+        let mut created_audio_ev: Option<Id> = None;
+
+        if has_video {
+            let v_track_idx = selected_events
+                .iter()
+                .find(|(_, _, _, k)| *k == TrackKind::Video)
+                .map(|(ti, _, _, _)| *ti)
+                .or_else(|| {
+                    self.project
+                        .tracks
+                        .iter()
+                        .position(|t| t.kind == TrackKind::Video)
+                });
+
+            if let Some(ti) = v_track_idx {
+                let mut ev = Event::new(&media_item, min_start, nest_dur);
+                ev.name = seq_name.clone();
+                let ev_id = ev.id;
+                created_video_ev = Some(ev_id);
+                self.project.tracks[ti].events.push(ev);
+                new_sel.insert(ev_id);
+            }
+        }
+
+        if has_audio {
+            let a_track_idx = selected_events
+                .iter()
+                .find(|(_, _, _, k)| *k == TrackKind::Audio)
+                .map(|(ti, _, _, _)| *ti)
+                .or_else(|| {
+                    self.project
+                        .tracks
+                        .iter()
+                        .position(|t| t.kind == TrackKind::Audio)
+                });
+
+            if let Some(ti) = a_track_idx {
+                let mut ev = Event::new(&media_item, min_start, nest_dur);
+                ev.name = seq_name.clone();
+                let ev_id = ev.id;
+                created_audio_ev = Some(ev_id);
+                self.project.tracks[ti].events.push(ev);
+                new_sel.insert(ev_id);
+            }
+        }
+
+        if let (Some(vid_id), Some(aud_id)) = (created_video_ev, created_audio_ev) {
+            for t in &mut self.project.tracks {
+                for e in &mut t.events {
+                    if e.id == aud_id {
+                        e.sync_link_master = Some(vid_id);
+                    }
+                }
+            }
+        }
+
+        // 7. Salva a nova sequência em self.project.sequences
+        let new_sequence = Sequence {
+            id: new_seq_id,
+            name: seq_name,
+            tracks: new_tracks,
+            markers: Vec::new(),
+            regions: Vec::new(),
+            loop_region: None,
+            cursor: Ticks::ZERO,
+            scroll_x: Ticks::ZERO,
+            px_per_sec: 100.0,
+            transcript: None,
+        };
+        self.project.sequences.push(new_sequence);
+        self.project.sequence_order.push(new_seq_id);
+        self.project.format_version = 2;
+
+        self.sel_events = new_sel;
+        self.refresh_snapshot();
+        self.changed();
+
+        Ok(new_seq_id)
+    }
+
     /// Retorna as pastas de trabalho configuradas para o projeto.
     pub fn work_folders(&self) -> &crate::model::WorkFolders {
         &self.project.work_folders

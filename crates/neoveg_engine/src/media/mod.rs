@@ -71,6 +71,15 @@ pub struct NestedProjectEntry {
     pub path: PathBuf,
 }
 
+/// Estado em memória de uma sequência interna aninhada como mídia (`MediaSource::Sequence`).
+pub struct NestedSequenceEntry {
+    pub sequence_id: Id,
+    pub name: String,
+    pub tracks: Vec<crate::model::Track>,
+    pub settings: crate::model::ProjectSettings,
+    pub media: Arc<MediaCache>,
+}
+
 pub fn is_supported(path: &Path) -> bool {
     let ext = ext_of(path);
     IMAGE_EXTS.contains(&ext.as_str())
@@ -158,6 +167,8 @@ pub enum VideoSource {
     Generated,
     /// Linha do tempo aninhada (`.neoveg`) com cache próprio de quadros renderizados.
     Nested(Arc<NestedProjectEntry>, Mutex<FrameCache>),
+    /// Sequência interna do projeto aninhada como mídia (Premiere Pro ref. pp. 290–291).
+    NestedSequence(Arc<NestedSequenceEntry>, Mutex<FrameCache>),
 }
 
 impl VideoSource {
@@ -167,7 +178,8 @@ impl VideoSource {
             | VideoSource::Y4m(_, c)
             | VideoSource::System(_, c)
             | VideoSource::Sequence(_, _, c)
-            | VideoSource::Nested(_, c) => {
+            | VideoSource::Nested(_, c)
+            | VideoSource::NestedSequence(_, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .set_budget(cap, max_bytes);
@@ -185,7 +197,8 @@ impl VideoSource {
             | VideoSource::Y4m(_, c)
             | VideoSource::System(_, c)
             | VideoSource::Sequence(_, _, c)
-            | VideoSource::Nested(_, c) => {
+            | VideoSource::Nested(_, c)
+            | VideoSource::NestedSequence(_, c) => {
                 c.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clear();
@@ -358,6 +371,92 @@ impl MediaCache {
             .iter()
             .filter_map(|(k, e)| e.audio.clone().map(|a| (*k, a)))
             .collect()
+    }
+
+    /// Sincroniza as entradas de mídia de sequências aninhadas (`MediaSource::Sequence`)
+    /// garantindo que o vídeo e o áudio mixado em memória estejam disponíveis.
+    pub fn sync_sequence_media(
+        &self,
+        project: &crate::model::Project,
+        shared_cache: Arc<MediaCache>,
+    ) {
+        for m in &project.media {
+            if let MediaSource::Sequence { id: seq_id } = m.source {
+                let (tracks, settings, name) = if project.active_sequence_id == Some(seq_id) {
+                    (
+                        project.tracks.clone(),
+                        project.settings.clone(),
+                        project
+                            .active_sequence_name
+                            .clone()
+                            .unwrap_or_else(|| "Sequência".into()),
+                    )
+                } else if let Some(s) = project.sequences.iter().find(|s| s.id == seq_id) {
+                    (s.tracks.clone(), project.settings.clone(), s.name.clone())
+                } else {
+                    continue;
+                };
+
+                let has_audio = tracks.iter().any(|t| {
+                    t.kind == crate::model::TrackKind::Audio && !t.is_folder && !t.events.is_empty()
+                });
+                let dur = m.duration.unwrap_or_else(|| {
+                    tracks
+                        .iter()
+                        .flat_map(|t| &t.events)
+                        .map(|e| e.end())
+                        .fold(Ticks::ZERO, Ticks::max)
+                });
+
+                let audio = if has_audio {
+                    let sr = settings.sample_rate.clamp(8000, 192_000);
+                    let audio_dur = dur.min(Ticks::from_secs_i64(MAX_NESTED_AUDIO_SECS));
+                    let total_samples = audio_dur.to_samples_round(sr).max(1) as usize;
+                    let capped_samples = total_samples
+                        .min((sr as usize).saturating_mul(MAX_NESTED_AUDIO_SECS as usize));
+                    let sub_proj = crate::model::Project {
+                        tracks: tracks.clone(),
+                        settings: settings.clone(),
+                        ..crate::model::Project::new_default()
+                    };
+                    let audio_map = shared_cache.audio_map();
+                    let mut mixer = crate::engine::audio::Mixer::new_offline(sr);
+                    let pdc = mixer.total_latency(&sub_proj) as i64;
+                    let mut stereo = Vec::with_capacity(capped_samples.saturating_mul(2));
+                    let mut pos = 0usize;
+                    let chunk = 2048usize;
+                    while pos < capped_samples {
+                        let n = (capped_samples - pos).min(chunk);
+                        let mut blk = vec![0.0f32; n * 2];
+                        mixer.process(&sub_proj, &audio_map, pos as i64 + pdc, &mut blk);
+                        stereo.extend_from_slice(&blk);
+                        pos += n;
+                    }
+                    Some(Arc::new(AudioData::from_stereo(sr, stereo)))
+                } else {
+                    None
+                };
+
+                let entry = Arc::new(MediaEntry {
+                    video: VideoSource::NestedSequence(
+                        Arc::new(NestedSequenceEntry {
+                            sequence_id: seq_id,
+                            name,
+                            tracks,
+                            settings,
+                            media: shared_cache.clone(),
+                        }),
+                        Mutex::new(FrameCache::new(16)),
+                    ),
+                    audio,
+                });
+
+                self.entries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(m.id, entry);
+            }
+        }
     }
 
     /// Limpa o cache de mídia gerada de um item (após edição).
@@ -573,6 +672,43 @@ impl MediaCache {
                 let ft = fps.frame_to_ticks(idx as i64);
                 let frame = crate::engine::video::render_frame_preview(
                     &nested.project,
+                    &nested.media,
+                    ft,
+                    rw,
+                    rh,
+                    true,
+                );
+                let img = Arc::new(frame.to_image()?);
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .put(idx, img.clone());
+                Some(img)
+            }
+            VideoSource::NestedSequence(nested, cache) => {
+                let fps = item.fps.unwrap_or(nested.settings.fps);
+                let max_idx = item
+                    .duration
+                    .map(|d| fps.ticks_to_frame_floor(d).max(0))
+                    .unwrap_or(i64::MAX / 2);
+                let idx = fps.ticks_to_frame_floor(t).clamp(0, max_idx) as usize;
+                if let Some(img) = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(idx)
+                {
+                    return Some(img);
+                }
+                let rw = nested.settings.width.clamp(16, 1920) as usize;
+                let rh = nested.settings.height.clamp(16, 1080) as usize;
+                let ft = fps.frame_to_ticks(idx as i64);
+                let sub_proj = crate::model::Project {
+                    tracks: nested.tracks.clone(),
+                    settings: nested.settings.clone(),
+                    ..crate::model::Project::new_default()
+                };
+                let frame = crate::engine::video::render_frame_preview(
+                    &sub_proj,
                     &nested.media,
                     ft,
                     rw,
@@ -814,6 +950,26 @@ fn load_entry_inner(
             item.has_video = true;
             MediaEntry {
                 video: VideoSource::Generated,
+                audio: None,
+            }
+        }
+        MediaSource::Sequence { id: seq_id } => {
+            let dur = item.duration.unwrap_or_else(|| Ticks::from_secs_i64(10));
+            item.has_video = true;
+            item.has_audio = true;
+            item.duration = Some(dur);
+            item.info = format!("Sequência aninhada (ID: {seq_id})");
+            MediaEntry {
+                video: VideoSource::NestedSequence(
+                    Arc::new(NestedSequenceEntry {
+                        sequence_id: seq_id,
+                        name: item.name.clone(),
+                        tracks: Vec::new(),
+                        settings: crate::model::ProjectSettings::default(),
+                        media: Arc::new(MediaCache::default()),
+                    }),
+                    Mutex::new(FrameCache::new(16)),
+                ),
                 audio: None,
             }
         }

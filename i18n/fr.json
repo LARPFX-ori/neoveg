@@ -2145,5 +2145,13 @@
   "◀ 1q": "◀ 1i",
   "★ Favoritos": "★ Favoris",
   "＋ Barramento": "+ Bus",
-  "＋ Marcador no Cursor": "+ Marqueur au curseur"
+  "＋ Marcador no Cursor": "+ Marqueur au curseur",
+  "Aninhar seleção em nova sequência": "Imbriquer la sélection dans une nouvelle séquence",
+  "Abrir sequência aninhada em aba": "Ouvrir la séquence imbriquée dans un onglet",
+  "Nenhum evento selecionado para aninhar": "Aucun événement sélectionné à imbriquer",
+  "Uma sequência não pode ser aninhada dentro de si mesma": "Une séquence ne peut pas être imbriquée dans elle-même",
+  "Referência cíclica detectada entre sequências aninhadas": "Référence cyclique détectée entre séquences imbriquées",
+  "Profundidade máxima de aninhamento ({max}) excedida": "Profondeur maximale d'imbrication ({max}) dépassée",
+  "Limite máximo de sequências atingido": "Limite maximale de séquences atteinte",
+  "Seleção inválida para aninhar": "Sélection non valide à imbriquer"
 }

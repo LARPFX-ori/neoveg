@@ -2145,5 +2145,13 @@
   "◀ 1q": "◀ 1f",
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "+ Bus",
-  "＋ Marcador no Cursor": "+ Marcador en cursor"
+  "＋ Marcador no Cursor": "+ Marcador en cursor",
+  "Aninhar seleção em nova sequência": "Anidar selección en nueva secuencia",
+  "Abrir sequência aninhada em aba": "Abrir secuencia anidada en pestaña",
+  "Nenhum evento selecionado para aninhar": "No hay eventos seleccionados para anidar",
+  "Uma sequência não pode ser aninhada dentro de si mesma": "Una secuencia no se puede anidar dentro de sí misma",
+  "Referência cíclica detectada entre sequências aninhadas": "Referencia cíclica detectada entre secuencias anidadas",
+  "Profundidade máxima de aninhamento ({max}) excedida": "Profundidad máxima de anidamiento ({max}) excedida",
+  "Limite máximo de sequências atingido": "Límite máximo de secuencias alcanzado",
+  "Seleção inválida para aninhar": "Selección no válida para anidar"
 }

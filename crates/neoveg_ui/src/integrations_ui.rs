@@ -430,7 +430,7 @@ impl App {
                 Some(PathBuf::from(path))
             }
             MediaSource::ImageSequence { paths, .. } => paths.first().map(PathBuf::from),
-            MediaSource::Generated(_) => None,
+            MediaSource::Generated(_) | MediaSource::Sequence { .. } => None,
         }
     }
 

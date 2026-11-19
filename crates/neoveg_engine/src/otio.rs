@@ -1041,6 +1041,12 @@ fn export_media_ref(item: Option<&MediaItem>, fps: FrameRate, sr: Option<u32>) -
                 "parameters": params,
             })
         }
+        MediaSource::Sequence { id } => serde_json::json!({
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "name": m.name,
+            "target_url": format!("sequence:{id}"),
+            "available_range": avail,
+        }),
     }
 }
 

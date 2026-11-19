@@ -871,6 +871,8 @@ impl App {
         ) {
             self.dlg.fx_target = None;
         }
+        self.media
+            .sync_sequence_media(&self.project, self.media.clone());
         self.changed();
         true
     }
@@ -1127,8 +1129,13 @@ impl App {
     pub(crate) fn reload_all_media(&mut self) {
         self.thumbs.clear();
         self.project_media.clear_thumbs();
+        self.media
+            .sync_sequence_media(&self.project, self.media.clone());
         let items = self.project.media.clone();
         for m in items {
+            if matches!(m.source, MediaSource::Sequence { .. }) {
+                continue;
+            }
             self.media.remove(m.id);
             self.spawn_media_load(m);
         }

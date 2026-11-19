@@ -2145,5 +2145,13 @@
   "◀ 1q": "◀ 1f",
   "★ Favoritos": "★ Favorites",
   "＋ Barramento": "+ Bus",
-  "＋ Marcador no Cursor": "+ Marker at Cursor"
+  "＋ Marcador no Cursor": "+ Marker at Cursor",
+  "Aninhar seleção em nova sequência": "Nest selection into new sequence",
+  "Abrir sequência aninhada em aba": "Open nested sequence in tab",
+  "Nenhum evento selecionado para aninhar": "No events selected to nest",
+  "Uma sequência não pode ser aninhada dentro de si mesma": "A sequence cannot be nested inside itself",
+  "Referência cíclica detectada entre sequências aninhadas": "Cyclic reference detected between nested sequences",
+  "Profundidade máxima de aninhamento ({max}) excedida": "Maximum nesting depth ({max}) exceeded",
+  "Limite máximo de sequências atingido": "Maximum sequence limit reached",
+  "Seleção inválida para aninhar": "Invalid selection to nest"
 }

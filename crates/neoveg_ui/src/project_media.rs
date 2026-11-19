@@ -1018,7 +1018,13 @@ impl App {
                                             2.0,
                                             self.theme.extreme_bg,
                                         );
-                                        let icon = if m.has_audio {
+                                        let icon = if matches!(
+                                            m.source,
+                                            MediaSource::Sequence { .. }
+                                                | MediaSource::NestedProject { .. }
+                                        ) {
+                                            Icon::NestedTimeline
+                                        } else if m.has_audio {
                                             Icon::AudioTrack
                                         } else {
                                             Icon::MediaItem
@@ -1047,7 +1053,11 @@ impl App {
                                         .unwrap_or_else(|| "estática".into());
                                     let tag = media_kind_tag(m);
                                     let offline = !self.media.contains(m.id)
-                                        && !matches!(m.source, MediaSource::Generated(_));
+                                        && !matches!(
+                                            m.source,
+                                            MediaSource::Generated(_)
+                                                | MediaSource::Sequence { .. }
+                                        );
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new(format!("{dur} • {tag}"))
@@ -1094,7 +1104,12 @@ impl App {
                     ui.horizontal(|ui| {
                         icons::paint_inline(
                             ui,
-                            if m.has_video {
+                            if matches!(
+                                m.source,
+                                MediaSource::Sequence { .. } | MediaSource::NestedProject { .. }
+                            ) {
+                                Icon::NestedTimeline
+                            } else if m.has_video {
                                 Icon::MediaItem
                             } else {
                                 Icon::AudioTrack
@@ -1644,5 +1659,6 @@ fn media_source_label(src: &MediaSource) -> String {
         MediaSource::ImageSequence { paths, .. } => format!("Sequência ({} quadros)", paths.len()),
         MediaSource::Generated(_) => "Gerador interno".into(),
         MediaSource::NestedProject { path } => format!("Projeto aninhado: {path}"),
+        MediaSource::Sequence { id } => format!("Sequência aninhada (ID: {id})"),
     }
 }

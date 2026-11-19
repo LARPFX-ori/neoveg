@@ -1198,6 +1198,7 @@ pub fn export_fcpxml_string(project: &Project, name_override: Option<&str>) -> S
                 .map(|p| encode_target_url(p))
                 .unwrap_or_default(),
             MediaSource::Generated(g) => g.label(),
+            MediaSource::Sequence { id } => format!("sequence:{id}"),
         };
         res_xml.push_str(&format!(
             "        <asset id=\"{rid}\" name=\"{}\" src=\"{}\" start=\"0s\" duration=\"{}\" hasVideo=\"{}\" hasAudio=\"{}\" format=\"r1\"/>\n",

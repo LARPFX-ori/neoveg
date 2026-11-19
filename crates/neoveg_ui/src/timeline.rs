@@ -3787,9 +3787,15 @@ impl App {
                         }
                     } else {
                         let e = &self.project.tracks[ti].events[ei];
-                        let sel = (e.start, e.end());
-                        self.time_sel = Some(sel);
-                        self.project.loop_region = Some(sel);
+                        if let Some(seq_id) = self.nested_sequence_id(e.media_id) {
+                            self.switch_sequence_app(seq_id);
+                        } else if self.nested_media_path(e.media_id).is_some() {
+                            self.open_nested_media_tab(e.media_id);
+                        } else {
+                            let sel = (e.start, e.end());
+                            self.time_sel = Some(sel);
+                            self.project.loop_region = Some(sel);
+                        }
                     }
                 }
             }
@@ -4680,6 +4686,18 @@ impl App {
     ) {
         match payload {
             DndPayload::Media(mid) => {
+                if let Some(m) = self.project.media(mid) {
+                    if let MediaSource::Sequence { id: seq_id } = m.source {
+                        if let Some(active_id) = self.project.active_sequence_id {
+                            if let Err(e) =
+                                self.project.validate_no_sequence_cycle(active_id, seq_id)
+                            {
+                                self.set_status(e);
+                                return;
+                            }
+                        }
+                    }
+                }
                 self.checkpoint();
                 self.add_media_to_timeline(mid, t, track);
             }
@@ -5026,6 +5044,23 @@ impl App {
                 .clicked()
         {
             self.open_nested_media_tab(e.media_id);
+            ui.close_menu();
+        }
+        if let Some(seq_id) = self.nested_sequence_id(e.media_id) {
+            if ui
+                .button(tr(lang, "Abrir sequência aninhada em aba"))
+                .clicked()
+            {
+                self.switch_sequence_app(seq_id);
+                ui.close_menu();
+            }
+        }
+        if !self.sel_events.is_empty()
+            && ui
+                .button(tr(lang, "Aninhar seleção em nova sequência"))
+                .clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), "sequence.nest_selection");
             ui.close_menu();
         }
         if is_video && ui.button(tr(lang, "Pan/Crop do evento...")).clicked() {
