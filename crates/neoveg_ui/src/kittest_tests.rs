@@ -1636,8 +1636,9 @@ fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
 
 /// Ferramentas da barra da Prévia que não cabem na largura do painel ficam no
 /// menu "⋯" (preview_toolbar.rs): abre o menu quando o botão não está na barra.
-/// O menu abre com clique de ponteiro (`simulate_click`), como o do usuário: o
-/// clique de acessibilidade do kittest (`click`) não abriu o menu na CI.
+/// Na CI, nem `click` nem `simulate_click` abriram esse menu no kittest (no
+/// programa ele abre), por isso os testes da barra usam uma janela larga em
+/// que tudo cabe; isto fica como reserva.
 fn reach_preview_tool(harness: &mut Harness<'_, App>, label: &str) {
     if harness.query_by_label(label).is_none() {
         harness
@@ -1649,8 +1650,10 @@ fn reach_preview_tool(harness: &mut Harness<'_, App>, label: &str) {
 
 #[test]
 fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
+    // janela larga: todas as ferramentas da Prévia cabem na barra (o menu "⋯"
+    // dos excedentes tem teste próprio da divisão em preview_toolbar)
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(1480.0, 900.0))
+        .with_size(egui::vec2(2400.0, 900.0))
         .build_eframe(build_ready_app);
     harness.run_steps(2);
     let ctx = harness.ctx.clone();
@@ -1729,8 +1732,10 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
 
 #[test]
 fn kittest_trilhas_pastas_comp_pai_filho_multicam_e_3d() {
+    // janela larga: todas as ferramentas da Prévia cabem na barra (o menu "⋯"
+    // dos excedentes tem teste próprio da divisão em preview_toolbar)
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(1480.0, 900.0))
+        .with_size(egui::vec2(2400.0, 900.0))
         .build_eframe(build_ready_app);
     harness.run_steps(2);
     let ctx = harness.ctx.clone();
