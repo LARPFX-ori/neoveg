@@ -2938,6 +2938,7 @@ fn build_snapshot(
                         .collect(),
                     active_take: takes::active_index(e),
                     effects: fx_snaps(&e.fx, lang),
+                    envelopes: e.envelopes.iter().map(env_snap).collect(),
                 })
                 .collect(),
             effects: fx_snaps(&t.fx, lang),
@@ -3271,13 +3272,15 @@ fn script_effects(
             for po in params {
                 let name = po.name.trim();
                 for (p, spec) in fx.params.iter_mut().zip(specs.iter()) {
-                    if spec.name.eq_ignore_ascii_case(name)
-                        || spec.name_in(neoveg_common::Language::PtBr).eq_ignore_ascii_case(name)
-                        || spec.name_in(neoveg_common::Language::En).eq_ignore_ascii_case(name)
-                    {
-                        if po.value.is_finite() {
-                            p.value = (po.value as f32).clamp(spec.min, spec.max);
-                        }
+                    let matches_name = spec.name.eq_ignore_ascii_case(name)
+                        || spec
+                            .name_in(neoveg_common::Language::PtBr)
+                            .eq_ignore_ascii_case(name)
+                        || spec
+                            .name_in(neoveg_common::Language::En)
+                            .eq_ignore_ascii_case(name);
+                    if matches_name && po.value.is_finite() {
+                        p.value = (po.value as f32).clamp(spec.min, spec.max);
                     }
                 }
             }
@@ -3285,7 +3288,9 @@ fn script_effects(
 
         if let Some(keys) = &f.keyframes {
             if keys.len() > MAX_SCRIPT_ENV_POINTS {
-                return Err(bad(format!("mais de {MAX_SCRIPT_ENV_POINTS} quadros-chave num efeito")));
+                return Err(bad(format!(
+                    "mais de {MAX_SCRIPT_ENV_POINTS} quadros-chave num efeito"
+                )));
             }
             for k in keys {
                 if k.time < 0 {
@@ -4440,14 +4445,17 @@ mod efeitos_envelopes_tests {
         let media = MediaItem {
             id: 1,
             name: "video.mp4".into(),
-            path: "C:/video.mp4".into(),
+            source: MediaSource::File {
+                path: "C:/video.mp4".into(),
+            },
             has_video: true,
             has_audio: true,
             duration: Some(Ticks::from_secs_i64(10)),
             width: 1920,
             height: 1080,
-            fps: FrameRate::FPS_30,
-            stream_count: 2,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
         };
         let mut ev = neoveg_engine::model::Event::new(&media, Ticks::ZERO, Ticks::from_secs_i64(5));
         assert!(ev.envelopes.is_empty());
