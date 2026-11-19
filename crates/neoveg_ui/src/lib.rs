@@ -37,6 +37,7 @@ mod pan_crop_window;
 mod panels;
 mod plugin_manager;
 mod preview_overlays;
+mod preview_toolbar;
 mod project_media;
 mod script_forms;
 mod scrollbars;

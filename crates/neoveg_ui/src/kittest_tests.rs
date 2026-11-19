@@ -1634,6 +1634,15 @@ fn kittest_midia_do_projeto_bins_modos_substituir_e_storyboard() {
     assert_eq!(harness.state().session.active_storyboard_id, Some(sb_id));
 }
 
+/// Ferramentas da barra da Prévia que não cabem na largura do painel ficam no
+/// menu "⋯" (preview_toolbar.rs): abre o menu quando o botão não está na barra.
+fn reach_preview_tool(harness: &mut Harness<'_, App>, label: &str) {
+    if harness.query_by_label(label).is_none() {
+        harness.get_by_label("Mais ferramentas da prévia").click();
+        harness.run_steps(2);
+    }
+}
+
 #[test]
 fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     let mut harness = Harness::builder()
@@ -1643,6 +1652,7 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     let ctx = harness.ctx.clone();
 
     // 1. Botão de tela dividida alterna Bypass FX.
+    reach_preview_tool(&mut harness, "Tela dividida");
     harness.get_by_label("Tela dividida").click();
     harness.run_steps(2);
     assert_eq!(
@@ -1651,6 +1661,7 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     );
 
     // 2. Copiar quadro armazena buffer da área de transferência interna.
+    reach_preview_tool(&mut harness, "Copiar quadro");
     harness.get_by_label("Copiar quadro").click();
     harness.run_steps(2);
     assert!(harness.state().preview_clipboard.is_some());
@@ -1663,7 +1674,10 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     assert!((harness.state().preview_zoom - 1.0).abs() < 1e-4);
 
     // 4. Silenciar áudio e vídeo da prévia via barra de ferramentas.
+    reach_preview_tool(&mut harness, "Silenciar áudio da prévia");
     harness.get_by_label("Silenciar áudio da prévia").click();
+    harness.run_steps(2);
+    reach_preview_tool(&mut harness, "Silenciar vídeo da prévia");
     harness.get_by_label("Silenciar vídeo da prévia").click();
     harness.run_steps(2);
     assert!(harness.state().opts.preview_mute_audio);
@@ -1679,6 +1693,7 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
     // 6. Prévia em RAM constrói quadros no cache sem travar e Monitor Externo abre limpo
     // sem deslocar os botões estáticos da barra quando "Limpar RAM" aparece.
     let ext_rect_before = harness.get_by_label("Monitor externo").raw_bounds();
+    reach_preview_tool(&mut harness, "Prévia em RAM");
     harness.get_by_label("Prévia em RAM").click();
     harness.run_steps(4);
     if harness.state().ram_preview.frames.is_empty() {
@@ -1688,7 +1703,14 @@ fn kittest_previa_split_ram_zoom_copia_mudo_e_monitor_externo() {
             .insert_frame(0, image::RgbaImage::new(16, 16));
     }
     harness.run_steps(2);
+    let in_menu = harness.query_by_label("Limpar RAM").is_none();
+    reach_preview_tool(&mut harness, "Limpar RAM");
     assert!(harness.query_by_label("Limpar RAM").is_some());
+    if in_menu {
+        // fecha o menu "⋯" antes de medir a barra
+        harness.get_by_label("Mais ferramentas da prévia").click();
+        harness.run_steps(2);
+    }
     assert_eq!(
         harness.get_by_label("Monitor externo").raw_bounds(),
         ext_rect_before,
@@ -1770,6 +1792,7 @@ fn kittest_trilhas_pastas_comp_pai_filho_multicam_e_3d() {
     assert_eq!(active, 1);
 
     // 3. Alternar modo 3D Estereoscópico pelo botão da Prévia.
+    reach_preview_tool(&mut harness, "Modo 3D Estereoscópico");
     harness.get_by_label("Modo 3D Estereoscópico").click();
     harness.run_steps(2);
     assert_eq!(

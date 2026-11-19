@@ -2282,3 +2282,36 @@ fn teste_aninhar_selecao_deteccao_de_ciclo_e_duplo_clique() {
     assert!(app.switch_sequence_app(nested_id));
     assert_eq!(app.project.active_sequence_id, Some(nested_id));
 }
+
+/// Barra da Prévia numa linha só: o que não cabe vai para o menu "⋯", que
+/// também precisa de espaço; com tudo cabendo, o menu não aparece.
+#[test]
+fn barra_da_previa_cabe_numa_linha_com_menu_de_excedentes() {
+    use crate::preview_toolbar::{preview_tools_that_fit, PreviewTool};
+    let gap = 4.0;
+    // tudo cabe: sem menu
+    assert_eq!(preview_tools_that_fit(&[26.0; 5], 500.0, gap), 5);
+    assert_eq!(preview_tools_that_fit(&[], 10.0, gap), 0);
+    // não cabe: as primeiras ficam, com espaço para o "⋯" (24 + gap)
+    let widths = [26.0; 19];
+    let n = preview_tools_that_fit(&widths, 300.0, gap);
+    assert!(n < widths.len());
+    let used: f32 = widths[..n].iter().map(|w| w + gap).sum();
+    assert!(used + 24.0 + gap <= 300.0, "a barra passou da largura");
+    assert!(
+        used + 26.0 + gap + 24.0 + gap > 300.0,
+        "sobrou espaço sem uso"
+    );
+    // painel estreito demais: tudo no menu, sem pânico
+    assert_eq!(preview_tools_that_fit(&widths, 10.0, gap), 0);
+    assert_eq!(preview_tools_that_fit(&widths, -5.0, gap), 0);
+    // larguras inválidas não quebram a conta
+    assert_eq!(
+        preview_tools_that_fit(&[f32::NAN, f32::INFINITY, -3.0], 100.0, gap),
+        3
+    );
+    // a barra começa pelas ferramentas da barra do VEGAS Pro
+    assert_eq!(PreviewTool::ALL[0], PreviewTool::ProjectProps);
+    assert_eq!(PreviewTool::ALL[1], PreviewTool::ExternalMonitor);
+    assert_eq!(PreviewTool::ALL.last(), Some(&PreviewTool::ClearRam));
+}
