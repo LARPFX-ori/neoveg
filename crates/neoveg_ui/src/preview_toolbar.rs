@@ -134,20 +134,30 @@ impl App {
                 .collect();
             let inline = preview_tools_that_fit(&widths, ui.available_width(), gap);
             let (shown, rest) = tools.split_at(inline.min(tools.len()));
+            // ids fixos por ferramenta e para o "⋯": quantas ferramentas cabem
+            // muda de um quadro para outro (ex.: o rótulo do zoom muda de
+            // largura), e com ids automáticos os menus abertos (zoom, "⋯")
+            // trocariam de id e fechariam sozinhos
             for tool in shown {
                 let rect = ui
-                    .scope(|ui| self.preview_tool_inline(ui, *tool, is_floating))
+                    .push_id(("preview_tool", *tool as u8), |ui| {
+                        self.preview_tool_inline(ui, *tool, is_floating)
+                    })
                     .response
                     .rect;
                 ui.ctx()
                     .data_mut(|d| d.insert_temp(width_id(*tool), rect.width()));
             }
             if !rest.is_empty() {
-                let more = ui.menu_button("⋯", |ui| {
-                    for tool in rest {
-                        self.preview_tool_menu(ui, *tool);
-                    }
-                });
+                let more = ui
+                    .push_id("preview_tool_more", |ui| {
+                        ui.menu_button("⋯", |ui| {
+                            for tool in rest {
+                                self.preview_tool_menu(ui, *tool);
+                            }
+                        })
+                    })
+                    .inner;
                 let label = tr(lang, "Mais ferramentas da prévia");
                 more.response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
