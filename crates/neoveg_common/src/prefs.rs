@@ -515,6 +515,78 @@ fn sanitize_exe_path(path: &mut String) {
     }
 }
 
+/// Limite máximo de predefinições de Pan/Crop salvas pelo usuário (§0.4).
+pub const MAX_PAN_CROP_PRESETS: usize = 64;
+
+/// Predefinição personalizada de Pan/Crop salva pelo usuário nas Preferências.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedPanCropPreset {
+    pub name: String,
+    pub cx: f32,
+    pub cy: f32,
+    pub size: f32,
+    pub rot: f32,
+    #[serde(default = "default_one_f32")]
+    pub ratio: f32,
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
+    #[serde(default)]
+    pub smoothness: f32,
+    #[serde(default = "default_true_bool")]
+    pub stretch_to_fill: bool,
+}
+
+fn default_one_f32() -> f32 {
+    1.0
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+impl SavedPanCropPreset {
+    pub fn sanitize(&mut self) -> bool {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() || trimmed.contains('\0') {
+            return false;
+        }
+        self.name = trimmed.chars().take(64).collect();
+        self.cx = if self.cx.is_finite() {
+            self.cx.clamp(-10.0, 10.0)
+        } else {
+            0.5
+        };
+        self.cy = if self.cy.is_finite() {
+            self.cy.clamp(-10.0, 10.0)
+        } else {
+            0.5
+        };
+        self.size = if self.size.is_finite() {
+            self.size.clamp(0.01, 20.0)
+        } else {
+            1.0
+        };
+        self.rot = if self.rot.is_finite() {
+            self.rot.clamp(-3600.0, 3600.0)
+        } else {
+            0.0
+        };
+        self.ratio = if self.ratio.is_finite() {
+            self.ratio.clamp(0.05, 20.0)
+        } else {
+            1.0
+        };
+        self.smoothness = if self.smoothness.is_finite() {
+            self.smoothness.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        true
+    }
+}
+
 /// Caminhos manuais e opções de integração com a suíte ArtCraft e o Blender (§0.4).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalAppsPrefs {
@@ -638,6 +710,9 @@ pub struct Preferences {
     /// sessões (`dialog_window.rs`).
     #[serde(default)]
     pub docked_dialogs: Vec<String>,
+    /// Predefinições personalizadas de Pan/Crop salvas pelo usuário.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pan_crop_presets: Vec<SavedPanCropPreset>,
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
@@ -1305,6 +1380,7 @@ impl Default for Preferences {
             event_hidden_buttons_audio: Vec::new(),
             custom_cursors: default_custom_cursors(),
             docked_dialogs: Vec::new(),
+            pan_crop_presets: Vec::new(),
             show_splash: default_show_splash(),
             system_ui_font: default_system_ui_font(),
             allow_floating_dock: default_allow_floating_dock(),
@@ -1452,6 +1528,8 @@ impl Preferences {
         self.user_fx_presets.retain_mut(|p| p.sanitize());
         self.fx_chains.truncate(MAX_SAVED_FX_CHAINS);
         self.fx_chains.retain_mut(|c| c.sanitize());
+        self.pan_crop_presets.truncate(MAX_PAN_CROP_PRESETS);
+        self.pan_crop_presets.retain_mut(|p| p.sanitize());
         self.toolbar_buttons.truncate(MAX_TOOLBAR_BUTTONS);
         self.toolbar_buttons.retain(|id| {
             let t = id.trim();

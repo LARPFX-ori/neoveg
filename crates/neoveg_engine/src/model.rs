@@ -33,6 +33,12 @@ pub struct ProjectSettings {
     /// Modo de visualização/renderização 3D estereoscópica (manual p. 426).
     #[serde(default)]
     pub stereo_3d: Stereo3dMode,
+    /// Distância interocular da câmera estereoscópica 3D (em fração da largura do quadro).
+    #[serde(default = "default_stereo_interocular")]
+    pub stereo_3d_interocular: f32,
+    /// Plano de convergência Z da câmera estereoscópica 3D (0.0 = plano da tela).
+    #[serde(default)]
+    pub stereo_3d_convergence: f32,
     /// Tempo musical em batidas por minuto para régua e grade de compassos (p. 232).
     #[serde(default = "default_bpm")]
     pub bpm: f64,
@@ -52,6 +58,10 @@ pub struct ProjectSettings {
 
 fn default_bpm() -> f64 {
     120.0
+}
+
+fn default_stereo_interocular() -> f32 {
+    0.035
 }
 
 /// Modo 3D estereoscópico do projeto (*Project Properties → Video → Stereoscopic 3D mode*).
@@ -257,6 +267,8 @@ impl Default for ProjectSettings {
             manually_configured: false,
             channel_layout: ChannelLayout::Stereo,
             stereo_3d: Stereo3dMode::Off,
+            stereo_3d_interocular: default_stereo_interocular(),
+            stereo_3d_convergence: 0.0,
             bpm: default_bpm(),
             pixel_format: crate::color::PixelFormat::Bits8,
             compositing_gamma: crate::color::CompositingGamma::Gamma2_222,
@@ -2892,6 +2904,20 @@ pub struct MotionKey {
     pub rot_x: f32,
     #[serde(default)]
     pub rot_y: f32,
+    /// Deslocamento do eixo de rotação (pivô / ponto de ancoragem) em fração do quadro.
+    #[serde(default)]
+    pub pivot_x: f32,
+    #[serde(default)]
+    pub pivot_y: f32,
+    #[serde(default)]
+    pub pivot_z: f32,
+    /// Orientação 3D separada da rotação (manual VEGAS Pro 21, p. 752), em graus.
+    #[serde(default)]
+    pub orient_x: f32,
+    #[serde(default)]
+    pub orient_y: f32,
+    #[serde(default)]
+    pub orient_z: f32,
 }
 
 impl Default for MotionKey {
@@ -2905,6 +2931,12 @@ impl Default for MotionKey {
             z: 0.0,
             rot_x: 0.0,
             rot_y: 0.0,
+            pivot_x: 0.0,
+            pivot_y: 0.0,
+            pivot_z: 0.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
         }
     }
 }
@@ -2920,6 +2952,88 @@ impl Lerp for MotionKey {
             z: self.z.lerp(&o.z, t),
             rot_x: self.rot_x.lerp(&o.rot_x, t),
             rot_y: self.rot_y.lerp(&o.rot_y, t),
+            pivot_x: self.pivot_x.lerp(&o.pivot_x, t),
+            pivot_y: self.pivot_y.lerp(&o.pivot_y, t),
+            pivot_z: self.pivot_z.lerp(&o.pivot_z, t),
+            orient_x: self.orient_x.lerp(&o.orient_x, t),
+            orient_y: self.orient_y.lerp(&o.orient_y, t),
+            orient_z: self.orient_z.lerp(&o.orient_z, t),
+        }
+    }
+}
+
+/// Parâmetros de *Sombra 2D* ou *Brilho 2D* do Movimento da Trilha (VEGAS Pro p. 412).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShadowGlowKey {
+    /// Deslocamento em fração da largura/altura do quadro.
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    /// Desfoque normalizado (`0.0..=1.0`).
+    #[serde(default = "default_sg_blur")]
+    pub blur: f32,
+    /// Intensidade (`0.0..=1.0`).
+    #[serde(default = "default_sg_intensity")]
+    pub intensity: f32,
+    /// Cor RGBA normalizada (`0.0..=1.0`).
+    #[serde(default = "default_shadow_color")]
+    pub color: [f32; 4],
+}
+
+fn default_sg_blur() -> f32 {
+    0.25
+}
+
+fn default_sg_intensity() -> f32 {
+    0.65
+}
+
+fn default_shadow_color() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+impl ShadowGlowKey {
+    pub fn default_shadow() -> Self {
+        Self {
+            offset_x: 0.015,
+            offset_y: 0.02,
+            blur: 0.25,
+            intensity: 0.65,
+            color: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    pub fn default_glow() -> Self {
+        Self {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 0.35,
+            intensity: 0.70,
+            color: [1.0, 0.92, 0.65, 1.0],
+        }
+    }
+}
+
+impl Default for ShadowGlowKey {
+    fn default() -> Self {
+        Self::default_shadow()
+    }
+}
+
+impl Lerp for ShadowGlowKey {
+    fn lerp(&self, o: &Self, t: f32) -> Self {
+        Self {
+            offset_x: self.offset_x.lerp(&o.offset_x, t),
+            offset_y: self.offset_y.lerp(&o.offset_y, t),
+            blur: self.blur.lerp(&o.blur, t),
+            intensity: self.intensity.lerp(&o.intensity, t),
+            color: [
+                self.color[0].lerp(&o.color[0], t),
+                self.color[1].lerp(&o.color[1], t),
+                self.color[2].lerp(&o.color[2], t),
+                self.color[3].lerp(&o.color[3], t),
+            ],
         }
     }
 }
@@ -3034,12 +3148,37 @@ pub struct Track {
     /// a camada vira um plano no espaço, com Z e rotação em X/Y.
     #[serde(default)]
     pub motion_3d: bool,
+    /// Composição 3D para o movimento do grupo Pai/Filho (Parent Motion 3D).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parent_motion_3d: bool,
+    /// Sombra 2D da trilha habilitada no Movimento da Trilha.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shadow_2d_enabled: bool,
+    /// Quadros-chave de Sombra 2D da trilha.
+    #[serde(default)]
+    pub shadow_2d: Keyframes<ShadowGlowKey>,
+    /// Brilho 2D da trilha habilitado no Movimento da Trilha.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub glow_2d_enabled: bool,
+    /// Quadros-chave de Brilho 2D da trilha.
+    #[serde(default = "default_glow_keyframes")]
+    pub glow_2d: Keyframes<ShadowGlowKey>,
     /// Trilha marcada como multicâmera (angles em takes).
     #[serde(default, skip_serializing_if = "is_false")]
     pub multicam: bool,
     /// Modo de automação dos envelopes da faixa (Desligado / Ler / Touch / Latch, p. 1008).
     #[serde(default)]
     pub automation_mode: AutomationMode,
+}
+
+fn default_glow_keyframes() -> Keyframes<ShadowGlowKey> {
+    Keyframes {
+        keys: vec![Keyframe {
+            t: Ticks::ZERO,
+            value: ShadowGlowKey::default_glow(),
+            curve: Curve::Smooth,
+        }],
+    }
 }
 
 /// Modo de automação de envelopes por trilha ou barramento (manual VEGAS Pro 21, p. 1008).
@@ -3222,6 +3361,11 @@ impl Track {
             mask_mode: TrackMaskMode::None,
             parent_motion: Keyframes::default(),
             motion_3d: false,
+            parent_motion_3d: false,
+            shadow_2d_enabled: false,
+            shadow_2d: Keyframes::default(),
+            glow_2d_enabled: false,
+            glow_2d: default_glow_keyframes(),
             multicam: false,
             automation_mode: AutomationMode::Read,
         }
@@ -3291,6 +3435,9 @@ pub struct PanCropKey {
     pub flip_h: bool,
     #[serde(default)]
     pub flip_v: bool,
+    /// Suavidade da interpolação espacial/temporal (`0.0..=100.0`, manual VEGAS Pro 21, p. 253).
+    #[serde(default)]
+    pub smoothness: f32,
 }
 
 impl Default for PanCropKey {
@@ -3303,6 +3450,7 @@ impl Default for PanCropKey {
             ratio: 1.0,
             flip_h: false,
             flip_v: false,
+            smoothness: 0.0,
         }
     }
 }
@@ -3316,6 +3464,47 @@ impl PanCropKey {
             1.0
         }
     }
+
+    pub fn smoothness_safe(&self) -> f32 {
+        if self.smoothness.is_finite() {
+            self.smoothness.clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Avalia `Keyframes<PanCropKey>` aplicando a suavidade (*Smoothness*) configurada
+/// em cada quadro-chave (`0..100` mistura interpolação suave cúbica/Hermite sobre a curva).
+pub fn eval_pan_crop_smooth(kf: &Keyframes<PanCropKey>, t: Ticks) -> PanCropKey {
+    if kf.keys.is_empty() {
+        return PanCropKey::default();
+    }
+    if kf.keys.len() == 1 || t <= kf.keys[0].t {
+        return kf.keys[0].value.clone();
+    }
+    if let Some(last) = kf.keys.last() {
+        if t >= last.t {
+            return last.value.clone();
+        }
+    }
+    for i in 0..kf.keys.len() - 1 {
+        let a = &kf.keys[i];
+        let b = &kf.keys[i + 1];
+        if t >= a.t && t <= b.t {
+            let lin = t.fraction_in(a.t, b.t);
+            let mut u = a.curve.shape(lin);
+            let sm = (a.value.smoothness_safe() * 0.01).clamp(0.0, 1.0);
+            if sm > 0.0 && a.curve != Curve::Hold {
+                let hermite = u * u * (3.0 - 2.0 * u);
+                let quintic = u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+                let target = hermite * (1.0 - sm) + quintic * sm;
+                u = u + (target - u) * sm;
+            }
+            return a.value.lerp(&b.value, u);
+        }
+    }
+    kf.eval(t)
 }
 
 impl Lerp for PanCropKey {
@@ -3334,6 +3523,7 @@ impl Lerp for PanCropKey {
             ratio: self.ratio.lerp(&o.ratio, t),
             flip_h,
             flip_v,
+            smoothness: self.smoothness.lerp(&o.smoothness, t),
         }
     }
 }
@@ -3449,8 +3639,17 @@ pub struct Event {
     /// Manter proporção da mídia (letterbox) em eventos de vídeo.
     #[serde(default = "yes")]
     pub maintain_aspect: bool,
+    /// *Esticar para preencher o quadro* no Pan/Crop (`true` = padrão; `false` mantém
+    /// tamanho nativo sem esticar a origem para o quadro de saída, manual p. 251).
+    #[serde(default = "yes")]
+    pub pan_crop_stretch_to_fill: bool,
     #[serde(default)]
     pub pan_crop: Keyframes<PanCropKey>,
+    /// Máscara Bézier embutida na linha *Máscara* do Pan/Crop (manual p. 254).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pan_crop_mask_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan_crop_mask: Option<Box<crate::mask::BezierMaskData>>,
     #[serde(default)]
     pub fx: Vec<FxInstance>,
     /// Grupo de eventos (ex.: áudio + vídeo do mesmo arquivo).
@@ -3524,7 +3723,10 @@ impl Event {
             reverse: false,
             gain_db: 0.0,
             maintain_aspect: true,
+            pan_crop_stretch_to_fill: true,
             pan_crop: Keyframes::default(),
+            pan_crop_mask_enabled: false,
+            pan_crop_mask: None,
             fx: vec![],
             group: None,
             transition: None,

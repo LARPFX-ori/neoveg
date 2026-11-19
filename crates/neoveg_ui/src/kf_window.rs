@@ -299,6 +299,10 @@ impl Workspace {
 pub(crate) struct KfRow<'a> {
     pub label: &'a str,
     pub keys: Vec<(Ticks, Curve)>,
+    /// Caixa de seleção opcional à esquerda do nome (ex.: Máscara, Sombra 2D, Brilho 2D).
+    pub checked: Option<bool>,
+    /// Destaca a linha ativa no cabeçalho da trilha de quadros-chave.
+    pub selected: bool,
 }
 
 /// Botões da barra de navegação de quadros-chave.
@@ -323,6 +327,10 @@ pub(crate) struct KfStripOut {
     pub set_curve: Option<(usize, usize, Curve)>,
     /// "Excluir" no menu de contexto: (trilha, índice).
     pub delete_key: Option<(usize, usize)>,
+    /// Clique no nome da trilha de quadros-chave: seleciona a trilha ativa.
+    pub select_row: Option<usize>,
+    /// Clique na caixa de seleção da trilha: alterna ligado/desligado.
+    pub toggle_row: Option<usize>,
 }
 
 const KF_LABEL_W: f32 = 150.0;
@@ -436,13 +444,53 @@ pub(crate) fn keyframe_strip(
                 theme.tl_lane_odd
             },
         );
-        p.rect_filled(name.shrink2(vec2(0.0, 1.0)), 0.0, theme.widget_bg);
+        let name_bg = if row.selected {
+            theme.selection_bg
+        } else {
+            theme.widget_bg
+        };
+        let name_fg = if row.selected {
+            crate::theme::contrast_on(name_bg)
+        } else {
+            theme.text_primary
+        };
+        p.rect_filled(name.shrink2(vec2(0.0, 1.0)), 0.0, name_bg);
+        let label_x = if let Some(checked) = row.checked {
+            let cb =
+                Rect::from_center_size(pos2(name.left() + 9.0, name.center().y), vec2(10.0, 10.0));
+            p.rect_filled(cb, 1.0, theme.window_fill);
+            p.rect_stroke(
+                cb,
+                1.0,
+                Stroke::new(1.0_f32, theme.border),
+                StrokeKind::Inside,
+            );
+            if checked {
+                p.line_segment(
+                    [
+                        pos2(cb.left() + 2.0, cb.center().y),
+                        pos2(cb.center().x, cb.bottom() - 2.0),
+                    ],
+                    Stroke::new(1.5_f32, theme.accent),
+                );
+                p.line_segment(
+                    [
+                        pos2(cb.center().x, cb.bottom() - 2.0),
+                        pos2(cb.right() - 2.0, cb.top() + 2.0),
+                    ],
+                    Stroke::new(1.5_f32, theme.accent),
+                );
+            }
+            name.left() + 18.0
+        } else {
+            name.left() + 4.0
+        };
         p.text(
-            pos2(name.left() + 4.0, name.center().y),
+            pos2(label_x, name.center().y),
             egui::Align2::LEFT_CENTER,
             row.label,
             egui::FontId::proportional(11.0),
-            theme.text_primary,
+            name_fg,
         );
         // seta de início da trilha
         p.add(Shape::convex_polygon(
@@ -529,6 +577,18 @@ pub(crate) fn keyframe_strip(
         match dragging.filter(|_| resp.dragged()) {
             Some((ri, ki)) => out.move_key = Some((ri, ki, t_of(pos.x))),
             None if pos.x >= lanes.left() => out.seek = Some(t_of(pos.x)),
+            None if resp.clicked() && names.contains(pos) => {
+                let ri = ((pos.y - ruler.bottom()) / KF_ROW_H).floor();
+                if (0.0..rows.len() as f32).contains(&ri) {
+                    let ri = ri as usize;
+                    out.select_row = Some(ri);
+                    if rows.get(ri).and_then(|r| r.checked).is_some()
+                        && pos.x <= names.left() + 16.0
+                    {
+                        out.toggle_row = Some(ri);
+                    }
+                }
+            }
             None => {}
         }
     }
