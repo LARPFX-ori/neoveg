@@ -2529,7 +2529,7 @@ impl App {
             painter.rect_filled(
                 Rect::from_min_size(r.min, vec2(6.0, h)),
                 0.0,
-                shade(track.color, 1.0),
+                shade(self.track_rgb(track.color), 1.0),
             );
             if depth > 0 {
                 let gx = r.left() + 6.0 + indent * 0.5;
@@ -5302,9 +5302,12 @@ impl App {
             return;
         }
         for env in envelopes.iter().filter(|e| e.visible) {
+            // cores da aba Exibição, na ordem de DISPLAY_ENVELOPES
             let col = match env.kind {
-                EnvKind::Volume | EnvKind::Opacity => self.theme.tl_env_primary,
-                EnvKind::Pan | EnvKind::FadeToColor => self.theme.tl_env_secondary,
+                EnvKind::Volume => self.envelope_color(0, self.theme.tl_env_primary),
+                EnvKind::Pan => self.envelope_color(1, self.theme.tl_env_secondary),
+                EnvKind::Opacity => self.envelope_color(2, self.theme.tl_env_primary),
+                EnvKind::FadeToColor => self.envelope_color(3, self.theme.tl_env_secondary),
             };
             let mut pts = vec![];
             let mut x = lanes.left();
@@ -5405,7 +5408,7 @@ impl App {
                 lane,
                 0.0,
                 if track_is_folder {
-                    shade(self.project.tracks[ti].color, 0.32)
+                    shade(self.track_rgb(self.project.tracks[ti].color), 0.32)
                 } else if selected {
                     self.theme.tl_lane_even
                 } else {
@@ -5449,10 +5452,15 @@ impl App {
                 }
                 let sel = self.sel_events.contains(&e.id);
                 let k = if sel { 1.0 } else { 0.62 };
+                let tc = self.track_rgb(track.color);
+                // Inverter a cor de fundo do evento (aba Exibição)
+                let reverse = self.prefs.display.reverse_event_bg;
                 let body = if e.mute || muted {
                     shade([90, 90, 90], if self.theme.dark_mode { 0.7 } else { 1.45 })
+                } else if reverse {
+                    shade(tc, k * 1.35)
                 } else {
-                    shade(track.color, k * 0.55)
+                    shade(tc, k * 0.55)
                 };
                 let hdr_h = 14.0f32.min(r.height() * 0.3);
                 painter.rect_filled(r, 2.0, body);
@@ -5463,7 +5471,7 @@ impl App {
                         Color32::from_gray(176)
                     }
                 } else {
-                    shade(track.color, k * 0.9)
+                    shade(tc, k * 0.9)
                 };
                 let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
                 painter.rect_filled(hdr, 2.0, hdr_col);
@@ -5527,7 +5535,11 @@ impl App {
                         };
                         // VEGAS: a forma de onda usa a cor da faixa (Track Display
                         // Color); cinza quando mudo, em alto contraste ou sem contraste
-                        let tinted = shade(track.color, if body_light { 0.45 } else { 1.35 });
+                        let tinted = if reverse {
+                            shade(tc, 0.28)
+                        } else {
+                            shade(tc, if body_light { 0.45 } else { 1.35 })
+                        };
                         let col = if e.mute
                             || muted
                             || self.theme.high_contrast
@@ -5932,7 +5944,15 @@ impl App {
             let x = self.tl.t2x(t, left);
             painter.line_segment(
                 [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
-                Stroke::new(1.0_f32, self.theme.tl_playhead_edit),
+                Stroke::new(
+                    1.0_f32,
+                    self.prefs
+                        .display
+                        .snap_color
+                        .map_or(self.theme.tl_playhead_edit, |[r, g, b]| {
+                            Color32::from_rgb(r, g, b)
+                        }),
+                ),
             );
         }
     }

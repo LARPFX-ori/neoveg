@@ -280,6 +280,68 @@ impl Default for EditLayoutPrefs {
     }
 }
 
+/// Tipos de envelope com cor própria na aba Exibição.
+pub const DISPLAY_ENVELOPES: [&str; 4] = ["Volume", "Pan", "Opacidade", "Fade para cor"];
+/// Quantas cores tem a paleta de cores de trilha.
+pub const TRACK_PALETTE_LEN: usize = 8;
+
+/// Opções da aba Exibição (manual do VEGAS Pro 21, pp. 1101–1103; ajuda do
+/// VEGAS Pro 2026, *Display Tab*). `None` usa a cor padrão (do tema ou da
+/// paleta de trilhas).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayPrefs {
+    /// Substitui na exibição cada cor da paleta padrão de trilhas: toda trilha
+    /// com aquela cor passa a ser mostrada com a escolhida.
+    pub track_colors: [Option<[u8; 3]>; TRACK_PALETTE_LEN],
+    /// Cor dos envelopes, na ordem de [`DISPLAY_ENVELOPES`].
+    pub envelope_colors: [Option<[u8; 3]>; 4],
+    /// Cor do indicador de encaixe na timeline.
+    pub snap_color: Option<[u8; 3]>,
+    /// Intensidade da cor dos ícones, em % (0 = cinza, 100 = normal, 200).
+    pub icon_strength_pct: u16,
+    /// Fundo dos botões ativos da barra de ferramentas.
+    pub button_highlight: Option<[u8; 3]>,
+    /// Esconde a área de janelas quando ela não está em uso.
+    pub auto_hide_dock: bool,
+    /// Troca a cor de frente e de fundo dos eventos (no áudio, a cor da
+    /// trilha vai para o fundo e a forma de onda fica escura).
+    pub reverse_event_bg: bool,
+}
+
+impl Default for DisplayPrefs {
+    fn default() -> Self {
+        Self {
+            track_colors: [None; TRACK_PALETTE_LEN],
+            envelope_colors: [None; 4],
+            snap_color: None,
+            icon_strength_pct: 100,
+            button_highlight: None,
+            auto_hide_dock: false,
+            reverse_event_bg: false,
+        }
+    }
+}
+
+impl DisplayPrefs {
+    pub const ICON_STRENGTH_MAX: u16 = 200;
+
+    pub fn sanitize(&mut self) {
+        self.icon_strength_pct = self.icon_strength_pct.min(Self::ICON_STRENGTH_MAX);
+    }
+
+    /// Cor de trilha `i` da paleta escolhida (ou `None`, a padrão).
+    pub fn track_color(&self, i: usize) -> Option<[u8; 3]> {
+        self.track_colors.get(i).copied().flatten()
+    }
+
+    pub fn set_track_color(&mut self, i: usize, c: Option<[u8; 3]>) {
+        if let Some(slot) = self.track_colors.get_mut(i) {
+            *slot = c;
+        }
+    }
+}
+
 /// Modo de rolagem automática da timeline durante a reprodução.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaybackScrollMode {
@@ -536,6 +598,10 @@ pub struct Preferences {
     /// a acopla, e `Ctrl` impede; desligada, só acopla com `Ctrl`.
     #[serde(default = "default_allow_floating_dock")]
     pub allow_floating_dock: bool,
+    /// Opções da aba Exibição: cores de trilha, envelope e encaixe, cor dos
+    /// ícones e dos botões ativos, área de janelas e fundo dos eventos.
+    #[serde(default)]
+    pub display: DisplayPrefs,
     /// Escala da interface em porcentagem (tamanho de textos, botões e
     /// painéis), de `UI_SCALE_MIN` a `UI_SCALE_MAX`.
     #[serde(default = "default_ui_scale_pct")]
@@ -1182,6 +1248,7 @@ impl Default for Preferences {
             show_splash: default_show_splash(),
             system_ui_font: default_system_ui_font(),
             allow_floating_dock: default_allow_floating_dock(),
+            display: DisplayPrefs::default(),
             ui_scale_pct: default_ui_scale_pct(),
             show_welcome: default_show_welcome(),
             recent_projects: Vec::new(),
@@ -1277,6 +1344,7 @@ impl Preferences {
         // combinações que o tipo de layout salvo não tem (ex.: Moderno com a
         // timeline no topo, gravado à mão ou por uma versão antiga)
         self.edit_layout.normalize();
+        self.display.sanitize();
         self.language = Language::from_pref(&self.language).code().to_string();
         if self.theme.trim().is_empty() || self.theme.len() > 48 {
             self.theme = default_theme();
@@ -1575,6 +1643,29 @@ mod tests {
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.track_header.get(true), HeaderButtons::all(false));
         assert_eq!(back.track_header.get(false), HeaderButtons::all(true));
+    }
+
+    #[test]
+    fn aba_exibicao_padroes_limites_e_ida_e_volta() {
+        let mut d = DisplayPrefs::default();
+        assert_eq!(d.icon_strength_pct, 100);
+        assert!(!d.auto_hide_dock && !d.reverse_event_bg);
+        d.set_track_color(2, Some([1, 2, 3]));
+        d.set_track_color(99, Some([9, 9, 9]));
+        assert_eq!(d.track_color(2), Some([1, 2, 3]));
+        assert_eq!(d.track_color(99), None);
+        d.icon_strength_pct = 9999;
+        d.sanitize();
+        assert_eq!(d.icon_strength_pct, DisplayPrefs::ICON_STRENGTH_MAX);
+        let p = Preferences {
+            display: d.clone(),
+            ..Default::default()
+        };
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.display, d);
+        // preferências antigas, sem o campo, abrem com os padrões
+        let old: DisplayPrefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(old, DisplayPrefs::default());
     }
 
     #[test]

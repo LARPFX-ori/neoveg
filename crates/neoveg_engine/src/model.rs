@@ -3050,7 +3050,8 @@ fn one() -> f32 {
     1.0
 }
 
-const TRACK_COLORS: [[u8; 3]; 8] = [
+/// Paleta padrão das cores de trilha (a aba Exibição pode trocar cada uma na tela).
+pub const TRACK_COLORS: [[u8; 3]; 8] = [
     [86, 132, 214],
     [214, 120, 86],
     [96, 186, 120],

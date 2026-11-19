@@ -5,6 +5,7 @@
 use crate::theme::ThemeColors;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
@@ -286,6 +287,43 @@ struct Pal {
     purple: Color32,
 }
 
+/// Intensidade da cor dos ícones (% de saturação) e fundo dos botões ativos
+/// da aba Exibição, atualizados pelo `App` a cada quadro.
+static ICON_STRENGTH_PCT: AtomicU32 = AtomicU32::new(100);
+/// `0` = cor do tema; senão `0x01RRGGBB`.
+static BUTTON_HIGHLIGHT: AtomicU32 = AtomicU32::new(0);
+
+/// Aplica as opções da aba Exibição aos ícones e botões.
+pub fn set_display_prefs(icon_strength_pct: u16, button_highlight: Option<[u8; 3]>) {
+    ICON_STRENGTH_PCT.store(u32::from(icon_strength_pct.min(200)), Ordering::Relaxed);
+    let packed = button_highlight.map_or(0, |[r, g, b]| {
+        0x0100_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+    });
+    BUTTON_HIGHLIGHT.store(packed, Ordering::Relaxed);
+}
+
+fn button_highlight(theme: &ThemeColors) -> Color32 {
+    let v = BUTTON_HIGHLIGHT.load(Ordering::Relaxed);
+    // no alto contraste vale o tema (contraste AAA)
+    if v == 0 || theme.high_contrast {
+        theme.selection_bg
+    } else {
+        Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    }
+}
+
+/// Muda a saturação de `c` (`pct` 100 = igual).
+pub fn saturate(c: Color32, pct: u32) -> Color32 {
+    if pct == 100 {
+        return c;
+    }
+    let k = pct as f32 / 100.0;
+    let (r, g, b) = (f32::from(c.r()), f32::from(c.g()), f32::from(c.b()));
+    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    let f = |v: f32| (gray + (v - gray) * k).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_unmultiplied(f(r), f(g), f(b), c.a())
+}
+
 impl Pal {
     fn from_theme(theme: &ThemeColors, enabled: bool) -> Self {
         let mut pal = if theme.high_contrast {
@@ -325,6 +363,16 @@ impl Pal {
                 purple: Color32::from_rgb(130, 74, 214),
             }
         };
+        let strength = ICON_STRENGTH_PCT.load(Ordering::Relaxed);
+        if strength != 100 && !theme.high_contrast {
+            let s = |c: Color32| saturate(c, strength);
+            pal.blue = s(pal.blue);
+            pal.amber = s(pal.amber);
+            pal.green = s(pal.green);
+            pal.red = s(pal.red);
+            pal.cyan = s(pal.cyan);
+            pal.purple = s(pal.purple);
+        }
         if !enabled {
             let dim = |c: Color32| c.gamma_multiply(0.38);
             pal = Self {
@@ -1786,7 +1834,8 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
         draggable,
         a11y,
     } = opts;
-    let sel_fg = crate::theme::contrast_on(theme.selection_bg);
+    let active_bg = button_highlight(theme);
+    let sel_fg = crate::theme::contrast_on(active_bg);
     let label_fg = if !enabled {
         theme.text_muted
     } else if active {
@@ -1826,7 +1875,7 @@ fn draw_button(ui: &mut egui::Ui, opts: BtnOpts<'_>, theme: &ThemeColors) -> egu
         let hovered = enabled && resp.hovered();
         let down = enabled && resp.is_pointer_button_down_on();
         let fill = if active {
-            theme.selection_bg
+            active_bg
         } else if down || hovered {
             theme.widget_hover_bg
         } else {
