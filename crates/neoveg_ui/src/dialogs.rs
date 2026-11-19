@@ -968,6 +968,8 @@ pub struct Dialogs {
     pub cmd_marker_label: String,
     pub cmd_marker_type: String,
     pub cmd_marker_arg: String,
+    pub work_folders_open: bool,
+    pub work_folders_draft: Option<neoveg_engine::model::WorkFolders>,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -1014,13 +1016,11 @@ impl Dialogs {
     }
 
     pub fn open_render(&mut self, p: &Project, proj_path: Option<&Path>) {
+        let render_dir = p.work_folders.effective_render_exports(proj_path);
         let base = proj_path
-            .map(|pp| pp.with_extension("avi"))
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join("render.avi")
-            });
+            .and_then(|pp| pp.file_stem())
+            .map(|stem| render_dir.join(format!("{}.avi", stem.to_string_lossy())))
+            .unwrap_or_else(|| render_dir.join("render.avi"));
         let (
             path,
             format,
@@ -1156,6 +1156,7 @@ impl App {
         self.header_buttons_window(ctx);
         self.customize_toolbar_window(ctx);
         self.command_marker_window(ctx);
+        crate::dlg_work_folders::show_work_folders_window(self, ctx);
         self.misc_windows(ctx);
     }
 

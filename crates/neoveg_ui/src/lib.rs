@@ -16,6 +16,7 @@ mod color_grading;
 mod convert_dialog;
 mod crash_report;
 mod dialogs;
+mod dlg_work_folders;
 mod dock;
 mod dock_drop;
 mod edit;

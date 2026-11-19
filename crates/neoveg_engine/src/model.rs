@@ -332,6 +332,9 @@ pub struct Project {
     /// Transcrição de fala por IA (AI Speech to Text / VEGAS Pro manual p. 674).
     #[serde(default)]
     pub transcript: Option<crate::speech::Transcript>,
+    /// Mapeamento de pastas de trabalho do projeto (item 14 do roadmap).
+    #[serde(default, skip_serializing_if = "WorkFolders::is_empty")]
+    pub work_folders: WorkFolders,
 }
 
 fn default_format_version() -> u32 {
@@ -382,6 +385,143 @@ impl Sequence {
             px_per_sec: 100.0,
             transcript: None,
         }
+    }
+}
+
+/// Mapeamento de pastas de trabalho do projeto (item 14 do roadmap).
+/// Define os diretórios onde o projeto guarda mídias capturadas ou importadas,
+/// gravações de áudio, arquivos pré-renderizados, proxies e exportações.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkFolders {
+    /// Pasta para mídias capturadas ou importadas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub captured_media: String,
+    /// Pasta para gravações de áudio direto da timeline.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub audio_recordings: String,
+    /// Pasta para trechos pré-renderizados da timeline.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prerendered_files: String,
+    /// Pasta para geração de proxies de vídeo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxies: String,
+    /// Pasta para exportações e renders finais.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub render_exports: String,
+}
+
+impl WorkFolders {
+    pub fn is_empty(&self) -> bool {
+        self.captured_media.is_empty()
+            && self.audio_recordings.is_empty()
+            && self.prerendered_files.is_empty()
+            && self.proxies.is_empty()
+            && self.render_exports.is_empty()
+    }
+
+    pub fn sanitize(&mut self) {
+        self.captured_media = Self::sanitize_path(&self.captured_media);
+        self.audio_recordings = Self::sanitize_path(&self.audio_recordings);
+        self.prerendered_files = Self::sanitize_path(&self.prerendered_files);
+        self.proxies = Self::sanitize_path(&self.proxies);
+        self.render_exports = Self::sanitize_path(&self.render_exports);
+    }
+
+    fn sanitize_path(s: &str) -> String {
+        s.chars()
+            .filter(|&c| c != '\0')
+            .take(1024)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    pub fn effective_captured_media(
+        &self,
+        proj_path: Option<&std::path::Path>,
+    ) -> std::path::PathBuf {
+        if !self.captured_media.trim().is_empty() {
+            std::path::PathBuf::from(self.captured_media.trim())
+        } else if let Some(parent) = proj_path.and_then(|p| p.parent()) {
+            parent.join("capturas")
+        } else {
+            neoveg_common::util::base_dir().join("capturas")
+        }
+    }
+
+    pub fn effective_audio_recordings(
+        &self,
+        proj_path: Option<&std::path::Path>,
+        prefs_dir: Option<&str>,
+    ) -> std::path::PathBuf {
+        if !self.audio_recordings.trim().is_empty() {
+            std::path::PathBuf::from(self.audio_recordings.trim())
+        } else if let Some(pref) = prefs_dir.filter(|p| !p.trim().is_empty()) {
+            std::path::PathBuf::from(pref.trim())
+        } else if let Some(parent) = proj_path.and_then(|p| p.parent()) {
+            parent.join("audio_rec")
+        } else {
+            std::env::temp_dir().join("neoveg_recordings")
+        }
+    }
+
+    pub fn effective_prerendered_files(
+        &self,
+        proj_path: Option<&std::path::Path>,
+    ) -> std::path::PathBuf {
+        if !self.prerendered_files.trim().is_empty() {
+            std::path::PathBuf::from(self.prerendered_files.trim())
+        } else if let Some(parent) = proj_path.and_then(|p| p.parent()) {
+            parent.join("prerender")
+        } else {
+            neoveg_common::util::base_dir().join("prerender")
+        }
+    }
+
+    pub fn effective_proxies(&self, proj_path: Option<&std::path::Path>) -> std::path::PathBuf {
+        if !self.proxies.trim().is_empty() {
+            std::path::PathBuf::from(self.proxies.trim())
+        } else if let Some(parent) = proj_path.and_then(|p| p.parent()) {
+            parent.join("proxies")
+        } else {
+            neoveg_common::util::base_dir().join("proxies")
+        }
+    }
+
+    pub fn effective_render_exports(
+        &self,
+        proj_path: Option<&std::path::Path>,
+    ) -> std::path::PathBuf {
+        if !self.render_exports.trim().is_empty() {
+            std::path::PathBuf::from(self.render_exports.trim())
+        } else if let Some(parent) = proj_path.and_then(|p| p.parent()) {
+            parent.join("renders")
+        } else {
+            neoveg_common::util::base_dir().join("renders")
+        }
+    }
+
+    pub fn default_captured_media(proj_path: Option<&std::path::Path>) -> std::path::PathBuf {
+        Self::default().effective_captured_media(proj_path)
+    }
+
+    pub fn default_audio_recordings(
+        proj_path: Option<&std::path::Path>,
+        prefs_dir: Option<&str>,
+    ) -> std::path::PathBuf {
+        Self::default().effective_audio_recordings(proj_path, prefs_dir)
+    }
+
+    pub fn default_prerendered_files(proj_path: Option<&std::path::Path>) -> std::path::PathBuf {
+        Self::default().effective_prerendered_files(proj_path)
+    }
+
+    pub fn default_proxies(proj_path: Option<&std::path::Path>) -> std::path::PathBuf {
+        Self::default().effective_proxies(proj_path)
+    }
+
+    pub fn default_render_exports(proj_path: Option<&std::path::Path>) -> std::path::PathBuf {
+        Self::default().effective_render_exports(proj_path)
     }
 }
 
@@ -1474,6 +1614,7 @@ impl Project {
             }
         }
 
+        self.work_folders.sanitize();
         self.sort_events();
         fixes
     }
@@ -5068,5 +5209,63 @@ mod tests {
         );
         assert_eq!(roundtrip.sequences.len(), 1);
         assert_eq!(roundtrip.sequences[0].name, "Sequência 1");
+    }
+
+    #[test]
+    fn teste_item14_pastas_trabalho_sanitizacao_e_rotas() {
+        let mut wf = WorkFolders {
+            captured_media: "  C:\\Projetos\\Capturas\0maliciosa  ".into(),
+            audio_recordings: "a".repeat(2000),
+            prerendered_files: "  D:\\Cache\\Prerender  ".into(),
+            proxies: String::new(),
+            render_exports: String::new(),
+        };
+        wf.sanitize();
+
+        assert!(!wf.captured_media.contains('\0'));
+        assert_eq!(wf.captured_media, "C:\\Projetos\\Capturasmaliciosa");
+        assert_eq!(wf.audio_recordings.len(), 1024);
+        assert_eq!(wf.prerendered_files, "D:\\Cache\\Prerender");
+
+        // Resolução inteligente
+        let dummy_proj = std::path::Path::new("C:/MeuProjeto/teste.neoveg");
+        assert_eq!(
+            wf.effective_captured_media(Some(dummy_proj)),
+            std::path::PathBuf::from("C:\\Projetos\\Capturasmaliciosa")
+        );
+        assert_eq!(
+            wf.effective_proxies(Some(dummy_proj)),
+            std::path::PathBuf::from("C:/MeuProjeto/proxies")
+        );
+        assert_eq!(
+            wf.effective_render_exports(Some(dummy_proj)),
+            std::path::PathBuf::from("C:/MeuProjeto/renders")
+        );
+
+        // Sem projeto salvo
+        assert_eq!(
+            WorkFolders::default().effective_proxies(None),
+            neoveg_common::util::base_dir().join("proxies")
+        );
+    }
+
+    #[test]
+    fn teste_item14_pastas_trabalho_ida_e_volta_json() {
+        let mut p = Project::new_default();
+        let json_default = serde_json::to_string(&p).expect("serializa");
+        assert!(
+            !json_default.contains("\"work_folders\""),
+            "work_folders vazia deve ser omitida do json"
+        );
+
+        p.work_folders.captured_media = "C:\\Capturas".into();
+        p.work_folders.render_exports = "D:\\Exports".into();
+        let json_custom = serde_json::to_string(&p).expect("serializa custom");
+        assert!(json_custom.contains("\"work_folders\""));
+
+        let mut roundtrip: Project = serde_json::from_str(&json_custom).expect("deserializa");
+        roundtrip.sanitize();
+        assert_eq!(roundtrip.work_folders.captured_media, "C:\\Capturas");
+        assert_eq!(roundtrip.work_folders.render_exports, "D:\\Exports");
     }
 }

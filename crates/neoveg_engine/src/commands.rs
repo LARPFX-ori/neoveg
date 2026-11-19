@@ -465,6 +465,7 @@ pub enum UiAction {
     EncoderStopCurrent,
     EncoderStopQueue,
     SnapshotDialog,
+    OpenWorkFolders,
     OpenProjectProps,
     OpenEventProps,
     OpenPasteAttributesDialog,
@@ -1079,6 +1080,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenProjectProps, h),
+    },
+    CommandDef {
+        id: "file.work_folders",
+        label: "Pastas de trabalho...",
+        menu_path: "Arquivo/Pastas de trabalho...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenWorkFolders, h),
     },
     CommandDef {
         id: "file.exit",
@@ -4227,5 +4237,31 @@ mod tests {
         s.project.active_sequence_id = None;
         assert!(run_command("sequence.rename", &mut s, &mut h).is_err());
         assert!(run_command("sequence.duplicate", &mut s, &mut h).is_err());
+    }
+
+    #[test]
+    fn comando_work_folders_hostil() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+
+        // Comando registrado e funcional
+        run_command("file.work_folders", &mut s, &mut h).unwrap();
+
+        // Parâmetros hostis em set_work_folders
+        let hostil = crate::model::WorkFolders {
+            captured_media: "X:\0\0\0//invalido".into(),
+            audio_recordings: "b".repeat(5000),
+            prerendered_files: "\0\0".into(),
+            proxies: "   C:\\Temp\\Proxies   ".into(),
+            render_exports: "D:\\Renders".into(),
+        };
+        s.set_work_folders(hostil);
+        assert!(!s.work_folders().captured_media.contains('\0'));
+        assert_eq!(s.work_folders().audio_recordings.len(), 1024);
+        assert_eq!(s.work_folders().proxies, "C:\\Temp\\Proxies");
+
+        // Desfazer restaura as pastas anteriores
+        assert!(s.undo());
+        assert!(s.work_folders().is_empty());
     }
 }
