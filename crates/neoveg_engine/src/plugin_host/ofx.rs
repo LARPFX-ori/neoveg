@@ -1791,8 +1791,11 @@ fn host_props() -> Box<PropSet> {
     p.set_str("OfxPropName", &["org.neoveg.Neoveg"]);
     p.set_str("OfxPropLabel", &["Neoveg"]);
     p.set_int("OfxPropAPIVersion", &[1, 4]);
-    p.set_int("OfxPropVersion", &[0, 1, 0]);
-    p.set_str("OfxPropVersionLabel", &["0.1.0"]);
+    let v_major: c_int = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap_or(0);
+    let v_minor: c_int = env!("CARGO_PKG_VERSION_MINOR").parse().unwrap_or(0);
+    let v_patch: c_int = env!("CARGO_PKG_VERSION_PATCH").parse().unwrap_or(0);
+    p.set_int("OfxPropVersion", &[v_major, v_minor, v_patch]);
+    p.set_str("OfxPropVersionLabel", &[env!("CARGO_PKG_VERSION")]);
     p.set_int("OfxImageEffectHostPropIsBackground", &[0]);
     p.set_int("OfxImageEffectPropSupportsOverlays", &[0]);
     p.set_int("OfxImageEffectPropSupportsMultiResolution", &[0]);
