@@ -624,6 +624,20 @@ pub struct Preferences {
     /// visíveis*), pelo identificador de cada botão.
     #[serde(default)]
     pub trimmer_hidden_buttons: Vec<String>,
+    /// Botões ocultos na faixa de botões dos eventos de vídeo.
+    #[serde(default)]
+    pub event_hidden_buttons_video: Vec<String>,
+    /// Botões ocultos na faixa de botões dos eventos de áudio.
+    #[serde(default)]
+    pub event_hidden_buttons_audio: Vec<String>,
+    /// Usa os ponteiros vetoriais personalizados de edição (aparo, fade, slip,
+    /// stretch, rotação, caneta Bézier etc.). Desligado, usa só os do SO.
+    #[serde(default = "default_custom_cursors")]
+    pub custom_cursors: bool,
+    /// Identificadores de diálogos mantidos acoplados na janela principal entre
+    /// sessões (`dialog_window.rs`).
+    #[serde(default)]
+    pub docked_dialogs: Vec<String>,
     /// Exibe a tela de abertura (Splash Screen) durante a inicialização gráfica.
     #[serde(default = "default_show_splash")]
     pub show_splash: bool,
@@ -1147,6 +1161,10 @@ fn default_show_splash() -> bool {
     true
 }
 
+fn default_custom_cursors() -> bool {
+    true
+}
+
 fn default_system_ui_font() -> bool {
     true
 }
@@ -1283,6 +1301,10 @@ impl Default for Preferences {
             edit_layout: EditLayoutPrefs::default(),
             track_header: TrackHeaderPrefs::default(),
             trimmer_hidden_buttons: Vec::new(),
+            event_hidden_buttons_video: Vec::new(),
+            event_hidden_buttons_audio: Vec::new(),
+            custom_cursors: default_custom_cursors(),
+            docked_dialogs: Vec::new(),
             show_splash: default_show_splash(),
             system_ui_font: default_system_ui_font(),
             allow_floating_dock: default_allow_floating_dock(),
@@ -1421,6 +1443,9 @@ impl Preferences {
         sanitize_string_list(&mut self.render_favorites, MAX_RENDER_FAVORITES, 80, false);
         sanitize_string_list(&mut self.fx_favorites, MAX_RENDER_FAVORITES, 80, false);
         sanitize_string_list(&mut self.gen_favorites, MAX_RENDER_FAVORITES, 80, false);
+        sanitize_string_list(&mut self.docked_dialogs, 64, 80, false);
+        sanitize_string_list(&mut self.event_hidden_buttons_video, 32, 48, false);
+        sanitize_string_list(&mut self.event_hidden_buttons_audio, 32, 48, false);
         self.external_apps.sanitize();
         self.default_track.sanitize();
         self.user_fx_presets.truncate(MAX_USER_FX_PRESETS);

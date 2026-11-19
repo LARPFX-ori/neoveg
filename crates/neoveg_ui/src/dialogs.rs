@@ -1154,6 +1154,7 @@ impl App {
         self.render_progress_window(ctx);
         self.convert_windows(ctx);
         self.header_buttons_window(ctx);
+        self.event_buttons_window(ctx);
         self.customize_toolbar_window(ctx);
         self.command_marker_window(ctx);
         crate::dlg_work_folders::show_work_folders_window(self, ctx);
@@ -1449,6 +1450,91 @@ impl App {
             Some(false) => self.dlg.header_buttons = None,
             None if !open => self.dlg.header_buttons = None,
             None => self.dlg.header_buttons = Some((video, draft)),
+        }
+    }
+
+    fn event_buttons_window(&mut self, ctx: &egui::Context) {
+        let Some(is_video) = self.event_buttons_dlg_video else {
+            return;
+        };
+        let lang = self.lang();
+        let mut open = true;
+        let mut close_now = false;
+        let list = if is_video {
+            &mut self.prefs.event_hidden_buttons_video
+        } else {
+            &mut self.prefs.event_hidden_buttons_audio
+        };
+        let mut show_fx = !list.iter().any(|k| k == "fx");
+        let mut show_pc = !list.iter().any(|k| k == "pan_crop");
+        let mut show_dur = !list.iter().any(|k| k == "duration");
+        let title = if is_video {
+            tr(lang, "Botões visíveis nos eventos de vídeo")
+        } else {
+            tr(lang, "Botões visíveis nos eventos de áudio")
+        };
+        let mut changed = false;
+        crate::dialog_window::DialogWindow::new(title)
+            .id(egui::Id::new("event_buttons_win"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                if ui
+                    .checkbox(&mut show_fx, tr(lang, "Efeitos do evento (fx)"))
+                    .changed()
+                {
+                    changed = true;
+                }
+                if is_video
+                    && ui
+                        .checkbox(&mut show_pc, tr(lang, "Pan/Crop do evento"))
+                        .changed()
+                {
+                    changed = true;
+                }
+                if ui
+                    .checkbox(&mut show_dur, tr(lang, "Duração no cabeçalho do evento"))
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(tr(lang, "Mostrar todos")).clicked() {
+                        show_fx = true;
+                        show_pc = true;
+                        show_dur = true;
+                        changed = true;
+                    }
+                    if ui.button(tr(lang, "Fechar")).clicked() {
+                        close_now = true;
+                    }
+                });
+            });
+        if changed {
+            let list = if is_video {
+                &mut self.prefs.event_hidden_buttons_video
+            } else {
+                &mut self.prefs.event_hidden_buttons_audio
+            };
+            list.clear();
+            if !show_fx {
+                list.push("fx".into());
+            }
+            if is_video && !show_pc {
+                list.push("pan_crop".into());
+            }
+            if !show_dur {
+                list.push("duration".into());
+            }
+            self.prefs.sanitize();
+            let _ = self.prefs.save();
+        }
+        if !open || close_now {
+            self.event_buttons_dlg_video = None;
         }
     }
 
@@ -5562,6 +5648,10 @@ fn prefs_general(
         ui.checkbox(
             &mut draft.show_tooltips,
             tr(lang, "Exibir dicas flutuantes (Tool Tips) nos controles"),
+        );
+        ui.checkbox(
+            &mut draft.custom_cursors,
+            tr(lang, "Usar ponteiros personalizados de edição"),
         );
     });
 

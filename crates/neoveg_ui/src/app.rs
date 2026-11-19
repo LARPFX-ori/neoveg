@@ -249,6 +249,8 @@ pub(crate) struct PreviewReqKey {
     expanded_ab: Option<(Option<Id>, Ticks, Option<Id>, Ticks)>,
     /// Isolamento de canal em vigor (muda a imagem enviada à textura).
     channel: (crate::preview_overlays::ChannelIsolation, bool),
+    /// Projeção equiretangular 360° quantizada em décimos de grau.
+    view_360: Option<(i32, i32, i32)>,
 }
 
 pub struct App {
@@ -268,6 +270,14 @@ pub struct App {
     /// Isolamento de canal da prévia (Sobreposições) e se é em cinza.
     pub(crate) preview_channel: crate::preview_overlays::ChannelIsolation,
     pub(crate) preview_channel_gray: bool,
+    /// Canal de legendas fechadas CC1–CC4 na Prévia de Vídeo.
+    pub(crate) preview_cc_channel: crate::preview_overlays::ClosedCaptionChannel,
+    /// Projeção equiretangular 360° interativa na Prévia de Vídeo.
+    pub(crate) preview_360: crate::preview_overlays::Preview360State,
+    /// Ponteiro vetorial personalizado escolhido para o quadro atual.
+    pub(crate) active_cursor: crate::cursors::NeovegCursor,
+    /// Diálogo de botões visíveis nos eventos (`Some(true)` = vídeo, `Some(false)` = áudio).
+    pub(crate) event_buttons_dlg_video: Option<bool>,
     /// Fps exibido na prévia durante a reprodução.
     pub(crate) display_fps: crate::preview_overlays::FpsMeter,
     pub(crate) preview_pan: egui::Vec2,
@@ -492,6 +502,10 @@ impl App {
             preview_zoom_bypass: None,
             preview_channel: Default::default(),
             preview_channel_gray: false,
+            preview_cc_channel: Default::default(),
+            preview_360: Default::default(),
+            active_cursor: Default::default(),
+            event_buttons_dlg_video: None,
             display_fps: Default::default(),
             preview_pan: egui::Vec2::ZERO,
             external_monitor: false,
@@ -2221,6 +2235,13 @@ impl App {
             (lid, lt, rid, rt)
         });
         let channel = self.effective_preview_channel();
+        let view_360 = self.preview_360.enabled.then(|| {
+            (
+                (self.preview_360.yaw_deg * 10.0).round() as i32,
+                (self.preview_360.pitch_deg * 10.0).round() as i32,
+                (self.preview_360.fov_deg * 10.0).round() as i32,
+            )
+        });
         let key = PreviewReqKey {
             t,
             gen: self.generation,
@@ -2232,6 +2253,7 @@ impl App {
             mute_video,
             expanded_ab,
             channel,
+            view_360,
         };
         if key != self.last_req {
             if !scopes
@@ -2415,7 +2437,21 @@ impl App {
     }
 
     fn preview_color_image(&self, img: &image::RgbaImage) -> egui::ColorImage {
-        isolated_color_image(img, self.effective_preview_channel())
+        if self.preview_360.enabled {
+            let w = img.width() as usize;
+            let h = img.height() as usize;
+            let mut raw = crate::preview_overlays::project_equirectangular_360(
+                img.as_raw(),
+                w,
+                h,
+                self.preview_360,
+            );
+            let (mode, gray) = self.effective_preview_channel();
+            crate::preview_overlays::isolate_channel(&mut raw, mode, gray);
+            egui::ColorImage::from_rgba_unmultiplied([w, h], &raw)
+        } else {
+            isolated_color_image(img, self.effective_preview_channel())
+        }
     }
 
     /// Zoom da prévia em passos de 5% (*+* / *-* do botão Zoom).
@@ -4819,8 +4855,10 @@ impl App {
             self.prefs.display.icon_strength_pct,
             self.prefs.display.button_highlight,
         );
-        // idioma e ícone das janelas próprias dos diálogos (dialog_window)
+        // idioma, ícone e acoplamento persistido das janelas próprias dos diálogos
+        self.active_cursor = crate::cursors::NeovegCursor::default();
         crate::dialog_window::set_context(ctx, self.lang(), &self.window_icon);
+        crate::dialog_window::sync_docked_prefs(ctx, &self.prefs.docked_dialogs);
         // escala da interface (Exibir > Escala da interface, Preferências)
         let want_zoom = self.prefs.ui_scale_factor();
         if (ctx.zoom_factor() - want_zoom).abs() > 0.001 {
@@ -4989,6 +5027,34 @@ impl App {
                 self.confirm_close = false;
             }
         }
+        // Persiste alterações no estado acoplado/flutuante dos diálogos nativos.
+        let dock_changes = crate::dialog_window::take_docked_changes(ctx);
+        if !dock_changes.is_empty() {
+            for (k, docked) in dock_changes {
+                if docked {
+                    if !self.prefs.docked_dialogs.contains(&k) {
+                        self.prefs.docked_dialogs.push(k);
+                    }
+                } else {
+                    self.prefs.docked_dialogs.retain(|x| x != &k);
+                }
+            }
+            self.prefs.sanitize();
+            let _ = self.prefs.save();
+        }
+        // Renderiza o ponteiro vetorial personalizado do quadro (se ativo).
+        if self.active_cursor.is_custom() {
+            crate::cursors::render_cursor(
+                ctx,
+                self.active_cursor,
+                &self.theme,
+                self.prefs.custom_cursors,
+            );
+        }
+    }
+
+    pub(crate) fn set_cursor_shape(&mut self, cursor: crate::cursors::NeovegCursor) {
+        self.active_cursor = cursor;
     }
 }
 

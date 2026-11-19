@@ -181,6 +181,238 @@ impl FpsMeter {
     }
 }
 
+/// Canal de legendas fechadas (CEA-608 CC1–CC4) exibido como sobreposição na
+/// Prévia de Vídeo (manual do VEGAS Pro 21, p. 199).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ClosedCaptionChannel {
+    #[default]
+    Off,
+    Cc1,
+    Cc2,
+    Cc3,
+    Cc4,
+}
+
+impl ClosedCaptionChannel {
+    pub const ALL: [ClosedCaptionChannel; 5] =
+        [Self::Off, Self::Cc1, Self::Cc2, Self::Cc3, Self::Cc4];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Legendas fechadas: Desligado",
+            Self::Cc1 => "CC1",
+            Self::Cc2 => "CC2",
+            Self::Cc3 => "CC3",
+            Self::Cc4 => "CC4",
+        }
+    }
+
+    pub fn prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Cc1 => Some("CC1"),
+            Self::Cc2 => Some("CC2"),
+            Self::Cc3 => Some("CC3"),
+            Self::Cc4 => Some("CC4"),
+        }
+    }
+}
+
+/// Resolve o texto de legenda fechada ativo em `t` para o canal `channel`,
+/// procurando em marcadores de comando (`CC1:...`..`CC4:...`) e regiões
+/// rotuladas, limitando o texto exibido para proteção contra entradas hostis.
+pub fn resolve_closed_caption(
+    project: &neoveg_engine::model::Project,
+    t: neoveg_engine::model::Ticks,
+    channel: ClosedCaptionChannel,
+) -> Option<String> {
+    let tag = channel.prefix()?;
+    // 1. Procura região ativa no cursor cuja etiqueta corresponda ao canal
+    // (ou qualquer região em CC1 quando não tem prefixo CC2..CC4).
+    for r in &project.regions {
+        if t >= r.start && t <= r.end {
+            let trimmed = r.label.trim();
+            if let Some(rest) = strip_cc_prefix(trimmed, tag) {
+                if !rest.is_empty() {
+                    return Some(rest.chars().take(160).collect());
+                }
+            } else if channel == ClosedCaptionChannel::Cc1
+                && !trimmed.is_empty()
+                && !has_any_cc_prefix(trimmed)
+            {
+                return Some(trimmed.chars().take(160).collect());
+            }
+        }
+    }
+    // 2. Procura o marcador de comando mais recente antes/em `t` (até 5 s).
+    let max_age = neoveg_engine::model::Ticks::from_secs_i64(5);
+    let mut best: Option<(neoveg_engine::model::Ticks, String)> = None;
+    for m in &project.markers {
+        if m.kind != neoveg_engine::model::MarkerKind::Command || m.t > t {
+            continue;
+        }
+        if t - m.t > max_age {
+            continue;
+        }
+        let text = if !m.command_arg.trim().is_empty() {
+            m.command_arg.trim()
+        } else {
+            m.label.trim()
+        };
+        if let Some(rest) = strip_cc_prefix(text, tag) {
+            if !rest.is_empty() && best.as_ref().is_none_or(|(bt, _)| m.t >= *bt) {
+                best = Some((m.t, rest.chars().take(160).collect()));
+            }
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+fn has_any_cc_prefix(s: &str) -> bool {
+    ["CC1", "CC2", "CC3", "CC4"]
+        .iter()
+        .any(|p| strip_cc_prefix(s, p).is_some())
+}
+
+fn strip_cc_prefix<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let head = s.get(..tag.len())?;
+    if !head.eq_ignore_ascii_case(tag) {
+        return None;
+    }
+    let rest = s.get(tag.len()..)?;
+    if let Some(after) = rest.strip_prefix(':').or_else(|| rest.strip_prefix(' ')) {
+        Some(after.trim())
+    } else {
+        None
+    }
+}
+
+/// Estado da câmera virtual da Prévia de Vídeo em modo 360° equiretangular.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Preview360State {
+    pub enabled: bool,
+    /// Rotação horizontal em graus (-180..=180).
+    pub yaw_deg: f32,
+    /// Inclinação vertical em graus (-85..=85).
+    pub pitch_deg: f32,
+    /// Campo de visão horizontal em graus (30..=130).
+    pub fov_deg: f32,
+}
+
+impl Default for Preview360State {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            yaw_deg: 0.0,
+            pitch_deg: 0.0,
+            fov_deg: 90.0,
+        }
+    }
+}
+
+impl Preview360State {
+    pub fn reset_view(&mut self) {
+        self.yaw_deg = 0.0;
+        self.pitch_deg = 0.0;
+        self.fov_deg = 90.0;
+    }
+
+    pub fn orbit(&mut self, dx_deg: f32, dy_deg: f32) {
+        if dx_deg.is_finite() {
+            self.yaw_deg = (self.yaw_deg + dx_deg).rem_euclid(360.0);
+            if self.yaw_deg > 180.0 {
+                self.yaw_deg -= 360.0;
+            }
+        }
+        if dy_deg.is_finite() {
+            self.pitch_deg = (self.pitch_deg + dy_deg).clamp(-85.0, 85.0);
+        }
+    }
+
+    pub fn adjust_fov(&mut self, delta_deg: f32) {
+        if delta_deg.is_finite() {
+            self.fov_deg = (self.fov_deg + delta_deg).clamp(30.0, 130.0);
+        }
+    }
+}
+
+/// Projeta um quadro equiretangular 360° (`src`, `w × h` RGBA) numa visão
+/// retilínea segundo `state` (yaw/pitch/FOV). Devolve o quadro original sem
+/// pânico quando dimensões ou parâmetros forem inválidos (§0.4).
+pub fn project_equirectangular_360(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    state: Preview360State,
+) -> Vec<u8> {
+    let Some(expected) = w.checked_mul(h).and_then(|n| n.checked_mul(4)) else {
+        return Vec::new();
+    };
+    if w == 0 || h == 0 || src.len() < expected || expected > 64 * 1024 * 1024 {
+        return src.get(..expected.min(src.len())).unwrap_or(&[]).to_vec();
+    }
+    let yaw = if state.yaw_deg.is_finite() {
+        state.yaw_deg.to_radians()
+    } else {
+        0.0
+    };
+    let pitch = if state.pitch_deg.is_finite() {
+        state.pitch_deg.clamp(-85.0, 85.0).to_radians()
+    } else {
+        0.0
+    };
+    let fov = if state.fov_deg.is_finite() {
+        state.fov_deg.clamp(30.0, 130.0).to_radians()
+    } else {
+        90.0_f32.to_radians()
+    };
+
+    let (cy, sy) = (yaw.cos(), yaw.sin());
+    let (cp, sp) = (pitch.cos(), pitch.sin());
+    let half_w = (fov * 0.5).tan();
+    let aspect = h as f32 / w as f32;
+    let half_h = half_w * aspect;
+
+    let mut out = vec![0u8; expected];
+    let wf = w as f32;
+    let hf = h as f32;
+    let inv_tau = 1.0 / std::f32::consts::TAU;
+    let inv_pi = 1.0 / std::f32::consts::PI;
+
+    for y in 0..h {
+        let ny = 1.0 - 2.0 * ((y as f32 + 0.5) / hf);
+        let ry0 = ny * half_h;
+        let row_off = y * w * 4;
+        for x in 0..w {
+            let nx = 2.0 * ((x as f32 + 0.5) / wf) - 1.0;
+            let rx0 = nx * half_w;
+            let rz0 = 1.0_f32;
+            // Rotação pitch (em torno de X)
+            let ry1 = ry0 * cp + rz0 * sp;
+            let rz1 = -ry0 * sp + rz0 * cp;
+            // Rotação yaw (em torno de Y)
+            let dx = rx0 * cy + rz1 * sy;
+            let dy = ry1;
+            let dz = -rx0 * sy + rz1 * cy;
+            let inv_len = (dx * dx + dy * dy + dz * dz).sqrt().recip();
+            let ux = dx * inv_len;
+            let uy = (dy * inv_len).clamp(-1.0, 1.0);
+            let uz = dz * inv_len;
+
+            let lon = ux.atan2(uz); // -pi..pi
+            let lat = uy.asin(); // -pi/2..pi/2
+            let u = (lon * inv_tau + 0.5).rem_euclid(1.0);
+            let v = (0.5 - lat * inv_pi).clamp(0.0, 1.0);
+            let sx = ((u * wf) as usize).min(w - 1);
+            let sy_i = ((v * hf) as usize).min(h - 1);
+            let si = (sy_i * w + sx) * 4;
+            let di = row_off + x * 4;
+            out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +505,70 @@ mod tests {
         assert_eq!(m.fps(), None);
         m.clear();
         assert_eq!(m.fps(), None);
+    }
+
+    #[test]
+    fn legendas_fechadas_cc1_a_cc4_resolvem_regioes_e_comandos() {
+        let mut p = neoveg_engine::model::Project::new_default();
+        p.regions.push(neoveg_engine::model::Region {
+            id: 1,
+            start: neoveg_engine::model::Ticks::ZERO,
+            end: neoveg_engine::model::Ticks::from_secs_i64(4),
+            label: "CC2: Olá mundo".into(),
+        });
+        p.markers.push(neoveg_engine::model::Marker {
+            id: 2,
+            t: neoveg_engine::model::Ticks::from_secs_i64(1),
+            label: "cmd".into(),
+            kind: neoveg_engine::model::MarkerKind::Command,
+            command_type: "CAPTION".into(),
+            command_arg: "CC3: Legenda de comando".into(),
+        });
+        let t = neoveg_engine::model::Ticks::from_secs_i64(2);
+        assert_eq!(
+            resolve_closed_caption(&p, t, ClosedCaptionChannel::Off),
+            None
+        );
+        assert_eq!(
+            resolve_closed_caption(&p, t, ClosedCaptionChannel::Cc2).as_deref(),
+            Some("Olá mundo")
+        );
+        assert_eq!(
+            resolve_closed_caption(&p, t, ClosedCaptionChannel::Cc3).as_deref(),
+            Some("Legenda de comando")
+        );
+        assert_eq!(
+            resolve_closed_caption(&p, t, ClosedCaptionChannel::Cc4),
+            None
+        );
+    }
+
+    #[test]
+    fn projecao_360_respeita_limites_e_nao_entra_em_panico_com_entradas_hostis() {
+        let src = vec![200u8; 16 * 8 * 4];
+        let mut st = Preview360State {
+            enabled: true,
+            yaw_deg: 45.0,
+            pitch_deg: 20.0,
+            fov_deg: 90.0,
+        };
+        let out = project_equirectangular_360(&src, 16, 8, st);
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out[0], 200);
+        // Entradas hostis (§0.4)
+        st.orbit(f32::NAN, f32::INFINITY);
+        st.adjust_fov(f32::NEG_INFINITY);
+        assert!(project_equirectangular_360(&src, 0, 8, st).is_empty());
+        assert!(project_equirectangular_360(&[], 16, 8, st).is_empty());
+        let hostil = Preview360State {
+            enabled: true,
+            yaw_deg: f32::NAN,
+            pitch_deg: f32::INFINITY,
+            fov_deg: f32::NAN,
+        };
+        assert_eq!(
+            project_equirectangular_360(&src, 16, 8, hostil).len(),
+            src.len()
+        );
     }
 }

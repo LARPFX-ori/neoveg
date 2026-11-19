@@ -86,6 +86,7 @@ enum Zone {
     GainHandle,
     FxButton,
     PanCropButton,
+    MoreButton,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -558,20 +559,55 @@ impl App {
         (r.top() + 3.0 + t * span).clamp(r.top() + 2.0, (r.bottom() - 3.0).max(r.top() + 2.0))
     }
 
-    fn event_buttons(r: &Rect, is_video: bool) -> (Option<Rect>, Option<Rect>) {
-        if r.width() < 70.0 {
-            return (None, None);
+    fn event_button_hidden(&self, is_video: bool, key: &str) -> bool {
+        let list = if is_video {
+            &self.prefs.event_hidden_buttons_video
+        } else {
+            &self.prefs.event_hidden_buttons_audio
+        };
+        list.iter().any(|k| k == key)
+    }
+
+    fn event_buttons(
+        &self,
+        r: &Rect,
+        is_video: bool,
+    ) -> (Option<Rect>, Option<Rect>, Option<Rect>) {
+        if r.width() < 54.0 {
+            return (None, None, None);
         }
-        let fx = Rect::from_min_size(pos2(r.right() - 20.0, r.top() + 2.0), vec2(16.0, 13.0));
-        let pc = if is_video {
-            Some(Rect::from_min_size(
-                pos2(r.right() - 38.0, r.top() + 2.0),
-                vec2(16.0, 13.0),
-            ))
+        // No layout VEGAS Pro, os botões do evento ficam no canto inferior direito
+        // quando a faixa tem altura confortável, recuando para o topo em faixas mínimas.
+        let y = if r.height() >= 34.0 {
+            (r.bottom() - 16.0).max(r.top() + 2.0)
+        } else {
+            r.top() + 2.0
+        };
+        let mut rx = r.right() - 4.0;
+        let more = if r.width() >= 54.0 {
+            rx -= 14.0;
+            let b = Rect::from_min_size(pos2(rx, y), vec2(14.0, 13.0));
+            rx -= 2.0;
+            Some(b)
         } else {
             None
         };
-        (Some(fx), pc)
+        let fx = if !self.event_button_hidden(is_video, "fx") && r.width() >= 70.0 {
+            rx -= 16.0;
+            let b = Rect::from_min_size(pos2(rx, y), vec2(16.0, 13.0));
+            rx -= 2.0;
+            Some(b)
+        } else {
+            None
+        };
+        let pc = if is_video && !self.event_button_hidden(is_video, "pan_crop") && r.width() >= 88.0
+        {
+            rx -= 16.0;
+            Some(Rect::from_min_size(pos2(rx, y), vec2(16.0, 13.0)))
+        } else {
+            None
+        };
+        (fx, pc, more)
     }
 
     fn hit_event(
@@ -594,7 +630,10 @@ impl App {
                 if !hit_rect.contains(pos) {
                     continue;
                 }
-                let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
+                let (fxb, pcb, moreb) = self.event_buttons(&r, track.kind == TrackKind::Video);
+                if moreb.map(|b| b.contains(pos)).unwrap_or(false) {
+                    return Some((ti, ei, Zone::MoreButton));
+                }
                 if fxb.map(|b| b.contains(pos)).unwrap_or(false) {
                     return Some((ti, ei, Zone::FxButton));
                 }
@@ -2140,6 +2179,18 @@ impl App {
             });
             let in_loop = loop_r.contains(pos);
             let in_marker = marker_r.contains(pos);
+            if matches!(self.tl.drag, Drag::Scrub)
+                || (matches!(self.tl.drag, Drag::None) && ruler_r.contains(pos))
+            {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::Scrub);
+            } else if matches!(
+                self.tl.drag,
+                Drag::LoopEdge { .. } | Drag::RegionEdge { .. }
+            ) {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::MoveX);
+            } else if matches!(self.tl.drag, Drag::LoopMove { .. } | Drag::Marker { .. }) {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::Move);
+            }
             if resp.drag_started() {
                 let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
                 let ot = self.tl.x2t(origin.x, left);
@@ -2605,22 +2656,54 @@ impl App {
                 self.theme.tl_header_idle
             };
             painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, bg);
-            painter.rect_filled(
-                Rect::from_min_size(r.min, vec2(6.0, h)),
-                0.0,
-                shade(self.track_rgb(track.color), 1.0),
+            let use_gutter = h >= 42.0;
+            let gutter_col = shade(
+                self.track_rgb(track.color),
+                if selected { 1.05 } else { 0.88 },
             );
-            if depth > 0 {
-                let gx = r.left() + 6.0 + indent * 0.5;
-                let mid_y = r.center().y;
-                painter.line_segment(
-                    [pos2(gx, r.top()), pos2(gx, mid_y)],
-                    Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+            let gutter_rect = Rect::from_min_size(
+                pos2(r.left() + indent, r.top() + 0.5),
+                vec2(22.0, (h - 1.0).max(1.0)),
+            );
+            if use_gutter {
+                painter.rect_filled(gutter_rect, 0.0, gutter_col);
+                if selected {
+                    painter.rect_filled(
+                        Rect::from_min_size(gutter_rect.min, vec2(2.5, gutter_rect.height())),
+                        0.0,
+                        self.theme.accent,
+                    );
+                }
+                if depth > 0 {
+                    let gx = r.left() + indent * 0.5;
+                    let mid_y = r.center().y;
+                    painter.line_segment(
+                        [pos2(gx, r.top()), pos2(gx, mid_y)],
+                        Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                    );
+                    painter.line_segment(
+                        [pos2(gx, mid_y), pos2(r.left() + indent, mid_y)],
+                        Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                    );
+                }
+            } else {
+                painter.rect_filled(
+                    Rect::from_min_size(r.min, vec2(6.0, h)),
+                    0.0,
+                    shade(self.track_rgb(track.color), 1.0),
                 );
-                painter.line_segment(
-                    [pos2(gx, mid_y), pos2(r.left() + 9.0 + indent, mid_y)],
-                    Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
-                );
+                if depth > 0 {
+                    let gx = r.left() + 6.0 + indent * 0.5;
+                    let mid_y = r.center().y;
+                    painter.line_segment(
+                        [pos2(gx, r.top()), pos2(gx, mid_y)],
+                        Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                    );
+                    painter.line_segment(
+                        [pos2(gx, mid_y), pos2(r.left() + 9.0 + indent, mid_y)],
+                        Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
+                    );
+                }
             }
             painter.line_segment(
                 [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
@@ -2639,13 +2722,6 @@ impl App {
                 break;
             }
 
-            let inner = Rect::from_min_max(
-                pos2(r.left() + 10.0 + indent, r.top() + 3.0),
-                pos2(r.right() - 14.0, r.bottom() - 3.0),
-            );
-            let mut child =
-                ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("th", tid)));
-            child.set_clip_rect(inner.intersect(area));
             let kind = self.project.tracks[ti].kind;
             let mut changed_track = false;
             let mut want_checkpoint = false;
@@ -2659,140 +2735,186 @@ impl App {
             let lang = self.lang();
             let btns = self.prefs.track_header.get(is_video);
             let mut more: Option<HeaderAction> = None;
-            child.horizontal(|ui| {
-                // botão Mais (manual do VEGAS Pro 21, p. 69): os comandos de
-                // todos os botões do cabeçalho, inclusive os ocultos. O manual
-                // o põe acima do número; aqui fica ao lado, para não aumentar
-                // a altura do cabeçalho.
-                let (cur_mute, cur_solo, cur_auto, cur_armed) = {
-                    let t = &self.project.tracks[ti];
-                    (t.mute, t.solo, t.automation_mode, t.record_armed)
-                };
-                let adj = self.project.tracks[ti].is_adjustment();
-                ui.menu_button(egui::RichText::new("…").small(), |ui| {
+            let (cur_mute, cur_solo, cur_auto, cur_armed) = {
+                let t = &self.project.tracks[ti];
+                (t.mute, t.solo, t.automation_mode, t.record_armed)
+            };
+            let adj = self.project.tracks[ti].is_adjustment();
+            let track_icon = if is_folder {
+                Icon::TrackFolder
+            } else if kind == TrackKind::Video {
+                Icon::VideoTrack
+            } else {
+                Icon::AudioTrack
+            };
+            let draw_more_menu = |ui: &mut egui::Ui, more_out: &mut Option<HeaderAction>| {
+                if ui
+                    .selectable_label(cur_mute, tr(lang, "Mudo (Z)"))
+                    .clicked()
+                {
+                    *more_out = Some(HeaderAction::Mute);
+                    ui.close_menu();
+                }
+                if ui
+                    .selectable_label(cur_solo, tr(lang, "Solo (X)"))
+                    .clicked()
+                {
+                    *more_out = Some(HeaderAction::Solo);
+                    ui.close_menu();
+                }
+                if ui.button(tr(lang, "Efeitos da trilha...")).clicked() {
+                    *more_out = Some(HeaderAction::Fx);
+                    ui.close_menu();
+                }
+                if is_video
+                    && !adj
+                    && ui
+                        .button(tr(lang, "Movimento da trilha (Track Motion)..."))
+                        .clicked()
+                {
+                    *more_out = Some(HeaderAction::TrackMotion);
+                    ui.close_menu();
+                }
+                if !is_folder {
                     if ui
-                        .selectable_label(cur_mute, tr(lang, "Mudo (Z)"))
+                        .button(tr(lang, "Minimizar a altura da trilha"))
                         .clicked()
                     {
-                        more = Some(HeaderAction::Mute);
+                        *more_out = Some(HeaderAction::Minimize);
                         ui.close_menu();
                     }
                     if ui
-                        .selectable_label(cur_solo, tr(lang, "Solo (X)"))
+                        .button(tr(lang, "Maximizar a altura da trilha"))
                         .clicked()
                     {
-                        more = Some(HeaderAction::Solo);
+                        *more_out = Some(HeaderAction::Maximize);
                         ui.close_menu();
                     }
-                    if ui.button(tr(lang, "Efeitos da trilha...")).clicked() {
-                        more = Some(HeaderAction::Fx);
-                        ui.close_menu();
-                    }
-                    if is_video
-                        && !adj
-                        && ui
-                            .button(tr(lang, "Movimento da trilha (Track Motion)..."))
-                            .clicked()
-                    {
-                        more = Some(HeaderAction::TrackMotion);
-                        ui.close_menu();
-                    }
-                    if !is_folder {
-                        if ui
-                            .button(tr(lang, "Minimizar a altura da trilha"))
-                            .clicked()
-                        {
-                            more = Some(HeaderAction::Minimize);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button(tr(lang, "Maximizar a altura da trilha"))
-                            .clicked()
-                        {
-                            more = Some(HeaderAction::Maximize);
-                            ui.close_menu();
-                        }
-                    }
-                    if is_video
-                        && !is_folder
-                        && !adj
-                        && ui
-                            .selectable_label(
-                                has_parent,
-                                tr(lang, "Tornar filho de composição (Pai/Filho)"),
-                            )
-                            .clicked()
-                    {
-                        more = Some(HeaderAction::ToggleCompositingChild);
-                        ui.close_menu();
-                    }
-                    if !is_video
-                        && !is_folder
-                        && ui
-                            .selectable_label(cur_armed, tr(lang, "Armar para gravação"))
-                            .clicked()
-                    {
-                        more = Some(HeaderAction::RecordArm);
-                        ui.close_menu();
-                    }
-                    if !is_folder {
-                        ui.menu_button(format!("Automação ({})", cur_auto.short_label()), |ui| {
-                            for m in AutomationMode::ALL {
-                                if ui.radio(cur_auto == m, m.label()).clicked() {
-                                    more = Some(HeaderAction::SetAutomation(m));
-                                    ui.close_menu();
-                                }
+                }
+                if is_video
+                    && !is_folder
+                    && !adj
+                    && ui
+                        .selectable_label(
+                            has_parent,
+                            tr(lang, "Tornar filho de composição (Pai/Filho)"),
+                        )
+                        .clicked()
+                {
+                    *more_out = Some(HeaderAction::ToggleCompositingChild);
+                    ui.close_menu();
+                }
+                if !is_video
+                    && !is_folder
+                    && ui
+                        .selectable_label(cur_armed, tr(lang, "Armar para gravação"))
+                        .clicked()
+                {
+                    *more_out = Some(HeaderAction::RecordArm);
+                    ui.close_menu();
+                }
+                if !is_folder {
+                    ui.menu_button(format!("Automação ({})", cur_auto.short_label()), |ui| {
+                        for m in AutomationMode::ALL {
+                            if ui.radio(cur_auto == m, m.label()).clicked() {
+                                *more_out = Some(HeaderAction::SetAutomation(m));
+                                ui.close_menu();
                             }
-                        });
-                    }
-                    ui.separator();
-                    if ui
-                        .button(tr(lang, "Editar conjunto de botões visíveis..."))
-                        .clicked()
-                    {
-                        more = Some(HeaderAction::EditButtons);
-                        ui.close_menu();
-                    }
-                })
-                .response
-                .on_hover_text(tr(lang, "Mais (botões do cabeçalho, inclusive os ocultos)"));
-                let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
-                let num_bg = if selected {
-                    self.theme.selection_bg
-                } else {
-                    self.theme.widget_bg
-                };
-                let num_border = if selected {
-                    self.theme.accent
-                } else {
-                    self.theme.border
-                };
-                ui.painter().rect_filled(num_r, 2.0, num_bg);
-                ui.painter().rect_stroke(
-                    num_r,
-                    2.0,
-                    Stroke::new(1.0_f32, num_border),
-                    StrokeKind::Inside,
+                        }
+                    });
+                }
+                ui.separator();
+                if ui
+                    .button(tr(lang, "Editar conjunto de botões visíveis..."))
+                    .clicked()
+                {
+                    *more_out = Some(HeaderAction::EditButtons);
+                    ui.close_menu();
+                }
+            };
+
+            if use_gutter {
+                // Coluna lateral colorida no padrão VEGAS Pro (manual p. 69):
+                // botão Mais (`…`) no topo, acima do número e do ícone da faixa.
+                let gutter_fg = crate::theme::contrast_on(gutter_col);
+                let mut gutter_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(gutter_rect.shrink2(vec2(1.0, 1.0)))
+                        .id_salt(("th_gutter", tid)),
                 );
-                ui.painter().text(
-                    num_r.center(),
-                    Align2::CENTER_CENTER,
-                    format!("{}", ti + 1),
-                    FontId::proportional(11.0),
-                    crate::theme::contrast_on(num_bg),
-                );
-                icons::paint_inline(
-                    ui,
-                    if is_folder {
-                        Icon::TrackFolder
-                    } else if kind == TrackKind::Video {
-                        Icon::VideoTrack
+                gutter_ui.set_clip_rect(gutter_rect.intersect(area));
+                gutter_ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
+                gutter_ui.spacing_mut().button_padding = vec2(2.0, 0.0);
+                gutter_ui.vertical_centered(|ui| {
+                    ui.menu_button(egui::RichText::new("…").small().color(gutter_fg), |ui| {
+                        draw_more_menu(ui, &mut more)
+                    })
+                    .response
+                    .on_hover_text(tr(lang, "Mais (botões do cabeçalho, inclusive os ocultos)"));
+                    let num_txt = if selected {
+                        egui::RichText::new(format!("{}", ti + 1))
+                            .size(11.0)
+                            .strong()
+                            .color(gutter_fg)
                     } else {
-                        Icon::AudioTrack
-                    },
-                    14.0,
-                    &self.theme,
-                );
+                        egui::RichText::new(format!("{}", ti + 1))
+                            .size(11.0)
+                            .color(gutter_fg)
+                    };
+                    ui.label(num_txt);
+                    if h >= 48.0 {
+                        let mut gutter_theme = self.theme.clone();
+                        gutter_theme.text_primary = gutter_fg;
+                        gutter_theme.text_muted = gutter_fg.gamma_multiply(0.85);
+                        icons::paint_inline(ui, track_icon, 12.0, &gutter_theme);
+                    }
+                });
+            }
+
+            let inner = Rect::from_min_max(
+                pos2(
+                    r.left() + indent + if use_gutter { 26.0 } else { 10.0 },
+                    r.top() + 3.0,
+                ),
+                pos2(r.right() - 14.0, r.bottom() - 3.0),
+            );
+            let mut child =
+                ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("th", tid)));
+            child.set_clip_rect(inner.intersect(area));
+            child.horizontal(|ui| {
+                if !use_gutter {
+                    ui.menu_button(egui::RichText::new("…").small(), |ui| {
+                        draw_more_menu(ui, &mut more);
+                    })
+                    .response
+                    .on_hover_text(tr(lang, "Mais (botões do cabeçalho, inclusive os ocultos)"));
+                    let (num_r, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
+                    let num_bg = if selected {
+                        self.theme.selection_bg
+                    } else {
+                        self.theme.widget_bg
+                    };
+                    let num_border = if selected {
+                        self.theme.accent
+                    } else {
+                        self.theme.border
+                    };
+                    ui.painter().rect_filled(num_r, 2.0, num_bg);
+                    ui.painter().rect_stroke(
+                        num_r,
+                        2.0,
+                        Stroke::new(1.0_f32, num_border),
+                        StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        num_r.center(),
+                        Align2::CENTER_CENTER,
+                        format!("{}", ti + 1),
+                        FontId::proportional(11.0),
+                        crate::theme::contrast_on(num_bg),
+                    );
+                    icons::paint_inline(ui, track_icon, 14.0, &self.theme);
+                }
                 if is_folder {
                     let toggle_lbl = if folder_collapsed { ">" } else { "v" };
                     if ui
@@ -3707,53 +3829,155 @@ impl App {
         }
 
         let hover = pointer.filter(|p| lanes.contains(*p));
-        // cursor do mouse conforme a ferramenta e a zona
-        if let (Some(_), Drag::None, EditTool::Selection) = (hover, &self.tl.drag, tool) {
-            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
-        } else if let (Some(_), Drag::None, EditTool::Zoom) = (hover, &self.tl.drag, tool) {
-            ui.ctx().set_cursor_icon(CursorIcon::ZoomIn);
-        } else if let (Some(p), Drag::None, EditTool::Envelope) = (hover, &self.tl.drag, tool) {
-            if self.hit_envelope(p, left, rows).is_some() {
-                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
-            }
-        } else if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
-            if let Some((_, _, Some(_), _)) = self.hit_envelope(p, left, rows) {
-                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
-            } else if let Some((_, _, z)) = self.hit_event(p, left, layout) {
-                match z {
-                    Zone::LeftEdge | Zone::RightEdge => {
-                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal)
-                    }
-                    Zone::FadeIn | Zone::FadeOut => {
-                        ui.ctx().set_cursor_icon(CursorIcon::ResizeNeSw)
-                    }
-                    Zone::GainHandle => ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical),
-                    Zone::FxButton | Zone::PanCropButton => {
-                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand)
-                    }
-                    Zone::Body => {
-                        let mode = self.session.edit_mode;
-                        if mode == EditMode::SplitTrim || (mods.command && mods.alt && mods.shift) {
-                            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
-                        } else if mods.alt
-                            || matches!(mode, EditMode::Slip | EditMode::Slide)
-                            || (mods.command && mods.alt)
-                        {
-                            ui.ctx().set_cursor_icon(CursorIcon::AllScroll);
-                        } else {
-                            ui.ctx().set_cursor_icon(CursorIcon::Grab);
+        // Ponteiro vetorial contextual conforme ferramenta, modo e operação ativa.
+        match &self.tl.drag {
+            Drag::None => {
+                if let Some(p) = hover {
+                    match tool {
+                        EditTool::Selection => {
+                            self.set_cursor_shape(crate::cursors::NeovegCursor::SelectBox);
+                        }
+                        EditTool::Zoom => {
+                            self.set_cursor_shape(if mods.shift || mods.alt {
+                                crate::cursors::NeovegCursor::ZoomOut
+                            } else {
+                                crate::cursors::NeovegCursor::ZoomIn
+                            });
+                        }
+                        EditTool::Envelope => {
+                            if self.hit_envelope(p, left, rows).is_some() {
+                                self.set_cursor_shape(crate::cursors::NeovegCursor::EnvelopeHand);
+                            }
+                        }
+                        EditTool::Normal => {
+                            if matches!(self.hit_keyframe(p, left, rows), Some((_, _, Some(_), _)))
+                            {
+                                self.set_cursor_shape(crate::cursors::NeovegCursor::MoveX);
+                            } else if matches!(
+                                self.hit_envelope(p, left, rows),
+                                Some((_, _, Some(_), _))
+                            ) {
+                                self.set_cursor_shape(crate::cursors::NeovegCursor::EnvelopeHand);
+                            } else if let Some((ti, ei, z)) = self.hit_event(p, left, layout) {
+                                let mode = self.session.edit_mode;
+                                match z {
+                                    Zone::LeftEdge | Zone::RightEdge => {
+                                        let cur = if mods.command || mode == EditMode::Stretch {
+                                            crate::cursors::NeovegCursor::TimeStretch
+                                        } else if mode == EditMode::Roll {
+                                            crate::cursors::NeovegCursor::TrimAdjacent
+                                        } else if mods.alt || mode == EditMode::Slip {
+                                            crate::cursors::NeovegCursor::Slip
+                                        } else if z == Zone::LeftEdge {
+                                            crate::cursors::NeovegCursor::TrimLeft
+                                        } else {
+                                            crate::cursors::NeovegCursor::TrimRight
+                                        };
+                                        self.set_cursor_shape(cur);
+                                    }
+                                    Zone::FadeIn | Zone::FadeOut => {
+                                        self.set_cursor_shape(
+                                            crate::cursors::NeovegCursor::FadeOffset,
+                                        );
+                                    }
+                                    Zone::GainHandle => {
+                                        self.set_cursor_shape(
+                                            crate::cursors::NeovegCursor::EnvelopeHand,
+                                        );
+                                    }
+                                    Zone::FxButton | Zone::PanCropButton | Zone::MoreButton => {
+                                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                                    }
+                                    Zone::Body => {
+                                        if mode == EditMode::SplitTrim
+                                            || (mods.command && mods.alt && mods.shift)
+                                        {
+                                            self.set_cursor_shape(
+                                                crate::cursors::NeovegCursor::SplitTrim,
+                                            );
+                                        } else if mode == EditMode::Slide
+                                            || (mods.command && mods.alt)
+                                        {
+                                            self.set_cursor_shape(
+                                                crate::cursors::NeovegCursor::Slide,
+                                            );
+                                        } else if mods.alt || mode == EditMode::Slip {
+                                            let pt = self.tl.x2t(p.x, left);
+                                            let in_xfade =
+                                                self.project.tracks.get(ti).is_some_and(|tr| {
+                                                    tr.events.iter().enumerate().any(|(idx, ev)| {
+                                                        idx != ei
+                                                            && pt >= ev.start
+                                                            && pt <= ev.end()
+                                                    })
+                                                });
+                                            self.set_cursor_shape(if in_xfade {
+                                                crate::cursors::NeovegCursor::SlipCrossfade
+                                            } else {
+                                                crate::cursors::NeovegCursor::Slip
+                                            });
+                                        } else if mode == EditMode::Shuffle {
+                                            self.set_cursor_shape(
+                                                crate::cursors::NeovegCursor::MoveX,
+                                            );
+                                        } else {
+                                            ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                                        }
+                                    }
+                                }
+                            } else if self.hit_envelope(p, left, rows).is_some() {
+                                self.set_cursor_shape(crate::cursors::NeovegCursor::EnvelopeHand);
+                            }
                         }
                     }
                 }
-            } else if self.hit_envelope(p, left, rows).is_some() {
-                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
-        }
-
-        if let (Some(p), Drag::None) = (hover, &self.tl.drag) {
-            if matches!(self.hit_keyframe(p, left, rows), Some((_, _, Some(_), _))) {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            Drag::Trim { left, slip, .. } => {
+                self.set_cursor_shape(if *slip {
+                    crate::cursors::NeovegCursor::Slip
+                } else if *left {
+                    crate::cursors::NeovegCursor::TrimLeft
+                } else {
+                    crate::cursors::NeovegCursor::TrimRight
+                });
             }
+            Drag::Stretch { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::TimeStretch);
+            }
+            Drag::Roll { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::TrimAdjacent);
+            }
+            Drag::SplitTrim { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::SplitTrim);
+            }
+            Drag::Fade { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::FadeOffset);
+            }
+            Drag::Slip { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::Slip);
+            }
+            Drag::Slide { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::Slide);
+            }
+            Drag::Gain { .. } | Drag::EnvPoint { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::EnvelopeHand);
+            }
+            Drag::Scrub => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::Scrub);
+            }
+            Drag::Box { zoom: true, .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::ZoomIn);
+            }
+            Drag::Box { zoom: false, .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::SelectBox);
+            }
+            Drag::Move { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::Move);
+            }
+            Drag::Shuffle { .. } | Drag::Keyframe { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::MoveX);
+            }
+            _ => {}
         }
 
         if resp.drag_started_by(egui::PointerButton::Primary) {
@@ -4074,7 +4298,7 @@ impl App {
                         orig,
                     };
                 }
-                Zone::FxButton | Zone::PanCropButton => {}
+                Zone::FxButton | Zone::PanCropButton | Zone::MoreButton => {}
                 Zone::Body => {
                     let mode = self.session.edit_mode;
                     if mode == EditMode::SplitTrim || (mods.command && mods.alt && mods.shift) {
@@ -4749,6 +4973,11 @@ impl App {
                 }
                 Zone::PanCropButton => {
                     self.dlg.pan_crop = Some(id);
+                    return;
+                }
+                Zone::MoreButton => {
+                    self.event_buttons_dlg_video =
+                        Some(self.project.tracks[ti].kind == TrackKind::Video);
                     return;
                 }
                 _ => {}
@@ -5802,15 +6031,20 @@ impl App {
                 if let Some(tr) = &e.transition {
                     label = format!("[{}] {}", tr.kind.name(), label);
                 }
-                let btns_w = if r.width() < 70.0 {
-                    2.0
-                } else if track.kind == TrackKind::Video {
-                    42.0
+                let is_video_track = track.kind == TrackKind::Video;
+                let (fxb, pcb, moreb) = self.event_buttons(&r, is_video_track);
+                let top_btns_w = if r.height() >= 34.0 {
+                    4.0
                 } else {
-                    24.0
+                    let min_x = [fxb, pcb, moreb]
+                        .into_iter()
+                        .flatten()
+                        .map(|b| b.left())
+                        .fold(r.right(), f32::min);
+                    (r.right() - min_x + 4.0).max(4.0)
                 };
-                let mut text_right = (r.right() - btns_w).min(lanes.right());
-                if r.width() >= 150.0 {
+                let mut text_right = (r.right() - top_btns_w).min(lanes.right());
+                if r.width() >= 150.0 && !self.event_button_hidden(is_video_track, "duration") {
                     let dur_str = self.fmt_time(e.length);
                     let (dur_galley, dur_w) = painter.fonts(|f| {
                         crate::fonts::tabular_galley(
@@ -5830,33 +6064,69 @@ impl App {
                         text_right = dx - 4.0;
                     }
                 }
+                let label_left = r.left().max(lanes.left()) + 3.0;
                 let label_clip =
                     Rect::from_min_max(hdr.min, pos2(text_right.max(hdr.left()), hdr.bottom()))
                         .intersect(lanes);
-                painter.with_clip_rect(label_clip).text(
-                    pos2(r.left().max(lanes.left()) + 4.0, hdr.top() + 1.0),
-                    Align2::LEFT_TOP,
-                    label,
-                    FontId::proportional(11.0),
-                    hdr_fg,
-                );
-                // botões do evento
-                let (fxb, pcb) = Self::event_buttons(&r, track.kind == TrackKind::Video);
-                let btn_bg = if body_light {
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 170)
+                if label_clip.width() > 8.0 {
+                    let galley = painter.layout_no_wrap(
+                        label,
+                        FontId::proportional(11.0),
+                        if self.theme.high_contrast {
+                            hdr_fg
+                        } else {
+                            Color32::from_rgb(238, 240, 244)
+                        },
+                    );
+                    if !self.theme.high_contrast {
+                        let pill_w =
+                            (galley.size().x + 8.0).min((text_right - label_left).max(0.0));
+                        if pill_w > 6.0 {
+                            let pill = Rect::from_min_size(
+                                pos2(label_left, hdr.top() + 1.0),
+                                vec2(pill_w, (hdr.height() - 2.0).max(11.0)),
+                            );
+                            painter.with_clip_rect(label_clip).rect_filled(
+                                pill,
+                                2.0,
+                                Color32::from_rgba_unmultiplied(16, 18, 22, 165),
+                            );
+                        }
+                    }
+                    painter.with_clip_rect(label_clip).galley(
+                        pos2(label_left + 3.0, hdr.top() + 1.0),
+                        galley,
+                        hdr_fg,
+                    );
+                }
+                // botões do evento (canto inferior direito no padrão VEGAS Pro)
+                let btn_bg = if body_light && self.theme.high_contrast {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 220)
                 } else {
-                    Color32::from_rgba_unmultiplied(18, 22, 28, 175)
+                    Color32::from_rgba_unmultiplied(22, 24, 28, 205)
                 };
-                let btn_muted = crate::theme::contrast_on(btn_bg).gamma_multiply(0.78);
+                let btn_muted = crate::theme::contrast_on(btn_bg).gamma_multiply(0.82);
+                if let Some(cluster) = [fxb, pcb, moreb].into_iter().flatten().reduce(Rect::union) {
+                    let tray = cluster.expand2(vec2(2.0, 1.5));
+                    painter.rect_filled(
+                        tray,
+                        3.0,
+                        Color32::from_rgba_unmultiplied(14, 15, 18, 170),
+                    );
+                    painter.rect_stroke(
+                        tray,
+                        3.0,
+                        Stroke::new(1.0_f32, self.theme.border.gamma_multiply(0.8)),
+                        StrokeKind::Inside,
+                    );
+                }
                 if let Some(b) = fxb {
                     let col = if e.fx.is_empty() {
                         btn_muted
                     } else if self.theme.high_contrast {
                         self.theme.accent
-                    } else if body_light {
-                        Color32::from_rgb(16, 130, 56)
                     } else {
-                        Color32::from_rgb(120, 230, 120)
+                        Color32::from_rgb(120, 230, 130)
                     };
                     painter.rect_filled(b, 2.0, btn_bg);
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
@@ -5874,19 +6144,30 @@ impl App {
                         btn_muted
                     } else if self.theme.high_contrast {
                         self.theme.accent
-                    } else if body_light {
-                        Color32::from_rgb(16, 102, 198)
                     } else {
-                        Color32::from_rgb(120, 200, 255)
+                        Color32::from_rgb(115, 200, 255)
                     };
                     painter.rect_filled(b, 2.0, btn_bg);
                     painter.rect_stroke(b, 2.0, Stroke::new(1.0_f32, col), StrokeKind::Inside);
-                    icons::paint(
-                        &painter,
-                        b.shrink(1.5),
-                        Icon::PanCrop,
-                        &ev_icon_theme,
-                        active,
+                    let mut pc_theme = ev_icon_theme.clone();
+                    pc_theme.text_primary = col;
+                    pc_theme.text_muted = col;
+                    icons::paint(&painter, b.shrink(1.5), Icon::PanCrop, &pc_theme, active);
+                }
+                if let Some(b) = moreb {
+                    painter.rect_filled(b, 2.0, btn_bg);
+                    painter.rect_stroke(
+                        b,
+                        2.0,
+                        Stroke::new(1.0_f32, btn_muted.gamma_multiply(0.65)),
+                        StrokeKind::Inside,
+                    );
+                    painter.text(
+                        b.center(),
+                        Align2::CENTER_CENTER,
+                        "…",
+                        FontId::proportional(10.0),
+                        btn_muted,
                     );
                 }
                 // fades
@@ -6149,25 +6430,45 @@ fn env_first_locked() -> bool {
     false
 }
 
+pub fn draw_meter_channel(painter: &egui::Painter, r: Rect, v: f32) {
+    painter.rect_filled(r, 1.0, Color32::from_rgb(16, 17, 20));
+    let db = lin_to_db(v).clamp(-60.0, 6.0);
+    let n = ((db + 60.0) / 66.0).clamp(0.0, 1.0);
+    if n <= 0.001 || r.height() < 2.0 {
+        return;
+    }
+    let y_top = r.bottom() - n * r.height();
+    // Faixas graduadas estilo console VEGAS Pro: verde (-60..-12 dB),
+    // amarelo (-12..-2 dB) e vermelho (-2..+6 dB).
+    let y_yellow = r.bottom() - ((-12.0 + 60.0) / 66.0) * r.height();
+    let y_red = r.bottom() - ((-2.0 + 60.0) / 66.0) * r.height();
+    let bands = [
+        (
+            y_top.max(y_yellow),
+            r.bottom(),
+            Color32::from_rgb(62, 194, 88),
+        ),
+        (y_top.max(y_red), y_yellow, Color32::from_rgb(232, 204, 52)),
+        (y_top, y_red, Color32::from_rgb(236, 62, 54)),
+    ];
+    for (b_top, b_bot, col) in bands {
+        if b_bot > b_top + 0.25 {
+            painter.rect_filled(
+                Rect::from_min_max(pos2(r.left(), b_top), pos2(r.right(), b_bot)),
+                0.0,
+                col,
+            );
+        }
+    }
+}
+
 pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
-    painter.rect_filled(r, 1.0, Color32::from_gray(20));
-    let w = (r.width() - 1.0) / 2.0;
+    painter.rect_filled(r, 1.0, Color32::from_rgb(16, 17, 20));
+    let w = ((r.width() - 1.0) * 0.5).max(1.0);
     for (i, v) in lv.iter().enumerate() {
-        let db = lin_to_db(*v).clamp(-60.0, 6.0);
-        let n = ((db + 60.0) / 66.0).clamp(0.0, 1.0);
-        let col = if db > -0.1 {
-            Color32::from_rgb(240, 60, 50)
-        } else if db > -9.0 {
-            Color32::from_rgb(230, 210, 60)
-        } else {
-            Color32::from_rgb(70, 200, 90)
-        };
         let x0 = r.left() + i as f32 * (w + 1.0);
-        let bar = Rect::from_min_max(
-            pos2(x0, r.bottom() - n * r.height()),
-            pos2(x0 + w, r.bottom()),
-        );
-        painter.rect_filled(bar, 0.0, col);
+        let ch_r = Rect::from_min_max(pos2(x0, r.top()), pos2((x0 + w).min(r.right()), r.bottom()));
+        draw_meter_channel(painter, ch_r, *v);
     }
 }
 
