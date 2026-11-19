@@ -1327,7 +1327,6 @@ impl App {
             Stroke::new(1.0_f32, self.theme.border),
         );
 
-        let active_id = self.project.active_sequence_id;
         let mut cur_x = rect.left() + 4.0;
         let font_id = FontId::proportional(11.5);
         let tab_h = rect.height() - 3.0;
@@ -1337,13 +1336,13 @@ impl App {
         let mut action_duplicate: Option<Id> = None;
         let mut action_rename: Option<(Id, String)> = None;
 
-        let seq_count = self.project.sequences.len();
+        let tabs = self.project.sequence_tab_info();
+        let seq_count = tabs.len();
 
-        for seq in &self.project.sequences {
-            let is_active = Some(seq.id) == active_id;
+        for (seq_id, seq_name, is_active) in tabs {
             let text_w = ui
                 .painter()
-                .layout_no_wrap(seq.name.clone(), font_id.clone(), Color32::WHITE)
+                .layout_no_wrap(seq_name.clone(), font_id.clone(), Color32::WHITE)
                 .size()
                 .x;
             let close_w = if seq_count > 1 { 16.0 } else { 0.0 };
@@ -1354,7 +1353,7 @@ impl App {
             }
 
             let tab_rect = Rect::from_min_size(pos2(cur_x, rect.top() + 3.0), vec2(tab_w, tab_h));
-            let tab_resp = ui.interact(tab_rect, ui.id().with(("seq_tab", seq.id)), Sense::click());
+            let tab_resp = ui.interact(tab_rect, ui.id().with(("seq_tab", seq_id)), Sense::click());
 
             let bg = if is_active {
                 self.theme.tl_header_bg
@@ -1409,9 +1408,9 @@ impl App {
             let max_text_w = tab_w - 12.0 - close_w;
             let text_pos = pos2(tab_rect.left() + 8.0, tab_rect.center().y);
             let label_clipped = if text_w > max_text_w {
-                format!("{}…", seq.name.chars().take(8).collect::<String>())
+                format!("{}…", seq_name.chars().take(8).collect::<String>())
             } else {
-                seq.name.clone()
+                seq_name.clone()
             };
             p.text(
                 text_pos,
@@ -1428,7 +1427,7 @@ impl App {
                 );
                 let close_resp = ui.interact(
                     close_rect,
-                    ui.id().with(("seq_close", seq.id)),
+                    ui.id().with(("seq_close", seq_id)),
                     Sense::click(),
                 );
                 let close_color = if close_resp.hovered() {
@@ -1444,30 +1443,30 @@ impl App {
                     close_color,
                 );
                 if close_resp.clicked() {
-                    action_delete = Some(seq.id);
+                    action_delete = Some(seq_id);
                 }
             }
 
             tab_resp.context_menu(|ui| {
                 if ui.button(tr(self.lang(), "Renomear")).clicked() {
-                    action_rename = Some((seq.id, seq.name.clone()));
+                    action_rename = Some((seq_id, seq_name.clone()));
                     ui.close_menu();
                 }
                 if ui.button(tr(self.lang(), "Duplicar sequência")).clicked() {
-                    action_duplicate = Some(seq.id);
+                    action_duplicate = Some(seq_id);
                     ui.close_menu();
                 }
                 if seq_count > 1 && ui.button(tr(self.lang(), "Excluir sequência")).clicked() {
-                    action_delete = Some(seq.id);
+                    action_delete = Some(seq_id);
                     ui.close_menu();
                 }
             });
 
             if tab_resp.clicked() && !is_active {
-                action_switch = Some(seq.id);
+                action_switch = Some(seq_id);
             }
             if tab_resp.double_clicked() {
-                action_rename = Some((seq.id, seq.name.clone()));
+                action_rename = Some((seq_id, seq_name.clone()));
             }
 
             cur_x += tab_w + 3.0;
@@ -1495,24 +1494,17 @@ impl App {
             self.theme.text_primary,
         );
         if add_resp.clicked() {
-            self.checkpoint();
             self.create_sequence(None);
-            self.changed();
         }
 
         if let Some(target_id) = action_switch {
-            self.switch_sequence(target_id);
-            self.changed();
+            self.switch_sequence_app(target_id);
         }
         if let Some(target_id) = action_delete {
-            self.checkpoint();
             self.delete_sequence(target_id);
-            self.changed();
         }
         if let Some(source_id) = action_duplicate {
-            self.checkpoint();
             self.duplicate_sequence(source_id);
-            self.changed();
         }
         if let Some((id, name)) = action_rename {
             self.tl.rename = Some((id, name));

@@ -647,8 +647,32 @@ impl EditorSession {
         }
     }
 
+    /// Alterna para outra sequência pelo ID preservando parâmetros de visualização (cursor, scroll_x, px_per_sec).
+    pub fn switch_sequence_with_view(
+        &mut self,
+        seq_id: Id,
+        scroll_x: Ticks,
+        px_per_sec: f32,
+    ) -> Option<(Ticks, Ticks, f32)> {
+        let view =
+            self.project
+                .switch_sequence_with_view(seq_id, self.cursor, scroll_x, px_per_sec)?;
+        self.cursor = view.0;
+        self.sel_events.clear();
+        self.sel_track = if self.project.tracks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.time_sel = None;
+        self.refresh_snapshot();
+        self.changed();
+        Some(view)
+    }
+
     /// Cria uma nova sequência no projeto e a torna ativa.
     pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
+        self.checkpoint();
         let id = self.project.create_sequence(name);
         self.cursor = Ticks::ZERO;
         self.sel_events.clear();
@@ -665,6 +689,7 @@ impl EditorSession {
 
     /// Duplica uma sequência existente com todo o seu conteúdo.
     pub fn duplicate_sequence(&mut self, seq_id: Id) -> Option<Id> {
+        self.checkpoint();
         let id = self.project.duplicate_sequence(seq_id);
         if id.is_some() {
             self.refresh_snapshot();
@@ -675,6 +700,10 @@ impl EditorSession {
 
     /// Remove uma sequência se houver mais de uma no projeto.
     pub fn delete_sequence(&mut self, seq_id: Id) -> bool {
+        if self.project.sequences.is_empty() {
+            return false;
+        }
+        self.checkpoint();
         if self.project.delete_sequence(seq_id) {
             self.cursor = Ticks::ZERO;
             self.sel_events.clear();
@@ -690,6 +719,26 @@ impl EditorSession {
         } else {
             false
         }
+    }
+
+    /// Renomeia uma sequência pelo ID.
+    pub fn rename_sequence(&mut self, seq_id: Id, new_name: &str) -> bool {
+        self.checkpoint();
+        if self.project.rename_sequence(seq_id, new_name) {
+            self.refresh_snapshot();
+            self.changed();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Renomeia a sequência ativa atual.
+    pub fn rename_active_sequence(&mut self, new_name: &str) -> bool {
+        let Some(id) = self.project.active_sequence_id else {
+            return false;
+        };
+        self.rename_sequence(id, new_name)
     }
 
     pub fn insert_track(&mut self, kind: TrackKind) -> usize {
@@ -1871,15 +1920,10 @@ impl EditorSession {
         ms.get(zero_based).copied()
     }
 
-    /// Remove mídias do projeto que não são usadas por nenhum evento.
+    /// Remove mídias do projeto que não são usadas por nenhum evento (incluindo sequências inativas).
     /// Retorna os IDs removidos para o chamador limpar caches visuais.
     pub fn remove_unused_media(&mut self, media: Option<&MediaCache>) -> Vec<Id> {
-        let used: HashSet<Id> = self
-            .project
-            .tracks
-            .iter()
-            .flat_map(|t| t.events.iter().flat_map(crate::takes::media_ids))
-            .collect();
+        let used: HashSet<Id> = self.project.used_media_ids();
         let n0 = self.project.media.len();
         self.checkpoint();
         let removed: Vec<Id> = self
@@ -4196,6 +4240,14 @@ impl EditorSession {
                 !crate::takes::uses_media(e, media_id) || crate::takes::remove_media(e, media_id)
             });
         }
+        for s in &mut self.project.sequences {
+            for t in &mut s.tracks {
+                t.events.retain_mut(|e| {
+                    !crate::takes::uses_media(e, media_id)
+                        || crate::takes::remove_media(e, media_id)
+                });
+            }
+        }
         self.project.media.retain(|m| m.id != media_id);
         for bin in &mut self.project.media_bins {
             bin.media_ids.retain(|&id| id != media_id);
@@ -4258,6 +4310,35 @@ impl EditorSession {
                 }
             }
         }
+        for s in &mut self.project.sequences {
+            for t in &mut s.tracks {
+                for e in &mut t.events {
+                    if e.media_id == target_id {
+                        if e.name == old_name {
+                            e.name = new_name.clone();
+                        }
+                        if e.take_name == old_name {
+                            e.take_name = new_name.clone();
+                        }
+                        if !e.looped {
+                            if let Some(d) = new_dur.filter(|d| *d > Ticks::ZERO) {
+                                e.offset = e.offset.clamp_safe(Ticks::ZERO, d);
+                            }
+                        }
+                    }
+                    for alt in &mut e.alt_takes {
+                        if alt.media_id == target_id && alt.name == old_name {
+                            alt.name = new_name.clone();
+                        }
+                        if !e.looped {
+                            if let Some(d) = new_dur.filter(|d| *d > Ticks::ZERO) {
+                                alt.offset = alt.offset.clamp_safe(Ticks::ZERO, d);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         self.active_media_id = Some(target_id);
         self.changed();
         self.set_status(format!("Mídia substituída por \"{new_name}\"."));
@@ -4286,6 +4367,21 @@ impl EditorSession {
                         }
                     }
                     touched += 1;
+                }
+            }
+        }
+        for s in &mut self.project.sequences {
+            for t in &mut s.tracks {
+                for e in &mut t.events {
+                    if crate::takes::replace_media_id(e, old_id, new_id, &old_name, &new_item.name)
+                    {
+                        if !e.looped {
+                            if let Some(d) = new_item.duration.filter(|d| *d > Ticks::ZERO) {
+                                e.offset = e.offset.clamp_safe(Ticks::ZERO, d);
+                            }
+                        }
+                        touched += 1;
+                    }
                 }
             }
         }
@@ -6638,5 +6734,85 @@ mod tests {
 
     fn p_media_id(p: &Project) -> Id {
         p.media[0].id
+    }
+
+    #[test]
+    fn teste_item13_trocar_editar_desfazer_duas_vezes() {
+        let mut s = EditorSession::new(Project::new_default());
+        let seq1_id = s.project.active_sequence_id.unwrap();
+        s.project.tracks[0].name = "Trilha Seq 1".into();
+
+        // Cria seq 2
+        let seq2_id = s.create_sequence(Some("Seq 2"));
+        assert_eq!(s.project.active_sequence_id, Some(seq2_id));
+        s.project.tracks[0].name = "Trilha Seq 2".into();
+
+        // Alterna de volta para seq 1 (troca NÃO é passo de desfazer)
+        assert!(s.switch_sequence(seq1_id));
+        assert_eq!(s.project.tracks[0].name, "Trilha Seq 1");
+
+        // Edita seq 1
+        s.checkpoint();
+        s.project.tracks[0].name = "Trilha Seq 1 Editada".into();
+        s.changed();
+
+        // Alterna para seq 2
+        assert!(s.switch_sequence(seq2_id));
+        assert_eq!(s.project.tracks[0].name, "Trilha Seq 2");
+
+        // Edita seq 2
+        s.checkpoint();
+        s.project.tracks[0].name = "Trilha Seq 2 Editada".into();
+        s.changed();
+
+        // Desfaz a edição da seq 2
+        assert!(s.undo());
+        assert_eq!(s.project.tracks[0].name, "Trilha Seq 2");
+
+        // Desfaz a edição da seq 1
+        assert!(s.undo());
+        // Alterna para seq 1 e confere que a edição foi desfeita
+        assert!(s.switch_sequence(seq1_id));
+        assert_eq!(s.project.tracks[0].name, "Trilha Seq 1");
+    }
+
+    #[test]
+    fn teste_item13_midia_usada_so_em_sequencia_inativa_nao_e_removida() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut m1 = sample_media(new_id(), 64, 36, None);
+        m1.name = "media_ativa.avi".into();
+        let m1_id = m1.id;
+        let mut m2 = sample_media(new_id(), 64, 36, None);
+        m2.name = "media_inativa.avi".into();
+        let m2_id = m2.id;
+        let mut m3 = sample_media(new_id(), 64, 36, None);
+        m3.name = "media_desperdicada.avi".into();
+        let m3_id = m3.id;
+
+        s.project.media.push(m1.clone());
+        s.project.media.push(m2.clone());
+        s.project.media.push(m3.clone());
+
+        // Sequência ativa (seq 1) usa m1
+        let ev1 = Event::new(&m1, Ticks::ZERO, Ticks::from_secs_i64(5));
+        s.project.tracks[0].events.push(ev1);
+
+        // Cria sequência 2 (que vira ativa) e nela coloca m2
+        s.create_sequence(Some("Seq Inativa"));
+        let ev2 = Event::new(&m2, Ticks::ZERO, Ticks::from_secs_i64(5));
+        s.project.tracks[0].events.push(ev2);
+
+        // Alterna de volta para seq 1: seq 2 agora é inativa e contém m2
+        let seq1_id = s.project.sequences[0].id;
+        assert!(s.switch_sequence(seq1_id));
+
+        // Executa remoção de mídia não utilizada
+        let removed = s.remove_unused_media(None);
+
+        // Apenas m3 deve ser removida; m1 (na seq ativa) e m2 (na seq inativa) DEVEM ser preservadas!
+        assert_eq!(removed, vec![m3_id]);
+        assert!(s.project.media.iter().any(|m| m.id == m1_id));
+        assert!(s.project.media.iter().any(|m| m.id == m2_id));
+        assert!(!s.project.media.iter().any(|m| m.id == m3_id));
     }
 }

@@ -2612,12 +2612,30 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "sequence.rename",
+        label: "Renomear sequência ativa",
+        menu_path: "Editar/Sequência/Renomear sequência ativa",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.active_sequence_id.is_some(),
+        run: |s, h| {
+            if let Some(id) = s.project.active_sequence_id {
+                let current_name = s
+                    .project
+                    .sequence_name(id)
+                    .unwrap_or_else(|| "Sequência".to_string());
+                s.rename_active_sequence(&format!("{current_name} (Renomeada)"));
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "sequence.delete",
         label: "Excluir sequência ativa",
         menu_path: "Editar/Sequência/Excluir sequência ativa",
         default_shortcut: None,
         needs_ui: false,
-        enabled: |s, _| s.project.sequences.len() > 1,
+        enabled: |s, _| !s.project.sequences.is_empty(),
         run: |s, h| {
             if let Some(id) = s.project.active_sequence_id {
                 s.checkpoint();
@@ -4169,10 +4187,45 @@ mod tests {
 
         // Comandos de sequência
         run_command("sequence.new", &mut s, &mut h).unwrap();
-        assert_eq!(s.project.sequences.len(), 2);
+        assert_eq!(s.project.sequences.len(), 1); // 1 inativa + 1 ativa
         run_command("sequence.duplicate", &mut s, &mut h).unwrap();
-        assert_eq!(s.project.sequences.len(), 3);
+        assert_eq!(s.project.sequences.len(), 2); // 2 inativas + 1 ativa
         run_command("sequence.delete", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 1); // 1 inativa + 1 ativa
+    }
+
+    #[test]
+    fn comandos_sequencias_parametros_hostis() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+
+        // Com apenas 1 sequência no projeto, excluir deve ser desabilitado/recusado
+        assert!(run_command("sequence.delete", &mut s, &mut h).is_err());
+
+        // sequence.rename com sequência ativa
+        run_command("sequence.rename", &mut s, &mut h).unwrap();
+        assert!(s
+            .project
+            .active_sequence_name
+            .as_deref()
+            .unwrap_or("")
+            .contains("(Renomeada)"));
+
+        // sequence.new cria sequência
+        run_command("sequence.new", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 1);
+
+        // sequence.duplicate duplica ativa
+        run_command("sequence.duplicate", &mut s, &mut h).unwrap();
         assert_eq!(s.project.sequences.len(), 2);
+
+        // sequence.delete agora tem sucesso
+        run_command("sequence.delete", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.sequences.len(), 1);
+
+        // Estado hostil: active_sequence_id = None
+        s.project.active_sequence_id = None;
+        assert!(run_command("sequence.rename", &mut s, &mut h).is_err());
+        assert!(run_command("sequence.duplicate", &mut s, &mut h).is_err());
     }
 }

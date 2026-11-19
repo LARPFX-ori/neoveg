@@ -310,18 +310,39 @@ pub struct Project {
     /// Sequências de *storyboard* para montagem rápida na timeline.
     #[serde(default)]
     pub storyboards: Vec<Storyboard>,
-    /// Sequências em abas na timeline (item 13 do backlog / VEGAS Pro).
-    #[serde(default)]
+    /// Sequências inativas guardadas no projeto (item 13 do backlog / estilo Premiere Pro).
+    /// O campo vazio não é gravado, preservando compatibilidade com projetos legados.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequences: Vec<Sequence>,
     /// ID da sequência ativa no momento.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_sequence_id: Option<Id>,
+    /// Nome da sequência ativa no momento.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_sequence_name: Option<String>,
+    /// Ordem estável das abas de sequência na timeline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequence_order: Vec<Id>,
+    /// Versão do formato de arquivo do projeto (versão 2 inclui suporte a múltiplas sequências).
+    #[serde(
+        default = "default_format_version",
+        skip_serializing_if = "is_default_format_version"
+    )]
+    pub format_version: u32,
     /// Transcrição de fala por IA (AI Speech to Text / VEGAS Pro manual p. 674).
     #[serde(default)]
     pub transcript: Option<crate::speech::Transcript>,
 }
 
-/// Sequência em aba na timeline (item 13 do backlog / VEGAS Pro).
+fn default_format_version() -> u32 {
+    1
+}
+
+fn is_default_format_version(v: &u32) -> bool {
+    *v <= 1
+}
+
+/// Sequência em aba na timeline (item 13 do backlog / estilo Premiere Pro).
 ///
 /// Cada sequência mantém sua própria coleção de trilhas, eventos, marcadores,
 /// regiões e região de loop, permitindo múltiplos cortes e montagens no mesmo projeto.
@@ -331,15 +352,19 @@ pub struct Sequence {
     pub name: String,
     #[serde(default)]
     pub tracks: Vec<Track>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<Region>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_region: Option<(Ticks, Ticks)>,
     #[serde(default)]
     pub cursor: Ticks,
     #[serde(default)]
+    pub scroll_x: Ticks,
+    #[serde(default)]
+    pub px_per_sec: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<crate::speech::Transcript>,
 }
 
@@ -353,6 +378,8 @@ impl Sequence {
             regions: Vec::new(),
             loop_region: None,
             cursor: Ticks::ZERO,
+            scroll_x: Ticks::ZERO,
+            px_per_sec: 100.0,
             transcript: None,
         }
     }
@@ -367,135 +394,378 @@ impl Project {
         p
     }
 
-    /// Garante que o projeto tenha pelo menos uma sequência configurada e sincronizada.
+    /// Garante que o projeto tenha pelo menos uma sequência ativa configurada.
     pub fn ensure_sequences(&mut self) {
-        if self.sequences.is_empty() {
+        if self.active_sequence_id.is_none() {
             let seq_id = new_id();
-            let seq = Sequence {
-                id: seq_id,
-                name: "Sequência 1".to_string(),
-                tracks: self.tracks.clone(),
-                markers: self.markers.clone(),
-                regions: self.regions.clone(),
-                loop_region: self.loop_region,
-                cursor: Ticks::ZERO,
-                transcript: self.transcript.clone(),
-            };
-            self.sequences.push(seq);
             self.active_sequence_id = Some(seq_id);
-        } else if self.active_sequence_id.is_none() {
-            self.active_sequence_id = self.sequences.first().map(|s| s.id);
+            if self.active_sequence_name.is_none() {
+                self.active_sequence_name = Some("Sequência 1".to_string());
+            }
+        }
+        let act_id = self.active_sequence_id.unwrap_or(0);
+        if !self.sequence_order.contains(&act_id) {
+            self.sequence_order.insert(0, act_id);
+        }
+        for s in &self.sequences {
+            if !self.sequence_order.contains(&s.id) {
+                self.sequence_order.push(s.id);
+            }
+        }
+        if !self.sequences.is_empty() {
+            self.format_version = 2;
+        }
+    }
+
+    /// Informações para renderização das abas de sequência (ID, nome, se é ativa).
+    pub fn sequence_tab_info(&self) -> Vec<(Id, String, bool)> {
+        let active_id = self.active_sequence_id.unwrap_or(0);
+        let active_name = self
+            .active_sequence_name
+            .as_deref()
+            .unwrap_or("Sequência 1");
+        let mut tabs = Vec::new();
+
+        if self.sequence_order.is_empty() {
+            tabs.push((active_id, active_name.to_string(), true));
+            for s in &self.sequences {
+                tabs.push((s.id, s.name.clone(), false));
+            }
+            return tabs;
+        }
+
+        for &id in &self.sequence_order {
+            if id == active_id {
+                tabs.push((id, active_name.to_string(), true));
+            } else if let Some(s) = self.sequences.iter().find(|s| s.id == id) {
+                tabs.push((id, s.name.clone(), false));
+            }
+        }
+
+        if tabs.is_empty() {
+            tabs.push((active_id, active_name.to_string(), true));
+        }
+        tabs
+    }
+
+    /// Retorna o nome da sequência pelo ID.
+    pub fn sequence_name(&self, id: Id) -> Option<String> {
+        if self.active_sequence_id == Some(id) {
+            Some(
+                self.active_sequence_name
+                    .clone()
+                    .unwrap_or_else(|| "Sequência 1".to_string()),
+            )
+        } else {
+            self.sequences
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.name.clone())
         }
     }
 
     /// Sincroniza o estado atual das trilhas/marcadores com a sequência ativa.
     pub fn sync_to_active_sequence(&mut self) {
         self.ensure_sequences();
-        if let Some(active_id) = self.active_sequence_id {
-            if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == active_id) {
-                seq.tracks = self.tracks.clone();
-                seq.markers = self.markers.clone();
-                seq.regions = self.regions.clone();
-                seq.loop_region = self.loop_region;
-                seq.transcript = self.transcript.clone();
-            }
-        }
     }
 
-    /// Alterna para uma sequência diferente pelo ID, sincronizando antes a atual.
-    pub fn switch_sequence(&mut self, target_id: Id) -> bool {
-        self.sync_to_active_sequence();
-        if let Some(target) = self.sequences.iter().find(|s| s.id == target_id).cloned() {
-            self.tracks = target.tracks;
-            self.markers = target.markers;
-            self.regions = target.regions;
-            self.loop_region = target.loop_region;
-            self.transcript = target.transcript;
-            self.active_sequence_id = Some(target_id);
-            true
-        } else {
-            false
+    /// Alterna para uma sequência diferente pelo ID, guardando a ativa nas inativas com parâmetros de visualização.
+    pub fn switch_sequence_with_view(
+        &mut self,
+        target_id: Id,
+        current_cursor: Ticks,
+        current_scroll_x: Ticks,
+        current_px_per_sec: f32,
+    ) -> Option<(Ticks, Ticks, f32)> {
+        self.ensure_sequences();
+        if self.active_sequence_id == Some(target_id) {
+            return Some((current_cursor, current_scroll_x, current_px_per_sec));
         }
+        let pos = self.sequences.iter().position(|s| s.id == target_id)?;
+
+        let old_active_id = self.active_sequence_id.unwrap_or_else(new_id);
+        let old_active_name = self
+            .active_sequence_name
+            .clone()
+            .unwrap_or_else(|| "Sequência 1".to_string());
+        let saved_seq = Sequence {
+            id: old_active_id,
+            name: old_active_name,
+            tracks: std::mem::take(&mut self.tracks),
+            markers: std::mem::take(&mut self.markers),
+            regions: std::mem::take(&mut self.regions),
+            loop_region: self.loop_region.take(),
+            cursor: current_cursor,
+            scroll_x: current_scroll_x,
+            px_per_sec: current_px_per_sec,
+            transcript: self.transcript.take(),
+        };
+
+        let target = self.sequences.remove(pos);
+        let view = (target.cursor, target.scroll_x, target.px_per_sec);
+        self.sequences.push(saved_seq);
+
+        self.tracks = target.tracks;
+        self.markers = target.markers;
+        self.regions = target.regions;
+        self.loop_region = target.loop_region;
+        self.transcript = target.transcript;
+        self.active_sequence_id = Some(target.id);
+        self.active_sequence_name = Some(target.name);
+
+        if !self.sequence_order.contains(&target.id) {
+            self.sequence_order.push(target.id);
+        }
+        Some(view)
+    }
+
+    /// Alterna para uma sequência diferente pelo ID, guardando a ativa nas inativas.
+    pub fn switch_sequence(&mut self, target_id: Id) -> bool {
+        self.switch_sequence_with_view(target_id, Ticks::ZERO, Ticks::ZERO, 100.0)
+            .is_some()
     }
 
     /// Cria uma nova sequência no projeto e a torna ativa.
     pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
-        self.sync_to_active_sequence();
-        let new_id = new_id();
-        let seq_name = name
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("Sequência {}", self.sequences.len() + 1));
-        let seq = Sequence {
-            id: new_id,
-            name: seq_name,
-            tracks: vec![
-                Track::new(TrackKind::Video, "Vídeo 1"),
-                Track::new(TrackKind::Audio, "Áudio 1"),
-            ],
-            markers: Vec::new(),
-            regions: Vec::new(),
-            loop_region: None,
+        self.ensure_sequences();
+        // Salva a sequência ativa atual
+        let old_active_id = self.active_sequence_id.unwrap_or_else(new_id);
+        let old_active_name = self
+            .active_sequence_name
+            .clone()
+            .unwrap_or_else(|| "Sequência 1".to_string());
+        let saved_seq = Sequence {
+            id: old_active_id,
+            name: old_active_name,
+            tracks: std::mem::take(&mut self.tracks),
+            markers: std::mem::take(&mut self.markers),
+            regions: std::mem::take(&mut self.regions),
+            loop_region: self.loop_region.take(),
             cursor: Ticks::ZERO,
-            transcript: None,
+            scroll_x: Ticks::ZERO,
+            px_per_sec: 100.0,
+            transcript: self.transcript.take(),
         };
-        self.tracks = seq.tracks.clone();
+        self.sequences.push(saved_seq);
+
+        let new_id = new_id();
+        let total = self.sequences.len() + 1;
+        let new_name = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Sequência {total}"));
+
+        self.tracks = vec![
+            Track::new(TrackKind::Video, "Vídeo 1"),
+            Track::new(TrackKind::Audio, "Áudio 1"),
+        ];
         self.markers.clear();
         self.regions.clear();
         self.loop_region = None;
         self.transcript = None;
-        self.sequences.push(seq);
         self.active_sequence_id = Some(new_id);
+        self.active_sequence_name = Some(new_name);
+        self.sequence_order.push(new_id);
+        self.format_version = 2;
         new_id
     }
 
-    /// Duplica uma sequência existente com todo o seu conteúdo.
+    /// Duplica uma sequência existente com remapeamento completo de todos os IDs.
     pub fn duplicate_sequence(&mut self, source_id: Id) -> Option<Id> {
-        self.sync_to_active_sequence();
-        let source = self.sequences.iter().find(|s| s.id == source_id)?.clone();
-        let new_id = new_id();
-        let dup = Sequence {
-            id: new_id,
-            name: format!("{} (Cópia)", source.name),
-            tracks: source.tracks,
-            markers: source.markers,
-            regions: source.regions,
-            loop_region: source.loop_region,
-            cursor: source.cursor,
-            transcript: source.transcript,
+        self.ensure_sequences();
+        let (
+            source_name,
+            source_tracks,
+            source_markers,
+            source_regions,
+            source_loop,
+            source_cursor,
+            source_scroll_x,
+            source_px_per_sec,
+            source_transcript,
+        ) = {
+            if self.active_sequence_id == Some(source_id) {
+                (
+                    self.active_sequence_name
+                        .clone()
+                        .unwrap_or_else(|| "Sequência 1".to_string()),
+                    self.tracks.clone(),
+                    self.markers.clone(),
+                    self.regions.clone(),
+                    self.loop_region,
+                    Ticks::ZERO,
+                    Ticks::ZERO,
+                    100.0f32,
+                    self.transcript.clone(),
+                )
+            } else {
+                let s = self.sequences.iter().find(|s| s.id == source_id)?;
+                (
+                    s.name.clone(),
+                    s.tracks.clone(),
+                    s.markers.clone(),
+                    s.regions.clone(),
+                    s.loop_region,
+                    s.cursor,
+                    s.scroll_x,
+                    s.px_per_sec,
+                    s.transcript.clone(),
+                )
+            }
         };
+
+        let new_seq_id = new_id();
+        let new_name = format!("{source_name} (Cópia)");
+
+        // Mapeamento de IDs para renumeração atômica (§3.1)
+        let mut track_map: std::collections::HashMap<Id, Id> = std::collections::HashMap::new();
+        for t in &source_tracks {
+            track_map.insert(t.id, new_id());
+        }
+
+        let mut event_map: std::collections::HashMap<Id, Id> = std::collections::HashMap::new();
+        for t in &source_tracks {
+            for e in &t.events {
+                event_map.insert(e.id, new_id());
+            }
+        }
+
+        let mut group_map: std::collections::HashMap<Id, Id> = std::collections::HashMap::new();
+        for t in &source_tracks {
+            for e in &t.events {
+                if let Some(gid) = e.group {
+                    group_map.entry(gid).or_insert_with(new_id);
+                }
+            }
+        }
+
+        let mut new_tracks = Vec::with_capacity(source_tracks.len());
+        for mut t in source_tracks {
+            let new_t_id = *track_map.get(&t.id).unwrap_or(&new_id());
+            let new_parent_id = t
+                .parent_track_id
+                .and_then(|pid| track_map.get(&pid).copied());
+
+            let mut new_fx = Vec::with_capacity(t.fx.len());
+            for f in t.fx {
+                let mut nf = f;
+                nf.id = new_id();
+                new_fx.push(nf);
+            }
+
+            let events = std::mem::take(&mut t.events);
+            let mut new_events = Vec::with_capacity(events.len());
+            for mut e in events {
+                e.id = *event_map.get(&e.id).unwrap_or(&new_id());
+                if let Some(gid) = e.group {
+                    e.group = group_map.get(&gid).copied();
+                }
+                if let Some(sm) = e.sync_link_master {
+                    e.sync_link_master = event_map.get(&sm).copied();
+                }
+                for f in &mut e.fx {
+                    f.id = new_id();
+                }
+                new_events.push(e);
+            }
+
+            t.id = new_t_id;
+            t.parent_track_id = new_parent_id;
+            t.fx = new_fx;
+            t.events = new_events;
+            new_tracks.push(t);
+        }
+
+        let new_markers = source_markers
+            .into_iter()
+            .map(|mut m| {
+                m.id = new_id();
+                m
+            })
+            .collect();
+
+        let new_regions = source_regions
+            .into_iter()
+            .map(|mut r| {
+                r.id = new_id();
+                r
+            })
+            .collect();
+
+        let dup = Sequence {
+            id: new_seq_id,
+            name: new_name,
+            tracks: new_tracks,
+            markers: new_markers,
+            regions: new_regions,
+            loop_region: source_loop,
+            cursor: source_cursor,
+            scroll_x: source_scroll_x,
+            px_per_sec: source_px_per_sec,
+            transcript: source_transcript,
+        };
+
         self.sequences.push(dup);
-        Some(new_id)
+        self.sequence_order.push(new_seq_id);
+        self.format_version = 2;
+        Some(new_seq_id)
     }
 
-    /// Remove uma sequência se houver mais de uma.
+    /// Remove uma sequência se houver mais de uma. Nunca apaga mídia do projeto.
     pub fn delete_sequence(&mut self, seq_id: Id) -> bool {
         self.ensure_sequences();
-        if self.sequences.len() <= 1 {
+        let total = 1 + self.sequences.len();
+        if total <= 1 {
             return false;
         }
         let was_active = self.active_sequence_id == Some(seq_id);
-        self.sequences.retain(|s| s.id != seq_id);
+        self.sequence_order.retain(|&id| id != seq_id);
         if was_active {
-            if let Some(first) = self.sequences.first().cloned() {
-                self.tracks = first.tracks;
-                self.markers = first.markers;
-                self.regions = first.regions;
-                self.loop_region = first.loop_region;
-                self.transcript = first.transcript;
-                self.active_sequence_id = Some(first.id);
-            }
+            let next_id = self.sequence_order.first().copied().unwrap_or(0);
+            let idx = self
+                .sequences
+                .iter()
+                .position(|s| s.id == next_id)
+                .unwrap_or(0);
+            let next = self.sequences.remove(idx);
+            self.tracks = next.tracks;
+            self.markers = next.markers;
+            self.regions = next.regions;
+            self.loop_region = next.loop_region;
+            self.transcript = next.transcript;
+            self.active_sequence_id = Some(next.id);
+            self.active_sequence_name = Some(next.name);
+        } else {
+            self.sequences.retain(|s| s.id != seq_id);
+        }
+        if self.sequences.is_empty() {
+            self.format_version = 1;
         }
         true
     }
 
-    /// Renomeia uma sequência.
+    /// Renomeia uma sequência pelo ID.
     pub fn rename_sequence(&mut self, seq_id: Id, new_name: &str) -> bool {
-        if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == seq_id) {
-            seq.name = new_name.to_string();
-            true
+        let cleaned: String = new_name
+            .trim()
+            .replace('\0', "")
+            .chars()
+            .take(128)
+            .collect();
+        let final_name = if cleaned.is_empty() {
+            "Sequência".to_string()
         } else {
-            false
+            cleaned
+        };
+
+        if self.active_sequence_id == Some(seq_id) {
+            self.active_sequence_name = Some(final_name);
+            return true;
         }
+        if let Some(seq) = self.sequences.iter_mut().find(|s| s.id == seq_id) {
+            seq.name = final_name;
+            return true;
+        }
+        false
     }
 
     pub fn duration(&self) -> Ticks {
@@ -662,16 +932,25 @@ impl Project {
 
     /// Valida atribuição acíclica de `parent_id` para `child_id` dentro de `MAX_TRACK_DEPTH` (§0.5).
     pub fn validate_track_parent(&self, child_id: Id, parent_id: Option<Id>) -> Result<(), String> {
+        Self::validate_tracks_parent_in_slice(&self.tracks, child_id, parent_id)
+    }
+
+    /// Valida vínculo pai/filho acíclico dentro de uma coleção de trilhas (§0.5).
+    pub fn validate_tracks_parent_in_slice(
+        tracks: &[Track],
+        child_id: Id,
+        parent_id: Option<Id>,
+    ) -> Result<(), String> {
         let Some(pid) = parent_id else {
             return Ok(());
         };
         if pid == child_id {
             return Err("uma trilha não pode ser pai de si mesma".into());
         }
-        let Some(child) = self.tracks.iter().find(|t| t.id == child_id) else {
+        let Some(child) = tracks.iter().find(|t| t.id == child_id) else {
             return Err("trilha filha inexistente".into());
         };
-        let Some(parent) = self.tracks.iter().find(|t| t.id == pid) else {
+        let Some(parent) = tracks.iter().find(|t| t.id == pid) else {
             return Err("trilha pai inexistente".into());
         };
         if !parent.is_folder && parent.kind != child.kind {
@@ -685,7 +964,7 @@ impl Project {
             if !visited.insert(cur) {
                 return Err("vínculo pai/filho criaria ciclo".into());
             }
-            let Some(tr) = self.tracks.iter().find(|t| t.id == cur) else {
+            let Some(tr) = tracks.iter().find(|t| t.id == cur) else {
                 return Err("ancestral inexistente".into());
             };
             let Some(next) = tr.parent_track_id else {
@@ -770,6 +1049,27 @@ impl Project {
                 }
             }
         }
+        for s in &self.sequences {
+            m = m.max(s.id);
+            for t in &s.tracks {
+                m = m.max(t.id);
+                for f in &t.fx {
+                    m = m.max(f.id);
+                }
+                for e in &t.events {
+                    m = m.max(e.id).max(e.group.unwrap_or(0));
+                    for f in &e.fx {
+                        m = m.max(f.id);
+                    }
+                }
+            }
+            for x in &s.markers {
+                m = m.max(x.id);
+            }
+            for x in &s.regions {
+                m = m.max(x.id);
+            }
+        }
         for f in self.master.fx.iter().chain(self.master.video_fx.iter()) {
             m = m.max(f.id);
         }
@@ -793,6 +1093,9 @@ impl Project {
         }
         for st in &self.storyboards {
             m = m.max(st.id);
+        }
+        if let Some(id) = self.active_sequence_id {
+            m = m.max(id);
         }
         m
     }
@@ -824,19 +1127,39 @@ impl Project {
 
     /// IDs das mídias efetivamente usadas na timeline (take ativo ou alternativo).
     pub fn used_media_ids(&self) -> std::collections::HashSet<Id> {
-        self.tracks
+        let mut ids: std::collections::HashSet<Id> = self
+            .tracks
             .iter()
             .flat_map(|t| t.events.iter().flat_map(crate::takes::media_ids))
-            .collect()
+            .collect();
+        for s in &self.sequences {
+            for t in &s.tracks {
+                for e in &t.events {
+                    for mid in crate::takes::media_ids(e) {
+                        ids.insert(mid);
+                    }
+                }
+            }
+        }
+        ids
     }
 
     /// Quantos eventos da linha do tempo referenciam a mídia `media_id`.
     pub fn media_usage_count(&self, media_id: Id) -> usize {
-        self.tracks
+        let active_count = self
+            .tracks
             .iter()
             .flat_map(|t| t.events.iter())
             .filter(|e| crate::takes::uses_media(e, media_id))
-            .count()
+            .count();
+        let inact_count: usize = self
+            .sequences
+            .iter()
+            .flat_map(|s| s.tracks.iter())
+            .flat_map(|t| t.events.iter())
+            .filter(|e| crate::takes::uses_media(e, media_id))
+            .count();
+        active_count.saturating_add(inact_count)
     }
 
     /// Coleta IDs de mídia pertencentes à pasta `bin_id` (opcionalmente recursivo em subpastas).
@@ -935,148 +1258,18 @@ impl Project {
             }
         }
 
-        // trilhas e eventos
+        // trilhas e eventos da sequência ativa
         let mut seen_tracks = std::collections::HashSet::new();
         let mut seen_events = std::collections::HashSet::new();
         // ids de mídia do projeto: takes alternativos sem mídia são descartados
         let media_ids: std::collections::HashSet<Id> = self.media.iter().map(|m| m.id).collect();
-        for t in &mut self.tracks {
-            if !seen_tracks.insert(t.id) {
-                t.id = new_id();
-                fixes.push("id de trilha duplicado renumerado".into());
-            }
-            t.height = clampf(fin32(t.height, 72.0), 28.0, 400.0);
-            t.volume_db = clampf(fin32(t.volume_db, 0.0), -120.0, 24.0);
-            t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
-            t.surround = t.surround.sanitized();
-            t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
-            let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
-                for k in &mut mk.keys {
-                    k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                    let v = &mut k.value;
-                    v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
-                    v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
-                    v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
-                    v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
-                    v.rot = fin32(v.rot, 0.0) % 3600.0;
-                    v.z = clampf(fin32(v.z, 0.0), -100.0, 100.0);
-                    v.rot_x = fin32(v.rot_x, 0.0) % 3600.0;
-                    v.rot_y = fin32(v.rot_y, 0.0) % 3600.0;
-                }
-                mk.keys.sort_by_key(|k| k.t);
-                if mk.keys.is_empty() {
-                    *mk = Keyframes::default();
-                }
-            };
-            sanitize_motion_list(&mut t.motion);
-            sanitize_motion_list(&mut t.parent_motion);
-            sanitize_envelopes(
-                &mut t.envelopes,
-                &[
-                    EnvKind::Volume,
-                    EnvKind::Pan,
-                    EnvKind::Opacity,
-                    EnvKind::FadeToColor,
-                ],
-            );
-            for f in &mut t.fx {
-                sanitize_fx(f);
-            }
-            for e in &mut t.events {
-                if !seen_events.insert(e.id) {
-                    e.id = new_id();
-                    fixes.push("id de evento duplicado renumerado".into());
-                }
-                e.start = e.start.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                if e.length <= Ticks::ZERO {
-                    fixes.push(format!("evento \"{}\" com duração inválida", e.name));
-                }
-                e.length = e.length.clamp_safe(Ticks::from_millis_i64(1), Ticks::MAX);
-                e.offset = e.offset.clamp_safe(Ticks::ZERO, Ticks::MAX);
-                fixes.extend(crate::takes::sanitize_takes(e, &media_ids));
-                if e.rate.as_f64() > 100.0 {
-                    e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
-                }
-                e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
-                e.pitch_semitones = clampf(fin32(e.pitch_semitones, 0.0), -24.0, 24.0);
-                e.fade_in.len = e.fade_in.len.clamp_safe(Ticks::ZERO, e.length);
-                e.fade_out.len = e
-                    .fade_out
-                    .len
-                    .clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
-                for k in &mut e.pan_crop.keys {
-                    k.t = k.t.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
-                    let v = &mut k.value;
-                    v.cx = clampf(fin32(v.cx, 0.5), -100.0, 100.0);
-                    v.cy = clampf(fin32(v.cy, 0.5), -100.0, 100.0);
-                    v.size = clampf(fin32(v.size, 1.0), 0.001, 100.0);
-                    v.rot = fin32(v.rot, 0.0) % 3600.0;
-                }
-                e.pan_crop.keys.sort_by_key(|k| k.t);
-                if e.pan_crop.keys.is_empty() {
-                    e.pan_crop = Keyframes::default();
-                }
-                if let Some(tr) = &mut e.transition {
-                    tr.softness = clampf(fin32(tr.softness, 0.0), 0.0, 0.5);
-                }
-                for f in &mut e.fx {
-                    sanitize_fx(f);
-                }
-                e.stereo_3d = e.stereo_3d.sanitized();
-            }
-        }
-        // Saneamento da hierarquia pai/filho de trilhas (§0.5: referências inexistentes ou ciclos).
-        let track_ids: Vec<Id> = self.tracks.iter().map(|t| t.id).collect();
-        for ti in 0..track_ids.len() {
-            let tid = track_ids[ti];
-            if self.tracks[ti].parent_track_id.is_some()
-                && self
-                    .validate_track_parent(tid, self.tracks[ti].parent_track_id)
-                    .is_err()
-            {
-                let name = self.tracks[ti].name.clone();
-                self.tracks[ti].parent_track_id = None;
-                fixes.push(format!(
-                    "vínculo pai/filho inválido ou cíclico removido da trilha \"{name}\""
-                ));
-            }
-        }
-        // Saneamento de Sync Links (§0.4 e §0.5: referências inexistentes ou ciclos).
-        let valid_sync: std::collections::HashMap<Id, Id> = self
-            .tracks
-            .iter()
-            .flat_map(|t| t.events.iter())
-            .filter_map(|e| e.sync_link_master.map(|m| (e.id, m)))
-            .collect();
-        for t in &mut self.tracks {
-            for e in &mut t.events {
-                if let Some(mid) = e.sync_link_master {
-                    let mut cur = mid;
-                    let mut visited = std::collections::HashSet::new();
-                    visited.insert(e.id);
-                    let mut ok = seen_events.contains(&mid);
-                    let mut depth = 0usize;
-                    while ok {
-                        if !visited.insert(cur) || depth >= 32 {
-                            ok = false;
-                            break;
-                        }
-                        depth += 1;
-                        let Some(&next) = valid_sync.get(&cur) else {
-                            break;
-                        };
-                        cur = next;
-                    }
-                    if !ok {
-                        e.sync_link_master = None;
-                        fixes.push(format!(
-                            "Sync Link inválido ou cíclico removido do evento \"{}\"",
-                            e.name
-                        ));
-                    }
-                }
-            }
-        }
+        sanitize_tracks_slice(
+            &mut self.tracks,
+            &mut seen_tracks,
+            &mut seen_events,
+            &media_ids,
+            &mut fixes,
+        );
         for f in self
             .master
             .fx
@@ -1123,57 +1316,74 @@ impl Project {
                 }
             }
         }
-        for t in &mut self.tracks {
-            if t.kind != TrackKind::Audio {
-                t.output_bus = None;
-                t.sends.clear();
-                continue;
-            }
-            if let Some(bid) = t.output_bus {
-                if !bus_ids.contains(&bid) {
-                    t.output_bus = None;
-                    fixes.push(format!(
-                        "barramento de saída inexistente na trilha \"{}\" restaurado para Master",
-                        t.name
-                    ));
-                }
-            }
-            t.sends.retain(|s| bus_ids.contains(&s.bus_id));
-            if t.sends.len() > MAX_AUDIO_BUSES {
-                t.sends.truncate(MAX_AUDIO_BUSES);
-            }
-            for s in &mut t.sends {
-                s.level_db = clampf(fin32(s.level_db, -6.0), -120.0, 24.0);
+        sanitize_track_buses(&mut self.tracks, &bus_ids, &mut fixes);
+
+        // Sequências inativas e abas (item 13 do backlog / estilo Premiere Pro)
+        if self.sequences.len() > MAX_SEQUENCES {
+            self.sequences.truncate(MAX_SEQUENCES);
+            fixes.push(format!("sequências limitadas ao máximo de {MAX_SEQUENCES}"));
+        }
+        if self.active_sequence_id.is_none() {
+            if let Some(first) = self.sequences.first() {
+                self.active_sequence_id = Some(first.id);
+                self.active_sequence_name = Some(first.name.clone());
+            } else {
+                self.active_sequence_id = Some(new_id());
+                self.active_sequence_name = Some("Sequência 1".to_string());
             }
         }
-        for m in &mut self.markers {
-            m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
-            m.label = m.label.chars().filter(|&c| c != '\0').take(256).collect();
-            m.command_type = m
-                .command_type
+        if self.active_sequence_name.is_none() {
+            self.active_sequence_name = Some("Sequência 1".to_string());
+        }
+        let mut seen_seqs = std::collections::HashSet::new();
+        if let Some(aid) = self.active_sequence_id {
+            seen_seqs.insert(aid);
+        }
+        for seq in &mut self.sequences {
+            if !seen_seqs.insert(seq.id) {
+                let old = seq.id;
+                seq.id = new_id();
+                fixes.push(format!("id de sequência duplicado {old} renumerado"));
+                seen_seqs.insert(seq.id);
+            }
+            let cleaned: String = seq
+                .name
                 .trim()
+                .replace('\0', "")
                 .chars()
-                .filter(|&c| c != '\0')
-                .take(64)
+                .take(128)
                 .collect();
-            m.command_arg = m
-                .command_arg
-                .chars()
-                .filter(|&c| c != '\0')
-                .take(512)
-                .collect();
+            seq.name = if cleaned.is_empty() {
+                "Sequência".to_string()
+            } else {
+                cleaned
+            };
+            sanitize_tracks_slice(
+                &mut seq.tracks,
+                &mut seen_tracks,
+                &mut seen_events,
+                &media_ids,
+                &mut fixes,
+            );
+            sanitize_track_buses(&mut seq.tracks, &bus_ids, &mut fixes);
+            sanitize_markers_and_regions(&mut seq.markers, &mut seq.regions, &mut seq.loop_region);
+            seq.cursor = seq.cursor.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            seq.scroll_x = seq.scroll_x.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            seq.px_per_sec = clampf(fin32(seq.px_per_sec, 100.0), 1.0, 10000.0);
         }
-        for r in &mut self.regions {
-            if r.end < r.start {
-                std::mem::swap(&mut r.start, &mut r.end);
+        let act_id = self.active_sequence_id.unwrap_or(0);
+        self.sequence_order.retain(|id| seen_seqs.contains(id));
+        if !self.sequence_order.contains(&act_id) {
+            self.sequence_order.insert(0, act_id);
+        }
+        for s in &self.sequences {
+            if !self.sequence_order.contains(&s.id) {
+                self.sequence_order.push(s.id);
             }
-            r.start = r.start.clamp_safe(Ticks::ZERO, Ticks::MAX);
-            r.end = r.end.clamp_safe(r.start, Ticks::MAX);
         }
-        self.loop_region = self
-            .loop_region
-            .filter(|(a, b)| b > a && *a >= Ticks::ZERO)
-            .map(|(a, b)| (a.min(Ticks::MAX), b.min(Ticks::MAX)));
+        self.format_version = if self.sequences.is_empty() { 1 } else { 2 };
+
+        sanitize_markers_and_regions(&mut self.markers, &mut self.regions, &mut self.loop_region);
 
         // Pastas manuais (bins), pastas inteligentes e storyboards (§0.4 e §0.5)
         if self.media_bins.len() > MAX_MEDIA_BINS {
@@ -1265,6 +1475,220 @@ impl Project {
 
 /// Maior dimensão de quadro aceita (evita alocações gigantes).
 pub const MAX_DIM: u32 = 8192;
+
+fn sanitize_tracks_slice(
+    tracks: &mut [Track],
+    seen_tracks: &mut std::collections::HashSet<Id>,
+    seen_events: &mut std::collections::HashSet<Id>,
+    media_ids: &std::collections::HashSet<Id>,
+    fixes: &mut Vec<String>,
+) {
+    use crate::util::clampf;
+    let fin32 = |v: f32, d: f32| if v.is_finite() { v } else { d };
+    for t in tracks.iter_mut() {
+        if !seen_tracks.insert(t.id) {
+            t.id = new_id();
+            fixes.push("id de trilha duplicado renumerado".into());
+        }
+        t.height = clampf(fin32(t.height, 72.0), 28.0, 400.0);
+        t.volume_db = clampf(fin32(t.volume_db, 0.0), -120.0, 24.0);
+        t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
+        t.surround = t.surround.sanitized();
+        t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
+        let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
+            for k in &mut mk.keys {
+                k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                let v = &mut k.value;
+                v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
+                v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
+                v.scale_x = clampf(fin32(v.scale_x, 1.0), 0.001, 100.0);
+                v.scale_y = clampf(fin32(v.scale_y, 1.0), 0.001, 100.0);
+                v.rot = fin32(v.rot, 0.0) % 3600.0;
+                v.z = clampf(fin32(v.z, 0.0), -100.0, 100.0);
+                v.rot_x = fin32(v.rot_x, 0.0) % 3600.0;
+                v.rot_y = fin32(v.rot_y, 0.0) % 3600.0;
+            }
+            mk.keys.sort_by_key(|k| k.t);
+            if mk.keys.is_empty() {
+                *mk = Keyframes::default();
+            }
+        };
+        sanitize_motion_list(&mut t.motion);
+        sanitize_motion_list(&mut t.parent_motion);
+        sanitize_envelopes(
+            &mut t.envelopes,
+            &[
+                EnvKind::Volume,
+                EnvKind::Pan,
+                EnvKind::Opacity,
+                EnvKind::FadeToColor,
+            ],
+        );
+        for f in &mut t.fx {
+            sanitize_fx(f);
+        }
+        for e in &mut t.events {
+            if !seen_events.insert(e.id) {
+                e.id = new_id();
+                fixes.push("id de evento duplicado renumerado".into());
+            }
+            e.start = e.start.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            if e.length <= Ticks::ZERO {
+                fixes.push(format!("evento \"{}\" com duração inválida", e.name));
+            }
+            e.length = e.length.clamp_safe(Ticks::from_millis_i64(1), Ticks::MAX);
+            e.offset = e.offset.clamp_safe(Ticks::ZERO, Ticks::MAX);
+            fixes.extend(crate::takes::sanitize_takes(e, media_ids));
+            if e.rate.as_f64() > 100.0 {
+                e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
+            }
+            e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
+            e.pitch_semitones = clampf(fin32(e.pitch_semitones, 0.0), -24.0, 24.0);
+            e.fade_in.len = e.fade_in.len.clamp_safe(Ticks::ZERO, e.length);
+            e.fade_out.len = e
+                .fade_out
+                .len
+                .clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
+            for k in &mut e.pan_crop.keys {
+                k.t = k.t.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
+                let v = &mut k.value;
+                v.cx = clampf(fin32(v.cx, 0.5), -100.0, 100.0);
+                v.cy = clampf(fin32(v.cy, 0.5), -100.0, 100.0);
+                v.size = clampf(fin32(v.size, 1.0), 0.001, 100.0);
+                v.rot = fin32(v.rot, 0.0) % 3600.0;
+            }
+            e.pan_crop.keys.sort_by_key(|k| k.t);
+            if e.pan_crop.keys.is_empty() {
+                e.pan_crop = Keyframes::default();
+            }
+            if let Some(tr) = &mut e.transition {
+                tr.softness = clampf(fin32(tr.softness, 0.0), 0.0, 0.5);
+            }
+            for f in &mut e.fx {
+                sanitize_fx(f);
+            }
+            e.stereo_3d = e.stereo_3d.sanitized();
+        }
+    }
+
+    // Saneamento da hierarquia pai/filho de trilhas (§0.5: referências inexistentes ou ciclos).
+    let track_ids: Vec<Id> = tracks.iter().map(|t| t.id).collect();
+    for ti in 0..track_ids.len() {
+        let tid = track_ids[ti];
+        if tracks[ti].parent_track_id.is_some()
+            && Project::validate_tracks_parent_in_slice(tracks, tid, tracks[ti].parent_track_id)
+                .is_err()
+        {
+            let name = tracks[ti].name.clone();
+            tracks[ti].parent_track_id = None;
+            fixes.push(format!(
+                "vínculo pai/filho inválido ou cíclico removido da trilha \"{name}\""
+            ));
+        }
+    }
+
+    // Saneamento de Sync Links (§0.4 e §0.5: referências inexistentes ou ciclos).
+    let valid_sync: std::collections::HashMap<Id, Id> = tracks
+        .iter()
+        .flat_map(|t| t.events.iter())
+        .filter_map(|e| e.sync_link_master.map(|m| (e.id, m)))
+        .collect();
+    for t in tracks.iter_mut() {
+        for e in &mut t.events {
+            if let Some(mid) = e.sync_link_master {
+                let mut cur = mid;
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(e.id);
+                let mut ok = seen_events.contains(&mid);
+                let mut depth = 0usize;
+                while ok {
+                    if !visited.insert(cur) || depth >= 32 {
+                        ok = false;
+                        break;
+                    }
+                    depth += 1;
+                    let Some(&next) = valid_sync.get(&cur) else {
+                        break;
+                    };
+                    cur = next;
+                }
+                if !ok {
+                    e.sync_link_master = None;
+                    fixes.push(format!(
+                        "Sync Link inválido ou cíclico removido do evento \"{}\"",
+                        e.name
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn sanitize_track_buses(
+    tracks: &mut [Track],
+    bus_ids: &std::collections::HashSet<Id>,
+    fixes: &mut Vec<String>,
+) {
+    use crate::util::clampf;
+    let fin32 = |v: f32, d: f32| if v.is_finite() { v } else { d };
+    for t in tracks.iter_mut() {
+        if t.kind != TrackKind::Audio {
+            t.output_bus = None;
+            t.sends.clear();
+            continue;
+        }
+        if let Some(bid) = t.output_bus {
+            if !bus_ids.contains(&bid) {
+                t.output_bus = None;
+                fixes.push(format!(
+                    "barramento de saída inexistente na trilha \"{}\" restaurado para Master",
+                    t.name
+                ));
+            }
+        }
+        t.sends.retain(|s| bus_ids.contains(&s.bus_id));
+        if t.sends.len() > MAX_AUDIO_BUSES {
+            t.sends.truncate(MAX_AUDIO_BUSES);
+        }
+        for s in &mut t.sends {
+            s.level_db = clampf(fin32(s.level_db, -6.0), -120.0, 24.0);
+        }
+    }
+}
+
+fn sanitize_markers_and_regions(
+    markers: &mut [Marker],
+    regions: &mut [Region],
+    loop_region: &mut Option<(Ticks, Ticks)>,
+) {
+    for m in markers.iter_mut() {
+        m.t = m.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+        m.label = m.label.chars().filter(|&c| c != '\0').take(256).collect();
+        m.command_type = m
+            .command_type
+            .trim()
+            .chars()
+            .filter(|&c| c != '\0')
+            .take(64)
+            .collect();
+        m.command_arg = m
+            .command_arg
+            .chars()
+            .filter(|&c| c != '\0')
+            .take(512)
+            .collect();
+    }
+    for r in regions.iter_mut() {
+        if r.end < r.start {
+            std::mem::swap(&mut r.start, &mut r.end);
+        }
+        r.start = r.start.clamp_safe(Ticks::ZERO, Ticks::MAX);
+        r.end = r.end.clamp_safe(r.start, Ticks::MAX);
+    }
+    *loop_region = loop_region
+        .filter(|(a, b)| b > a && *a >= Ticks::ZERO)
+        .map(|(a, b)| (a.min(Ticks::MAX), b.min(Ticks::MAX)));
+}
 
 fn sanitize_envelopes(envelopes: &mut Vec<Envelope>, allowed: &[EnvKind]) {
     let mut kinds = std::collections::HashSet::new();
@@ -1600,6 +2024,7 @@ pub const MAX_MEDIA_BINS: usize = 256;
 pub const MAX_BIN_DEPTH: usize = 32;
 pub const MAX_STORYBOARDS: usize = 64;
 pub const MAX_STORYBOARD_ITEMS: usize = 1024;
+pub const MAX_SEQUENCES: usize = 64;
 
 /// Pasta manual (*Bin*) para organização hierárquica da mídia do projeto.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4383,25 +4808,31 @@ mod tests {
     #[test]
     fn sequencias_multiplas_e_gerenciamento() {
         let mut p = Project::new_default();
-        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.sequences.len(), 0);
+        assert_eq!(p.sequence_tab_info().len(), 1);
         assert!(p.active_sequence_id.is_some());
         let seq1_id = p.active_sequence_id.unwrap();
-        assert_eq!(p.sequences[0].name, "Sequência 1");
+        assert_eq!(p.active_sequence_name.as_deref(), Some("Sequência 1"));
 
         // Cria nova sequência
         let seq2_id = p.create_sequence(Some("Corte Diretor"));
-        assert_eq!(p.sequences.len(), 2);
+        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.sequence_tab_info().len(), 2);
         assert_eq!(p.active_sequence_id, Some(seq2_id));
-        assert_eq!(p.sequences[1].name, "Corte Diretor");
+        assert_eq!(p.active_sequence_name.as_deref(), Some("Corte Diretor"));
 
         // Altera nome da sequência 2
         assert!(p.rename_sequence(seq2_id, "Corte Final"));
-        assert_eq!(p.sequences[1].name, "Corte Final");
+        assert_eq!(p.active_sequence_name.as_deref(), Some("Corte Final"));
 
         // Duplica sequência 2
         let seq3_id = p.duplicate_sequence(seq2_id).expect("duplica sequencia");
-        assert_eq!(p.sequences.len(), 3);
-        assert_eq!(p.sequences[2].name, "Corte Final (Cópia)");
+        assert_eq!(p.sequences.len(), 2);
+        assert_eq!(p.sequence_tab_info().len(), 3);
+        assert_eq!(
+            p.sequence_name(seq3_id).as_deref(),
+            Some("Corte Final (Cópia)")
+        );
 
         // Alterna de volta para sequência 1
         assert!(p.switch_sequence(seq1_id));
@@ -4412,15 +4843,224 @@ mod tests {
 
         // Exclui sequência 3
         assert!(p.delete_sequence(seq3_id));
-        assert_eq!(p.sequences.len(), 2);
+        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.sequence_tab_info().len(), 2);
 
         // Exclui sequência ativa (seq1): ativa deve mudar para a primeira restante
         assert!(p.delete_sequence(seq1_id));
-        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.sequences.len(), 0);
+        assert_eq!(p.sequence_tab_info().len(), 1);
         assert_eq!(p.active_sequence_id, Some(seq2_id));
 
         // Tenta excluir última sequência: deve recusar para nunca deixar projeto sem sequência
         assert!(!p.delete_sequence(seq2_id));
-        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.sequences.len(), 0);
+        assert_eq!(p.sequence_tab_info().len(), 1);
+    }
+
+    #[test]
+    fn teste_item13_duplicar_sem_ids_compartilhados() {
+        let mut p = Project::new_default();
+        let m = media_teste();
+        p.media.push(m);
+
+        // Configura trilha pai e filha com eventos, fx, takes, sync links, marcadores e regiões
+        let t1_id = p.tracks[0].id;
+        p.tracks[0].is_folder = true;
+        let t2_id = p.tracks[1].id;
+        p.tracks[1].parent_track_id = Some(t1_id);
+
+        let ev1 = Event::new(&p.media[0], Ticks::ZERO, Ticks::from_secs_i64(5));
+        let ev1_id = ev1.id;
+        let mut ev2 = Event::new(
+            &p.media[0],
+            Ticks::from_secs_i64(5),
+            Ticks::from_secs_i64(5),
+        );
+        ev2.sync_link_master = Some(ev1_id);
+        p.tracks[1].events.push(ev1);
+        p.tracks[1].events.push(ev2);
+
+        let m_id = new_id();
+        p.markers.push(Marker {
+            id: m_id,
+            t: Ticks::from_secs_i64(2),
+            label: "M1".into(),
+            kind: MarkerKind::Standard,
+            command_type: String::new(),
+            command_arg: String::new(),
+        });
+        let r_id = new_id();
+        p.regions.push(Region {
+            id: r_id,
+            start: Ticks::from_secs_i64(1),
+            end: Ticks::from_secs_i64(4),
+            label: "R1".into(),
+        });
+
+        let orig_id = p.active_sequence_id.unwrap();
+        let dup_id = p.duplicate_sequence(orig_id).expect("duplica sequência");
+
+        // Coleta todos os IDs da sequência original
+        let mut orig_ids = std::collections::HashSet::new();
+        orig_ids.insert(orig_id);
+        orig_ids.insert(t1_id);
+        orig_ids.insert(t2_id);
+        orig_ids.insert(m_id);
+        orig_ids.insert(r_id);
+        for t in &p.tracks {
+            for e in &t.events {
+                orig_ids.insert(e.id);
+            }
+        }
+
+        // Verifica na cópia que nenhum ID foi compartilhado
+        let dup_seq = p
+            .sequences
+            .iter()
+            .find(|s| s.id == dup_id)
+            .expect("sequência duplicada");
+        assert!(!orig_ids.contains(&dup_seq.id));
+        for t in &dup_seq.tracks {
+            assert!(
+                !orig_ids.contains(&t.id),
+                "ID de trilha compartilhado: {}",
+                t.id
+            );
+            for e in &t.events {
+                assert!(
+                    !orig_ids.contains(&e.id),
+                    "ID de evento compartilhado: {}",
+                    e.id
+                );
+            }
+        }
+        for m in &dup_seq.markers {
+            assert!(
+                !orig_ids.contains(&m.id),
+                "ID de marcador compartilhado: {}",
+                m.id
+            );
+        }
+        for r in &dup_seq.regions {
+            assert!(
+                !orig_ids.contains(&r.id),
+                "ID de região compartilhada: {}",
+                r.id
+            );
+        }
+
+        // Verifica que o vínculo pai/filho foi remapeado internamente dentro da cópia
+        let dup_t1 = dup_seq
+            .tracks
+            .iter()
+            .find(|t| t.is_folder)
+            .expect("pasta na cópia");
+        let dup_t2 = dup_seq
+            .tracks
+            .iter()
+            .find(|t| !t.is_folder)
+            .expect("filha na cópia");
+        assert_eq!(
+            dup_t2.parent_track_id,
+            Some(dup_t1.id),
+            "parent_track_id não foi remapeado para a nova trilha pai"
+        );
+
+        // Verifica que o Sync Link foi remapeado internamente dentro da cópia
+        let dup_ev1 = &dup_t2.events[0];
+        let dup_ev2 = &dup_t2.events[1];
+        assert_eq!(
+            dup_ev2.sync_link_master,
+            Some(dup_ev1.id),
+            "sync_link_master não foi remapeado para o novo evento mestre"
+        );
+    }
+
+    #[test]
+    fn teste_item13_load_hostil_sequencias() {
+        // Zero sequências
+        let mut p = Project {
+            active_sequence_id: None,
+            active_sequence_name: None,
+            sequences: Vec::new(),
+            ..Default::default()
+        };
+        let _ = p.sanitize();
+        assert!(p.active_sequence_id.is_some());
+        assert_eq!(p.active_sequence_name.as_deref(), Some("Sequência 1"));
+
+        // Mais de 64 sequências
+        for i in 0..100 {
+            let s = Sequence::new(new_id(), &format!("Seq {i}"));
+            p.sequences.push(s);
+        }
+        let fixes = p.sanitize();
+        assert_eq!(p.sequences.len(), MAX_SEQUENCES);
+        assert!(fixes
+            .iter()
+            .any(|f| f.contains("sequências limitadas ao máximo de 64")));
+
+        // IDs duplicados de sequência
+        let dup_id = new_id();
+        p.active_sequence_id = Some(dup_id);
+        p.sequences[0].id = dup_id;
+        p.sequences[1].id = dup_id;
+        let _ = p.sanitize();
+        assert_ne!(p.sequences[0].id, dup_id);
+        assert_ne!(p.sequences[1].id, p.sequences[0].id);
+
+        // Hierarquia cíclica de trilhas dentro de sequência inativa
+        let t1_id = new_id();
+        let t2_id = new_id();
+        let mut t1 = Track::new(TrackKind::Video, "T1");
+        t1.id = t1_id;
+        t1.parent_track_id = Some(t2_id);
+        let mut t2 = Track::new(TrackKind::Video, "T2");
+        t2.id = t2_id;
+        t2.parent_track_id = Some(t1_id);
+        p.sequences[0].tracks = vec![t1, t2];
+        let fixes = p.sanitize();
+        assert!(fixes
+            .iter()
+            .any(|f| f.contains("vínculo pai/filho inválido ou cíclico removido")));
+        assert!(
+            p.sequences[0].tracks[0].parent_track_id.is_none()
+                || p.sequences[0].tracks[1].parent_track_id.is_none()
+        );
+    }
+
+    #[test]
+    fn teste_item13_ida_e_volta_json() {
+        let mut p = Project::new_default();
+        let json_single = serde_json::to_string(&p).expect("serializa projeto de 1 sequencia");
+        assert!(
+            !json_single.contains("\"sequences\""),
+            "campo sequences deve ser omitido quando vazio"
+        );
+        assert_eq!(p.format_version, 1);
+
+        // Com múltiplas sequências
+        let seq2_id = p.create_sequence(Some("Segunda Sequência"));
+        assert_eq!(p.format_version, 2);
+        let json_multi = serde_json::to_string(&p).expect("serializa projeto multi-sequencias");
+        assert!(
+            json_multi.contains("\"sequences\""),
+            "campo sequences deve estar presente"
+        );
+        assert!(json_multi.contains("\"format_version\":2"));
+
+        // Ida e volta
+        let mut roundtrip: Project =
+            serde_json::from_str(&json_multi).expect("deserializa multi-sequencias");
+        roundtrip.sanitize();
+        assert_eq!(roundtrip.format_version, 2);
+        assert_eq!(roundtrip.active_sequence_id, Some(seq2_id));
+        assert_eq!(
+            roundtrip.active_sequence_name.as_deref(),
+            Some("Segunda Sequência")
+        );
+        assert_eq!(roundtrip.sequences.len(), 1);
+        assert_eq!(roundtrip.sequences[0].name, "Sequência 1");
     }
 }
