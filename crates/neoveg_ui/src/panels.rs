@@ -1148,12 +1148,21 @@ impl App {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     // barra de transporte da prévia (manual do VEGAS Pro 21,
-                    // p. 201-202); estreita, fica só o essencial
-                    let full = ui.available_width() >= 236.0;
+                    // p. 201-202), na ordem da barra principal: Gravar, Loop,
+                    // Reproduzir do início, Reproduzir, Pausar, Parar, Início,
+                    // Fim e quadros; estreita, fica só o essencial
+                    let full = ui.available_width() >= 300.0;
                     let pad_x =
-                        ((ui.available_width() - if full { 232.0 } else { 88.0 }) * 0.5).max(0.0);
+                        ((ui.available_width() - if full { 290.0 } else { 116.0 }) * 0.5).max(0.0);
                     ui.add_space(pad_x);
                     if full {
+                        self.cmd_tool_toggle(
+                            ui,
+                            self.recorder.is_some(),
+                            Icon::RecordDot,
+                            None,
+                            "transport.record",
+                        );
                         let looping = self.opts.loop_playback;
                         self.cmd_tool_toggle(
                             ui,
@@ -1164,13 +1173,7 @@ impl App {
                         );
                     }
                     self.cmd_tool_btn(ui, Icon::PlayFromStart, None, "transport.play_from_start");
-                    self.cmd_tool_toggle(
-                        ui,
-                        playing,
-                        if playing { Icon::Pause } else { Icon::Play },
-                        None,
-                        "transport.play_toggle",
-                    );
+                    self.play_pause_buttons(ui, playing);
                     self.cmd_tool_btn(ui, Icon::Stop, None, "transport.stop");
                     if full {
                         self.cmd_tool_btn(ui, Icon::GoStart, None, "transport.project_start");

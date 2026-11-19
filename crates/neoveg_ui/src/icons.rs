@@ -25,6 +25,7 @@ pub enum Icon {
     MagnetSnap,
     AutoRipple,
     IgnoreGrouping,
+    LockEnvelopes,
     Envelopes,
     LayoutWindow,
     GoStart,
@@ -135,7 +136,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 122] = [
+    pub const ALL: [Icon; 123] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -152,6 +153,7 @@ impl Icon {
         Icon::MagnetSnap,
         Icon::AutoRipple,
         Icon::IgnoreGrouping,
+        Icon::LockEnvelopes,
         Icon::Envelopes,
         Icon::LayoutWindow,
         Icon::GoStart,
@@ -681,6 +683,30 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.p.rect_stroke(l1, c.u(0.12), c.stroke(0.10, pal.amber), StrokeKind::Inside);
             c.p.rect_stroke(l2, c.u(0.12), c.stroke(0.10, pal.blue), StrokeKind::Inside);
             c.line(0.32, 0.20, 0.68, 0.82, pal.red, 0.09);
+        }
+        Icon::LockEnvelopes => {
+            // Travar envelopes nos eventos: linha de envelope sobre um evento,
+            // com um cadeado no canto (desenho original)
+            c.p.rect_filled(c.rect(0.06, 0.40, 0.70, 0.78), c.u(0.05), pal.blue);
+            c.polyline(
+                &[(0.10, 0.66), (0.30, 0.46), (0.48, 0.58), (0.66, 0.44)],
+                pal.green,
+                0.10,
+            );
+            c.polyline(
+                &[
+                    (0.70, 0.40),
+                    (0.70, 0.22),
+                    (0.81, 0.14),
+                    (0.92, 0.22),
+                    (0.92, 0.40),
+                ],
+                pal.paper,
+                0.08,
+            );
+            let body = c.rect(0.64, 0.40, 0.98, 0.70);
+            c.p.rect_filled(body, c.u(0.04), pal.amber);
+            c.p.rect_stroke(body, c.u(0.04), c.stroke(0.05, pal.ink), StrokeKind::Inside);
         }
         Icon::Envelopes => {
             c.polyline(
