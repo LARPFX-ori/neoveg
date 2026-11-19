@@ -5288,8 +5288,7 @@ impl EditorSession {
                     PanCropKey {
                         cx: (base.cx + dx).clamp(-1.0, 2.0),
                         cy: (base.cy + dy).clamp(-1.0, 2.0),
-                        size: base.size,
-                        rot: base.rot,
+                        ..base.clone()
                     },
                     tol,
                 );
