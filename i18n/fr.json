@@ -31,6 +31,7 @@
   "24 bits": "24 bits",
   "29,970 qps (NTSC)": "29,970 ips (NTSC)",
   "3 painéis no topo, tema escuro": "3 panneaux en haut, thème sombre",
+  "3 painéis no topo, tema escuro (até a versão 22)": "3 panneaux en haut, thème sombre (jusqu'à la version 22)",
   "3. Prévia, Cor e Master Bus": "3. Aperçu, Couleur et Bus Master",
   "32 bits float": "32 bits flottant",
   "3GPP 360p (Dispositivos móveis)": "3GPP 360p (Appareils mobiles)",
@@ -1084,6 +1085,7 @@
   "Mixagem de Áudio": "Mixage audio",
   "Mixer": "Mixeur",
   "Modelo": "Modèle",
+  "Moderno": "Moderne",
   "Modo": "Mode",
   "Modo 3D Estereoscópico": "Mode 3D stéréoscopique",
   "Modo Normal": "Mode Normal",
@@ -1207,6 +1209,7 @@
   "Neutro": "Neutre",
   "Nitidez": "Netteté",
   "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": assim o plug-in abre sem esperar o download.": "Avec Google Drive en mode streaming, marquez le dossier comme \"Disponible hors connexion\" pour que le plug-in s'ouvre sans attendre le téléchargement.",
+  "No layout Moderno a timeline fica sempre na parte inferior.": "Dans la disposition Moderne, la timeline est toujours en bas.",
   "Noise Gate": "Porte de bruit",
   "Nome": "Nom",
   "Nome de origem (sem extensão)": "Nom source (sans extension)",
@@ -1489,6 +1492,7 @@
   "Razão": "Ratio",
   "Realimentação": "Rétroaction (Feedback)",
   "Reativar": "Réactiver",
+  "Recente": "Récent",
   "Recolher / expandir pasta da trilha": "Réduire / développer le dossier de piste",
   "Recolher ou expandir pasta": "Réduire ou développer le dossier",
   "Recorta para preencher o quadro sem barras": "Recadre pour remplir l'image sans bandes",
@@ -1921,6 +1925,7 @@
   "Vintage Suave": "Vintage doux",
   "Visor de tempo": "Affichage temporel",
   "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)": "Affichage temporel (double-clic : Aller à • clic droit : format)",
+  "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior (sem a opção de timeline no topo) e barra de transporte/edição no rodapé.": "Apparence renouvelée en gris foncé, avec des zones d'ancrage sur les quatre côtés de la fenêtre ; onglets, aperçu et Master Bus en haut, timeline toujours dans la moitié inférieure (sans l'option timeline en haut) et barre de transport/montage en bas.",
   "Visualizar durante a codificação": "Aperçu pendant l'encodage",
   "Vol": "Vol",
   "Vol_dB": "Vol_dB",
@@ -2032,6 +2037,7 @@
   "timeline no topo, tema claro": "timeline en haut, thème clair",
   "trilha \"{name}\"": "piste \"{name}\"",
   "uso inválido: {msg}\n{help}": "utilisation invalide : {msg}\n{help}",
+  "visual renovado, timeline sempre embaixo (versão 23 em diante)": "apparence renouvelée, timeline toujours en bas (version 23 et suivantes)",
   "v{ver} • {n} worker(s)": "v{ver} • {n} worker(s)",
   "zoom out": "zoom arrière",
   "{added} legenda(s) importada(s) de {path}": "{added} sous-titre(s) importé(s) depuis {path}",
@@ -2108,4 +2114,4 @@
   "★ Favoritos": "★ Favoris",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marqueur au curseur"
-}
+}

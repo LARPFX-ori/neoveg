@@ -31,6 +31,7 @@
   "24 bits": "24ビット",
   "29,970 qps (NTSC)": "29.970 fps (NTSC)",
   "3 painéis no topo, tema escuro": "上部 3 パネル、ダークテーマ",
+  "3 painéis no topo, tema escuro (até a versão 22)": "上部に 3 パネル、ダークテーマ（バージョン 22 まで）",
   "3. Prévia, Cor e Master Bus": "3. プレビュー・カラー・マスターバス",
   "32 bits float": "32ビット浮動",
   "3GPP 360p (Dispositivos móveis)": "3GPP 360p (モバイルデバイス)",
@@ -1084,6 +1085,7 @@
   "Mixagem de Áudio": "オーディオ ミキシング",
   "Mixer": "ミキサー",
   "Modelo": "テンプレート",
+  "Moderno": "モダン",
   "Modo": "モード",
   "Modo 3D Estereoscópico": "立体視 3D モード",
   "Modo Normal": "標準モード",
@@ -1207,6 +1209,7 @@
   "Neutro": "ニュートラル",
   "Nitidez": "シャープ",
   "No Google Drive em modo streaming, marque a pasta como \"Disponível off-line\": assim o plug-in abre sem esperar o download.": "Google ドライブがストリーミングモードの場合は、フォルダーを「オフラインで使用可能」にすると、ダウンロードを待たずにプラグインが開きます。",
+  "No layout Moderno a timeline fica sempre na parte inferior.": "モダンレイアウトではタイムラインは常に下部にあります。",
   "Noise Gate": "ノイズ ゲート",
   "Nome": "名前",
   "Nome de origem (sem extensão)": "ソース名 (拡張子なし)",
@@ -1489,6 +1492,7 @@
   "Razão": "レシオ",
   "Realimentação": "フィードバック",
   "Reativar": "再キュー",
+  "Recente": "最近",
   "Recolher / expandir pasta da trilha": "トラックフォルダーを折りたたむ/展開",
   "Recolher ou expandir pasta": "フォルダーを折りたたむ/展開",
   "Recorta para preencher o quadro sem barras": "黒帯が出ないようにトリミングして埋めます",
@@ -1921,6 +1925,7 @@
   "Vintage Suave": "ソフト ビンテージ",
   "Visor de tempo": "タイム ディスプレイ",
   "Visor de tempo (duplo clique: Ir para tempo • clique direito: formato de tempo)": "タイム ディスプレイ (ダブルクリック: 移動 • 右クリック: 表示形式)",
+  "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior (sem a opção de timeline no topo) e barra de transporte/edição no rodapé.": "ダークグレーの刷新された外観で、ウィンドウの四辺にドッキング領域があります。タブ、プレビュー、マスターバスは上部、タイムラインは常に下半分（上部に置くオプションなし）、トランスポート/編集バーは下部です。",
   "Visualizar durante a codificação": "エンコード中にプレビューを表示",
   "Vol": "音量",
   "Vol_dB": "音量_dB",
@@ -2032,6 +2037,7 @@
   "timeline no topo, tema claro": "上部タイムライン、ライトテーマ",
   "trilha \"{name}\"": "トラック「{name}」",
   "uso inválido: {msg}\n{help}": "無効な指定です: {msg}\n{help}",
+  "visual renovado, timeline sempre embaixo (versão 23 em diante)": "刷新された外観、タイムラインは常に下（バージョン 23 以降）",
   "v{ver} • {n} worker(s)": "v{ver} • {n} ワーカースレッド",
   "zoom out": "ズームアウト",
   "{added} legenda(s) importada(s) de {path}": "{path} から {added} 件の字幕をインポートしました",
@@ -2108,4 +2114,4 @@
   "★ Favoritos": "★ お気に入り",
   "＋ Barramento": "+ バス",
   "＋ Marcador no Cursor": "+ カーソル位置にマーカー"
-}
+}

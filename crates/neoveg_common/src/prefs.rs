@@ -81,20 +81,32 @@ pub enum LayoutType {
     #[default]
     #[serde(alias = "magix", alias = "MAGIX")]
     Magix,
+    /// Geração com o visual renovado (cores, fontes e ícones novos) e áreas de
+    /// acoplar nos quatro lados, em que a timeline fica sempre embaixo (a
+    /// opção de timeline no topo saiu nesta geração).
+    #[serde(alias = "moderno", alias = "modern")]
+    Moderno,
 }
 
 impl LayoutType {
-    pub const ALL: [LayoutType; 3] = [
+    pub const ALL: [LayoutType; 4] = [
         LayoutType::SonicFoundry,
         LayoutType::Sony,
         LayoutType::Magix,
+        LayoutType::Moderno,
     ];
+
+    /// A timeline pode ficar no topo (as gerações até a "Recente").
+    pub fn allows_timeline_on_top(self) -> bool {
+        self != LayoutType::Moderno
+    }
 
     pub fn id(self) -> &'static str {
         match self {
             LayoutType::SonicFoundry => "sonic_foundry",
             LayoutType::Sony => "sony",
             LayoutType::Magix => "magix",
+            LayoutType::Moderno => "moderno",
         }
     }
 
@@ -105,7 +117,8 @@ impl LayoutType {
         let pt = match self {
             LayoutType::SonicFoundry => "Clássico",
             LayoutType::Sony => "Intermediário",
-            LayoutType::Magix => "Atual",
+            LayoutType::Magix => "Recente",
+            LayoutType::Moderno => "Moderno",
         };
         tr(lang, pt)
     }
@@ -119,7 +132,8 @@ impl LayoutType {
         let pt = match self {
             LayoutType::SonicFoundry => "timeline no topo, tema claro",
             LayoutType::Sony => "área acoplável no topo, cinza médio",
-            LayoutType::Magix => "3 painéis no topo, tema escuro",
+            LayoutType::Magix => "3 painéis no topo, tema escuro (até a versão 22)",
+            LayoutType::Moderno => "visual renovado, timeline sempre embaixo (versão 23 em diante)",
         };
         tr(lang, pt)
     }
@@ -142,6 +156,11 @@ impl LayoutType {
                 "Área acoplável no topo em 3 painéis (Abas, Prévia e Master Bus) com abas na base, \
                  timeline na metade inferior, barra de transporte/edição no rodapé e tema escuro."
             }
+            LayoutType::Moderno => {
+                "Visual renovado em cinza escuro, com áreas de acoplar nos quatro lados da \
+                 janela; Abas, Prévia e Master Bus no topo, timeline sempre na metade inferior \
+                 (sem a opção de timeline no topo) e barra de transporte/edição no rodapé."
+            }
         };
         tr(lang, pt)
     }
@@ -155,6 +174,7 @@ impl LayoutType {
             "sonic_foundry" | "sonic-foundry" | "sonic foundry" | "sonic fonudry"
             | "sonicfoundry" | "clássico" | "classico" => LayoutType::SonicFoundry,
             "sony" | "intermediário" | "intermediario" => LayoutType::Sony,
+            "moderno" | "modern" => LayoutType::Moderno,
             _ => LayoutType::Magix,
         }
     }
@@ -163,7 +183,8 @@ impl LayoutType {
         match self {
             LayoutType::SonicFoundry => "vegas-claro",
             LayoutType::Sony => "vegas-medio",
-            LayoutType::Magix => "vegas-escuro",
+            // o cinza neutro do VEGAS Escuro é o mais próximo da geração nova
+            LayoutType::Magix | LayoutType::Moderno => "vegas-escuro",
         }
     }
 
@@ -171,7 +192,7 @@ impl LayoutType {
         match self {
             LayoutType::SonicFoundry => 270.0,
             LayoutType::Sony => 300.0,
-            LayoutType::Magix => 320.0,
+            LayoutType::Magix | LayoutType::Moderno => 320.0,
         }
     }
 
@@ -179,7 +200,7 @@ impl LayoutType {
         match self {
             LayoutType::SonicFoundry => 0.36,
             LayoutType::Sony => 0.42,
-            LayoutType::Magix => 0.40,
+            LayoutType::Magix | LayoutType::Moderno => 0.40,
         }
     }
 }
@@ -225,7 +246,7 @@ impl EditLayoutPrefs {
                 master_bus_docked: false,
                 sync_theme_with_layout: true,
             },
-            LayoutType::Magix => Self {
+            LayoutType::Magix | LayoutType::Moderno => Self {
                 layout_type,
                 timeline_at_bottom: true,
                 tabs_at_top: false,
@@ -237,10 +258,19 @@ impl EditLayoutPrefs {
         }
     }
 
+    /// Corrige combinações que a geração escolhida não tem (na "Moderno" a
+    /// timeline fica sempre embaixo).
+    pub fn normalize(&mut self) {
+        if !self.layout_type.allows_timeline_on_top() {
+            self.timeline_at_bottom = true;
+        }
+    }
+
     pub fn apply_type(&mut self, layout_type: LayoutType) {
         let sync = self.sync_theme_with_layout;
         *self = Self::for_type(layout_type);
         self.sync_theme_with_layout = sync;
+        self.normalize();
     }
 }
 
@@ -1244,6 +1274,9 @@ impl Preferences {
     }
 
     pub fn sanitize(&mut self) {
+        // combinações que o tipo de layout salvo não tem (ex.: Moderno com a
+        // timeline no topo, gravado à mão ou por uma versão antiga)
+        self.edit_layout.normalize();
         self.language = Language::from_pref(&self.language).code().to_string();
         if self.theme.trim().is_empty() || self.theme.len() > 48 {
             self.theme = default_theme();
@@ -1546,7 +1579,27 @@ mod tests {
 
     #[test]
     fn tipos_de_layout_e_aliases_funcionam() {
-        assert_eq!(LayoutType::ALL.len(), 3);
+        assert_eq!(LayoutType::ALL.len(), 4);
+        assert_eq!(LayoutType::from_pref("moderno"), LayoutType::Moderno);
+        assert_eq!(LayoutType::from_pref("Modern"), LayoutType::Moderno);
+        // na geração Moderno a timeline fica sempre embaixo
+        let mut m = EditLayoutPrefs::for_type(LayoutType::Moderno);
+        assert!(m.timeline_at_bottom && m.master_bus_docked && m.transport_at_bottom);
+        assert!(!LayoutType::Moderno.allows_timeline_on_top());
+        m.timeline_at_bottom = false;
+        m.normalize();
+        assert!(
+            m.timeline_at_bottom,
+            "preferência salva com timeline no topo é corrigida"
+        );
+        let mut r = EditLayoutPrefs::for_type(LayoutType::Magix);
+        r.timeline_at_bottom = false;
+        r.apply_type(LayoutType::Moderno);
+        assert!(r.timeline_at_bottom);
+        assert_eq!(LayoutType::Moderno.default_theme_id(), "vegas-escuro");
+        let back: LayoutType =
+            serde_json::from_str(&serde_json::to_string(&LayoutType::Moderno).unwrap()).unwrap();
+        assert_eq!(back, LayoutType::Moderno);
         assert_eq!(
             LayoutType::from_pref("Sonic Fonudry"),
             LayoutType::SonicFoundry
