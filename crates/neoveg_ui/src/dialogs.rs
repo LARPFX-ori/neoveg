@@ -1172,7 +1172,8 @@ impl App {
         let mut save_close = false;
         let mut cancel_close = false;
         let mut restore_def = false;
-        egui::Window::new("Personalizar barra de ferramentas")
+        crate::dialog_window::DialogWindow::new("Personalizar barra de ferramentas")
+            .id(egui::Id::new("customize_toolbar_win"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -1301,7 +1302,8 @@ impl App {
         let mut open = true;
         let mut insert_now = false;
         let mut cancel_now = false;
-        egui::Window::new("Inserir marcador de comando")
+        crate::dialog_window::DialogWindow::new("Inserir marcador de comando")
+            .id(egui::Id::new("command_marker_win"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1388,7 +1390,7 @@ impl App {
         } else {
             tr(lang, "Botões visíveis: faixas de áudio")
         };
-        egui::Window::new(title)
+        crate::dialog_window::DialogWindow::new(title)
             .id(egui::Id::new("header_buttons_win"))
             .open(&mut open)
             .resizable(false)
@@ -1458,7 +1460,8 @@ impl App {
         let mut apply = false;
         let mut cancel = false;
         let mut mask = self.dlg.paste_attrs_mask;
-        egui::Window::new("Colar atributos do evento")
+        crate::dialog_window::DialogWindow::new("Colar atributos do evento")
+            .id(egui::Id::new("paste_attrs_win"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -1621,7 +1624,8 @@ impl App {
         let mut close_dlg = false;
 
         let editable = !track_locked && !ev.locked;
-        egui::Window::new(format!("Escolher take — {}", ev.name))
+        crate::dialog_window::DialogWindow::new(format!("Escolher take — {}", ev.name))
+            .id(egui::Id::new("take_chooser_win"))
             .open(&mut open)
             .resizable(true)
             .default_size([560.0, 360.0])
@@ -1972,7 +1976,8 @@ impl App {
         let mut close = false;
         let running = self.dlg.scene_detect_job.is_some();
 
-        egui::Window::new(format!("Detectar cenas e cortes — {}", ev.name))
+        crate::dialog_window::DialogWindow::new(format!("Detectar cenas e cortes — {}", ev.name))
+            .id(egui::Id::new("scene_detect_win"))
             .open(&mut open)
             .resizable(false)
             .default_width(380.0)
@@ -2153,7 +2158,8 @@ impl App {
         let mut open = true;
         let mut run_track = false;
         let mut close = false;
-        egui::Window::new(format!("Rastreamento de Movimento — {src_name}"))
+        crate::dialog_window::DialogWindow::new(format!("Rastreamento de Movimento — {src_name}"))
+            .id(egui::Id::new("motion_track_win"))
             .open(&mut open)
             .resizable(false)
             .default_width(390.0)
@@ -2272,7 +2278,7 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut changed = false;
-        egui::Window::new(tr(lang, "Propriedades do projeto"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Propriedades do projeto"))
             .id(egui::Id::new("project_props_win"))
             .open(&mut open)
             .resizable(false)
@@ -2492,7 +2498,7 @@ impl App {
         let mut open_tc = false;
         let mut open_pc = false;
         let mut open_fx = false;
-        egui::Window::new(tr(lang, "Propriedades do evento"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Propriedades do evento"))
             .id(egui::Id::new("event_props_win"))
             .open(&mut open)
             .default_width(380.0)
@@ -2832,7 +2838,7 @@ impl App {
             return;
         };
         let mut chain_copy = chain.clone();
-        egui::Window::new(title)
+        crate::dialog_window::DialogWindow::new(title)
             .id(egui::Id::new("fx_chain_win"))
             .open(&mut open)
             .default_width(440.0)
@@ -3330,7 +3336,7 @@ impl App {
         let before = spec.clone();
         // centralizada: sem posição, o egui a punha no primeiro espaço livre,
         // por cima dos cabeçalhos de faixa
-        egui::Window::new(tr(lang, "Mídia gerada"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Mídia gerada"))
             .id(egui::Id::new("gen_editor_win"))
             .open(&mut open)
             .default_width(420.0)
@@ -3540,7 +3546,7 @@ impl App {
             return;
         };
 
-        egui::Window::new(tr(lang, "Renderizar como"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Renderizar como"))
             .id(egui::Id::new("render_as_win"))
             .open(&mut open)
             .resizable(true)
@@ -3995,7 +4001,7 @@ impl App {
             };
             let mut cancel = false;
             let theme = self.theme.clone();
-            egui::Window::new(tr(lang, "Renderizando..."))
+            crate::dialog_window::DialogWindow::new(tr(lang, "Renderizando..."))
                 .id(egui::Id::new("render_prog_win"))
                 .collapsible(true)
                 .resizable(false)
@@ -4038,8 +4044,11 @@ impl App {
         let lang = self.lang();
         if let Some(msg) = self.dlg.render_done.clone() {
             let mut close = false;
-            egui::Window::new(tr(lang, "Renderização"))
+            // o fechar da janela é o mesmo que OK
+            let mut keep = true;
+            crate::dialog_window::DialogWindow::new(tr(lang, "Renderização"))
                 .id(egui::Id::new("render_done_win"))
+                .open(&mut keep)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
@@ -4048,14 +4057,14 @@ impl App {
                         close = true;
                     }
                 });
-            if close {
+            if close || !keep {
                 self.dlg.render_done = None;
             }
         }
         if self.dlg.goto_open {
             let mut open = true;
             let mut go = None;
-            egui::Window::new(tr(lang, "Ir para"))
+            crate::dialog_window::DialogWindow::new(tr(lang, "Ir para"))
                 .id(egui::Id::new("goto_win"))
                 .open(&mut open)
                 .collapsible(false)
@@ -4100,7 +4109,7 @@ impl App {
         }
         if self.dlg.about {
             let mut open = true;
-            egui::Window::new(tr(lang, "Sobre o Neoveg"))
+            crate::dialog_window::DialogWindow::new(tr(lang, "Sobre o Neoveg"))
                 .id(egui::Id::new("about_win"))
                 .open(&mut open)
                 .collapsible(false)
@@ -4162,7 +4171,7 @@ impl App {
             }
         }
         let mut open = true;
-        egui::Window::new(tr(lang, "Atalhos de teclado"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Atalhos de teclado"))
             .id(egui::Id::new("shortcuts_win"))
             .open(&mut open)
             .default_width(640.0)
@@ -4323,7 +4332,7 @@ impl App {
         let mut live_theme: Option<ThemeId> = None;
         let mut live_language: Option<Language> = None;
 
-        let mut win = egui::Window::new(tr(lang, "Preferências..."))
+        let mut win = crate::dialog_window::DialogWindow::new(tr(lang, "Preferências..."))
             .id(egui::Id::new("prefs_win"))
             .open(&mut open)
             .collapsible(false)
@@ -4709,7 +4718,7 @@ impl App {
         let extra_wrap = if def_w < 440.0 { 26.0 } else { 0.0 };
         let scroll_max_h = (def_h - 96.0 - extra_wrap).max(90.0);
 
-        egui::Window::new(tr(lang, "Editar > Propriedades > Layout"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Editar > Propriedades > Layout"))
             .id(egui::Id::new("edit_layout_win"))
             .open(&mut open)
             .collapsible(false)
@@ -4885,23 +4894,26 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut commit = false;
-        egui::Window::new(tr(lang, "Salvar layout de janela (.neoveglayout)"))
-            .id(egui::Id::new("save_layout_win"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label(tr(lang, "Nome do layout:"));
-                ui.text_edit_singleline(&mut self.dlg.save_layout_name);
-                ui.horizontal(|ui| {
-                    if ui.button(tr(lang, "Salvar")).clicked() {
-                        commit = true;
-                    }
-                    if ui.button(tr(lang, "Cancelar")).clicked() {
-                        self.dlg.save_layout_open = false;
-                    }
-                });
+        crate::dialog_window::DialogWindow::new(tr(
+            lang,
+            "Salvar layout de janela (.neoveglayout)",
+        ))
+        .id(egui::Id::new("save_layout_win"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(tr(lang, "Nome do layout:"));
+            ui.text_edit_singleline(&mut self.dlg.save_layout_name);
+            ui.horizontal(|ui| {
+                if ui.button(tr(lang, "Salvar")).clicked() {
+                    commit = true;
+                }
+                if ui.button(tr(lang, "Cancelar")).clicked() {
+                    self.dlg.save_layout_open = false;
+                }
             });
+        });
         if commit {
             let name = self.dlg.save_layout_name.clone();
             self.save_named_layout(&name);

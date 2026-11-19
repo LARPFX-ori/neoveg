@@ -48,7 +48,7 @@ impl App {
         let mut copy = false;
         let mut open_logs = false;
         let recovery_offer = self.recovery_offer;
-        egui::Window::new(tr(lang, "O Neoveg não foi fechado normalmente"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "O Neoveg não foi fechado normalmente"))
             .id(egui::Id::new("crash_report_win"))
             .collapsible(false)
             .resizable(true)

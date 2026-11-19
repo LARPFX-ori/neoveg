@@ -206,6 +206,7 @@
   "Arraste até um evento de vídeo para usar no crossfade ou fade.": "Drag onto a video event to apply on crossfade or fade-in.",
   "Arraste para a timeline": "Drag onto timeline",
   "Arraste para posicionar a origem na sala (frente no topo)": "Drag to position source in the room (front at top)",
+  "Arraste para soltar a janela ou acoplá-la na janela do Neoveg": "Drag to float the window or dock it in the Neoveg window",
   "Arraste para um evento ou trilha de vídeo": "Drag onto a video event or track",
   "Arraste um efeito até um evento ou trilha, ou use os botões para aplicar à seleção / trilha selecionada / master.": "Drag an effect onto an event or track, or use the buttons to apply to selection / selected track / master.",
   "Arraste uma mídia para a timeline, ou dê um duplo clique para adicionar no cursor.": "Drag media onto the timeline, or double-click to insert at cursor.",
@@ -2042,4 +2043,4 @@
   "★ Favoritos": "★ Favorites",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker at Cursor"
-}
+}

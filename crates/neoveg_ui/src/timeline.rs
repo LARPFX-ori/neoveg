@@ -2307,7 +2307,7 @@ impl App {
         };
         let mut open = true;
         let mut done = false;
-        egui::Window::new(tr(lang, "Renomear"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Renomear"))
             .id(egui::Id::new("tl_rename_win"))
             .collapsible(false)
             .resizable(false)

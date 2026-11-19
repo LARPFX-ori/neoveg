@@ -206,6 +206,7 @@
   "Arraste até um evento de vídeo para usar no crossfade ou fade.": "クロスフェード/フェード用としてビデオイベントにドラッグします。",
   "Arraste para a timeline": "タイムラインへドラッグ",
   "Arraste para posicionar a origem na sala (frente no topo)": "ドラッグで空間内の位置を調整 (上が前方)",
+  "Arraste para soltar a janela ou acoplá-la na janela do Neoveg": "ドラッグしてウィンドウを切り離すか、Neoveg ウィンドウにドッキングします",
   "Arraste para um evento ou trilha de vídeo": "ビデオイベントまたはトラックへドラッグ",
   "Arraste um efeito até um evento ou trilha, ou use os botões para aplicar à seleção / trilha selecionada / master.": "エフェクトをイベントやトラックにドラッグ、またはボタンで選択/トラック/マスターに適用します。",
   "Arraste uma mídia para a timeline, ou dê um duplo clique para adicionar no cursor.": "メディアをタイムラインにドラッグ、またはダブルクリックでカーソル位置に追加。",
@@ -2042,4 +2043,4 @@
   "★ Favoritos": "★ お気に入り",
   "＋ Barramento": "+ バス",
   "＋ Marcador no Cursor": "+ カーソル位置にマーカー"
-}
+}

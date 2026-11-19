@@ -37,7 +37,7 @@ pub fn show_work_folders_window(app: &mut crate::App, ctx: &egui::Context) {
     let def_proxies = neoveg_engine::model::WorkFolders::default_proxies(proj_path);
     let def_renders = neoveg_engine::model::WorkFolders::default_render_exports(proj_path);
 
-    egui::Window::new(tr(lang, "Pastas de trabalho"))
+    crate::dialog_window::DialogWindow::new(tr(lang, "Pastas de trabalho"))
         .id(egui::Id::new("work_folders_window"))
         .open(&mut open)
         .resizable(true)

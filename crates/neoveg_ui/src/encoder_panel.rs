@@ -1460,505 +1460,486 @@ impl App {
             .find(|i| i.id == modal.item_id)
             .map(|i| i.source.clone());
 
-        egui::Window::new(tr(lang, "Configurações de Exportação — Neoveg Encoder"))
-            .id(egui::Id::new("enc_export_win"))
-            .open(&mut keep_open)
-            .default_size([780.0, 520.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.columns(2, |cols| {
-                    // Coluna Esquerda: Origem / Saída, Scrub, Intervalo, Corte e Escala
-                    let left = &mut cols[0];
-                    left.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut modal.preview_pane,
-                            SettingsPreviewPane::Source,
-                            tr(lang, "Origem"),
-                        );
-                        ui.selectable_value(
-                            &mut modal.preview_pane,
-                            SettingsPreviewPane::Output,
-                            tr(lang, "Saída"),
-                        );
-                    });
-
-                    // Gera/atualiza prévia rápida da origem ou do quadro transformado
-                    let t = Ticks::from_millis_i64((modal.preview_sec.max(0.0) * 1000.0) as i64);
-                    let src_key = format!("{}:{:.2}", modal.item_id, modal.preview_sec);
-                    if modal.src_frame_key != src_key {
-                        modal.src_frame_key = src_key;
-                        if let Some(QueueSource::ProjectSnapshot { project, .. }) = &item_src {
-                            modal.src_frame_cache =
-                                Some(render_frame(project, &self.media, t, 320, 180));
-                        } else {
-                            modal.src_frame_cache =
-                                Some(Frame::filled(320, 180, [0.16, 0.24, 0.34, 1.0]));
-                        }
-                    }
-
-                    if let Some(src_f) = &modal.src_frame_cache {
-                        let pane_tag = match modal.preview_pane {
-                            SettingsPreviewPane::Source => 0u8,
-                            SettingsPreviewPane::Output => 1u8,
-                        };
-                        let key = format!(
-                            "{pane_tag}:{}:{:?}:{:?}:{:?}",
-                            modal.src_frame_key,
-                            modal.draft.crop,
-                            modal.draft.scaling,
-                            modal.draft.effects.grade
-                        );
-                        if modal.preview_cache_key != key {
-                            modal.preview_cache_key = key;
-                            let frame = if modal.preview_pane == SettingsPreviewPane::Source {
-                                src_f.clone()
-                            } else {
-                                let name = item_src
-                                    .as_ref()
-                                    .map(QueueSource::display_name)
-                                    .unwrap_or_else(|| "origem".into());
-                                preview_transformed_frame(
-                                    src_f,
-                                    t,
-                                    modal
-                                        .draft
-                                        .fps_override
-                                        .unwrap_or(self.session.project.settings.fps),
-                                    self.session.project.settings.sample_rate,
-                                    &modal.draft,
-                                    &name,
-                                )
-                            };
-                            if let Some(img) = frame.to_image() {
-                                let thumb = rgba_to_color_image(&img);
-                                modal.preview_tex = Some(ctx.load_texture(
-                                    "enc_settings_pv",
-                                    thumb,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                            }
-                        }
-                    }
-                    if let Some(tex) = &modal.preview_tex {
-                        left.image((tex.id(), egui::vec2(320.0, 180.0)));
-                    }
-
-                    let fps_disp = modal
-                        .draft
-                        .fps_override
-                        .unwrap_or(self.session.project.settings.fps);
-                    let tc_str = format_ticks(
-                        t,
-                        fps_disp,
-                        self.session.project.settings.sample_rate,
-                        self.session.opts.time_format,
+        crate::dialog_window::DialogWindow::new(tr(
+            lang,
+            "Configurações de Exportação — Neoveg Encoder",
+        ))
+        .id(egui::Id::new("enc_export_win"))
+        .open(&mut keep_open)
+        .default_size([780.0, 520.0])
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.columns(2, |cols| {
+                // Coluna Esquerda: Origem / Saída, Scrub, Intervalo, Corte e Escala
+                let left = &mut cols[0];
+                left.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut modal.preview_pane,
+                        SettingsPreviewPane::Source,
+                        tr(lang, "Origem"),
                     );
-                    left.horizontal(|ui| {
-                        ui.label(tr(lang, "Tempo:"));
-                        ui.add(egui::Slider::new(&mut modal.preview_sec, 0.0..=60.0).text(tc_str));
-                    });
+                    ui.selectable_value(
+                        &mut modal.preview_pane,
+                        SettingsPreviewPane::Output,
+                        tr(lang, "Saída"),
+                    );
+                });
 
-                    left.separator();
-                    left.label(RichText::new(tr(lang, "Intervalo de Origem")).strong());
-                    egui::ComboBox::from_id_salt("enc_range_mode")
-                        .selected_text(modal.draft.range.name_in(lang))
-                        .show_ui(left, |ui| {
-                            for rm in SourceRangeMode::ALL {
-                                ui.selectable_value(&mut modal.draft.range, rm, rm.name_in(lang));
-                            }
-                        });
-                    if modal.draft.range == SourceRangeMode::Custom {
-                        let mut in_s = modal.draft.custom_in.as_secs_f64();
-                        let mut out_s = modal.draft.custom_out.as_secs_f64().max(in_s + 0.1);
-                        left.horizontal(|ui| {
-                            ui.label(tr(lang, "Entrada (s):"));
-                            ui.add(
-                                egui::DragValue::new(&mut in_s)
-                                    .speed(0.1)
-                                    .range(0.0..=86400.0),
-                            );
-                            ui.label(tr(lang, "Saída (s):"));
-                            ui.add(
-                                egui::DragValue::new(&mut out_s)
-                                    .speed(0.1)
-                                    .range(0.1..=86400.0),
-                            );
-                        });
-                        modal.draft.custom_in = Ticks::from_millis_i64((in_s * 1000.0) as i64);
-                        modal.draft.custom_out =
-                            Ticks::from_millis_i64((out_s.max(in_s + 0.04) * 1000.0) as i64);
+                // Gera/atualiza prévia rápida da origem ou do quadro transformado
+                let t = Ticks::from_millis_i64((modal.preview_sec.max(0.0) * 1000.0) as i64);
+                let src_key = format!("{}:{:.2}", modal.item_id, modal.preview_sec);
+                if modal.src_frame_key != src_key {
+                    modal.src_frame_key = src_key;
+                    if let Some(QueueSource::ProjectSnapshot { project, .. }) = &item_src {
+                        modal.src_frame_cache =
+                            Some(render_frame(project, &self.media, t, 320, 180));
+                    } else {
+                        modal.src_frame_cache =
+                            Some(Frame::filled(320, 180, [0.16, 0.24, 0.34, 1.0]));
                     }
+                }
 
-                    left.separator();
-                    left.horizontal(|ui| {
-                        ui.checkbox(
-                            &mut modal.draft.crop.enabled,
-                            tr(lang, "Cortar Origem (Crop)"),
-                        );
-                        if modal.draft.crop.enabled {
-                            egui::ComboBox::from_id_salt("enc_crop_ar")
-                                .selected_text(modal.draft.crop.aspect.name_in(lang))
-                                .show_ui(ui, |ui| {
-                                    for ar in CropAspect::ALL {
-                                        ui.selectable_value(
-                                            &mut modal.draft.crop.aspect,
-                                            ar,
-                                            ar.name_in(lang),
-                                        );
-                                    }
-                                });
+                if let Some(src_f) = &modal.src_frame_cache {
+                    let pane_tag = match modal.preview_pane {
+                        SettingsPreviewPane::Source => 0u8,
+                        SettingsPreviewPane::Output => 1u8,
+                    };
+                    let key = format!(
+                        "{pane_tag}:{}:{:?}:{:?}:{:?}",
+                        modal.src_frame_key,
+                        modal.draft.crop,
+                        modal.draft.scaling,
+                        modal.draft.effects.grade
+                    );
+                    if modal.preview_cache_key != key {
+                        modal.preview_cache_key = key;
+                        let frame = if modal.preview_pane == SettingsPreviewPane::Source {
+                            src_f.clone()
+                        } else {
+                            let name = item_src
+                                .as_ref()
+                                .map(QueueSource::display_name)
+                                .unwrap_or_else(|| "origem".into());
+                            preview_transformed_frame(
+                                src_f,
+                                t,
+                                modal
+                                    .draft
+                                    .fps_override
+                                    .unwrap_or(self.session.project.settings.fps),
+                                self.session.project.settings.sample_rate,
+                                &modal.draft,
+                                &name,
+                            )
+                        };
+                        if let Some(img) = frame.to_image() {
+                            let thumb = rgba_to_color_image(&img);
+                            modal.preview_tex = Some(ctx.load_texture(
+                                "enc_settings_pv",
+                                thumb,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                    }
+                }
+                if let Some(tex) = &modal.preview_tex {
+                    left.image((tex.id(), egui::vec2(320.0, 180.0)));
+                }
+
+                let fps_disp = modal
+                    .draft
+                    .fps_override
+                    .unwrap_or(self.session.project.settings.fps);
+                let tc_str = format_ticks(
+                    t,
+                    fps_disp,
+                    self.session.project.settings.sample_rate,
+                    self.session.opts.time_format,
+                );
+                left.horizontal(|ui| {
+                    ui.label(tr(lang, "Tempo:"));
+                    ui.add(egui::Slider::new(&mut modal.preview_sec, 0.0..=60.0).text(tc_str));
+                });
+
+                left.separator();
+                left.label(RichText::new(tr(lang, "Intervalo de Origem")).strong());
+                egui::ComboBox::from_id_salt("enc_range_mode")
+                    .selected_text(modal.draft.range.name_in(lang))
+                    .show_ui(left, |ui| {
+                        for rm in SourceRangeMode::ALL {
+                            ui.selectable_value(&mut modal.draft.range, rm, rm.name_in(lang));
                         }
                     });
-                    if modal.draft.crop.enabled {
-                        left.horizontal(|ui| {
-                            ui.label(tr(lang, "E:"));
-                            ui.add(
-                                egui::DragValue::new(&mut modal.draft.crop.left_px).range(0..=4096),
-                            );
-                            ui.label(tr(lang, "S:"));
-                            ui.add(
-                                egui::DragValue::new(&mut modal.draft.crop.top_px).range(0..=4096),
-                            );
-                            ui.label(tr(lang, "D:"));
-                            ui.add(
-                                egui::DragValue::new(&mut modal.draft.crop.right_px)
-                                    .range(0..=4096),
-                            );
-                            ui.label(tr(lang, "I:"));
-                            ui.add(
-                                egui::DragValue::new(&mut modal.draft.crop.bottom_px)
-                                    .range(0..=4096),
-                            );
-                        });
-                    }
+                if modal.draft.range == SourceRangeMode::Custom {
+                    let mut in_s = modal.draft.custom_in.as_secs_f64();
+                    let mut out_s = modal.draft.custom_out.as_secs_f64().max(in_s + 0.1);
                     left.horizontal(|ui| {
-                        ui.label(tr(lang, "Escala de Origem:"));
-                        egui::ComboBox::from_id_salt("enc_scale_mode")
-                            .selected_text(modal.draft.scaling.name_in(lang))
+                        ui.label(tr(lang, "Entrada (s):"));
+                        ui.add(
+                            egui::DragValue::new(&mut in_s)
+                                .speed(0.1)
+                                .range(0.0..=86400.0),
+                        );
+                        ui.label(tr(lang, "Saída (s):"));
+                        ui.add(
+                            egui::DragValue::new(&mut out_s)
+                                .speed(0.1)
+                                .range(0.1..=86400.0),
+                        );
+                    });
+                    modal.draft.custom_in = Ticks::from_millis_i64((in_s * 1000.0) as i64);
+                    modal.draft.custom_out =
+                        Ticks::from_millis_i64((out_s.max(in_s + 0.04) * 1000.0) as i64);
+                }
+
+                left.separator();
+                left.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut modal.draft.crop.enabled,
+                        tr(lang, "Cortar Origem (Crop)"),
+                    );
+                    if modal.draft.crop.enabled {
+                        egui::ComboBox::from_id_salt("enc_crop_ar")
+                            .selected_text(modal.draft.crop.aspect.name_in(lang))
                             .show_ui(ui, |ui| {
-                                for sm in SourceScalingMode::ALL {
+                                for ar in CropAspect::ALL {
                                     ui.selectable_value(
-                                        &mut modal.draft.scaling,
-                                        sm,
-                                        sm.name_in(lang),
+                                        &mut modal.draft.crop.aspect,
+                                        ar,
+                                        ar.name_in(lang),
                                     );
                                 }
                             });
-                    });
-
-                    // Coluna Direita: Abas Vídeo / Áudio / Efeitos
-                    let right = &mut cols[1];
-                    right.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut modal.tab,
-                            ExportSettingsTab::Video,
-                            tr(lang, "Vídeo"),
+                    }
+                });
+                if modal.draft.crop.enabled {
+                    left.horizontal(|ui| {
+                        ui.label(tr(lang, "E:"));
+                        ui.add(egui::DragValue::new(&mut modal.draft.crop.left_px).range(0..=4096));
+                        ui.label(tr(lang, "S:"));
+                        ui.add(egui::DragValue::new(&mut modal.draft.crop.top_px).range(0..=4096));
+                        ui.label(tr(lang, "D:"));
+                        ui.add(
+                            egui::DragValue::new(&mut modal.draft.crop.right_px).range(0..=4096),
                         );
-                        ui.selectable_value(
-                            &mut modal.tab,
-                            ExportSettingsTab::Audio,
-                            tr(lang, "Áudio"),
-                        );
-                        ui.selectable_value(
-                            &mut modal.tab,
-                            ExportSettingsTab::Effects,
-                            tr(lang, "Efeitos e Sobreposições"),
+                        ui.label(tr(lang, "I:"));
+                        ui.add(
+                            egui::DragValue::new(&mut modal.draft.crop.bottom_px).range(0..=4096),
                         );
                     });
-                    right.separator();
+                }
+                left.horizontal(|ui| {
+                    ui.label(tr(lang, "Escala de Origem:"));
+                    egui::ComboBox::from_id_salt("enc_scale_mode")
+                        .selected_text(modal.draft.scaling.name_in(lang))
+                        .show_ui(ui, |ui| {
+                            for sm in SourceScalingMode::ALL {
+                                ui.selectable_value(&mut modal.draft.scaling, sm, sm.name_in(lang));
+                            }
+                        });
+                });
 
-                    egui::ScrollArea::vertical()
-                        .id_salt("enc_modal_right")
-                        .max_height(370.0)
-                        .show(right, |ui| match modal.tab {
-                            ExportSettingsTab::Video => {
-                                ui.horizontal(|ui| {
-                                    ui.label(tr(lang, "Formato:"));
-                                    egui::ComboBox::from_id_salt("modal_fmt")
-                                        .selected_text(modal.draft.format.name_in(lang))
-                                        .show_ui(ui, |ui| {
-                                            for f in RenderFormat::ALL {
-                                                if ui
-                                                    .selectable_value(
-                                                        &mut modal.draft.format,
-                                                        f,
-                                                        f.name_in(lang),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    modal.draft.output_path = modal
-                                                        .draft
-                                                        .output_path
-                                                        .with_extension(f.ext());
-                                                }
-                                            }
-                                        });
-                                });
-                                ui.checkbox(
-                                    &mut modal.draft.include_video,
-                                    tr(lang, "Exportar Vídeo"),
-                                );
-                                ui.checkbox(
-                                    &mut modal.draft.match_source_dims,
-                                    tr(lang, "Corresponder à resolução da origem"),
-                                );
-                                ui.add_enabled_ui(!modal.draft.match_source_dims, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Largura:"));
-                                        ui.add(
-                                            egui::DragValue::new(&mut modal.draft.width)
-                                                .range(16..=7680),
-                                        );
-                                        ui.label(tr(lang, "Altura:"));
-                                        ui.add(
-                                            egui::DragValue::new(&mut modal.draft.height)
-                                                .range(16..=4320),
-                                        );
-                                    });
-                                });
-                                if modal.draft.format.uses_video_bitrate() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Taxa de vídeo (kbps):"));
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut modal.draft.video_bitrate_kbps,
-                                                500..=100_000,
-                                            )
-                                            .logarithmic(true),
-                                        );
-                                    });
-                                }
-                                if modal.draft.format.uses_jpeg_quality() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Qualidade JPEG:"));
-                                        ui.add(egui::Slider::new(
-                                            &mut modal.draft.jpeg_quality,
-                                            10..=100,
-                                        ));
-                                    });
-                                }
-                            }
-                            ExportSettingsTab::Audio => {
-                                ui.checkbox(
-                                    &mut modal.draft.include_audio,
-                                    tr(lang, "Exportar Áudio"),
-                                );
-                                if modal.draft.format.uses_audio_bitrate() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Taxa de áudio (kbps):"));
-                                        ui.add(egui::Slider::new(
-                                            &mut modal.draft.audio_bitrate_kbps,
-                                            64..=512,
-                                        ));
-                                    });
-                                }
-                                if modal.draft.format.uses_wav_bits() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Profundidade PCM:"));
-                                        ui.selectable_value(
-                                            &mut modal.draft.wav_bits,
-                                            WavBits::Pcm16,
-                                            tr(lang, "16 bits"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut modal.draft.wav_bits,
-                                            WavBits::Pcm24,
-                                            tr(lang, "24 bits"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut modal.draft.wav_bits,
-                                            WavBits::Float32,
-                                            tr(lang, "32 bits float"),
-                                        );
-                                    });
-                                }
-                            }
-                            ExportSettingsTab::Effects => {
-                                ui.label(
-                                    RichText::new(tr(lang, "Correção de Cor / LUT (.cube)"))
-                                        .strong(),
-                                );
-                                egui::ComboBox::from_id_salt("modal_grade")
-                                    .selected_text(modal.draft.effects.grade.name_in(lang))
+                // Coluna Direita: Abas Vídeo / Áudio / Efeitos
+                let right = &mut cols[1];
+                right.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut modal.tab,
+                        ExportSettingsTab::Video,
+                        tr(lang, "Vídeo"),
+                    );
+                    ui.selectable_value(
+                        &mut modal.tab,
+                        ExportSettingsTab::Audio,
+                        tr(lang, "Áudio"),
+                    );
+                    ui.selectable_value(
+                        &mut modal.tab,
+                        ExportSettingsTab::Effects,
+                        tr(lang, "Efeitos e Sobreposições"),
+                    );
+                });
+                right.separator();
+
+                egui::ScrollArea::vertical()
+                    .id_salt("enc_modal_right")
+                    .max_height(370.0)
+                    .show(right, |ui| match modal.tab {
+                        ExportSettingsTab::Video => {
+                            ui.horizontal(|ui| {
+                                ui.label(tr(lang, "Formato:"));
+                                egui::ComboBox::from_id_salt("modal_fmt")
+                                    .selected_text(modal.draft.format.name_in(lang))
                                     .show_ui(ui, |ui| {
-                                        for (label, g) in GradePreset::NAMED {
+                                        for f in RenderFormat::ALL {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut modal.draft.format,
+                                                    f,
+                                                    f.name_in(lang),
+                                                )
+                                                .clicked()
+                                            {
+                                                modal.draft.output_path =
+                                                    modal.draft.output_path.with_extension(f.ext());
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.checkbox(&mut modal.draft.include_video, tr(lang, "Exportar Vídeo"));
+                            ui.checkbox(
+                                &mut modal.draft.match_source_dims,
+                                tr(lang, "Corresponder à resolução da origem"),
+                            );
+                            ui.add_enabled_ui(!modal.draft.match_source_dims, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr(lang, "Largura:"));
+                                    ui.add(
+                                        egui::DragValue::new(&mut modal.draft.width)
+                                            .range(16..=7680),
+                                    );
+                                    ui.label(tr(lang, "Altura:"));
+                                    ui.add(
+                                        egui::DragValue::new(&mut modal.draft.height)
+                                            .range(16..=4320),
+                                    );
+                                });
+                            });
+                            if modal.draft.format.uses_video_bitrate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr(lang, "Taxa de vídeo (kbps):"));
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut modal.draft.video_bitrate_kbps,
+                                            500..=100_000,
+                                        )
+                                        .logarithmic(true),
+                                    );
+                                });
+                            }
+                            if modal.draft.format.uses_jpeg_quality() {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr(lang, "Qualidade JPEG:"));
+                                    ui.add(egui::Slider::new(
+                                        &mut modal.draft.jpeg_quality,
+                                        10..=100,
+                                    ));
+                                });
+                            }
+                        }
+                        ExportSettingsTab::Audio => {
+                            ui.checkbox(&mut modal.draft.include_audio, tr(lang, "Exportar Áudio"));
+                            if modal.draft.format.uses_audio_bitrate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr(lang, "Taxa de áudio (kbps):"));
+                                    ui.add(egui::Slider::new(
+                                        &mut modal.draft.audio_bitrate_kbps,
+                                        64..=512,
+                                    ));
+                                });
+                            }
+                            if modal.draft.format.uses_wav_bits() {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr(lang, "Profundidade PCM:"));
+                                    ui.selectable_value(
+                                        &mut modal.draft.wav_bits,
+                                        WavBits::Pcm16,
+                                        tr(lang, "16 bits"),
+                                    );
+                                    ui.selectable_value(
+                                        &mut modal.draft.wav_bits,
+                                        WavBits::Pcm24,
+                                        tr(lang, "24 bits"),
+                                    );
+                                    ui.selectable_value(
+                                        &mut modal.draft.wav_bits,
+                                        WavBits::Float32,
+                                        tr(lang, "32 bits float"),
+                                    );
+                                });
+                            }
+                        }
+                        ExportSettingsTab::Effects => {
+                            ui.label(
+                                RichText::new(tr(lang, "Correção de Cor / LUT (.cube)")).strong(),
+                            );
+                            egui::ComboBox::from_id_salt("modal_grade")
+                                .selected_text(modal.draft.effects.grade.name_in(lang))
+                                .show_ui(ui, |ui| {
+                                    for (label, g) in GradePreset::NAMED {
+                                        ui.selectable_value(
+                                            &mut modal.draft.effects.grade,
+                                            g,
+                                            tr(lang, label),
+                                        );
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                let ltxt = modal
+                                    .draft
+                                    .effects
+                                    .lut_path
+                                    .as_deref()
+                                    .and_then(|p| p.file_name())
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| tr(lang, "Nenhuma LUT selecionada").into());
+                                ui.label(ltxt);
+                                if ui.small_button(tr(lang, "Selecionar .cube...")).clicked() {
+                                    if let Some(p) = rfd::FileDialog::new()
+                                        .add_filter(tr(lang, "Tabela LUT"), &["cube"])
+                                        .pick_file()
+                                    {
+                                        modal.draft.effects.lut_path = Some(p);
+                                    }
+                                }
+                                if modal.draft.effects.lut_path.is_some()
+                                    && ui.small_button(tr(lang, "Limpar")).clicked()
+                                {
+                                    modal.draft.effects.lut_path = None;
+                                }
+                            });
+
+                            ui.separator();
+                            ui.checkbox(
+                                &mut modal.draft.effects.timecode_overlay.enabled,
+                                tr(lang, "Sobreposição de Timecode"),
+                            );
+                            if modal.draft.effects.timecode_overlay.enabled {
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(
+                                        &mut modal.draft.effects.timecode_overlay.source,
+                                        TimecodeSource::MediaTime,
+                                        tr(lang, "Tempo da Mídia"),
+                                    );
+                                    ui.selectable_value(
+                                        &mut modal.draft.effects.timecode_overlay.source,
+                                        TimecodeSource::CustomStart,
+                                        tr(lang, "Timecode Inicial"),
+                                    );
+                                    ui.checkbox(
+                                        &mut modal.draft.effects.timecode_overlay.drop_frame,
+                                        tr(lang, "Drop-Frame"),
+                                    );
+                                });
+                                overlay_pos_controls(
+                                    ui,
+                                    lang,
+                                    "tc_pos",
+                                    &mut modal.draft.effects.timecode_overlay.position,
+                                    &mut modal.draft.effects.timecode_overlay.size_pct,
+                                    &mut modal.draft.effects.timecode_overlay.bg_opacity,
+                                );
+                            }
+
+                            ui.separator();
+                            ui.checkbox(
+                                &mut modal.draft.effects.name_overlay.enabled,
+                                tr(lang, "Sobreposição de Nome"),
+                            );
+                            if modal.draft.effects.name_overlay.enabled {
+                                egui::ComboBox::from_id_salt("name_fmt")
+                                    .selected_text(
+                                        modal.draft.effects.name_overlay.format.name_in(lang),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for nf in NameFormat::ALL {
                                             ui.selectable_value(
-                                                &mut modal.draft.effects.grade,
-                                                g,
-                                                tr(lang, label),
+                                                &mut modal.draft.effects.name_overlay.format,
+                                                nf,
+                                                nf.name_in(lang),
                                             );
                                         }
                                     });
                                 ui.horizontal(|ui| {
-                                    let ltxt = modal
-                                        .draft
-                                        .effects
-                                        .lut_path
-                                        .as_deref()
-                                        .and_then(|p| p.file_name())
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| {
-                                            tr(lang, "Nenhuma LUT selecionada").into()
-                                        });
-                                    ui.label(ltxt);
-                                    if ui.small_button(tr(lang, "Selecionar .cube...")).clicked() {
+                                    ui.label(tr(lang, "Prefixo:"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut modal.draft.effects.name_overlay.prefix,
+                                        )
+                                        .desired_width(80.0),
+                                    );
+                                    ui.label(tr(lang, "Sufixo:"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut modal.draft.effects.name_overlay.suffix,
+                                        )
+                                        .desired_width(80.0),
+                                    );
+                                });
+                                overlay_pos_controls(
+                                    ui,
+                                    lang,
+                                    "nm_pos",
+                                    &mut modal.draft.effects.name_overlay.position,
+                                    &mut modal.draft.effects.name_overlay.size_pct,
+                                    &mut modal.draft.effects.name_overlay.bg_opacity,
+                                );
+                            }
+
+                            ui.separator();
+                            ui.checkbox(
+                                &mut modal.draft.effects.image_overlay.enabled,
+                                tr(lang, "Sobreposição de Imagem (Marca d'água)"),
+                            );
+                            if modal.draft.effects.image_overlay.enabled {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button(tr(lang, "Escolher imagem...")).clicked() {
                                         if let Some(p) = rfd::FileDialog::new()
-                                            .add_filter(tr(lang, "Tabela LUT"), &["cube"])
+                                            .add_filter(tr(lang, "Imagens"), IMAGE_EXTS)
                                             .pick_file()
                                         {
-                                            modal.draft.effects.lut_path = Some(p);
+                                            modal.draft.effects.image_overlay.path = Some(p);
                                         }
                                     }
-                                    if modal.draft.effects.lut_path.is_some()
-                                        && ui.small_button(tr(lang, "Limpar")).clicked()
-                                    {
-                                        modal.draft.effects.lut_path = None;
-                                    }
+                                    ui.checkbox(
+                                        &mut modal.draft.effects.image_overlay.absolute_size,
+                                        tr(lang, "Tamanho absoluto"),
+                                    );
                                 });
-
-                                ui.separator();
-                                ui.checkbox(
-                                    &mut modal.draft.effects.timecode_overlay.enabled,
-                                    tr(lang, "Sobreposição de Timecode"),
+                                overlay_pos_controls(
+                                    ui,
+                                    lang,
+                                    "im_pos",
+                                    &mut modal.draft.effects.image_overlay.position,
+                                    &mut modal.draft.effects.image_overlay.size_pct,
+                                    &mut modal.draft.effects.image_overlay.opacity,
                                 );
-                                if modal.draft.effects.timecode_overlay.enabled {
-                                    ui.horizontal(|ui| {
-                                        ui.selectable_value(
-                                            &mut modal.draft.effects.timecode_overlay.source,
-                                            TimecodeSource::MediaTime,
-                                            tr(lang, "Tempo da Mídia"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut modal.draft.effects.timecode_overlay.source,
-                                            TimecodeSource::CustomStart,
-                                            tr(lang, "Timecode Inicial"),
-                                        );
-                                        ui.checkbox(
-                                            &mut modal.draft.effects.timecode_overlay.drop_frame,
-                                            tr(lang, "Drop-Frame"),
-                                        );
-                                    });
-                                    overlay_pos_controls(
-                                        ui,
-                                        lang,
-                                        "tc_pos",
-                                        &mut modal.draft.effects.timecode_overlay.position,
-                                        &mut modal.draft.effects.timecode_overlay.size_pct,
-                                        &mut modal.draft.effects.timecode_overlay.bg_opacity,
-                                    );
-                                }
-
-                                ui.separator();
-                                ui.checkbox(
-                                    &mut modal.draft.effects.name_overlay.enabled,
-                                    tr(lang, "Sobreposição de Nome"),
-                                );
-                                if modal.draft.effects.name_overlay.enabled {
-                                    egui::ComboBox::from_id_salt("name_fmt")
-                                        .selected_text(
-                                            modal.draft.effects.name_overlay.format.name_in(lang),
-                                        )
-                                        .show_ui(ui, |ui| {
-                                            for nf in NameFormat::ALL {
-                                                ui.selectable_value(
-                                                    &mut modal.draft.effects.name_overlay.format,
-                                                    nf,
-                                                    nf.name_in(lang),
-                                                );
-                                            }
-                                        });
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Prefixo:"));
-                                        ui.add(
-                                            egui::TextEdit::singleline(
-                                                &mut modal.draft.effects.name_overlay.prefix,
-                                            )
-                                            .desired_width(80.0),
-                                        );
-                                        ui.label(tr(lang, "Sufixo:"));
-                                        ui.add(
-                                            egui::TextEdit::singleline(
-                                                &mut modal.draft.effects.name_overlay.suffix,
-                                            )
-                                            .desired_width(80.0),
-                                        );
-                                    });
-                                    overlay_pos_controls(
-                                        ui,
-                                        lang,
-                                        "nm_pos",
-                                        &mut modal.draft.effects.name_overlay.position,
-                                        &mut modal.draft.effects.name_overlay.size_pct,
-                                        &mut modal.draft.effects.name_overlay.bg_opacity,
-                                    );
-                                }
-
-                                ui.separator();
-                                ui.checkbox(
-                                    &mut modal.draft.effects.image_overlay.enabled,
-                                    tr(lang, "Sobreposição de Imagem (Marca d'água)"),
-                                );
-                                if modal.draft.effects.image_overlay.enabled {
-                                    ui.horizontal(|ui| {
-                                        if ui.small_button(tr(lang, "Escolher imagem...")).clicked()
-                                        {
-                                            if let Some(p) = rfd::FileDialog::new()
-                                                .add_filter(tr(lang, "Imagens"), IMAGE_EXTS)
-                                                .pick_file()
-                                            {
-                                                modal.draft.effects.image_overlay.path = Some(p);
-                                            }
-                                        }
-                                        ui.checkbox(
-                                            &mut modal.draft.effects.image_overlay.absolute_size,
-                                            tr(lang, "Tamanho absoluto"),
-                                        );
-                                    });
-                                    overlay_pos_controls(
-                                        ui,
-                                        lang,
-                                        "im_pos",
-                                        &mut modal.draft.effects.image_overlay.position,
-                                        &mut modal.draft.effects.image_overlay.size_pct,
-                                        &mut modal.draft.effects.image_overlay.opacity,
-                                    );
-                                }
-
-                                ui.separator();
-                                ui.checkbox(
-                                    &mut modal.draft.effects.time_tuner.enabled,
-                                    tr(lang, "Ajustador de Tempo (Time Tuner)"),
-                                );
-                                if modal.draft.effects.time_tuner.enabled {
-                                    ui.horizontal(|ui| {
-                                        ui.label(tr(lang, "Duração (%):"));
-                                        ui.add(egui::Slider::new(
-                                            &mut modal.draft.effects.time_tuner.duration_pct,
-                                            25.0..=200.0,
-                                        ));
-                                    });
-                                }
                             }
-                        });
-                });
 
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(tr(lang, "OK (Salvar na Fila)")).clicked() {
-                        save_clicked = true;
-                    }
-                    if ui
-                        .button(tr(lang, "Codificar Agora (Teste Síncrono)"))
-                        .clicked()
-                    {
-                        save_clicked = true;
-                        run_now_clicked = true;
-                    }
-                    if ui.button(tr(lang, "Cancelar")).clicked() {
-                        cancel_clicked = true;
-                    }
-                });
+                            ui.separator();
+                            ui.checkbox(
+                                &mut modal.draft.effects.time_tuner.enabled,
+                                tr(lang, "Ajustador de Tempo (Time Tuner)"),
+                            );
+                            if modal.draft.effects.time_tuner.enabled {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr(lang, "Duração (%):"));
+                                    ui.add(egui::Slider::new(
+                                        &mut modal.draft.effects.time_tuner.duration_pct,
+                                        25.0..=200.0,
+                                    ));
+                                });
+                            }
+                        }
+                    });
             });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(tr(lang, "OK (Salvar na Fila)")).clicked() {
+                    save_clicked = true;
+                }
+                if ui
+                    .button(tr(lang, "Codificar Agora (Teste Síncrono)"))
+                    .clicked()
+                {
+                    save_clicked = true;
+                    run_now_clicked = true;
+                }
+                if ui.button(tr(lang, "Cancelar")).clicked() {
+                    cancel_clicked = true;
+                }
+            });
+        });
 
         if cancel_clicked {
             keep_open = false;
@@ -2011,7 +1992,7 @@ impl App {
         };
         let QueueSource::MediaFile { mut interpret, .. } = self.encoder.state.items[idx].source
         else {
-            egui::Window::new(tr(lang, "Interpretar Gravação"))
+            crate::dialog_window::DialogWindow::new(tr(lang, "Interpretar Gravação"))
                 .id(egui::Id::new("enc_interpret_na_win"))
                 .open(&mut keep)
                 .show(ctx, |ui| {
@@ -2026,7 +2007,7 @@ impl App {
             return;
         };
         let mut dirty = false;
-        egui::Window::new(tr(lang, "Interpretar Gravação — Neoveg Encoder"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Interpretar Gravação — Neoveg Encoder"))
             .id(egui::Id::new("enc_interpret_win"))
             .open(&mut keep)
             .resizable(false)
@@ -2128,7 +2109,7 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut dirty = false;
-        egui::Window::new(tr(lang, "Preferências do Neoveg Encoder"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Preferências do Neoveg Encoder"))
             .id(egui::Id::new("enc_prefs_win"))
             .open(&mut open)
             .resizable(false)
@@ -2223,7 +2204,7 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut create = false;
-        egui::Window::new(tr(lang, "Nova Predefinição Personalizada"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Nova Predefinição Personalizada"))
             .id(egui::Id::new("enc_new_preset_win"))
             .open(&mut open)
             .resizable(false)
@@ -2303,7 +2284,7 @@ impl App {
         let lang = self.lang();
         let mut open = true;
         let mut create = false;
-        egui::Window::new(tr(lang, "Novo Grupo de Predefinições"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Novo Grupo de Predefinições"))
             .id(egui::Id::new("enc_new_group_win"))
             .open(&mut open)
             .default_size([380.0, 320.0])
@@ -2356,7 +2337,7 @@ impl App {
         };
         let lang = self.lang();
         let mut open = true;
-        egui::Window::new(tr(lang, title))
+        crate::dialog_window::DialogWindow::new(tr(lang, title))
             .id(egui::Id::new("enc_log_win"))
             .open(&mut open)
             .default_size([560.0, 340.0])

@@ -151,7 +151,7 @@ impl App {
             .iter()
             .rposition(|k| k.t <= local + tol)
             .unwrap_or(0);
-        egui::Window::new(tr_args(
+        crate::dialog_window::DialogWindow::new(tr_args(
             lang,
             "Pan/Crop do evento — {name}",
             &[("name", &ev.name)],

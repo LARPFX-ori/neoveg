@@ -337,7 +337,7 @@ impl App {
         let mut new_key: Option<MotionKey> = None;
         let mut actions: Vec<TmAction> = Vec::new();
         let mut seek: Option<Ticks> = None;
-        egui::Window::new(tr_args(
+        crate::dialog_window::DialogWindow::new(tr_args(
             lang,
             "Movimento da trilha — {name}",
             &[("name", &name)],

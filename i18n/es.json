@@ -206,6 +206,7 @@
   "Arraste até um evento de vídeo para usar no crossfade ou fade.": "Arrastre a un evento de vídeo para usar en fundidos.",
   "Arraste para a timeline": "Arrastre a la línea de tiempo",
   "Arraste para posicionar a origem na sala (frente no topo)": "Arrastre para posicionar en la sala (frente arriba)",
+  "Arraste para soltar a janela ou acoplá-la na janela do Neoveg": "Arrastre para soltar la ventana o acoplarla en la ventana de Neoveg",
   "Arraste para um evento ou trilha de vídeo": "Arrastre a un evento o pista de vídeo",
   "Arraste um efeito até um evento ou trilha, ou use os botões para aplicar à seleção / trilha selecionada / master.": "Arrastre un efecto a un evento o pista, o use los botones para aplicarlo a selección / pista / master.",
   "Arraste uma mídia para a timeline, ou dê um duplo clique para adicionar no cursor.": "Arrastre un medio a la línea de tiempo o haga doble clic para añadir en el cursor.",
@@ -2042,4 +2043,4 @@
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marcador en cursor"
-}
+}

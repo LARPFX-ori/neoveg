@@ -169,7 +169,7 @@ impl App {
         let mut start = false;
         let mut cancel = false;
         let mut pick_folder = false;
-        egui::Window::new(tr(lang, "Converter mídia"))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Converter mídia"))
             .id(egui::Id::new("convert_offer_win"))
             .open(&mut open)
             .collapsible(false)
@@ -269,7 +269,7 @@ impl App {
         let mut cancel = false;
         let idx_s = (finished + 1).min(total).to_string();
         let total_s = total.to_string();
-        egui::Window::new(tr(lang, "Convertendo mídia..."))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Convertendo mídia..."))
             .id(egui::Id::new("convert_progress_win"))
             .collapsible(true)
             .resizable(false)
