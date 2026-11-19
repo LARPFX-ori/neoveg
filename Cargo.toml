@@ -45,6 +45,8 @@ uuid = { version = "1", default-features = false }
 libloading = "0.8"
 unicode-bidi = "0.3"
 unicode-linebreak = "0.1"
+# Pacote .neoveg (ZIP): só deflate em Rust puro, sem bzip2/zstd/lzma nem criptografia.
+zip = { version = "2.6", default-features = false, features = ["deflate"] }
 # Bindings da API VST 3 (SDK 3.8, MIT), usados só no host isolado de plug-ins.
 vst3 = "0.3"
 

@@ -1340,20 +1340,24 @@ impl App {
         let seq_count = tabs.len();
 
         for (seq_id, seq_name, is_active) in tabs {
+            // a aba mostra o arquivo da sequência dentro do pacote .neoveg
+            let seq_label = crate::model::sequence_file_label(&seq_name);
             let text_w = ui
                 .painter()
-                .layout_no_wrap(seq_name.clone(), font_id.clone(), Color32::WHITE)
+                .layout_no_wrap(seq_label.clone(), font_id.clone(), Color32::WHITE)
                 .size()
                 .x;
             let close_w = if seq_count > 1 { 16.0 } else { 0.0 };
-            let tab_w = (text_w + 20.0 + close_w).clamp(70.0, 180.0);
+            let tab_w = (text_w + 20.0 + close_w).clamp(70.0, 220.0);
 
             if cur_x + tab_w > rect.right() - 32.0 {
                 break;
             }
 
             let tab_rect = Rect::from_min_size(pos2(cur_x, rect.top() + 3.0), vec2(tab_w, tab_h));
-            let tab_resp = ui.interact(tab_rect, ui.id().with(("seq_tab", seq_id)), Sense::click());
+            let tab_resp = ui
+                .interact(tab_rect, ui.id().with(("seq_tab", seq_id)), Sense::click())
+                .on_hover_text(&seq_label);
 
             let bg = if is_active {
                 self.theme.tl_header_bg
@@ -1408,9 +1412,9 @@ impl App {
             let max_text_w = tab_w - 12.0 - close_w;
             let text_pos = pos2(tab_rect.left() + 8.0, tab_rect.center().y);
             let label_clipped = if text_w > max_text_w {
-                format!("{}…", seq_name.chars().take(8).collect::<String>())
+                format!("{}…", seq_label.chars().take(18).collect::<String>())
             } else {
-                seq_name.clone()
+                seq_label.clone()
             };
             p.text(
                 text_pos,

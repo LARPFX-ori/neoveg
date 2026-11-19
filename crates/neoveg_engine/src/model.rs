@@ -546,7 +546,7 @@ impl Project {
             let seq_id = new_id();
             self.active_sequence_id = Some(seq_id);
             if self.active_sequence_name.is_none() {
-                self.active_sequence_name = Some("Sequência 1".to_string());
+                self.active_sequence_name = Some(DEFAULT_SEQUENCE_NAME.to_string());
             }
         }
         let act_id = self.active_sequence_id.unwrap_or(0);
@@ -569,7 +569,7 @@ impl Project {
         let active_name = self
             .active_sequence_name
             .as_deref()
-            .unwrap_or("Sequência 1");
+            .unwrap_or(DEFAULT_SEQUENCE_NAME);
         let mut tabs = Vec::new();
 
         if self.sequence_order.is_empty() {
@@ -600,7 +600,7 @@ impl Project {
             Some(
                 self.active_sequence_name
                     .clone()
-                    .unwrap_or_else(|| "Sequência 1".to_string()),
+                    .unwrap_or_else(|| DEFAULT_SEQUENCE_NAME.to_string()),
             )
         } else {
             self.sequences
@@ -629,40 +629,66 @@ impl Project {
         }
         let pos = self.sequences.iter().position(|s| s.id == target_id)?;
 
-        let old_active_id = self.active_sequence_id.unwrap_or_else(new_id);
-        let old_active_name = self
+        let saved_seq =
+            self.take_active_sequence(current_cursor, current_scroll_x, current_px_per_sec);
+        let target = self.sequences.remove(pos);
+        self.sequences.push(saved_seq);
+        let target_id = target.id;
+        let view = self.install_active_sequence(target);
+        if !self.sequence_order.contains(&target_id) {
+            self.sequence_order.push(target_id);
+        }
+        Some(view)
+    }
+
+    /// Tira o conteúdo da sequência ativa (trilhas, marcadores, regiões, loop e
+    /// transcrição) como uma [`Sequence`], deixando-o vazio no projeto. O id e
+    /// o nome da ativa continuam no projeto.
+    pub fn take_active_sequence(
+        &mut self,
+        cursor: Ticks,
+        scroll_x: Ticks,
+        px_per_sec: f32,
+    ) -> Sequence {
+        let id = match self.active_sequence_id {
+            Some(id) => id,
+            None => {
+                let id = new_id();
+                self.active_sequence_id = Some(id);
+                id
+            }
+        };
+        let name = self
             .active_sequence_name
             .clone()
-            .unwrap_or_else(|| "Sequência 1".to_string());
-        let saved_seq = Sequence {
-            id: old_active_id,
-            name: old_active_name,
+            .unwrap_or_else(|| DEFAULT_SEQUENCE_NAME.to_string());
+        Sequence {
+            id,
+            name,
             tracks: std::mem::take(&mut self.tracks),
             markers: std::mem::take(&mut self.markers),
             regions: std::mem::take(&mut self.regions),
             loop_region: self.loop_region.take(),
-            cursor: current_cursor,
-            scroll_x: current_scroll_x,
-            px_per_sec: current_px_per_sec,
+            cursor,
+            scroll_x,
+            px_per_sec,
             transcript: self.transcript.take(),
-        };
-
-        let target = self.sequences.remove(pos);
-        let view = (target.cursor, target.scroll_x, target.px_per_sec);
-        self.sequences.push(saved_seq);
-
-        self.tracks = target.tracks;
-        self.markers = target.markers;
-        self.regions = target.regions;
-        self.loop_region = target.loop_region;
-        self.transcript = target.transcript;
-        self.active_sequence_id = Some(target.id);
-        self.active_sequence_name = Some(target.name);
-
-        if !self.sequence_order.contains(&target.id) {
-            self.sequence_order.push(target.id);
         }
-        Some(view)
+    }
+
+    /// Põe `seq` como a sequência ativa (o contrário de
+    /// [`Self::take_active_sequence`]) e devolve a vista guardada nela
+    /// (cursor, rolagem e zoom).
+    pub fn install_active_sequence(&mut self, seq: Sequence) -> (Ticks, Ticks, f32) {
+        let view = (seq.cursor, seq.scroll_x, seq.px_per_sec);
+        self.tracks = seq.tracks;
+        self.markers = seq.markers;
+        self.regions = seq.regions;
+        self.loop_region = seq.loop_region;
+        self.transcript = seq.transcript;
+        self.active_sequence_id = Some(seq.id);
+        self.active_sequence_name = Some(seq.name);
+        view
     }
 
     /// Alterna para uma sequência diferente pelo ID, guardando a ativa nas inativas.
@@ -675,30 +701,14 @@ impl Project {
     pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
         self.ensure_sequences();
         // Salva a sequência ativa atual
-        let old_active_id = self.active_sequence_id.unwrap_or_else(new_id);
-        let old_active_name = self
-            .active_sequence_name
-            .clone()
-            .unwrap_or_else(|| "Sequência 1".to_string());
-        let saved_seq = Sequence {
-            id: old_active_id,
-            name: old_active_name,
-            tracks: std::mem::take(&mut self.tracks),
-            markers: std::mem::take(&mut self.markers),
-            regions: std::mem::take(&mut self.regions),
-            loop_region: self.loop_region.take(),
-            cursor: Ticks::ZERO,
-            scroll_x: Ticks::ZERO,
-            px_per_sec: 100.0,
-            transcript: self.transcript.take(),
-        };
+        let saved_seq = self.take_active_sequence(Ticks::ZERO, Ticks::ZERO, 100.0);
         self.sequences.push(saved_seq);
 
         let new_id = new_id();
         let total = self.sequences.len() + 1;
         let new_name = name
             .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("Sequência {total}"));
+            .unwrap_or_else(|| format!("Sequência {total:02}"));
 
         self.tracks = vec![
             Track::new(TrackKind::Video, "Vídeo 1"),
@@ -733,7 +743,7 @@ impl Project {
                 (
                     self.active_sequence_name
                         .clone()
-                        .unwrap_or_else(|| "Sequência 1".to_string()),
+                        .unwrap_or_else(|| DEFAULT_SEQUENCE_NAME.to_string()),
                     self.tracks.clone(),
                     self.markers.clone(),
                     self.regions.clone(),
@@ -1475,11 +1485,11 @@ impl Project {
                 self.active_sequence_name = Some(first.name.clone());
             } else {
                 self.active_sequence_id = Some(new_id());
-                self.active_sequence_name = Some("Sequência 1".to_string());
+                self.active_sequence_name = Some(DEFAULT_SEQUENCE_NAME.to_string());
             }
         }
         if self.active_sequence_name.is_none() {
-            self.active_sequence_name = Some("Sequência 1".to_string());
+            self.active_sequence_name = Some(DEFAULT_SEQUENCE_NAME.to_string());
         }
         let mut seen_seqs = std::collections::HashSet::new();
         if let Some(aid) = self.active_sequence_id {
@@ -1976,9 +1986,24 @@ impl Project {
                 MAX_PROJECT_BYTES / (1024 * 1024)
             ));
         }
-        let txt = std::fs::read_to_string(path)
-            .map_err(|e| format!("erro ao ler {}: {e}", path.display()))?;
-        Self::from_json(&txt)
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("erro ao ler {}: {e}", path.display()))?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Carrega um projeto a partir dos bytes do arquivo: o pacote `.neoveg`
+    /// (ZIP com `project.json` e uma entrada `.nvegseq` por sequência) ou o
+    /// JSON dos projetos antigos e dos arquivos de recuperação.
+    pub fn from_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
+        if crate::package::is_package(bytes) {
+            let (mut p, mut fixes) = crate::package::read_package(bytes)?;
+            fixes.extend(p.sanitize());
+            bump_ids(p.max_id());
+            return Ok((p, fixes));
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| "projeto inválido: não é um pacote .neoveg nem JSON".to_string())?;
+        Self::from_json(text.trim_start_matches('\u{feff}'))
     }
 
     /// Salva o projeto em disco com rotação de backup padrão (ativo, 3 cópias).
@@ -1994,10 +2019,10 @@ impl Project {
         backup_enabled: bool,
         backup_copies: usize,
     ) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("erro ao serializar projeto: {e}"))?;
+        let bytes = crate::package::write_package(self)?;
         let tmp = path.with_extension("neoveg.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("erro ao gravar {}: {e}", tmp.display()))?;
+        std::fs::write(&tmp, bytes)
+            .map_err(|e| format!("erro ao gravar {}: {e}", tmp.display()))?;
 
         if backup_enabled && path.exists() {
             if let Err(e) = rotate_project_backups(path, backup_copies) {
@@ -2172,6 +2197,14 @@ pub const MAX_BIN_DEPTH: usize = 32;
 pub const MAX_STORYBOARDS: usize = 64;
 pub const MAX_STORYBOARD_ITEMS: usize = 1024;
 pub const MAX_SEQUENCES: usize = 64;
+/// Nome da primeira sequência de um projeto novo.
+pub const DEFAULT_SEQUENCE_NAME: &str = "Sequência 01";
+
+/// Rótulo da aba de uma sequência: o nome do arquivo `.nvegseq` dela dentro
+/// do pacote `.neoveg` (ex.: "Sequência 01.nvegseq").
+pub fn sequence_file_label(name: &str) -> String {
+    format!("{name}.{}", crate::package::SEQUENCE_EXT)
+}
 
 /// Pasta manual (*Bin*) para organização hierárquica da mídia do projeto.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4959,7 +4992,10 @@ mod tests {
         assert_eq!(p.sequence_tab_info().len(), 1);
         assert!(p.active_sequence_id.is_some());
         let seq1_id = p.active_sequence_id.unwrap();
-        assert_eq!(p.active_sequence_name.as_deref(), Some("Sequência 1"));
+        assert_eq!(
+            p.active_sequence_name.as_deref(),
+            Some(DEFAULT_SEQUENCE_NAME)
+        );
 
         // Cria nova sequência
         let seq2_id = p.create_sequence(Some("Corte Diretor"));
@@ -5135,7 +5171,10 @@ mod tests {
         };
         let _ = p.sanitize();
         assert!(p.active_sequence_id.is_some());
-        assert_eq!(p.active_sequence_name.as_deref(), Some("Sequência 1"));
+        assert_eq!(
+            p.active_sequence_name.as_deref(),
+            Some(DEFAULT_SEQUENCE_NAME)
+        );
 
         // Mais de 64 sequências
         for i in 0..100 {
@@ -5208,7 +5247,7 @@ mod tests {
             Some("Segunda Sequência")
         );
         assert_eq!(roundtrip.sequences.len(), 1);
-        assert_eq!(roundtrip.sequences[0].name, "Sequência 1");
+        assert_eq!(roundtrip.sequences[0].name, DEFAULT_SEQUENCE_NAME);
     }
 
     #[test]

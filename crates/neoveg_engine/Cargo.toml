@@ -27,6 +27,7 @@ uuid.workspace = true
 libloading.workspace = true
 unicode-bidi.workspace = true
 unicode-linebreak.workspace = true
+zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
