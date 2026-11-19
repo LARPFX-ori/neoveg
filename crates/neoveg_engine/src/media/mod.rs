@@ -11,6 +11,8 @@ pub mod convert;
 #[forbid(unsafe_code)]
 pub mod demux;
 #[forbid(unsafe_code)]
+pub mod fallback;
+#[forbid(unsafe_code)]
 pub mod ffv1;
 #[forbid(unsafe_code)]
 pub mod flac;
@@ -26,6 +28,8 @@ pub mod mkv;
 pub mod mov;
 #[forbid(unsafe_code)]
 mod system;
+pub(crate) mod vaapi;
+pub(crate) mod videotoolbox;
 #[forbid(unsafe_code)]
 pub mod wav;
 #[forbid(unsafe_code)]
