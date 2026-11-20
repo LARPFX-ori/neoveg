@@ -101,6 +101,8 @@ pub fn install(
 /// Atalhos do menu Iniciar e da Área de Trabalho e registro do Windows.
 /// Devolve os atalhos criados.
 #[cfg(windows)]
+// mesma assinatura da versão do Linux, que acrescenta o ícone à lista
+#[allow(clippy::ptr_arg)]
 fn integrate(opts: &InstallOptions, files: &mut Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
     let exe = opts.dir.join(APP_EXE);
     let mut shortcuts = Vec::new();
