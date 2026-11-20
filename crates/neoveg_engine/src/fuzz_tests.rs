@@ -500,16 +500,34 @@ fn fuzz_mp4_e_media_foundation_hostil() {
 
     let mp4_bytes = if fixture.exists() {
         let mut item = media_item(&fixture);
-        let imp = media::load_entry(&mut item).expect("fixture mf_smoke.mp4 deveria carregar");
-        assert!(imp.item.has_video);
-        assert!(imp.item.width > 0 && imp.item.height > 0);
-        let cache = media::MediaCache::default();
-        cache.insert(imp.item.id, imp.entry);
-        let img = cache.video_frame(&imp.item, crate::time::Ticks::from_millis_i64(500), 160, 90);
-        assert!(
-            img.is_some(),
-            "quadro decodificado via Media Foundation esperado"
-        );
+        match media::load_entry(&mut item) {
+            Ok(imp) => {
+                assert!(imp.item.has_video);
+                assert!(imp.item.width > 0 && imp.item.height > 0);
+                let cache = media::MediaCache::default();
+                cache.insert(imp.item.id, imp.entry);
+                let img =
+                    cache.video_frame(&imp.item, crate::time::Ticks::from_millis_i64(500), 160, 90);
+                assert!(
+                    img.is_some(),
+                    "quadro decodificado pelo decodificador do sistema esperado"
+                );
+            }
+            // A fixture é H.264. Fora do Windows (Media Foundation), só um
+            // decodificador do sistema a lê (VA-API); sem GPU, como no runner
+            // Linux da CI, o fallback em Rust puro não decodifica avc1 e a
+            // importação devolve erro recuperável, que é o comportamento
+            // certo (§3.6). O erro tem de ser esse, não outro; e as mutações
+            // abaixo rodam do mesmo jeito sobre os bytes da fixture.
+            Err(e) if !cfg!(windows) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    msg.contains("avc1"),
+                    "sem decodificador H.264 do sistema, o erro esperado é o do codec avc1: {msg}"
+                );
+            }
+            Err(e) => panic!("fixture mf_smoke.mp4 deveria carregar: {e:#}"),
+        }
         std::fs::read(&fixture).unwrap()
     } else {
         base
