@@ -741,6 +741,7 @@
   "Escolha de Plug-in": "プラグイン選択",
   "Escolha os botões que aparecem na barra do Trimmer.": "トリマーのボタンバーに表示するボタンを選んでください。",
   "Escolha uma pasta de instalação completa (ex.: C:\\...).": "完全なインストール先フォルダーを選んでください (例: C:\\...)。",
+  "Escolha uma pasta de instalação completa (ex.: /opt/neoveg).": "完全なインストール先フォルダーを選んでください (例: /opt/neoveg)。",
   "Escolher as sobreposições": "オーバーレイを選択",
   "Escolher imagem...": "画像を選択...",
   "Escolher modelo...": "テンプレートを選択...",

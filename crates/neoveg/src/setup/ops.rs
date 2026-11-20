@@ -66,7 +66,8 @@ pub fn install(
     let mut archive =
         zip::ZipArchive::new(region).map_err(|e| format!("pacote do programa ilegível: {e}"))?;
     let files = payload::extract_all(&mut archive, &opts.dir, progress).map_err(|e| {
-        if e.contains("os error 32") || e.contains("os error 5") {
+        // 32/5: arquivo em uso no Windows; 26: "Text file busy" no Linux
+        if e.contains("os error 32") || e.contains("os error 5") || e.contains("os error 26") {
             format!("{e}\nFeche o Neoveg antes de instalar.")
         } else {
             e
@@ -84,7 +85,23 @@ pub fn install(
         system::remove_empty_dirs(&opts.dir);
     }
     write_uninstaller(setup_exe, span, &opts.dir.join(UNINSTALLER_EXE))?;
+    let mut files = files;
+    let shortcuts = integrate(opts, &mut files)?;
+    Manifest {
+        produto: "Neoveg".into(),
+        versao: VERSION.into(),
+        escopo: opts.scope,
+        arquivos: files,
+        atalhos: shortcuts,
+        associacoes: opts.associate_files,
+    }
+    .save(&opts.dir)
+}
 
+/// Atalhos do menu Iniciar e da Área de Trabalho e registro do Windows.
+/// Devolve os atalhos criados.
+#[cfg(windows)]
+fn integrate(opts: &InstallOptions, files: &mut Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
     let exe = opts.dir.join(APP_EXE);
     let mut shortcuts = Vec::new();
     if let Some(menu) = system::start_menu_dir(opts.scope) {
@@ -99,7 +116,7 @@ pub fn install(
             shortcuts.push(lnk);
         }
     }
-    let size_kb = system::installed_size_kb(&opts.dir, &files);
+    let size_kb = system::installed_size_kb(&opts.dir, files);
     system::apply_registry(&system::registry_writes(
         opts.scope,
         &opts.dir,
@@ -107,39 +124,50 @@ pub fn install(
         size_kb,
         opts.associate_files,
     ))?;
-    Manifest {
-        produto: "Neoveg".into(),
-        versao: VERSION.into(),
-        escopo: opts.scope,
-        arquivos: files,
-        atalhos: shortcuts,
-        associacoes: opts.associate_files,
-    }
-    .save(&opts.dir)
+    Ok(shortcuts)
 }
 
-/// Pasta dos dados do usuário (preferências, layouts, recuperação, logs).
+/// Permissão de execução, ícone, atalho no menu de aplicativos, tipo MIME
+/// de `.neoveg` e comando `neoveg` (ver `linux.rs`). Devolve o que foi
+/// criado fora da pasta do programa.
+#[cfg(not(windows))]
+fn integrate(opts: &InstallOptions, files: &mut Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    use crate::linux;
+    linux::set_executable(&[opts.dir.join(APP_EXE), opts.dir.join(UNINSTALLER_EXE)])?;
+    linux::write_icon(&opts.dir.join(linux::ICON_FILE))?;
+    files.push(PathBuf::from(linux::ICON_FILE));
+    linux::integrate(
+        opts.scope,
+        &opts.dir,
+        opts.desktop_shortcut,
+        opts.associate_files,
+    )
+}
+
+/// Pasta dos dados do usuário (preferências, layouts, recuperação, logs):
+/// `%APPDATA%\Neoveg` no Windows, `~/.local/share/Neoveg` no Linux.
 pub fn user_data_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .map(|p| p.join(neoveg_common::util::USER_DATA_DIR_NAME))
+    neoveg_common::util::user_data_root().map(|p| p.join(neoveg_common::util::USER_DATA_DIR_NAME))
 }
 
 /// Desinstala o que o manifesto de `dir` lista. Os dados do usuário só são
 /// apagados com `remove_user_data`.
 pub fn uninstall(dir: &Path, remove_user_data: bool) -> Result<(), String> {
     let m = Manifest::load(dir)?;
-    for lnk in &m.atalhos {
-        if lnk
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
-        {
-            let _ = std::fs::remove_file(lnk);
+    #[cfg(windows)]
+    {
+        for lnk in &m.atalhos {
+            if lnk
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
+            {
+                let _ = std::fs::remove_file(lnk);
+            }
         }
+        system::delete_registry(&system::registry_deletes(m.escopo, m.associacoes));
     }
-    system::delete_registry(&system::registry_deletes(m.escopo, m.associacoes));
+    #[cfg(not(windows))]
+    crate::linux::deintegrate(dir, &m);
     for f in &m.arquivos {
         // só dentro da pasta instalada, mesmo com manifesto adulterado
         if let Some(rel) = payload::safe_relative(&f.to_string_lossy()) {

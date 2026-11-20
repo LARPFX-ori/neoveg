@@ -81,7 +81,8 @@ static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// (Arquivos de Programas) e é apagada ao desinstalar.
 pub const INSTALL_MARKER: &str = "instalado.json";
 
-/// Nome da pasta de dados do usuário quando instalado (`%APPDATA%\Neoveg`).
+/// Nome da pasta de dados do usuário quando instalado (`%APPDATA%\Neoveg` no
+/// Windows, `~/.local/share/Neoveg` no Linux).
 pub const USER_DATA_DIR_NAME: &str = "Neoveg";
 
 /// Escolhe a pasta base (regra pura, testável):
@@ -111,6 +112,31 @@ pub fn choose_base_dir(
     user_dir.unwrap_or_else(|| temp.join("neoveg"))
 }
 
+/// Raiz das pastas de dados do usuário: `%APPDATA%` no Windows e, nos
+/// outros sistemas, `$XDG_DATA_HOME` ou `~/.local/share` (XDG Base Directory).
+/// Só caminhos absolutos; variáveis vazias ou relativas são ignoradas.
+pub fn user_data_root() -> Option<PathBuf> {
+    let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    if cfg!(windows) {
+        user_data_root_from(var("APPDATA"), None, None)
+    } else {
+        user_data_root_from(None, var("XDG_DATA_HOME"), var("HOME"))
+    }
+}
+
+/// Regra pura de [`user_data_root`]: `appdata` (Windows) ou `xdg_data_home`
+/// ou `home/.local/share`.
+pub fn user_data_root_from(
+    appdata: Option<PathBuf>,
+    xdg_data_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let abs = |p: Option<PathBuf>| p.filter(|p| p.is_absolute());
+    abs(appdata)
+        .or_else(|| abs(xdg_data_home))
+        .or_else(|| abs(home).map(|h| h.join(".local").join("share")))
+}
+
 fn dir_is_writable(d: &std::path::Path) -> bool {
     let probe = d.join("logs");
     std::fs::create_dir_all(&probe).is_ok()
@@ -134,9 +160,7 @@ pub fn base_dir() -> PathBuf {
                 .as_ref()
                 .is_some_and(|d| d.join(INSTALL_MARKER).is_file());
             let writable = !installed && exe_dir.as_deref().is_some_and(dir_is_writable);
-            let user_data = std::env::var_os("APPDATA")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from);
+            let user_data = user_data_root();
             let chosen = choose_base_dir(
                 exe_dir,
                 installed,
@@ -280,6 +304,26 @@ mod tests {
         assert!(m.is_poisoned());
         *lock(&m) += 1;
         assert_eq!(*lock(&m), 2);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn raiz_dos_dados_do_usuario_segue_appdata_ou_xdg() {
+        let p = PathBuf::from;
+        assert_eq!(
+            user_data_root_from(None, Some(p("/x/dados")), Some(p("/home/u"))),
+            Some(p("/x/dados"))
+        );
+        assert_eq!(
+            user_data_root_from(None, None, Some(p("/home/u"))),
+            Some(p("/home/u/.local/share"))
+        );
+        // XDG_DATA_HOME relativo é ignorado (especificação XDG)
+        assert_eq!(
+            user_data_root_from(None, Some(p("rel")), Some(p("/home/u"))),
+            Some(p("/home/u/.local/share"))
+        );
+        assert_eq!(user_data_root_from(None, Some(p("")), Some(p(""))), None);
     }
 
     /// Instalado (marcador ao lado do executável): os dados vão para

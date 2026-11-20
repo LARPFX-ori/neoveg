@@ -131,7 +131,11 @@ impl SetupApp {
             self.phase = Phase::Failed(
                 tr(
                     self.lang,
-                    "Escolha uma pasta de instalação completa (ex.: C:\\...).",
+                    if cfg!(windows) {
+                        "Escolha uma pasta de instalação completa (ex.: C:\\...)."
+                    } else {
+                        "Escolha uma pasta de instalação completa (ex.: /opt/neoveg)."
+                    },
                 )
                 .into(),
             );

@@ -339,14 +339,26 @@ fn f32_to_u8(v: f32) -> u8 {
 
 /// Gera em código Rust puro o ícone original 32x32 da janela do Neoveg.
 pub(crate) fn window_icon_data() -> egui::IconData {
-    const SIDE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIDE as usize) * (SIDE as usize) * 4);
-    for y in 0..SIDE {
-        let py = y as f32;
-        for x in 0..SIDE {
-            let px = x as f32;
+    icon_data_sized(32)
+}
+
+/// Menor e maior lado aceitos por [`icon_data_sized`].
+pub(crate) const ICON_SIDE_RANGE: (u32, u32) = (16, 1024);
+
+/// O mesmo ícone com `side` x `side` pixels (limitado a [`ICON_SIDE_RANGE`]).
+/// O desenho é feito na grade de 32 unidades e a suavização das bordas fica
+/// com 1 pixel em qualquer tamanho; com 32, é o ícone da janela.
+pub(crate) fn icon_data_sized(side: u32) -> egui::IconData {
+    let side = side.clamp(ICON_SIDE_RANGE.0, ICON_SIDE_RANGE.1);
+    // pixels por unidade da grade de 32
+    let s = side as f32 / 32.0;
+    let mut rgba = Vec::with_capacity((side as usize) * (side as usize) * 4);
+    for y in 0..side {
+        let py = (y as f32 + 0.5) / s - 0.5;
+        for x in 0..side {
+            let px = (x as f32 + 0.5) / s - 0.5;
             let sd_box = sd_rounded_square(px, py, 14.2, 5.2);
-            let outer_cov = (0.75 - sd_box).clamp(0.0, 1.0);
+            let outer_cov = (0.75 - sd_box * s).clamp(0.0, 1.0);
             if outer_cov <= 0.0 {
                 rgba.extend_from_slice(&[0, 0, 0, 0]);
                 continue;
@@ -358,7 +370,7 @@ pub(crate) fn window_icon_data() -> egui::IconData {
             let mut b = blend_channel(52.0, 32.0, grad);
 
             // Borda sutil azul no perímetro do emblema arredondado
-            let border_cov = (1.0 - (sd_box + 0.85).abs()).clamp(0.0, 1.0);
+            let border_cov = ((1.0 - (sd_box + 0.85).abs()) * s).clamp(0.0, 1.0);
             r = blend_channel(r, 72.0, border_cov * 0.90);
             g = blend_channel(g, 162.0, border_cov * 0.90);
             b = blend_channel(b, 245.0, border_cov * 0.90);
@@ -366,14 +378,14 @@ pub(crate) fn window_icon_data() -> egui::IconData {
             // Hastes verticais do "N" em branco frio
             let d_left = dist_to_segment(px, py, 8.8, 22.2, 8.8, 9.8) - 1.65;
             let d_right = dist_to_segment(px, py, 23.2, 22.2, 23.2, 9.8) - 1.65;
-            let pillar_cov = (0.75 - d_left.min(d_right)).clamp(0.0, 1.0);
+            let pillar_cov = (0.75 - d_left.min(d_right) * s).clamp(0.0, 1.0);
             r = blend_channel(r, 238.0, pillar_cov);
             g = blend_channel(g, 245.0, pillar_cov);
             b = blend_channel(b, 255.0, pillar_cov);
 
             // Diagonal do "N" em ciano -> âmbar coral original do Neoveg
             let d_diag = dist_to_segment(px, py, 9.0, 10.0, 23.0, 22.0) - 1.75;
-            let diag_cov = (0.75 - d_diag).clamp(0.0, 1.0);
+            let diag_cov = (0.75 - d_diag * s).clamp(0.0, 1.0);
             let diag_t = ((px - 9.0) / 14.0).clamp(0.0, 1.0);
             let dr = blend_channel(58.0, 255.0, diag_t);
             let dg = blend_channel(196.0, 124.0, diag_t);
@@ -390,8 +402,8 @@ pub(crate) fn window_icon_data() -> egui::IconData {
     }
     egui::IconData {
         rgba,
-        width: SIDE,
-        height: SIDE,
+        width: side,
+        height: side,
     }
 }
 
@@ -842,5 +854,23 @@ mod tests {
         assert_eq!(icon.rgba[3], 0);
         let center_idx = (16 * 32 + 16) * 4;
         assert_eq!(icon.rgba[center_idx + 3], 255);
+    }
+
+    /// O ícone grande dos menus tem o mesmo desenho: cantos transparentes,
+    /// centro opaco e a haste esquerda do "N" clara. Tamanhos hostis são
+    /// limitados (alocação limitada, §0.4).
+    #[test]
+    fn icone_em_outros_tamanhos() {
+        let big = icon_data_sized(256);
+        assert_eq!((big.width, big.height), (256, 256));
+        assert_eq!(big.rgba.len(), 256 * 256 * 4);
+        let at = |x: usize, y: usize| (y * 256 + x) * 4;
+        assert_eq!(big.rgba[at(0, 0) + 3], 0);
+        assert_eq!(big.rgba[at(128, 128) + 3], 255);
+        // haste esquerda: x = 8,8 da grade de 32 -> pixel 72 de 256
+        let haste = at(72, 128);
+        assert!(big.rgba[haste] > 200 && big.rgba[haste + 2] > 200);
+        assert_eq!(icon_data_sized(0).width, ICON_SIDE_RANGE.0);
+        assert_eq!(icon_data_sized(u32::MAX).width, ICON_SIDE_RANGE.1);
     }
 }

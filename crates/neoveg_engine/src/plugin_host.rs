@@ -18,9 +18,10 @@ mod ofx;
 mod vst3;
 
 use crate::midi::Vst3MidiEvent;
+#[cfg(windows)]
+use crate::model::MAX_VST3_STATE_BYTES;
 use crate::model::{
     decode_hex_bytes, encode_hex_bytes, Id, OfxFxRef, OfxParamValue, Vst3FxRef, Vst3ParamValue,
-    MAX_VST3_STATE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
