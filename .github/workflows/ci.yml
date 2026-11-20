@@ -8,7 +8,8 @@
 # `neoveg/common-actions`. Esse repositório ainda não existe; quando existir,
 # troque estes passos pelos workflows reutilizáveis de lá.
 #
-# Windows primeiro: Linux/macOS entram junto com os backends nativos (ROADMAP, Fase 4).
+# Windows e Linux (Ubuntu). macOS entra junto com o backend nativo dele
+# (ROADMAP, Fase 4).
 
 name: CI
 
@@ -82,3 +83,63 @@ jobs:
       # resolver essa falha em paralelo.
       - name: cargo test
         run: cargo test --workspace -- --test-threads=1
+
+  # Os mesmos portões no Linux. Por quê: o Neoveg também é distribuído para
+  # Linux (instalador e pacote portátil do build_installer.py), e código só do
+  # Windows (`#[cfg(windows)]`) esconde avisos e erros que só aparecem aqui:
+  # um import usado só no Windows já quebrou o clippy do Linux sem a CI ver.
+  # ubuntu-latest (24.04, glibc 2.39) é a mesma base dos pacotes gerados.
+  gates-linux:
+    name: Portões (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cabeçalhos para compilar: ALSA (cpal, via alsa-sys e pkg-config),
+      # Wayland e xkbcommon (winit). Xvfb dá um servidor X aos testes que
+      # abrem janela; o runner não tem tela.
+      - name: Bibliotecas do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libwayland-dev libxkbcommon-dev xvfb
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # §3.4.1
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # §3.4.4
+      - name: Auditoria de licenças
+        run: python tools/check_licenses.py
+
+      # §3.4.2 e §0.9
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Mesmo motivo do job do Windows: sem as fixtures, os testes que as usam
+      # pulam e passam sem testar nada (§2.3: ffmpeg só como gerador/oráculo).
+      - name: Ferramentas das fixtures
+        run: |
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m pip install pyaaf2==1.7.1
+
+      - name: Gerar fixtures
+        run: |
+          python tools/gen_media_fixtures.py target/fixtures
+          python tools/gen_aaf_fixtures.py target/fixtures
+
+      # §3.4.3. Um teste por vez, como no Windows e como o projeto roda
+      # localmente; xvfb-run para os testes de janela.
+      - name: cargo test
+        run: xvfb-run -a cargo test --workspace -- --test-threads=1
