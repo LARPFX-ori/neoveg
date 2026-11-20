@@ -65,6 +65,7 @@ As imagens mostram só a interface do Neoveg, com mídia sintética gerada pelo 
   - **Conversão para formato compatível (Windows):** quando um arquivo não abre diretamente (extensão fora da lista ou codec que os leitores próprios não decodificam, como um AVI que não é MJPEG), o Neoveg oferece convertê-lo com o decodificador do sistema para AVI MJPEG + PCM (vídeo) ou WAV 24 bits (só áudio) e importa o resultado na mesma posição; também em *Arquivo → Converter mídia para formato compatível...*. O destino é escolhido no diálogo, o arquivo é gravado como `.part` até terminar, o AVI é gravado com as extensões OpenDML (sem o limite de 4 GB; até ~250 GB, e a qualidade JPEG cai de 90 até 50 só se for preciso para caber, com aviso), e nada é preenchido ou cortado em silêncio (`media/convert.rs`). (`ffmpeg`/`ffprobe` são utilizados exclusivamente como oráculos de teste externos e geradores de fixtures via `tools/gen_media_fixtures.py`, nunca linkados nem distribuídos.)
 - **Relatório quando o programa não fecha normalmente:** cada sessão da interface mantém um marcador travado em `logs/sessoes/`; na abertura seguinte a uma queda (erro interno, fechamento forçado, falta de energia), a janela *O Neoveg não foi fechado normalmente* diz o que aconteceu (o erro e o local, ou que o programa foi fechado sem aviso), lista os erros isolados daquela sessão, oferece a recuperação do projeto salvo automaticamente e permite copiar o relatório ou abrir a pasta de logs. Duas instâncias abertas ao mesmo tempo não contam como queda, e os pânicos de outras instâncias e dos hosts de plug-in não entram no relatório.
 - **Propriedades do projeto:** abas *Vídeo*, *Áudio*, *Régua*, *Resumo* e *CD de áudio*, como no VEGAS Pro; o Resumo e o código UPC/EAN entram na folha `.cue` exportada.
+- **Windows e Linux:** instalador próprio em Rust e pacote portátil para os dois sistemas; no Linux, atalho no menu de aplicativos, comando `neoveg` e associação dos arquivos `.neoveg` (ver *Instalador para Linux*).
 - **Hardware Limitado:** resoluções de prévia (*Rascunho / Prévia / Boa / Melhor*), geração de proxies `.avi`, pré-renderização seletiva de região, limite configurável de RAM/quadros em cache e compilação portátil sem `-C target-cpu=native`.
 
 ## Como Executar
@@ -180,6 +181,8 @@ cargo test --workspace
 python tools/check_licenses.py
 python build_portable.py
 ```
+
+A CI do GitHub (`.github/workflows/ci.yml`) roda esses portões em todo pull request, no Windows e no Linux (Ubuntu), com os testes um por vez e as fixtures de mídia geradas na hora.
 
 O script `build_portable.py` compila em modo release e gera o pacote portátil em `dist/` na raiz do repositório, com as fontes abertas `assets/fonts/` (`OFL-1.1`) e os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos. Depois de confirmar e verificar a cópia (`SHA-256`), ele apaga a pasta de build do cargo (`target/` ou `CARGO_TARGET_DIR`); se a compilação, verificação ou a cópia falhar, a pasta é mantida e o erro é informado. Use `--keep-target` para manter a pasta de build e `--out` para gravar o pacote em outro lugar. `dist/` e `target/` ficam no `.gitignore`.
 
