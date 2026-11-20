@@ -182,6 +182,8 @@ python tools/check_licenses.py
 python build_portable.py
 ```
 
+A CI do GitHub (`.github/workflows/ci.yml`) roda esses portões em todo pull request, no Windows e no Linux (Ubuntu), com os testes um por vez e as fixtures de mídia geradas na hora.
+
 O script `build_portable.py` compila em modo release e gera o pacote portátil em `dist/` na raiz do repositório, com as fontes abertas `assets/fonts/` (`OFL-1.1`) e os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos. Depois de confirmar e verificar a cópia (`SHA-256`), ele apaga a pasta de build do cargo (`target/` ou `CARGO_TARGET_DIR`); se a compilação, verificação ou a cópia falhar, a pasta é mantida e o erro é informado. Use `--keep-target` para manter a pasta de build e `--out` para gravar o pacote em outro lugar. `dist/` e `target/` ficam no `.gitignore`.
 
 ### Instalador para Windows
