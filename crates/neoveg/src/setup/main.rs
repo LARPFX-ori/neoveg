@@ -1,6 +1,6 @@
-//! Instalador do Neoveg para Windows.
+//! Instalador do Neoveg para Windows e Linux.
 //!
-//! O `Neoveg-Setup.exe` é este executável com o pacote do programa (a pasta
+//! O `Neoveg-Setup.exe` (no Linux, `Neoveg-Setup-<versão>-linux-x86_64`) é este executável com o pacote do programa (a pasta
 //! `dist/` em ZIP) anexado ao fim; ver `payload.rs` e
 //! `tools/build_installer.py`. Instalado, uma cópia sem o pacote vira o
 //! `desinstalar.exe`.
@@ -21,6 +21,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gui;
+#[cfg(not(windows))]
+mod linux;
 mod ops;
 mod payload;
 mod system;

@@ -1430,6 +1430,13 @@ fn abertura_em_janela_propria_desenha_so_a_abertura_e_depois_libera_a_janela() {
         .collect();
     assert!(cmds.contains(&egui::ViewportCommand::Decorations(true)));
     assert!(cmds.contains(&egui::ViewportCommand::Resizable(true)));
+    // sem tamanho máximo antes de liberar o redimensionamento: no X11 o
+    // máximo da abertura (640x388) voltava e sumiam maximizar e minimizar
+    let pos = |c: &egui::ViewportCommand| cmds.iter().position(|x| x == c);
+    let max = pos(&egui::ViewportCommand::MaxInnerSize(egui::Vec2::INFINITY))
+        .expect("a janela principal não pode herdar o tamanho máximo da abertura");
+    let resizable = pos(&egui::ViewportCommand::Resizable(true)).expect("Resizable");
+    assert!(max < resizable);
 }
 
 /// Num monitor 1440x900 (barra de tarefas de 40 pontos), a janela abria com

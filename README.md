@@ -202,6 +202,28 @@ Instalado, o Neoveg guarda preferências, layouts, logs e cópias de recuperaç�
 
 Modo silencioso: `Neoveg-Setup.exe --silent [--user | --all-users] [--dir <pasta>] [--desktop] [--no-assoc]`. Para remover sem janela: `desinstalar.exe --uninstall --silent [--remove-data]`.
 
+### Instalador para Linux
+
+```bash
+python3 build_installer.py
+```
+
+No Linux, o mesmo `build_installer.py` gera dois arquivos em `dist-installer/`:
+
+- `Neoveg-Setup-<versão>-linux-x86_64`: o mesmo instalador em Rust, com a mesma janela e as mesmas opções. Dê permissão de execução (`chmod +x`) e abra.
+- `Neoveg-<versão>-linux-x86_64.tar.gz`: o pacote portátil. Extraia e rode `./neoveg`; os dados ficam ao lado do executável.
+
+O instalador pergunta para quem instalar:
+
+- **Só para mim:** em `~/.local/opt/neoveg`, sem pedir senha. O atalho vai para `~/.local/share/applications` e o comando `neoveg` para `~/.local/bin`.
+- **Para todos os usuários:** em `/opt/neoveg`, com a senha de administrador pelo `pkexec`. O atalho e o tipo de arquivo vão para `/usr/local/share` e o comando para `/usr/local/bin`. Sem `pkexec`, rode `sudo ./Neoveg-Setup-<versão>-linux-x86_64 --silent --all-users`.
+
+O atalho segue a *Desktop Entry Specification* do freedesktop.org e aparece no menu de aplicativos dos ambientes que seguem essa especificação (GNOME, KDE Plasma, Xfce e outros) com o ícone do Neoveg. Se marcado, ele também vai para a Área de Trabalho (só na instalação para mim, lida de `~/.config/user-dirs.dirs`). A opção de abrir arquivos `.neoveg` registra o tipo `application/x-neoveg-project` (*Shared MIME-info*). As ferramentas `update-desktop-database`, `update-mime-database`, `xdg-mime` e `gio` são usadas quando existem; sem elas a instalação continua. Para desinstalar, use *Desinstalar o Neoveg* no menu do atalho (botão direito) ou rode `desinstalar --uninstall` na pasta instalada.
+
+Instalado, o Neoveg guarda os dados em `$XDG_DATA_HOME/Neoveg` (normalmente `~/.local/share/Neoveg`). O modo silencioso aceita as mesmas opções do Windows: `./Neoveg-Setup-<versão>-linux-x86_64 --silent [--user | --all-users] [--dir <pasta>] [--desktop] [--no-assoc]` e `desinstalar --uninstall --silent [--remove-data]`.
+
+O executável usa a glibc do sistema em que foi compilado: para rodar em distribuições mais antigas, compile na mais antiga delas.
+
 ### Idiomas (`i18n/*.json`)
 
 O Neoveg suporta **português do Brasil (`pt-BR`, padrão)**, **inglês (`en`)**, **espanhol (`es`)**, **francês (`fr`)**, **alemão (`de`)** e **japonês (`ja`)** a partir dos catálogos JSON na pasta `i18n/`. A troca de idioma pode ser feita ao vivo em **Preferências → Geral**, na tela inicial (**Boas-vindas**) ou na inicialização via `--lang <código>` / `NEOVEG_LANG`. Em japonês, glifos CJK são carregados das fontes instaladas no sistema operacional em tempo de execução. A interface usa as fontes do sistema, como o VEGAS Pro: Segoe UI no Windows (Tahoma como alternativa; Noto Sans, Liberation Sans ou DejaVu Sans no Linux) e Consolas ou Cascadia Mono nos campos monoespaçados, lidas da pasta de fontes do sistema e nunca distribuídas; **Preferências → Geral** volta para as fontes embutidas. O tamanho de textos, botões e painéis muda em **Exibir → Escala da interface** (Aumentar, Diminuir, 100%; de 50% a 300%, em passos de 10%) ou no campo *Escala da interface* das Preferências; os comandos vêm sem atalho padrão e podem receber um em *Personalizar teclado*. O *Visor de tempo* usa a sem serifa do sistema em negrito (Segoe UI Bold), com números de largura fixa.
