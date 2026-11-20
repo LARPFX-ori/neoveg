@@ -4950,10 +4950,16 @@ impl App {
         self.startup_window = false;
         let [min_w, min_h] = crate::MAIN_WINDOW_MIN;
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        // No X11, a janela criada sem redimensionar guarda o tamanho da
+        // abertura como tamanho máximo, e `Resizable(true)` o devolve: o
+        // máximo ficava menor que o mínimo e o gerenciador de janelas
+        // (Cinnamon) tirava os botões de maximizar e minimizar. Sem máximo
+        // (infinito = nenhum) antes de liberar o redimensionamento.
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::Vec2::INFINITY));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
             min_w, min_h,
         )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
         if !self.fit_main_window(ctx) {
             let [w, h] = crate::MAIN_WINDOW_SIZE;
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));

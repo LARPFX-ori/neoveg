@@ -1,14 +1,27 @@
 //! Integração com o Windows sem `unsafe`: registro por `reg.exe`, atalhos e
 //! elevação por PowerShell, e o manifesto da instalação (`instalado.json`).
+//! No Linux, as funções de sistema vêm de `linux.rs`; as do Windows ficam
+//! compiladas (e testadas) em todos os sistemas.
+
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Nome do executável do programa dentro da pasta instalada.
+#[cfg(windows)]
 pub const APP_EXE: &str = "neoveg.exe";
+#[cfg(not(windows))]
+pub const APP_EXE: &str = "neoveg";
 /// Nome do desinstalador copiado para a pasta instalada.
+#[cfg(windows)]
 pub const UNINSTALLER_EXE: &str = "desinstalar.exe";
+#[cfg(not(windows))]
+pub const UNINSTALLER_EXE: &str = "desinstalar";
+
+#[cfg(not(windows))]
+pub use crate::linux::{default_install_dir, is_elevated, run_elevated, schedule_self_removal};
 /// Chave em "Adicionar ou remover programas".
 pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Neoveg";
 /// ProgID da associação de `.neoveg`.
@@ -51,6 +64,7 @@ fn env_dir(var: &str) -> Option<PathBuf> {
 }
 
 /// Pasta padrão de instalação.
+#[cfg(windows)]
 pub fn default_install_dir(scope: Scope) -> Option<PathBuf> {
     match scope {
         Scope::User => env_dir("LOCALAPPDATA").map(|d| d.join("Programs").join("Neoveg")),
@@ -319,6 +333,7 @@ pub fn create_shortcut(lnk: &Path, target: &Path, workdir: &Path) -> Result<(), 
 
 /// O processo atual tem direitos de administrador (nível de integridade
 /// alto, SID S-1-16-12288).
+#[cfg(windows)]
 pub fn is_elevated() -> bool {
     let mut cmd = Command::new("whoami.exe");
     cmd.arg("/groups");
@@ -334,6 +349,7 @@ pub fn is_elevated() -> bool {
 
 /// Roda `exe` com `args` como administrador (pede a confirmação do UAC) e
 /// espera. Devolve o código de saída.
+#[cfg(windows)]
 pub fn run_elevated(exe: &Path, args: &[String]) -> Result<i32, String> {
     let arg_list = args
         .iter()
@@ -403,6 +419,7 @@ pub fn self_removal_script(install_dir: &Path, pid: u32) -> String {
 
 /// Agenda a limpeza final para depois que este desinstalador fechar (um
 /// executável em uso não pode ser apagado).
+#[cfg(windows)]
 pub fn schedule_self_removal(install_dir: &Path) -> Result<(), String> {
     let script = self_removal_script(install_dir, std::process::id());
     let mut cmd = Command::new("powershell.exe");

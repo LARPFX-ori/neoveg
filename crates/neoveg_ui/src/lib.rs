@@ -76,6 +76,10 @@ pub(crate) const MAIN_WINDOW_MIN: [f32; 2] = [900.0, 600.0];
 fn native_options(renderer: eframe::Renderer, splash_window: bool) -> eframe::NativeOptions {
     let viewport = egui::ViewportBuilder::default()
         .with_title("Neoveg")
+        // Linux: classe da janela (Wayland `app_id`, X11 `WM_CLASS`) igual ao
+        // atalho `neoveg.desktop` criado pelo instalador, para o painel mostrar
+        // o ícone e o nome certos
+        .with_app_id("neoveg")
         .with_icon(std::sync::Arc::new(crate::splash::window_icon_data()));
     let viewport = if splash_window {
         viewport
@@ -102,6 +106,12 @@ fn native_options(renderer: eframe::Renderer, splash_window: bool) -> eframe::Na
 /// instalador.
 pub fn window_icon() -> egui::IconData {
     crate::splash::window_icon_data()
+}
+
+/// O ícone do Neoveg com `side` x `side` pixels (de 16 a 1024), para atalhos
+/// e menus de aplicativos, que mostram o ícone maior que o da janela.
+pub fn app_icon(side: u32) -> egui::IconData {
+    crate::splash::icon_data_sized(side)
 }
 
 pub fn run_gui(
