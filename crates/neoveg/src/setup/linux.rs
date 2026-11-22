@@ -241,11 +241,41 @@ pub const ICON_SIDE: u32 = 256;
 
 /// Grava o ícone do Neoveg em PNG.
 pub fn write_icon(path: &Path) -> Result<(), String> {
-    let icon = neoveg_ui::app_icon(ICON_SIDE);
+    write_icon_sized(path, ICON_SIDE)
+}
+
+/// Grava o ícone do Neoveg em PNG com `side` pixels de lado.
+pub fn write_icon_sized(path: &Path, side: u32) -> Result<(), String> {
+    let icon = neoveg_ui::app_icon(side);
     let img = image::RgbaImage::from_raw(icon.width, icon.height, icon.rgba)
         .ok_or("ícone do Neoveg com tamanho inválido")?;
     img.save_with_format(path, image::ImageFormat::Png)
         .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Arquivos de um `.iconset` do macOS: nome e lado em pixels. São os nomes
+/// que o `iconutil -c icns` exige (tamanhos de 16 a 512 pontos, em 1x e 2x).
+pub const MACOS_ICONSET: [(&str, u32); 10] = [
+    ("icon_16x16.png", 16),
+    ("icon_16x16@2x.png", 32),
+    ("icon_32x32.png", 32),
+    ("icon_32x32@2x.png", 64),
+    ("icon_128x128.png", 128),
+    ("icon_128x128@2x.png", 256),
+    ("icon_256x256.png", 256),
+    ("icon_256x256@2x.png", 512),
+    ("icon_512x512.png", 512),
+    ("icon_512x512@2x.png", 1024),
+];
+
+/// Grava o ícone do Neoveg como `.iconset` do macOS em `dir` (usado pelo
+/// `build_installer.py` para montar o `Neoveg.icns` do pacote `.app`).
+pub fn write_macos_iconset(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for (name, side) in MACOS_ICONSET {
+        write_icon_sized(&dir.join(name), side)?;
+    }
+    Ok(())
 }
 
 fn write_file(path: &Path, contents: &str, mode: u32) -> Result<(), String> {
@@ -570,6 +600,18 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).is_err());
         assert!(alheio.exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn iconset_do_macos_tem_os_dez_tamanhos() {
+        let dir = std::env::temp_dir().join(format!("neoveg-iconset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_macos_iconset(&dir).unwrap();
+        for (name, side) in MACOS_ICONSET {
+            let img = image::open(dir.join(name)).unwrap();
+            assert_eq!((img.width(), img.height()), (side, side), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
