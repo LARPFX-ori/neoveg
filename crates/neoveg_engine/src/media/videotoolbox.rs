@@ -66,7 +66,7 @@ mod macos_impl {
     use anyhow::{anyhow, bail, Context, Result};
     use image::RgbaImage;
     use libloading::Library;
-    use std::ffi::{c_int, c_uint, c_void};
+    use std::ffi::{c_int, c_void};
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::ffi::OsStrExt;
@@ -219,6 +219,12 @@ mod macos_impl {
         flags: u32,
         out_buf: *mut CmBlockBufferRef,
     ) -> OsStatus;
+    type FnCmBlockBufReplace = unsafe extern "C" fn(
+        src: *const c_void,
+        dest_buf: CmBlockBufferRef,
+        offset_into_dest: usize,
+        data_len: usize,
+    ) -> OsStatus;
     type FnCmSampleBuf = unsafe extern "C" fn(
         alloc: CfAllocatorRef,
         data_buf: CmBlockBufferRef,
@@ -292,6 +298,7 @@ mod macos_impl {
         cm_h264_desc: FnCmH264Desc,
         cm_hevc_desc: FnCmHevcDesc,
         cm_block_buf: FnCmBlockBuf,
+        cm_block_buf_replace: FnCmBlockBufReplace,
         cm_sample_buf: FnCmSampleBuf,
         vt_create: FnVtCreate,
         vt_decode: FnVtDecode,
@@ -383,6 +390,11 @@ mod macos_impl {
                     FnCmHevcDesc
                 ),
                 cm_block_buf: sym!(cm, b"CMBlockBufferCreateWithMemoryBlock\0", FnCmBlockBuf),
+                cm_block_buf_replace: sym!(
+                    cm,
+                    b"CMBlockBufferReplaceDataBytes\0",
+                    FnCmBlockBufReplace
+                ),
                 cm_sample_buf: sym!(cm, b"CMSampleBufferCreateReady\0", FnCmSampleBuf),
                 vt_create: sym!(vt, b"VTDecompressionSessionCreate\0", FnVtCreate),
                 vt_decode: sym!(vt, b"VTDecompressionSessionDecodeFrame\0", FnVtDecode),
@@ -474,6 +486,7 @@ mod macos_impl {
     }
 
     impl VideoToolboxReader {
+        #[allow(clippy::too_many_arguments)]
         fn open(
             path: &Path,
             api: Arc<AppleMediaApi>,
@@ -647,25 +660,49 @@ mod macos_impl {
                     .with_context(|| format!("seek em {}", self.path.display()))?;
                 st.file.read_exact(&mut pkt)?;
 
+                // O bloco é alocado e liberado pelo próprio CoreMedia
+                // (`mem_block = NULL`, alocador padrão) e o pacote é copiado
+                // para dentro dele. Por quê: com `mem_block = pkt` e
+                // `block_alloc = NULL` (= `kCFAllocatorDefault`), o
+                // `CMBlockBuffer` vira dono da memória do `Vec` e chama `free()`
+                // nela ao ser liberado, o que aborta o processo no macOS
+                // (`malloc_zone_error` em `BBufFinalize`). Copiar também não
+                // depende de quanto tempo o VideoToolbox retém o buffer.
                 let mut block_buf: CmBlockBufferRef = ptr::null_mut();
-                // SAFETY: `pkt` permanece vivo até o fim da chamada síncrona `vt_wait`;
-                // `kCFAllocatorNull` (passando bloco copiado via `block_alloc = null`? Não:
-                // criamos bloco com `block_alloc = null` copiando com `CMBlockBufferCreateWithMemoryBlock`
-                // ou mantemos `pkt` vivo até liberar `sample_buf` e `block_buf`).
+                // SAFETY: `mem_block = NULL` faz o CoreMedia alocar `pkt.len()`
+                // bytes (flag `kCMBlockBufferAssureMemoryNowFlag` = 1);
+                // `block_buf` é liberado no fim da iteração.
                 let b_st = unsafe {
                     (st.api.cm_block_buf)(
                         ptr::null(),
-                        pkt.as_mut_ptr() as *mut c_void,
+                        ptr::null_mut(),
                         pkt.len(),
                         ptr::null(),
                         ptr::null(),
                         0,
                         pkt.len(),
-                        0,
+                        1,
                         &mut block_buf,
                     )
                 };
                 if b_st != 0 || block_buf.is_null() {
+                    continue;
+                }
+                // SAFETY: `pkt` tem `pkt.len()` bytes válidos e o bloco de
+                // destino foi criado com exatamente esse tamanho.
+                let r_st = unsafe {
+                    (st.api.cm_block_buf_replace)(
+                        pkt.as_ptr() as *const c_void,
+                        block_buf,
+                        0,
+                        pkt.len(),
+                    )
+                };
+                if r_st != 0 {
+                    // SAFETY: `block_buf` não nulo, criado acima.
+                    unsafe {
+                        (st.api.cf_release)(block_buf as CfTypeRef);
+                    }
                     continue;
                 }
 
