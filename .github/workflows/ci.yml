@@ -180,9 +180,13 @@ jobs:
 
       # Mesmo motivo dos outros jobs: sem as fixtures, os testes que as usam
       # pulam e passam sem testar nada (§2.3: ffmpeg só como gerador/oráculo).
+      # ffmpeg-full, não ffmpeg: a fórmula `ffmpeg` do Homebrew vem sem
+      # libvorbis, e sem ela oracle_ogg.ogg e demux_sample.webm não são
+      # gerados. A ffmpeg-full é keg-only, por isso vai para o PATH à mão.
       - name: Ferramentas das fixtures
         run: |
-          brew install ffmpeg
+          brew install ffmpeg-full
+          echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
           python -m pip install pyaaf2==1.7.1
 
       - name: Gerar fixtures
