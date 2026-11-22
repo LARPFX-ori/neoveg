@@ -8,8 +8,7 @@
 # `neoveg/common-actions`. Esse repositório ainda não existe; quando existir,
 # troque estes passos pelos workflows reutilizáveis de lá.
 #
-# Windows e Linux (Ubuntu). macOS entra junto com o backend nativo dele
-# (ROADMAP, Fase 4).
+# Windows, Linux (Ubuntu) e macOS.
 
 name: CI
 
@@ -143,3 +142,55 @@ jobs:
       # localmente; xvfb-run para os testes de janela.
       - name: cargo test
         run: xvfb-run -a cargo test --workspace -- --test-threads=1
+
+  # Os mesmos portões no macOS. Por quê: o backend VideoToolbox/AudioToolbox
+  # (`media/videotoolbox.rs`) só compila com `#[cfg(target_os = "macos")]`, e
+  # sem este job ele nunca passou pelo clippy: um import não usado e uma função
+  # com argumentos demais ficaram escondidos até o primeiro build num Mac.
+  # macos-latest é Apple Silicon (aarch64-apple-darwin); o Mac de testes do
+  # projeto é Intel (x86_64-apple-darwin), então os dois alvos ficam cobertos.
+  gates-macos:
+    name: Portões (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # §3.4.1
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # §3.4.4
+      - name: Auditoria de licenças
+        run: python tools/check_licenses.py
+
+      # §3.4.2 e §0.9
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Mesmo motivo dos outros jobs: sem as fixtures, os testes que as usam
+      # pulam e passam sem testar nada (§2.3: ffmpeg só como gerador/oráculo).
+      - name: Ferramentas das fixtures
+        run: |
+          brew install ffmpeg
+          python -m pip install pyaaf2==1.7.1
+
+      - name: Gerar fixtures
+        run: |
+          python tools/gen_media_fixtures.py target/fixtures
+          python tools/gen_aaf_fixtures.py target/fixtures
+
+      # §3.4.3. Um teste por vez, como nos outros sistemas. O runner do macOS
+      # tem sessão gráfica, então os testes de janela não precisam de Xvfb.
+      - name: cargo test
+        run: cargo test --workspace -- --test-threads=1
