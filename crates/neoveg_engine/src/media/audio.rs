@@ -370,29 +370,42 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// Taxa de amostragem e duração segundo o `ffprobe`.
+    ///
+    /// A duração é a soma das durações dos pacotes de áudio, não o
+    /// `format=duration`. Por quê: em AAC ADTS cru (`.aac`), que não tem
+    /// índice, o `format=duration` é estimado pelo bitrate. Com o ffmpeg 9.1
+    /// ele dá 2,288 s para a fixture de 2 s, cujos 95 pacotes × 1024
+    /// amostras a 48 kHz somam 2,027 s, exatamente o que o decodificador lê.
     fn ffprobe_oracle_sr_dur(path: &Path) -> Option<(u32, f64)> {
-        let out = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=sample_rate:format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-            ])
-            .arg(path)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
+        let probe = |entries: &str| -> Option<String> {
+            let out = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    entries,
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                ])
+                .arg(path)
+                .output()
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let sr = probe("stream=sample_rate")?.trim().parse::<u32>().ok()?;
+        let packets = probe("packet=duration_time")?;
+        let mut dur = 0.0;
+        let mut count = 0usize;
+        for line in packets.lines().map(str::trim).filter(|s| !s.is_empty()) {
+            dur += line.parse::<f64>().ok()?;
+            count += 1;
         }
-        let txt = String::from_utf8_lossy(&out.stdout);
-        let mut lines = txt.lines().map(str::trim).filter(|s| !s.is_empty());
-        let sr = lines.next()?.parse::<u32>().ok()?;
-        let dur = lines.next()?.parse::<f64>().ok()?;
-        Some((sr, dur))
+        (count > 0).then_some((sr, dur))
     }
 
     #[test]
