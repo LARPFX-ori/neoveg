@@ -82,7 +82,8 @@ static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub const INSTALL_MARKER: &str = "instalado.json";
 
 /// Nome da pasta de dados do usuário quando instalado (`%APPDATA%\Neoveg` no
-/// Windows, `~/.local/share/Neoveg` no Linux).
+/// Windows, `~/.local/share/Neoveg` no Linux, `~/Library/Application
+/// Support/Neoveg` no macOS).
 pub const USER_DATA_DIR_NAME: &str = "Neoveg";
 
 /// Escolhe a pasta base (regra pura, testável):
@@ -112,16 +113,49 @@ pub fn choose_base_dir(
     user_dir.unwrap_or_else(|| temp.join("neoveg"))
 }
 
-/// Raiz das pastas de dados do usuário: `%APPDATA%` no Windows e, nos
-/// outros sistemas, `$XDG_DATA_HOME` ou `~/.local/share` (XDG Base Directory).
+/// Raiz das pastas de dados do usuário: `%APPDATA%` no Windows,
+/// `~/Library/Application Support` no macOS e, nos outros sistemas,
+/// `$XDG_DATA_HOME` ou `~/.local/share` (XDG Base Directory).
 /// Só caminhos absolutos; variáveis vazias ou relativas são ignoradas.
 pub fn user_data_root() -> Option<PathBuf> {
     let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
     if cfg!(windows) {
         user_data_root_from(var("APPDATA"), None, None)
+    } else if cfg!(target_os = "macos") {
+        macos_user_data_root_from(var("HOME"))
     } else {
         user_data_root_from(None, var("XDG_DATA_HOME"), var("HOME"))
     }
+}
+
+/// Regra pura de [`user_data_root`] no macOS: `home/Library/Application
+/// Support`, a pasta de dados de aplicativos do sistema. `XDG_DATA_HOME` não
+/// vale no macOS.
+pub fn macos_user_data_root_from(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.filter(|h| h.is_absolute())
+        .map(|h| h.join("Library").join("Application Support"))
+}
+
+/// `true` quando `exe_dir` é a pasta `Contents/MacOS` de um pacote `.app`.
+///
+/// Por quê: dentro de um `.app` o Neoveg se comporta como instalado e grava
+/// os dados do usuário fora do pacote. Gravar `logs/` ou `autosave/` em
+/// `Neoveg.app/Contents/MacOS` invalida a assinatura do pacote, e o pacote
+/// pode estar num volume só de leitura (imagem de disco ou App Translocation).
+pub fn is_macos_app_bundle_dir(exe_dir: &std::path::Path) -> bool {
+    let name = |p: &std::path::Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    let Some(contents) = exe_dir.parent() else {
+        return false;
+    };
+    let Some(bundle) = contents.parent() else {
+        return false;
+    };
+    name(exe_dir).as_deref() == Some("MacOS")
+        && name(contents).as_deref() == Some("Contents")
+        && bundle
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
 }
 
 /// Regra pura de [`user_data_root`]: `appdata` (Windows) ou `xdg_data_home`
@@ -156,9 +190,10 @@ pub fn base_dir() -> PathBuf {
             let exe_dir = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-            let installed = exe_dir
-                .as_ref()
-                .is_some_and(|d| d.join(INSTALL_MARKER).is_file());
+            let installed = exe_dir.as_ref().is_some_and(|d| {
+                d.join(INSTALL_MARKER).is_file()
+                    || (cfg!(target_os = "macos") && is_macos_app_bundle_dir(d))
+            });
             let writable = !installed && exe_dir.as_deref().is_some_and(dir_is_writable);
             let user_data = user_data_root();
             let chosen = choose_base_dir(
@@ -324,6 +359,36 @@ mod tests {
             Some(p("/home/u/.local/share"))
         );
         assert_eq!(user_data_root_from(None, Some(p("")), Some(p(""))), None);
+    }
+
+    #[test]
+    fn raiz_dos_dados_do_usuario_no_macos() {
+        let p = PathBuf::from;
+        assert_eq!(
+            macos_user_data_root_from(Some(p("/Users/u"))),
+            Some(p("/Users/u/Library/Application Support"))
+        );
+        assert_eq!(macos_user_data_root_from(Some(p("rel"))), None);
+        assert_eq!(macos_user_data_root_from(Some(p(""))), None);
+        assert_eq!(macos_user_data_root_from(None), None);
+    }
+
+    #[test]
+    fn reconhece_a_pasta_do_executavel_de_um_pacote_app() {
+        let p = PathBuf::from;
+        assert!(is_macos_app_bundle_dir(&p(
+            "/Applications/Neoveg.app/Contents/MacOS"
+        )));
+        assert!(is_macos_app_bundle_dir(&p(
+            "/Users/u/Downloads/Neoveg.APP/Contents/MacOS"
+        )));
+        assert!(!is_macos_app_bundle_dir(&p(
+            "/Applications/Neoveg.app/Contents"
+        )));
+        assert!(!is_macos_app_bundle_dir(&p("/opt/neoveg/Contents/MacOS")));
+        assert!(!is_macos_app_bundle_dir(&p("/Users/u/neoveg")));
+        assert!(!is_macos_app_bundle_dir(&p("MacOS")));
+        assert!(!is_macos_app_bundle_dir(&p("/")));
     }
 
     /// Instalado (marcador ao lado do executável): os dados vão para

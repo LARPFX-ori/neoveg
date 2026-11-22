@@ -147,7 +147,8 @@ fn integrate(opts: &InstallOptions, files: &mut Vec<PathBuf>) -> Result<Vec<Path
 }
 
 /// Pasta dos dados do usuário (preferências, layouts, recuperação, logs):
-/// `%APPDATA%\Neoveg` no Windows, `~/.local/share/Neoveg` no Linux.
+/// `%APPDATA%\Neoveg` no Windows, `~/.local/share/Neoveg` no Linux,
+/// `~/Library/Application Support/Neoveg` no macOS.
 pub fn user_data_dir() -> Option<PathBuf> {
     neoveg_common::util::user_data_root().map(|p| p.join(neoveg_common::util::USER_DATA_DIR_NAME))
 }

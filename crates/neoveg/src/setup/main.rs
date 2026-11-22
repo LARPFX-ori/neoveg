@@ -44,6 +44,9 @@ pub enum Mode {
         remove_data: bool,
         scope: Option<Scope>,
     },
+    /// Ferramenta de build: grava o ícone como `.iconset` do macOS na pasta
+    /// (`build_installer.py`). Não instala nada.
+    WriteIconset(PathBuf),
 }
 
 /// Interpreta os argumentos (sem o nome do programa).
@@ -55,6 +58,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
     let mut dir: Option<PathBuf> = None;
     let mut desktop = false;
     let mut assoc = true;
+    let mut iconset: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -69,8 +73,15 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
                 let d = it.next().ok_or("--dir precisa de uma pasta")?;
                 dir = Some(PathBuf::from(d));
             }
+            "--write-iconset" => {
+                let d = it.next().ok_or("--write-iconset precisa de uma pasta")?;
+                iconset = Some(PathBuf::from(d));
+            }
             other => return Err(format!("argumento desconhecido: {other}")),
         }
+    }
+    if let Some(d) = iconset {
+        return Ok(Mode::WriteIconset(d));
     }
     if uninstall {
         return Ok(Mode::Uninstall {
@@ -144,9 +155,27 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        Ok(Mode::WriteIconset(dir)) => write_iconset(&dir),
         Ok(Mode::Uninstall { silent: false, .. }) => gui::run(exe, true),
         Ok(Mode::InstallGui) => gui::run(exe, false),
     }
+}
+
+#[cfg(not(windows))]
+fn write_iconset(dir: &std::path::Path) -> i32 {
+    match linux::write_macos_iconset(dir) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+#[cfg(windows)]
+fn write_iconset(_dir: &std::path::Path) -> i32 {
+    eprintln!("--write-iconset só existe no Linux e no macOS");
+    1
 }
 
 #[cfg(test)]
@@ -187,6 +216,11 @@ mod tests {
         );
         // hostis: sem valor, desconhecido
         assert!(parse_args(&a(&["--dir"])).is_err());
+        assert!(parse_args(&a(&["--write-iconset"])).is_err());
+        assert_eq!(
+            parse_args(&a(&["--write-iconset", "icones.iconset"])),
+            Ok(Mode::WriteIconset(PathBuf::from("icones.iconset")))
+        );
         assert!(parse_args(&a(&["--formatar-disco"])).is_err());
     }
 }
