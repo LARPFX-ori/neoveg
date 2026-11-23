@@ -898,7 +898,9 @@ impl App {
         } else {
             Rect::NOTHING
         };
-        let show_seq_tabs = full.height() > TOP_H + BOTTOM_BARS_H + doc_bar_h + SEQ_TAB_H + 36.0;
+        let classic_workflow = self.prefs.workflow_mode == neoveg_common::WorkflowMode::Classic;
+        let show_seq_tabs = !classic_workflow
+            && full.height() > TOP_H + BOTTOM_BARS_H + doc_bar_h + SEQ_TAB_H + 36.0;
         let seq_bar_h = if show_seq_tabs { SEQ_TAB_H } else { 0.0 };
         self.tl.last_seq_bar = if show_seq_tabs {
             let seq_bar_rect = Rect::from_min_size(
@@ -1566,9 +1568,23 @@ impl App {
             Stroke::new(1.0_f32, self.theme.border),
         );
 
+        let classic_workflow = self.prefs.workflow_mode == neoveg_common::WorkflowMode::Classic;
+        let seq_tabs = self.project.sequence_tab_info();
+        let primary_seq_id = seq_tabs.first().map(|(id, _, _)| *id);
+        let primary_seq_active = seq_tabs.first().is_none_or(|(_, _, active)| *active);
+
         let mut doc_switch = None;
         let mut doc_close = None;
+        let mut seq_switch: Option<Id> = None;
+        let mut seq_delete: Option<Id> = None;
+        let mut seq_duplicate: Option<Id> = None;
+        let mut seq_rename: Option<(Id, String)> = None;
         for (di, dname, dactive, ddirty) in self.doc_bar_entries() {
+            let tab_active = if classic_workflow && dactive {
+                primary_seq_active
+            } else {
+                dactive
+            };
             let label = if ddirty { format!("{dname}*") } else { dname };
             let text_w = ui
                 .painter()
@@ -1577,7 +1593,7 @@ impl App {
                 .x;
             let close_w = if di > 0 { 16.0 } else { 0.0 };
             let tab_w = (text_w + 22.0 + close_w).clamp(72.0, 220.0);
-            if cur_x + tab_w > rect.right() - 8.0 {
+            if cur_x + tab_w > rect.right() - 28.0 {
                 break;
             }
             let tab_rect = Rect::from_min_size(pos2(cur_x, rect.top() + 2.0), vec2(tab_w, tab_h));
@@ -1589,7 +1605,7 @@ impl App {
                     tr(lang, "Projeto aninhado aberto em aba (Ctrl+S salva todos)")
                 });
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
-            let bg = if dactive {
+            let bg = if tab_active {
                 self.theme.tl_header_bg
             } else if resp.hovered() {
                 self.theme.widget_hover_bg
@@ -1608,7 +1624,7 @@ impl App {
                 radius,
                 Stroke::new(
                     1.0_f32,
-                    if dactive {
+                    if tab_active {
                         self.theme.accent
                     } else {
                         self.theme.border
@@ -1625,7 +1641,7 @@ impl App {
                 egui::CornerRadius::ZERO,
                 self.theme.accent,
             );
-            let text_color = if dactive {
+            let text_color = if tab_active {
                 self.theme.text_primary
             } else {
                 self.theme.text_muted
@@ -1662,15 +1678,190 @@ impl App {
                     closing = true;
                 }
             }
-            if resp.clicked() && !closing && !dactive {
-                doc_switch = Some(di);
+            if resp.clicked() && !closing {
+                if !dactive {
+                    doc_switch = Some(di);
+                } else if classic_workflow && !primary_seq_active {
+                    seq_switch = primary_seq_id;
+                }
             }
             cur_x += tab_w + 3.0;
         }
+
+        // No fluxo Clássico, sequências adicionais do projeto atual aparecem na
+        // própria faixa de projetos abertos como projetos internos aninhados.
+        if classic_workflow {
+            let seq_suffix = format!(".{}", neoveg_engine::package::SEQUENCE_EXT);
+            for (seq_id, seq_name, is_active) in seq_tabs.iter().skip(1) {
+                let seq_label = seq_name
+                    .strip_suffix(&seq_suffix)
+                    .unwrap_or(seq_name)
+                    .to_string();
+                let text_w = ui
+                    .painter()
+                    .layout_no_wrap(seq_label.clone(), font_id.clone(), Color32::WHITE)
+                    .size()
+                    .x;
+                let tab_w = (text_w + 38.0).clamp(80.0, 220.0);
+                if cur_x + tab_w > rect.right() - 28.0 {
+                    break;
+                }
+                let tab_rect =
+                    Rect::from_min_size(pos2(cur_x, rect.top() + 2.0), vec2(tab_w, tab_h));
+                let tab_resp = ui
+                    .interact(
+                        tab_rect,
+                        ui.id().with(("classic_seq_tab", *seq_id)),
+                        Sense::click(),
+                    )
+                    .on_hover_text(tr(
+                        lang,
+                        "Projeto interno (sequência aninhada dentro do projeto atual)",
+                    ));
+                tab_resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &seq_label)
+                });
+                let bg = if *is_active {
+                    self.theme.tl_header_bg
+                } else if tab_resp.hovered() {
+                    self.theme.widget_hover_bg
+                } else {
+                    self.theme.panel_fill
+                };
+                let radius = egui::CornerRadius {
+                    nw: 3,
+                    ne: 3,
+                    sw: 0,
+                    se: 0,
+                };
+                p.rect_filled(tab_rect, radius, bg);
+                p.rect_stroke(
+                    tab_rect,
+                    radius,
+                    Stroke::new(
+                        1.0_f32,
+                        if *is_active {
+                            self.theme.accent
+                        } else {
+                            self.theme.border
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                let ico_r = Rect::from_center_size(
+                    pos2(tab_rect.left() + 10.0, tab_rect.center().y),
+                    vec2(10.0, 10.0),
+                );
+                icons::paint(p, ico_r, Icon::NestedTimeline, &self.theme, *is_active);
+                let text_color = if *is_active {
+                    self.theme.text_primary
+                } else {
+                    self.theme.text_muted
+                };
+                p.text(
+                    pos2(ico_r.right() + 4.0, tab_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    &seq_label,
+                    font_id.clone(),
+                    text_color,
+                );
+                let close_rect = Rect::from_center_size(
+                    pos2(tab_rect.right() - 10.0, tab_rect.center().y),
+                    vec2(12.0, 12.0),
+                );
+                let close_resp = ui
+                    .interact(
+                        close_rect,
+                        ui.id().with(("classic_seq_close", *seq_id)),
+                        Sense::click(),
+                    )
+                    .on_hover_text(tr(lang, "Excluir sequência"));
+                p.text(
+                    close_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "×",
+                    FontId::proportional(12.0),
+                    if close_resp.hovered() {
+                        self.theme.offline_fg
+                    } else {
+                        self.theme.text_muted
+                    },
+                );
+                let mut closing = false;
+                if close_resp.clicked() {
+                    seq_delete = Some(*seq_id);
+                    closing = true;
+                }
+                tab_resp.context_menu(|ui| {
+                    if ui.button(tr(lang, "Renomear")).clicked() {
+                        seq_rename = Some((*seq_id, seq_name.clone()));
+                        ui.close_menu();
+                    }
+                    if ui.button(tr(lang, "Duplicar sequência")).clicked() {
+                        seq_duplicate = Some(*seq_id);
+                        ui.close_menu();
+                    }
+                    if ui.button(tr(lang, "Excluir sequência")).clicked() {
+                        seq_delete = Some(*seq_id);
+                        ui.close_menu();
+                    }
+                });
+                if tab_resp.clicked() && !closing && !*is_active {
+                    seq_switch = Some(*seq_id);
+                }
+                if tab_resp.double_clicked() {
+                    seq_rename = Some((*seq_id, seq_name.clone()));
+                }
+                cur_x += tab_w + 3.0;
+            }
+
+            if cur_x + 22.0 <= rect.right() - 4.0 {
+                let add_rect =
+                    Rect::from_min_size(pos2(cur_x, rect.top() + 3.0), vec2(20.0, tab_h - 2.0));
+                let add_resp = ui
+                    .interact(
+                        add_rect,
+                        ui.id().with("classic_seq_add_btn"),
+                        Sense::click(),
+                    )
+                    .on_hover_text(tr(lang, "Novo projeto interno (sequência aninhada)"));
+                let add_bg = if add_resp.hovered() {
+                    self.theme.widget_hover_bg
+                } else {
+                    self.theme.widget_bg
+                };
+                p.rect_filled(add_rect, egui::CornerRadius::same(2), add_bg);
+                p.rect_stroke(
+                    add_rect,
+                    egui::CornerRadius::same(2),
+                    Stroke::new(1.0_f32, self.theme.border),
+                    StrokeKind::Inside,
+                );
+                p.text(
+                    add_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "+",
+                    font_id,
+                    self.theme.text_primary,
+                );
+                if add_resp.clicked() {
+                    self.create_sequence_app(None);
+                }
+            }
+        }
+
         if let Some(i) = doc_close {
             self.request_close_doc_tab(i);
         } else if let Some(i) = doc_switch {
             self.switch_doc_tab(i);
+        } else if let Some(target_id) = seq_switch {
+            self.switch_sequence_app(target_id);
+        } else if let Some(target_id) = seq_delete {
+            self.delete_sequence(target_id);
+        } else if let Some(source_id) = seq_duplicate {
+            self.duplicate_sequence(source_id);
+        } else if let Some((id, name)) = seq_rename {
+            self.tl.rename = Some((id, name));
         }
     }
 

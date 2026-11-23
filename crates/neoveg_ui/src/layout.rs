@@ -324,42 +324,91 @@ impl WindowLayout {
     }
 }
 
+fn closed_except(open: &[DockTab]) -> Option<Vec<String>> {
+    Some(
+        DockTab::ALL
+            .into_iter()
+            .filter(|t| !open.contains(t))
+            .map(|t| panel_key(t).to_string())
+            .collect(),
+    )
+}
+
 pub fn builtin_presets() -> Vec<WindowLayout> {
     vec![
         WindowLayout::default(),
         WindowLayout {
-            name: "Correção de Cor (Escopos)".into(),
-            dock_height: 390.0,
-            preview_ratio: 0.44,
+            name: "Edição com Trimmer".into(),
+            dock_height: 340.0,
+            preview_ratio: 0.34,
             dock_visible: true,
-            active_tab: panel_key(DockTab::Scopes).into(),
-            detached_tabs: vec![panel_key(DockTab::VideoFx).into()],
-            preview_detached: false,
-            preview_visible: true,
-            master_bus_visible: false,
-            master_bus_detached: false,
-            px_per_sec: None,
-            edit_layout: None,
-            tile_tree: None,
-            closed_tabs: None,
-            floating_windows: BTreeMap::new(),
-            floating_docks: Vec::new(),
-        },
-        WindowLayout {
-            name: "Mixagem de Áudio".into(),
-            dock_height: 360.0,
-            preview_ratio: 0.28,
-            dock_visible: true,
-            active_tab: panel_key(DockTab::Mixer).into(),
-            detached_tabs: vec![panel_key(DockTab::AudioFx).into()],
+            active_tab: panel_key(DockTab::ProjectMedia).into(),
+            detached_tabs: Vec::new(),
             preview_detached: false,
             preview_visible: true,
             master_bus_visible: true,
             master_bus_detached: false,
             px_per_sec: None,
             edit_layout: None,
-            tile_tree: None,
-            closed_tabs: None,
+            tile_tree: Some(crate::dock::build_trimmer_editing_tree()),
+            closed_tabs: closed_except(&[
+                DockTab::ProjectMedia,
+                DockTab::Explorer,
+                DockTab::Trimmer,
+                DockTab::Transitions,
+                DockTab::VideoFx,
+                DockTab::Generators,
+                DockTab::PluginManager,
+            ]),
+            floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
+        },
+        WindowLayout {
+            name: "Correção de Cor (Escopos)".into(),
+            dock_height: 380.0,
+            preview_ratio: 0.36,
+            dock_visible: true,
+            active_tab: panel_key(DockTab::Scopes).into(),
+            detached_tabs: Vec::new(),
+            preview_detached: false,
+            preview_visible: true,
+            master_bus_visible: false,
+            master_bus_detached: false,
+            px_per_sec: None,
+            edit_layout: None,
+            tile_tree: Some(crate::dock::build_color_grading_tree()),
+            closed_tabs: closed_except(&[
+                DockTab::ColorGrading,
+                DockTab::VideoFx,
+                DockTab::Scopes,
+                DockTab::ProjectMedia,
+                DockTab::Trimmer,
+            ]),
+            floating_windows: BTreeMap::new(),
+            floating_docks: Vec::new(),
+        },
+        WindowLayout {
+            name: "Mixagem de Áudio".into(),
+            dock_height: 360.0,
+            preview_ratio: 0.30,
+            dock_visible: true,
+            active_tab: panel_key(DockTab::Mixer).into(),
+            detached_tabs: Vec::new(),
+            preview_detached: false,
+            preview_visible: true,
+            master_bus_visible: true,
+            master_bus_detached: false,
+            px_per_sec: None,
+            edit_layout: None,
+            tile_tree: Some(crate::dock::build_audio_mixing_tree()),
+            closed_tabs: closed_except(&[
+                DockTab::Mixer,
+                DockTab::AudioFx,
+                DockTab::Loudness,
+                DockTab::SurroundPanner,
+                DockTab::ProjectMedia,
+                DockTab::Trimmer,
+            ]),
             floating_windows: BTreeMap::new(),
             floating_docks: Vec::new(),
         },
@@ -519,11 +568,16 @@ mod tests {
     #[test]
     fn presets_embutidos_sao_validos() {
         let presets = builtin_presets();
-        assert_eq!(presets.len(), 4);
+        assert_eq!(presets.len(), 5);
         for mut p in presets {
             let before = p.clone();
             p.sanitize();
             assert_eq!(p, before);
+            assert!(
+                p.detached_tabs.is_empty(),
+                "presets embutidos devem manter todos os painéis acoplados ({})",
+                p.name
+            );
         }
     }
 

@@ -2831,3 +2831,190 @@ fn kittest_arrastar_midia_do_projeto_para_o_trimmer() {
         "soltar mídia da Mídia do Projeto sobre a aba Trimmer deve abrir a mídia no Trimmer"
     );
 }
+
+/// Modo de fluxo de trabalho Clássico oculta a faixa separada de sequências e
+/// trata sequências adicionais como projetos internos na faixa de projetos
+/// abertos; o modo Intermediário exibe ambas as faixas empilhadas.
+#[test]
+fn kittest_fluxo_trabalho_classico_e_intermediario() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // Padrão é Intermediário: ambas as faixas visíveis
+    assert_eq!(
+        harness.state().prefs.workflow_mode,
+        neoveg_common::WorkflowMode::Intermediate
+    );
+    assert!(harness.state().tl.last_doc_bar.is_positive());
+    assert!(harness.state().tl.last_seq_bar.is_positive());
+
+    // Abre Preferências > Aparência e Layout e verifica as opções de fluxo de trabalho
+    {
+        let app = harness.state_mut();
+        app.exec_cmd(None, "options.prefs");
+        app.dlg.prefs_tab = crate::dialogs::PrefsCategory::Appearance;
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Clássico").is_some());
+    assert!(harness.query_by_label("Intermediário").is_some());
+    harness.state_mut().dlg.prefs_open = false;
+
+    // Alterna para fluxo Clássico e cria uma segunda sequência interna
+    let (seq1, seq2) = {
+        let app = harness.state_mut();
+        app.prefs.workflow_mode = neoveg_common::WorkflowMode::Classic;
+        let s1 = app
+            .project
+            .active_sequence_id
+            .expect("sequência principal ativa");
+        let s2 = app.create_sequence_app(Some("Subprojeto B"));
+        app.switch_sequence_app(s1);
+        (s1, s2)
+    };
+    harness.run_steps(2);
+    assert!(harness.state().tl.last_doc_bar.is_positive());
+    assert!(
+        !harness.state().tl.last_seq_bar.is_positive(),
+        "no fluxo Clássico a faixa dedicada de sequências deve ficar oculta"
+    );
+    let doc_bar = harness.state().tl.last_doc_bar;
+    let seq2_tab = harness
+        .query_all_by_label("Subprojeto B")
+        .filter_map(|n| n.raw_bounds())
+        .find(|b| (b.y0 as f32) >= doc_bar.top() - 2.0 && (b.y1 as f32) <= doc_bar.bottom() + 2.0)
+        .expect("Subprojeto B deve aparecer como projeto interno na faixa de projetos abertos");
+    let click_pos = egui::pos2(
+        ((seq2_tab.x0 + seq2_tab.x1) * 0.5) as f32,
+        ((seq2_tab.y0 + seq2_tab.y1) * 0.5) as f32,
+    );
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(click_pos));
+    harness.run_steps(1);
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: click_pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(1);
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: click_pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(2);
+    assert_eq!(harness.state().project.active_sequence_id, Some(seq2));
+    assert_ne!(seq1, seq2);
+
+    // Volta para Intermediário: faixa de sequências reaparece
+    harness.state_mut().prefs.workflow_mode = neoveg_common::WorkflowMode::Intermediate;
+    harness.run_steps(2);
+    assert!(harness.state().tl.last_seq_bar.is_positive());
+}
+
+/// Seleção em Efeitos de Vídeo e Plug-In Manager usa selectable_label limpo
+/// (sem camadas conflitantes), idêntico a Geradores de Mídia.
+#[test]
+fn kittest_selecao_efeitos_e_plugin_manager_igual_geradores() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // Efeitos de Vídeo: clicar diretamente no nome seleciona o efeito
+    {
+        let app = harness.state_mut();
+        app.dock_visible = true;
+        app.dock_tab = crate::DockTab::VideoFx;
+        app.pending_dock_focus = Some(crate::DockTab::VideoFx);
+    }
+    harness.run_steps(2);
+    let fx_name = crate::model::FxKind::HslAdjust.name_in(neoveg_common::Language::PtBr);
+    harness.get_by_label(fx_name).click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().fx_browser.selected,
+        Some(crate::model::FxKind::HslAdjust)
+    );
+    assert!(harness
+        .query_by_label(&format!("Presets: {fx_name}"))
+        .is_some());
+
+    // Plug-In Manager: clicar diretamente no nome seleciona e abre os detalhes + prévia
+    {
+        let app = harness.state_mut();
+        app.dock_tab = crate::DockTab::PluginManager;
+        app.pending_dock_focus = Some(crate::DockTab::PluginManager);
+    }
+    harness.run_steps(2);
+    harness
+        .query_all_by_label(fx_name)
+        .next()
+        .expect("efeito listado no Plug-In Manager")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness.query_by_label("Origem: nativo do Neoveg").is_some(),
+        "clicar em um plug-in no Plug-In Manager deve exibir imediatamente seus detalhes"
+    );
+}
+
+/// Layouts de janela fiéis ao VEGAS Pro mantêm painéis acoplados lado a lado
+/// (sem abrir janelas soltas indesejadas).
+#[test]
+fn kittest_layouts_vegas_acoplados_sem_janelas_soltas() {
+    use crate::dock::{find_pane_tile, DockPane};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    let presets = crate::layout::builtin_presets();
+    let trimmer_layout = presets
+        .iter()
+        .find(|p| p.name == "Edição com Trimmer")
+        .cloned()
+        .expect("preset Edição com Trimmer");
+    harness.state_mut().apply_window_layout(trimmer_layout);
+    harness.run_steps(2);
+    {
+        let st = harness.state();
+        assert!(st.detached_tabs.is_empty());
+        let parent_of = |pane: DockPane| {
+            find_pane_tile(&st.dock_tree, pane).and_then(|id| st.dock_tree.tiles.parent_of(id))
+        };
+        assert_ne!(
+            parent_of(DockPane::Tab(crate::DockTab::Trimmer)),
+            parent_of(DockPane::Preview),
+            "em Edição com Trimmer, o Trimmer deve ficar lado a lado com a Prévia de Vídeo"
+        );
+    }
+
+    let color_layout = presets
+        .iter()
+        .find(|p| p.name == "Correção de Cor (Escopos)")
+        .cloned()
+        .expect("preset Correção de Cor");
+    harness.state_mut().apply_window_layout(color_layout);
+    harness.run_steps(2);
+    {
+        let st = harness.state();
+        assert!(st.detached_tabs.is_empty());
+        let parent_of = |pane: DockPane| {
+            find_pane_tile(&st.dock_tree, pane).and_then(|id| st.dock_tree.tiles.parent_of(id))
+        };
+        let cg_g = parent_of(DockPane::Tab(crate::DockTab::ColorGrading));
+        let pv_g = parent_of(DockPane::Preview);
+        let sc_g = parent_of(DockPane::Tab(crate::DockTab::Scopes));
+        assert!(cg_g.is_some() && pv_g.is_some() && sc_g.is_some());
+        assert_ne!(cg_g, pv_g);
+        assert_ne!(pv_g, sc_g);
+        assert_ne!(cg_g, sc_g);
+    }
+}
