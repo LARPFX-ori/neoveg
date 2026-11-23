@@ -3,11 +3,14 @@
 //! isolamento de pânicos em workers, log em `logs/neoveg.log`, hook de
 //! pânico em `logs/crash.log` e recuperação automática do projeto.
 
+use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::cell::Cell;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 /// Trava um `Mutex` sem entrar em pânico se ele estiver envenenado: o dado
@@ -36,9 +39,32 @@ pub fn panic_message(p: &(dyn Any + Send)) -> String {
     }
 }
 
+thread_local! {
+    /// Profundidade de `catch_isolated` ativa na thread atual. Enquanto > 0, o
+    /// gancho de pânico sabe que o pânico será contido e não abre a janela de
+    /// encerramento inesperado.
+    static ISOLATED_GUARD_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct IsolatedDepthGuard;
+
+impl IsolatedDepthGuard {
+    fn enter() -> Self {
+        ISOLATED_GUARD_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for IsolatedDepthGuard {
+    fn drop(&mut self) {
+        ISOLATED_GUARD_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// Executa `f` sob `catch_unwind` e, se houver pânico, marca-o como isolado no
 /// marcador da sessão para não ser apontado como queda fatal.
 pub fn catch_isolated<T>(f: impl FnOnce() -> T) -> std::thread::Result<T> {
+    let _depth = IsolatedDepthGuard::enter();
     let r = std::panic::catch_unwind(AssertUnwindSafe(f));
     if r.is_err() {
         crate::session_marker::mark_isolated();
@@ -239,14 +265,148 @@ pub fn log_error(msg: &str) {
 type RecoveryCallback = fn() -> Option<String>;
 
 static RECOVERY_CB: Mutex<Option<RecoveryCallback>> = Mutex::new(None);
+static GUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CRASH_DIALOG_SPAWNED: AtomicBool = AtomicBool::new(false);
+
+/// Limite máximo para leitura do JSON do último erro (§0.4).
+const MAX_CRASH_PAYLOAD_BYTES: u64 = 512 * 1024;
+/// Limite de caracteres do stack trace incluído no payload da janela de erro.
+const MAX_CRASH_BACKTRACE_CHARS: usize = 16_000;
+
+/// Dados estruturados do último encerramento inesperado, gravados pelo hook de
+/// pânico em `logs/ultimo_crash.json` para o subprocesso `--crash-dialog`.
+/// Todos os campos já passam por [`redact`] antes da gravação (Regra da Casa 10).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrashDialogPayload {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub thread: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub backtrace: String,
+    #[serde(default)]
+    pub recovery_note: Option<String>,
+    #[serde(default)]
+    pub log_dir: String,
+}
+
+impl CrashDialogPayload {
+    /// Lê um arquivo de payload de crash tratando-o como entrada hostil (§0.4).
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        f.take(MAX_CRASH_PAYLOAD_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if (bytes.len() as u64) > MAX_CRASH_PAYLOAD_BYTES {
+            return Err("arquivo de relatório excede o limite seguro".into());
+        }
+        serde_json::from_slice::<Self>(&bytes).map_err(|e| e.to_string())
+    }
+
+    /// Grava o payload em JSON (ignora erros de disco no caminho de pânico).
+    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// Formata os detalhes técnicos do problema (estilo relatório de problema
+    /// clássico: descrição do problema, ambiente, erro, notas opcionais e stack trace).
+    pub fn format_problem_details(&self, user_notes: &str) -> String {
+        let mut s = String::new();
+        s.push_str("Descrição do Problema (Neoveg)\n");
+        s.push_str("========================================\n");
+        s.push_str("  Aplicativo:   Neoveg\n");
+        if !self.version.is_empty() {
+            s.push_str(&format!("  Versão:       {}\n", self.version));
+        }
+        let os = if self.os.is_empty() {
+            std::env::consts::OS
+        } else {
+            &self.os
+        };
+        let arch = if self.arch.is_empty() {
+            std::env::consts::ARCH
+        } else {
+            &self.arch
+        };
+        s.push_str(&format!("  Sistema:      {os} ({arch})\n"));
+        if !self.timestamp.is_empty() {
+            s.push_str(&format!("  Data/Hora:    {}\n", self.timestamp));
+        }
+        if !self.thread.is_empty() {
+            s.push_str(&format!("  Thread:       {}\n", self.thread));
+        }
+        if !self.location.is_empty() {
+            s.push_str(&format!("  Local:        {}\n", self.location));
+        }
+        if !self.message.is_empty() {
+            s.push_str(&format!("  Erro:         {}\n", self.message));
+        }
+        if let Some(note) = &self.recovery_note {
+            if !note.trim().is_empty() {
+                s.push_str(&format!("  Recuperação:  {}\n", note.trim()));
+            }
+        }
+        let notes = user_notes.trim();
+        if !notes.is_empty() {
+            s.push_str("\nDescrição do usuário:\n");
+            s.push_str(&redact(notes));
+            s.push('\n');
+        }
+        if !self.backtrace.trim().is_empty() {
+            s.push_str("\nInformações Extras (Stack Trace):\n");
+            s.push_str(&self.backtrace);
+            if !self.backtrace.ends_with('\n') {
+                s.push('\n');
+            }
+        }
+        s
+    }
+}
+
+/// Caminho padrão do payload do último encerramento inesperado (`logs/ultimo_crash.json`).
+pub fn last_crash_payload_path() -> PathBuf {
+    logs_dir().join("ultimo_crash.json")
+}
+
+/// Marca se o processo está atualmente executando a interface gráfica principal.
+/// Apenas quedas não isoladas na interface abrem a janela imediata de erro.
+pub fn set_gui_active(active: bool) {
+    GUI_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// Informa se a interface gráfica principal está marcada como ativa.
+pub fn is_gui_active() -> bool {
+    GUI_ACTIVE.load(Ordering::SeqCst)
+}
+
+fn should_spawn_crash_dialog(isolated: bool, gui_active: bool, disabled_env: bool) -> bool {
+    !isolated && gui_active && !disabled_env
+}
 
 /// Registra uma função chamada sem pânicos durante o tratamento de crash (§0.7).
 pub fn set_recovery_callback(cb: RecoveryCallback) {
     *lock(&RECOVERY_CB) = Some(cb);
 }
 
-/// Instala o hook de pânico: registra stack trace em `logs/crash.log` e
-/// executa o callback de recuperação (ex.: salvar `autosave/recuperacao.neoveg`).
+/// Instala o hook de pânico: registra stack trace em `logs/crash.log`,
+/// executa o callback de recuperação (ex.: salvar `autosave/recuperacao.neoveg`)
+/// e, para falhas não isoladas da interface gráfica, abre o diálogo de erro
+/// (`--crash-dialog`) em processo separado.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let thread = std::thread::current();
@@ -260,14 +420,49 @@ pub fn install_panic_hook() {
         // próxima abertura); não faz nada fora do modo de interface
         crate::session_marker::record_panic(&name, &loc, &msg);
         let bt = std::backtrace::Backtrace::force_capture();
+        let bt_text = bt.to_string();
         append(
             "crash.log",
-            &format!("pânico na thread '{name}' em {loc}: {msg}\n{bt}\n"),
+            &format!("pânico na thread '{name}' em {loc}: {msg}\n{bt_text}\n"),
         );
+        let mut recovery_note: Option<String> = None;
         if let Ok(guard) = RECOVERY_CB.try_lock() {
             if let Some(cb) = *guard {
                 if let Some(note) = cb() {
                     append("crash.log", &note);
+                    recovery_note = Some(redact(&note));
+                }
+            }
+        }
+        let isolated = ISOLATED_GUARD_DEPTH.with(|d| d.get() > 0);
+        let disabled_env = std::env::var_os("NEOVEG_NO_CRASH_DIALOG").is_some();
+        if !cfg!(test)
+            && should_spawn_crash_dialog(isolated, is_gui_active(), disabled_env)
+            && !CRASH_DIALOG_SPAWNED.swap(true, Ordering::SeqCst)
+        {
+            let bt_clean: String = redact(&bt_text)
+                .chars()
+                .take(MAX_CRASH_BACKTRACE_CHARS)
+                .collect();
+            let payload = CrashDialogPayload {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                timestamp: timestamp(),
+                thread: redact(&name),
+                location: redact(&loc),
+                message: redact(&msg),
+                backtrace: bt_clean,
+                recovery_note,
+                log_dir: redact(&logs_dir().display().to_string()),
+            };
+            let payload_path = last_crash_payload_path();
+            if payload.save_to_file(&payload_path).is_ok() {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe)
+                        .arg("--crash-dialog")
+                        .arg(&payload_path)
+                        .spawn();
                 }
             }
         }
@@ -360,5 +555,55 @@ mod tests {
             pick(None, false, false, Some(PathBuf::from("relativa"))),
             temp.join("neoveg")
         );
+    }
+
+    #[test]
+    fn isolated_guard_depth_volta_a_zero_apos_panico() {
+        assert_eq!(ISOLATED_GUARD_DEPTH.with(|d| d.get()), 0);
+        let seen_inside = std::cell::Cell::new(0usize);
+        let res = catch_isolated(|| {
+            seen_inside.set(ISOLATED_GUARD_DEPTH.with(|d| d.get()));
+            panic!("falha isolada de teste");
+        });
+        assert!(res.is_err());
+        assert_eq!(seen_inside.get(), 1);
+        assert_eq!(ISOLATED_GUARD_DEPTH.with(|d| d.get()), 0);
+        assert!(should_spawn_crash_dialog(false, true, false));
+        assert!(!should_spawn_crash_dialog(true, true, false));
+        assert!(!should_spawn_crash_dialog(false, false, false));
+        assert!(!should_spawn_crash_dialog(false, true, true));
+    }
+
+    #[test]
+    fn crash_dialog_payload_roundtrip_e_entrada_hostil() {
+        let dir = std::env::temp_dir().join(format!("neoveg_crash_payload_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("ultimo_crash.json");
+        let p = CrashDialogPayload {
+            version: "0.3.0".into(),
+            os: "windows".into(),
+            arch: "x86_64".into(),
+            timestamp: "2026-11-23 15:00:00".into(),
+            thread: "main".into(),
+            location: "crates/neoveg_ui/src/kf_window.rs:315".into(),
+            message: "falha simulada".into(),
+            backtrace: "0: neoveg::main".into(),
+            recovery_note: Some("projeto salvo".into()),
+            log_dir: "~/logs".into(),
+        };
+        p.save_to_file(&file).unwrap();
+        let back = CrashDialogPayload::load_from_file(&file).unwrap();
+        assert_eq!(back, p);
+        let text = back.format_problem_details("Movendo a trilha de vídeo");
+        assert!(text.contains("Versão:       0.3.0"));
+        assert!(text.contains("falha simulada"));
+        assert!(text.contains("Movendo a trilha de vídeo"));
+        assert!(text.contains("0: neoveg::main"));
+
+        // JSON corrompido ou arquivo inexistente nunca entra em pânico
+        std::fs::write(&file, b"{corrompido").unwrap();
+        assert!(CrashDialogPayload::load_from_file(&file).is_err());
+        assert!(CrashDialogPayload::load_from_file(&dir.join("inexistente.json")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
