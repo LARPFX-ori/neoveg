@@ -2666,3 +2666,91 @@ fn kittest_propriedades_do_projeto_tem_as_cinco_abas() {
     assert_eq!(harness.state().dlg.project_props_tab, 3);
     harness.get_by_label("Comentários");
 }
+
+/// Faixa de projetos abertos fica acima da faixa de sequências, e a caixa de
+/// seleção (EditTool::Selection) seleciona eventos na linha do tempo.
+#[test]
+fn kittest_faixa_projetos_acima_da_faixa_sequencias_e_retangulo_selecao() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    let doc_bar = harness.state().tl.last_doc_bar;
+    let seq_bar = harness.state().tl.last_seq_bar;
+    assert!(
+        doc_bar.is_positive(),
+        "faixa de projetos abertos deve ser desenhada"
+    );
+    assert!(
+        seq_bar.is_positive(),
+        "faixa de sequências deve ser desenhada"
+    );
+    assert!(
+        doc_bar.bottom() <= seq_bar.top() + 0.5,
+        "faixa de projetos ({doc_bar:?}) deve ficar acima da faixa de sequências ({seq_bar:?})"
+    );
+
+    // Insere evento em t=2s (dentro da área das faixas), fecha o editor de
+    // gerador e arrasta a caixa de seleção com EditTool::Selection sobre ele.
+    let eid = {
+        let app = harness.state_mut();
+        app.cursor = Ticks::from_secs_i64(2);
+        app.insert_generated(crate::model::GenSpec::SolidColor {
+            color: [0.2, 0.6, 0.9, 1.0],
+        });
+        app.dlg.gen_editor = None;
+        app.sel_events.clear();
+        app.session.edit_tool = neoveg_engine::session::EditTool::Selection;
+        app.project
+            .tracks
+            .iter()
+            .flat_map(|t| t.events.iter())
+            .map(|e| e.id)
+            .next()
+            .expect("evento gerado")
+    };
+    harness.run_steps(2);
+    let lanes = harness.state().tl.last_lanes;
+    let ev_rect = harness
+        .state()
+        .event_screen_rect(eid)
+        .expect("evento visível na timeline");
+    let p0 = egui::pos2(
+        (ev_rect.left() - 12.0).max(lanes.left() + 4.0),
+        (ev_rect.top() + 4.0).max(lanes.top() + 4.0),
+    );
+    let p1 = egui::pos2(
+        (ev_rect.center().x + 12.0).min(lanes.right() - 4.0),
+        (ev_rect.bottom() - 4.0).min(lanes.bottom() - 4.0),
+    );
+    assert!(lanes.contains(p0) && lanes.contains(p1));
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(p0));
+    harness.run_steps(1);
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: p0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(1);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(p1));
+    harness.run_steps(2);
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: p1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(2);
+    assert!(
+        harness.state().sel_events.contains(&eid),
+        "retângulo de seleção deve selecionar o evento alcançado (lanes={lanes:?}, ev={ev_rect:?}, p0={p0:?}, p1={p1:?})"
+    );
+}

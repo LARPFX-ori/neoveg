@@ -2344,3 +2344,65 @@ fn open_fx_target_abre_plugin_chooser_quando_cadeia_vazia() {
     app.open_fx_target(FxTarget::Track(tid));
     assert!(!app.dlg.fx_chooser_open);
 }
+
+#[test]
+fn agulha_preservada_ao_alternar_sequencias_e_projetos_abertos() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    app.project.ensure_sequences();
+    let seq1 = app.project.active_sequence_id.expect("seq1");
+    let t1 = Ticks::from_secs_i64(5);
+    let t2 = Ticks::from_secs_i64(12);
+    // Simula play_start diferente de cursor (reproduz o bug antigo onde `stop(false)` zerava a agulha)
+    app.session.play_start = Ticks::ZERO;
+    app.session.cursor = t1;
+
+    let seq2 = app.create_sequence_app(Some("Sequência 02"));
+    assert_eq!(app.session.cursor, Ticks::ZERO);
+    app.session.play_start = Ticks::ZERO;
+    app.session.cursor = t2;
+
+    assert!(app.switch_sequence_app(seq1));
+    assert_eq!(
+        app.session.cursor, t1,
+        "agulha da Sequência 01 deve ficar em 5s"
+    );
+    assert!(app.switch_sequence_app(seq2));
+    assert_eq!(
+        app.session.cursor, t2,
+        "agulha da Sequência 02 deve ficar em 12s"
+    );
+
+    // Também preserva a agulha entre projetos abertos em abas (principal <-> aninhado)
+    let dir = std::env::temp_dir().join(format!("neoveg_doc_cursor_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let sub_path = dir.join("sub.neoveg");
+    crate::model::Project::new_default()
+        .save_file(&sub_path)
+        .unwrap();
+    app.session.play_start = Ticks::ZERO;
+    app.open_nested_project_tab(&sub_path);
+    assert_eq!(app.active_doc, 1);
+    let t_sub = Ticks::from_secs_i64(8);
+    app.session.play_start = Ticks::ZERO;
+    app.session.cursor = t_sub;
+
+    app.switch_doc_tab(0);
+    assert_eq!(
+        app.session.cursor, t2,
+        "agulha do projeto principal deve permanecer em 12s"
+    );
+    app.switch_doc_tab(1);
+    assert_eq!(
+        app.session.cursor, t_sub,
+        "agulha do projeto aninhado deve permanecer em 8s"
+    );
+    app.request_close_doc_tab(1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

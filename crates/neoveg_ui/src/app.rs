@@ -903,10 +903,26 @@ impl App {
         self.session.changed();
     }
 
-    /// Alterna a sequência ativa no app: para reprodução, invalida prévia em RAM,
-    /// fecha diálogos atrelados à timeline antiga e restaura visão da nova sequência.
+    /// Cria uma nova sequência preservando a agulha e a visão da sequência ativa.
+    pub fn create_sequence_app(&mut self, name: Option<&str>) -> Id {
+        self.stop_preserving_cursor();
+        let id = self
+            .session
+            .create_sequence_with_view(name, self.tl.scroll_x, self.tl.px_per_sec);
+        self.tl.scroll_x = Ticks::ZERO;
+        {
+            let mut s = util::lock(&self.audio.shared);
+            s.pos = 0;
+        }
+        self.changed();
+        id
+    }
+
+    /// Alterna a sequência ativa no app: para reprodução sem mover a agulha,
+    /// invalida prévia em RAM, fecha diálogos atrelados à timeline antiga e
+    /// restaura a agulha e a visão da nova sequência.
     pub fn switch_sequence_app(&mut self, target_id: Id) -> bool {
-        self.stop(false);
+        self.stop_preserving_cursor();
         let Some((target_cursor, target_scroll_x, target_px_per_sec)) = self
             .session
             .switch_sequence_with_view(target_id, self.tl.scroll_x, self.tl.px_per_sec)
@@ -914,6 +930,12 @@ impl App {
             return false;
         };
         self.session.cursor = target_cursor;
+        self.session.play_start = target_cursor;
+        {
+            let sr = self.audio.sr;
+            let mut s = util::lock(&self.audio.shared);
+            s.pos = target_cursor.to_samples_round(sr);
+        }
         self.tl.scroll_x = target_scroll_x;
         if target_px_per_sec > 0.0 {
             self.tl.px_per_sec = target_px_per_sec;
@@ -1096,6 +1118,29 @@ impl App {
         } else {
             self.cursor = self.play_start;
         }
+    }
+
+    /// Para a reprodução preservando exatamente a posição atual da agulha
+    /// (`self.cursor`), sem voltar para `play_start` nem sobrescrever com o
+    /// buffer de áudio quando já estava parado (troca de aba de projeto/sequência).
+    pub fn stop_preserving_cursor(&mut self) {
+        let playing_pos = {
+            let mut s = self
+                .audio
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let was_playing = s.playing;
+            s.playing = false;
+            s.speed = 1.0;
+            s.reset_dsp();
+            was_playing.then_some(s.pos)
+        };
+        self.shuttle = 0.0;
+        if let Some(pos) = playing_pos {
+            self.cursor = Ticks::from_samples(pos.max(0), self.audio.sr);
+        }
+        self.play_start = self.cursor;
     }
 
     pub fn trimmer_play(&mut self) {

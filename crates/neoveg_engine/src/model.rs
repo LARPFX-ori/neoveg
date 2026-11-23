@@ -903,9 +903,22 @@ impl Project {
 
     /// Cria uma nova sequência no projeto e a torna ativa.
     pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
+        self.create_sequence_with_view(name, Ticks::ZERO, Ticks::ZERO, 100.0)
+    }
+
+    /// Cria uma nova sequência preservando a posição da agulha e a visão da
+    /// sequência que estava ativa.
+    pub fn create_sequence_with_view(
+        &mut self,
+        name: Option<&str>,
+        current_cursor: Ticks,
+        current_scroll_x: Ticks,
+        current_px_per_sec: f32,
+    ) -> Id {
         self.ensure_sequences();
-        // Salva a sequência ativa atual
-        let saved_seq = self.take_active_sequence(Ticks::ZERO, Ticks::ZERO, 100.0);
+        // Salva a sequência ativa atual com a visão dela
+        let saved_seq =
+            self.take_active_sequence(current_cursor, current_scroll_x, current_px_per_sec);
         self.sequences.push(saved_seq);
 
         let new_id = new_id();
