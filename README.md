@@ -1,5 +1,7 @@
 # Neoveg
 
+**Português (BR)** | [English](README.en.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [日本語](README.ja.md)
+
 Editor de vídeo não-linear (NLE) escrito em **Rust puro**, com interface nativa multilíngue (`pt-BR` padrão, `en`, `es`, `fr`, `de` e `ja`; `eframe` + `wgpu` com fallback automático para `glow`), semântica operacional inspirada no VEGAS Pro e política estrita de **zero pânico em produção**.
 
 ## Testou o Neoveg? Conte como foi
