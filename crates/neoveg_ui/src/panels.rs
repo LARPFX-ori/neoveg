@@ -1633,7 +1633,7 @@ impl App {
                 .on_hover_text(tr(lang, "Efeitos do Master Bus (áudio)"))
                 .clicked()
             {
-                self.dlg.fx_target = Some(FxTarget::MasterAudio);
+                self.open_fx_target(FxTarget::MasterAudio);
             }
             if ui
                 .selectable_label(self.master_mono, "Mono")
@@ -2134,7 +2134,7 @@ impl App {
                                         pending_toggle_solo = true;
                                     }
                                     if ui.small_button("FX").clicked() {
-                                        self.dlg.fx_target = Some(FxTarget::Track(tid));
+                                        self.open_fx_target(FxTarget::Track(tid));
                                     }
                                 });
                                 if !bus_choices.is_empty() {
@@ -2391,7 +2391,7 @@ impl App {
                                         toggle_solo = true;
                                     }
                                     if ui.small_button("FX").clicked() {
-                                        self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
+                                        self.open_fx_target(FxTarget::AudioBus(bid));
                                     }
                                 });
                                 let sel_lbl = pending_out

@@ -710,18 +710,31 @@ impl App {
             self.thumbs.remove(&id);
             self.project_media.invalidate_media(id);
         }
+        let mut has_sequence_media = false;
         for m in &self.session.project.media {
-            if let MediaSource::Generated(_) = m.source {
-                if !self.media.contains(m.id) {
-                    self.media.insert(
-                        m.id,
-                        media::MediaEntry {
-                            video: media::VideoSource::Generated,
-                            audio: None,
-                        },
-                    );
+            match m.source {
+                MediaSource::Generated(_) => {
+                    if !self.media.contains(m.id) {
+                        self.media.insert(
+                            m.id,
+                            media::MediaEntry {
+                                video: media::VideoSource::Generated,
+                                audio: None,
+                            },
+                        );
+                    }
                 }
+                MediaSource::Sequence { .. } => {
+                    has_sequence_media = true;
+                    self.thumbs.remove(&m.id);
+                    self.project_media.invalidate_media(m.id);
+                }
+                _ => {}
             }
+        }
+        if has_sequence_media {
+            self.media
+                .sync_sequence_media(&self.project, self.media.clone());
         }
     }
 
@@ -867,6 +880,13 @@ impl App {
 
     /// Marca o projeto como modificado (atualiza prévia e áudio).
     pub fn changed(&mut self) {
+        let missing_seq = self.session.project.media.iter().any(|m| {
+            matches!(m.source, MediaSource::Sequence { .. }) && !self.media.contains(m.id)
+        });
+        if missing_seq {
+            self.media
+                .sync_sequence_media(&self.session.project, self.media.clone());
+        }
         self.session.changed();
     }
 
@@ -905,7 +925,19 @@ impl App {
             self.dlg.fx_target = None;
         }
         self.media
-            .sync_sequence_media(&self.project, self.media.clone());
+            .sync_sequence_media(&self.session.project, self.media.clone());
+        let seq_media_ids: Vec<Id> = self
+            .session
+            .project
+            .media
+            .iter()
+            .filter(|m| matches!(m.source, MediaSource::Sequence { .. }))
+            .map(|m| m.id)
+            .collect();
+        for id in seq_media_ids {
+            self.thumbs.remove(&id);
+            self.project_media.invalidate_media(id);
+        }
         self.changed();
         true
     }
@@ -923,11 +955,24 @@ impl App {
     }
 
     fn after_history(&mut self) {
+        let mut has_seq = false;
         for m in &self.session.project.media {
-            if let MediaSource::Generated(_) = m.source {
-                self.media.invalidate_generated(m.id);
-                self.thumbs.remove(&m.id);
+            match m.source {
+                MediaSource::Generated(_) => {
+                    self.media.invalidate_generated(m.id);
+                    self.thumbs.remove(&m.id);
+                }
+                MediaSource::Sequence { .. } => {
+                    has_seq = true;
+                    self.thumbs.remove(&m.id);
+                    self.project_media.invalidate_media(m.id);
+                }
+                _ => {}
             }
+        }
+        if has_seq {
+            self.media
+                .sync_sequence_media(&self.project, self.media.clone());
         }
         self.sync_after_session();
     }
@@ -2814,10 +2859,12 @@ impl App {
                 self.dlg.pan_crop = self.sel_events.iter().next().copied();
             }
             UiAction::OpenFxEvent => {
-                self.dlg.fx_target = self.sel_events.iter().next().map(|i| FxTarget::Event(*i));
+                if let Some(id) = self.sel_events.iter().next().copied() {
+                    self.open_fx_target(FxTarget::Event(id));
+                }
             }
-            UiAction::OpenFxMasterAudio => self.dlg.fx_target = Some(FxTarget::MasterAudio),
-            UiAction::OpenFxMasterVideo => self.dlg.fx_target = Some(FxTarget::MasterVideo),
+            UiAction::OpenFxMasterAudio => self.open_fx_target(FxTarget::MasterAudio),
+            UiAction::OpenFxMasterVideo => self.open_fx_target(FxTarget::MasterVideo),
             UiAction::OpenMotionTrackDialog => self.open_motion_track_dialog(),
             UiAction::ApplyAudioFxNonRealtime => self.apply_audio_fx_non_realtime(),
             UiAction::OpenCustomizeToolbar => self.open_customize_toolbar(),

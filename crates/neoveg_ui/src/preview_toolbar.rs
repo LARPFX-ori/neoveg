@@ -151,7 +151,7 @@ impl App {
             if !rest.is_empty() {
                 let more = ui
                     .push_id("preview_tool_more", |ui| {
-                        ui.menu_button("⋯", |ui| {
+                        ui.menu_button("…", |ui| {
                             for tool in rest {
                                 self.preview_tool_menu(ui, *tool);
                             }
@@ -198,7 +198,7 @@ impl App {
                     .on_hover_text(tr(lang, "Efeitos de saída de vídeo"))
                     .clicked()
                 {
-                    self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                    self.open_fx_target(FxTarget::MasterVideo);
                 }
             }
             PreviewTool::Split => {
@@ -216,7 +216,7 @@ impl App {
                 }
             }
             PreviewTool::SplitMode => {
-                ui.menu_button("⏷", |ui| self.preview_split_menu(ui))
+                ui.menu_button("▼", |ui| self.preview_split_menu(ui))
                     .response
                     .on_hover_text(tr(lang, "Divisão"));
             }
@@ -254,7 +254,7 @@ impl App {
                     self.opts.safe_areas = !self.opts.safe_areas;
                 }
                 resp.context_menu(|ui| self.safe_guides_menu(ui));
-                ui.menu_button("⏷", |ui| self.safe_guides_menu(ui))
+                ui.menu_button("▼", |ui| self.safe_guides_menu(ui))
                     .response
                     .on_hover_text(tr(lang, "Escolher as sobreposições"));
             }
@@ -445,7 +445,7 @@ impl App {
             }
             PreviewTool::OutputFx => {
                 if ui.button(tr(lang, "Efeitos de saída de vídeo")).clicked() {
-                    self.dlg.fx_target = Some(FxTarget::MasterVideo);
+                    self.open_fx_target(FxTarget::MasterVideo);
                     ui.close_menu();
                 }
             }

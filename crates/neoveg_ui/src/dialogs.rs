@@ -896,6 +896,23 @@ struct SceneDetectJob {
     rx: std::sync::mpsc::Receiver<Vec<Ticks>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FxChooserItem {
+    Native(FxKind),
+    SavedChain(usize),
+    Ofx {
+        binary: String,
+        identifier: String,
+        label: String,
+    },
+    Vst3 {
+        binary: String,
+        class_id: String,
+        name: String,
+        is_instrument: bool,
+    },
+}
+
 #[derive(Default)]
 pub struct Dialogs {
     pub project_props: bool,
@@ -903,9 +920,11 @@ pub struct Dialogs {
     pub pan_crop: Option<Id>,
     pub track_motion: Option<Id>,
     pub fx_target: Option<FxTarget>,
-    fx_chooser_open: bool,
+    pub(crate) fx_chooser_open: bool,
     fx_chooser_cat: usize,
     fx_chooser_filter: String,
+    fx_chooser_selected: Option<FxChooserItem>,
+    fx_chooser_snapshot: Option<Vec<FxInstance>>,
     fx_selected_slot: Option<usize>,
     pub gen_editor: Option<Id>,
     pub paste_attrs_open: bool,
@@ -2590,8 +2609,9 @@ impl App {
         crate::dialog_window::DialogWindow::new(tr(lang, "Propriedades do projeto"))
             .id(egui::Id::new("project_props_win"))
             .open(&mut open)
-            .resizable(false)
-            .default_width(460.0)
+            .resizable(true)
+            .default_width(540.0)
+            .min_width(480.0)
             .show(ctx, |ui| {
                 // abas na ordem do VEGAS Pro: Vídeo, Áudio, Régua, Resumo, CD de áudio
                 ui.horizontal(|ui| {
@@ -2829,9 +2849,10 @@ impl App {
         crate::dialog_window::DialogWindow::new(tr(lang, "Propriedades do evento"))
             .id(egui::Id::new("event_props_win"))
             .open(&mut open)
-            .default_width(380.0)
+            .default_width(460.0)
+            .min_width(400.0)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(media_info).small());
+                ui.add(egui::Label::new(egui::RichText::new(media_info).small()).wrap());
                 ui.separator();
                 let Some(e) = self.project.event_mut(id) else {
                     return;
@@ -3082,7 +3103,7 @@ impl App {
             self.dlg.pan_crop = Some(id);
         }
         if open_fx {
-            self.dlg.fx_target = Some(FxTarget::Event(id));
+            self.open_fx_target(FxTarget::Event(id));
         }
         if changed {
             self.dialog_change();
@@ -3108,6 +3129,28 @@ impl App {
             FxTarget::AudioBus(id) => self.project.audio_bus_mut(id).map(|b| &mut b.fx),
             FxTarget::MasterAudio => Some(&mut self.project.master.fx),
             FxTarget::MasterVideo => Some(&mut self.project.master.video_fx),
+        }
+    }
+
+    /// Abre a janela de efeitos para `target` seguindo o fluxo do VEGAS Pro
+    /// (manual do VEGAS Pro 21, pp. 488–489): quando ainda não há nenhum plug-in
+    /// na cadeia, abre automaticamente o *Plug-In Chooser* (Escolha de Plug-in);
+    /// quando já há efeitos, abre direto na cadeia de parâmetros com acesso ao seletor.
+    pub(crate) fn open_fx_target(&mut self, target: FxTarget) {
+        let is_empty = self
+            .fx_chain_mut(target)
+            .map(|c| c.is_empty())
+            .unwrap_or(true);
+        self.dlg.fx_target = Some(target);
+        if is_empty {
+            self.dlg.fx_chooser_open = true;
+            self.dlg.fx_chooser_snapshot = Some(Vec::new());
+            self.dlg.fx_chooser_selected = None;
+            self.dlg.fx_selected_slot = None;
+        } else {
+            self.dlg.fx_chooser_open = false;
+            self.dlg.fx_chooser_snapshot = None;
+            self.dlg.fx_selected_slot = Some(0);
         }
     }
 
@@ -3168,8 +3211,8 @@ impl App {
         let fmt_local = self.fmt_time(local_t);
         let mut open = true;
         let mut changed = false;
-        let mut add: Option<FxKind> = None;
-        let mut replace_slot: Option<(usize, FxKind)> = None;
+        let mut add_item: Option<FxChooserItem> = None;
+        let mut replace_item: Option<(usize, FxChooserItem)> = None;
         let mut op: Option<(usize, &str)> = None;
         let mut apply_saved_chain: Option<usize> = None;
         let mut delete_saved_chain: Option<usize> = None;
@@ -3178,7 +3221,19 @@ impl App {
         let mut confirm_save_chain: Option<String> = None;
         let mut confirm_save_preset: Option<(FxInstance, String)> = None;
         let mut open_color_grading = false;
+        let mut chooser_ok = false;
+        let mut chooser_cancel = false;
         let saved_chains_snapshot = self.prefs.fx_chains.clone();
+        let probed_ofx = if !audio {
+            crate::plugin_manager::probed_ofx_plugins(ctx)
+        } else {
+            Vec::new()
+        };
+        let probed_vst3 = if audio {
+            crate::plugin_manager::probed_vst3_plugins(ctx)
+        } else {
+            Vec::new()
+        };
         let Some(chain) = self.fx_chain_mut(target) else {
             return;
         };
@@ -3186,43 +3241,510 @@ impl App {
         let mut chooser_open = self.dlg.fx_chooser_open;
         let mut chooser_cat = self.dlg.fx_chooser_cat;
         let mut chooser_filter = self.dlg.fx_chooser_filter.clone();
+        let mut chooser_selected = self.dlg.fx_chooser_selected.clone();
         let mut sel_slot = self.dlg.fx_selected_slot;
-        crate::dialog_window::DialogWindow::new(title)
+        let win_title = if chooser_open {
+            tr_args(lang, "Escolha de Plug-in — {title}", &[("title", &title)])
+        } else {
+            title
+        };
+        crate::dialog_window::DialogWindow::new(win_title)
             .id(egui::Id::new("fx_chain_win"))
             .open(&mut open)
-            .default_width(if chooser_open { 640.0 } else { 480.0 })
+            .default_size([740.0, 560.0])
+            .min_size([560.0, 400.0])
+            .resizable(true)
             .show(ctx, |ui| {
-                if !chain_copy.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new("○").weak());
+                // Faixa superior estilo VEGAS Pro: pílulas da cadeia + botão Cadeia de Plug-ins
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("●").weak());
+                    if chain_copy.is_empty() {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Nenhum plug-in na cadeia"))
+                                .small()
+                                .weak(),
+                        );
+                    } else {
                         for (i, fx) in chain_copy.iter_mut().enumerate() {
                             ui.label(egui::RichText::new("—").weak());
                             let is_sel = sel_slot == Some(i);
                             if ui.checkbox(&mut fx.enabled, "").changed() {
                                 changed = true;
                             }
-                            if ui
-                                .selectable_label(is_sel, fx.display_name())
-                                .clicked()
-                            {
+                            let pill_name = if matches!(fx.kind, FxKind::Ofx | FxKind::Vst3) {
+                                fx.display_name()
+                            } else {
+                                fx.kind.name_in(lang).to_string()
+                            };
+                            if ui.selectable_label(is_sel, pill_name).clicked() {
                                 sel_slot = Some(i);
                             }
                         }
-                        ui.label(egui::RichText::new("—○").weak());
-                    });
-                    ui.separator();
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .selectable_label(chooser_open, tr(lang, "Escolher plug-in..."))
+                    }
+                    ui.label(egui::RichText::new("—●").weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::icon_button(
+                            ui,
+                            Icon::PluginPlug,
+                            Some(tr(lang, "Cadeia de Plug-ins...")),
+                            chooser_open,
+                            true,
+                            &self.theme,
+                        )
                         .on_hover_text(tr(
                             lang,
-                            "Abrir seletor de plug-ins em 2 colunas (árvore e lista)",
+                            "Abrir seletor de plug-ins (Escolha de Plug-in) para adicionar, substituir ou remover efeitos",
                         ))
                         .clicked()
-                    {
-                        chooser_open = !chooser_open;
+                        {
+                            if !chooser_open {
+                                self.dlg.fx_chooser_snapshot = Some(chain_copy.clone());
+                            }
+                            chooser_open = !chooser_open;
+                        }
+                    });
+                });
+                ui.separator();
+
+                if chooser_open {
+                    // Seletor estilo VEGAS Pro Plug-In Chooser (manual pp. 488-489):
+                    // pastas à esquerda, lista + prévia no centro, botões OK/Cancelar/Adicionar/Substituir/Remover à direita.
+                    ui.horizontal(|ui| {
+                        ui.strong(tr(lang, "Escolha de Plug-in"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut chooser_filter)
+                                .desired_width((ui.available_width() - 120.0).clamp(160.0, 320.0))
+                                .hint_text(tr(lang, "Filtrar plug-ins...")),
+                        );
+                        if !chooser_filter.is_empty() && ui.small_button("×").clicked() {
+                            chooser_filter.clear();
+                        }
+                    });
+                    ui.add_space(4.0);
+                    let q = chooser_filter.trim().to_lowercase();
+                    let native_list: &[FxKind] = if audio {
+                        &FxKind::AUDIO
+                    } else {
+                        &FxKind::VIDEO
+                    };
+                    let mut folder_names: Vec<String> = vec![
+                        tr(lang, "Todos").to_string(),
+                        tr(lang, "Favoritos").to_string(),
+                        tr(lang, "Cadeias salvas").to_string(),
+                        if audio {
+                            tr(lang, "Terceiros (VST3)").to_string()
+                        } else {
+                            tr(lang, "Terceiros (OFX)").to_string()
+                        },
+                    ];
+                    if !audio {
+                        for cat in FxCategory::ALL {
+                            folder_names.push(cat.name_in(lang).to_string());
+                        }
                     }
+                    if chooser_cat >= folder_names.len() {
+                        chooser_cat = 0;
+                    }
+                    let favs = self.prefs.fx_favorites.clone();
+
+                    // Constrói os itens visíveis na pasta selecionada
+                    let mut visible_items: Vec<(String, FxChooserItem)> = Vec::new();
+                    match chooser_cat {
+                        0 => {
+                            // Todos: nativos + cadeias salvas + terceiros consultados
+                            for &k in native_list {
+                                let nm = k.name_in(lang).to_string();
+                                if q.is_empty()
+                                    || nm.to_lowercase().contains(&q)
+                                    || k.name().to_lowercase().contains(&q)
+                                {
+                                    visible_items.push((nm, FxChooserItem::Native(k)));
+                                }
+                            }
+                            if !audio {
+                                for (bin, info) in &probed_ofx {
+                                    if q.is_empty() || info.identifier.to_lowercase().contains(&q) {
+                                        let label = info
+                                            .identifier
+                                            .rsplit('.')
+                                            .next()
+                                            .filter(|s| !s.is_empty())
+                                            .unwrap_or(&info.identifier)
+                                            .to_string();
+                                        visible_items.push((
+                                            format!("{label} [OFX]"),
+                                            FxChooserItem::Ofx {
+                                                binary: bin.to_string_lossy().to_string(),
+                                                identifier: info.identifier.clone(),
+                                                label,
+                                            },
+                                        ));
+                                    }
+                                }
+                            } else {
+                                for (bin, info) in &probed_vst3 {
+                                    if q.is_empty() || info.name.to_lowercase().contains(&q) {
+                                        visible_items.push((
+                                            format!("{} [VST3]", info.name),
+                                            FxChooserItem::Vst3 {
+                                                binary: bin.to_string_lossy().to_string(),
+                                                class_id: info.class_id.clone(),
+                                                name: info.name.clone(),
+                                                is_instrument: info.is_instrument(),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        1 => {
+                            // Favoritos
+                            for &k in native_list {
+                                if !favs.iter().any(|f| f == &format!("{k:?}")) {
+                                    continue;
+                                }
+                                let nm = k.name_in(lang).to_string();
+                                if q.is_empty()
+                                    || nm.to_lowercase().contains(&q)
+                                    || k.name().to_lowercase().contains(&q)
+                                {
+                                    visible_items.push((nm, FxChooserItem::Native(k)));
+                                }
+                            }
+                        }
+                        2 => {
+                            // Cadeias salvas (Filter Packages)
+                            for (ci, c) in saved_chains_snapshot.iter().enumerate() {
+                                if c.audio != audio {
+                                    continue;
+                                }
+                                if q.is_empty() || c.name.to_lowercase().contains(&q) {
+                                    visible_items.push((
+                                        format!("{} ({})", c.name, c.items.len()),
+                                        FxChooserItem::SavedChain(ci),
+                                    ));
+                                }
+                            }
+                        }
+                        3 => {
+                            // Terceiros (OFX / VST3)
+                            if !audio {
+                                for (bin, info) in &probed_ofx {
+                                    if q.is_empty() || info.identifier.to_lowercase().contains(&q) {
+                                        let label = info
+                                            .identifier
+                                            .rsplit('.')
+                                            .next()
+                                            .filter(|s| !s.is_empty())
+                                            .unwrap_or(&info.identifier)
+                                            .to_string();
+                                        visible_items.push((
+                                            info.identifier.clone(),
+                                            FxChooserItem::Ofx {
+                                                binary: bin.to_string_lossy().to_string(),
+                                                identifier: info.identifier.clone(),
+                                                label,
+                                            },
+                                        ));
+                                    }
+                                }
+                            } else {
+                                for (bin, info) in &probed_vst3 {
+                                    if q.is_empty() || info.name.to_lowercase().contains(&q) {
+                                        visible_items.push((
+                                            info.name.clone(),
+                                            FxChooserItem::Vst3 {
+                                                binary: bin.to_string_lossy().to_string(),
+                                                class_id: info.class_id.clone(),
+                                                name: info.name.clone(),
+                                                is_instrument: info.is_instrument(),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        cat_idx => {
+                            let video_cat = FxCategory::ALL.get(cat_idx.saturating_sub(4)).copied();
+                            for &k in native_list {
+                                if k.category() != video_cat {
+                                    continue;
+                                }
+                                let nm = k.name_in(lang).to_string();
+                                if q.is_empty()
+                                    || nm.to_lowercase().contains(&q)
+                                    || k.name().to_lowercase().contains(&q)
+                                {
+                                    visible_items.push((nm, FxChooserItem::Native(k)));
+                                }
+                            }
+                        }
+                    }
+
+                    let avail_w = ui.available_width().max(480.0);
+                    let left_w = 155.0_f32;
+                    let right_w = 104.0_f32;
+                    let mid_w = (avail_w - left_w - right_w - 28.0).max(200.0);
+                    let chooser_h = (ui.available_height() - 16.0).clamp(240.0, 420.0);
+
+                    ui.horizontal_top(|ui| {
+                        // Coluna 1: Pastas de plug-ins
+                        ui.vertical(|ui| {
+                            ui.set_width(left_w);
+                            ui.strong(tr(lang, "Pastas"));
+                            egui::Frame::NONE
+                                .fill(self.theme.extreme_bg)
+                                .stroke(Stroke::new(1.0_f32, self.theme.border))
+                                .inner_margin(4.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(left_w - 8.0);
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("fx_chooser_folders")
+                                        .max_height(chooser_h - 24.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            for (ci, cname) in folder_names.iter().enumerate() {
+                                                ui.horizontal(|ui| {
+                                                    icons::paint_inline(
+                                                        ui,
+                                                        Icon::FolderItem,
+                                                        13.0,
+                                                        &self.theme,
+                                                    );
+                                                    if ui
+                                                        .selectable_label(chooser_cat == ci, cname)
+                                                        .clicked()
+                                                    {
+                                                        chooser_cat = ci;
+                                                    }
+                                                });
+                                            }
+                                        });
+                                });
+                        });
+
+                        // Coluna 2: Lista de plug-ins + prévia do efeito selecionado
+                        ui.vertical(|ui| {
+                            ui.set_width(mid_w);
+                            ui.strong(tr(lang, "Plug-ins disponíveis"));
+                            let preview_h = if !audio { 104.0 } else { 0.0 };
+                            let list_h = (chooser_h - preview_h - 28.0).max(120.0);
+                            egui::Frame::NONE
+                                .fill(self.theme.extreme_bg)
+                                .stroke(Stroke::new(1.0_f32, self.theme.border))
+                                .inner_margin(4.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(mid_w - 8.0);
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("fx_chooser_list")
+                                        .max_height(list_h)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            if visible_items.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(tr(
+                                                        lang,
+                                                        "Nenhum plug-in disponível nesta pasta.",
+                                                    ))
+                                                    .small()
+                                                    .weak(),
+                                                );
+                                            }
+                                            for (label, item) in &visible_items {
+                                                let is_sel =
+                                                    chooser_selected.as_ref() == Some(item);
+                                                let resp = ui.selectable_label(is_sel, label);
+                                                if resp.clicked() {
+                                                    chooser_selected = Some(item.clone());
+                                                }
+                                                if resp.double_clicked() {
+                                                    chooser_selected = Some(item.clone());
+                                                    add_item = Some(item.clone());
+                                                }
+                                            }
+                                        });
+                                });
+                            if !audio {
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    let thumb_sz = vec2(148.0, 84.0);
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(thumb_sz, Sense::hover());
+                                    let hovered = ui.rect_contains_pointer(rect);
+                                    let painted = match chooser_selected.as_ref() {
+                                        Some(FxChooserItem::Native(k)) => {
+                                            let ctx2 = ui.ctx().clone();
+                                            self.fx_browser
+                                                .preview_texture(&ctx2, *k, hovered)
+                                                .map(|tex| {
+                                                    egui::Image::new((tex.id(), thumb_sz))
+                                                        .paint_at(ui, rect);
+                                                })
+                                                .is_some()
+                                        }
+                                        Some(FxChooserItem::Ofx {
+                                            binary, identifier, ..
+                                        }) => {
+                                            let ctx2 = ui.ctx().clone();
+                                            match self.fx_browser.ofx.get(&ctx2, binary, identifier)
+                                            {
+                                                crate::fx_browser::OfxThumb::Ready(tex) => {
+                                                    egui::Image::new((tex.id(), thumb_sz))
+                                                        .paint_at(ui, rect);
+                                                    true
+                                                }
+                                                _ => false,
+                                            }
+                                        }
+                                        _ => false,
+                                    };
+                                    if !painted {
+                                        ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
+                                    }
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        2.0,
+                                        Stroke::new(1.0_f32, self.theme.border),
+                                        StrokeKind::Inside,
+                                    );
+                                    ui.vertical(|ui| {
+                                        let hint = match chooser_selected.as_ref() {
+                                            Some(FxChooserItem::Native(k)) => {
+                                                k.name_in(lang).to_string()
+                                            }
+                                            Some(FxChooserItem::Ofx { label, .. }) => label.clone(),
+                                            Some(FxChooserItem::SavedChain(ci)) => saved_chains_snapshot
+                                                .get(*ci)
+                                                .map(|c| c.name.clone())
+                                                .unwrap_or_default(),
+                                            _ => tr(
+                                                lang,
+                                                "Clique em um efeito para ver a prévia; duplo clique adiciona à cadeia.",
+                                            )
+                                            .to_string(),
+                                        };
+                                        ui.add(egui::Label::new(egui::RichText::new(hint).small()).wrap());
+                                    });
+                                });
+                            }
+                        });
+
+                        // Coluna 3: Botões de ação verticais no estilo do VEGAS Pro
+                        ui.vertical(|ui| {
+                            ui.set_width(right_w);
+                            ui.add_space(18.0);
+                            let bw = right_w - 4.0;
+                            if ui
+                                .add_sized([bw, 24.0], egui::Button::new(tr(lang, "OK")))
+                                .clicked()
+                            {
+                                chooser_ok = true;
+                            }
+                            if ui
+                                .add_sized([bw, 24.0], egui::Button::new(tr(lang, "Cancelar")))
+                                .clicked()
+                            {
+                                chooser_cancel = true;
+                            }
+                            ui.add_space(10.0);
+                            let has_pick = chooser_selected.is_some();
+                            if ui
+                                .add_enabled_ui(has_pick, |ui| {
+                                    ui.add_sized(
+                                        [bw, 24.0],
+                                        egui::Button::new(tr(lang, "Adicionar")),
+                                    )
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                add_item = chooser_selected.clone();
+                            }
+                            let valid_slot = sel_slot.filter(|&s| s < chain_copy.len());
+                            if ui
+                                .add_enabled_ui(has_pick && valid_slot.is_some(), |ui| {
+                                    ui.add_sized(
+                                        [bw, 24.0],
+                                        egui::Button::new(tr(lang, "Substituir")),
+                                    )
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                if let (Some(slot), Some(item)) =
+                                    (valid_slot, chooser_selected.clone())
+                                {
+                                    replace_item = Some((slot, item));
+                                }
+                            }
+                            if ui
+                                .add_enabled_ui(valid_slot.is_some(), |ui| {
+                                    ui.add_sized(
+                                        [bw, 24.0],
+                                        egui::Button::new(tr(lang, "Remover")),
+                                    )
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                if let Some(slot) = valid_slot {
+                                    op = Some((slot, "del"));
+                                }
+                            }
+                            ui.add_space(10.0);
+                            let has_saveable = chain_copy
+                                .iter()
+                                .any(|fx| !matches!(fx.kind, FxKind::Ofx | FxKind::Vst3));
+                            if ui
+                                .add_enabled_ui(has_saveable, |ui| {
+                                    ui.add_sized(
+                                        [bw, 24.0],
+                                        egui::Button::new(tr(lang, "Salvar cadeia...")),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text(tr(
+                                    lang,
+                                    "Salvar esta sequência de efeitos como pacote reutilizável (Filter Package)",
+                                ))
+                                .clicked()
+                            {
+                                self.dlg.save_chain_target = Some(target);
+                                if self.dlg.save_chain_name.trim().is_empty() {
+                                    self.dlg.save_chain_name = if audio {
+                                        tr(lang, "Cadeia de áudio").into()
+                                    } else {
+                                        tr(lang, "Cadeia de vídeo").into()
+                                    };
+                                }
+                            }
+                        });
+                    });
+                    if self.dlg.save_chain_target == Some(target) {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "Nome da cadeia:"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.dlg.save_chain_name)
+                                    .desired_width(180.0),
+                            );
+                            let valid = !self.dlg.save_chain_name.trim().is_empty();
+                            if ui
+                                .add_enabled(valid, egui::Button::new(tr(lang, "Salvar")))
+                                .clicked()
+                            {
+                                confirm_save_chain =
+                                    Some(self.dlg.save_chain_name.trim().to_string());
+                            }
+                            if ui.button(tr(lang, "Fechar")).clicked() {
+                                self.dlg.save_chain_target = None;
+                            }
+                        });
+                    }
+                    return;
+                }
+
+                ui.horizontal_wrapped(|ui| {
                     egui::ComboBox::from_id_salt("fx_add")
                         .selected_text(tr(lang, "+ Adicionar efeito..."))
                         .show_ui(ui, |ui| {
@@ -3233,7 +3755,7 @@ impl App {
                             };
                             for k in list {
                                 if ui.selectable_label(false, k.name_in(lang)).clicked() {
-                                    add = Some(*k);
+                                    add_item = Some(FxChooserItem::Native(*k));
                                 }
                             }
                         });
@@ -3300,94 +3822,17 @@ impl App {
                 });
                 if self.dlg.save_chain_target == Some(target) {
                     ui.horizontal(|ui| {
-                        ui.label("Nome da cadeia:");
+                        ui.label(tr(lang, "Nome da cadeia:"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.dlg.save_chain_name)
                                 .desired_width(160.0),
                         );
                         let valid = !self.dlg.save_chain_name.trim().is_empty();
-                        if ui.add_enabled(valid, egui::Button::new("Salvar")).clicked() {
+                        if ui.add_enabled(valid, egui::Button::new(tr(lang, "Salvar"))).clicked() {
                             confirm_save_chain = Some(self.dlg.save_chain_name.trim().to_string());
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr(lang, "Cancelar")).clicked() {
                             self.dlg.save_chain_target = None;
-                        }
-                    });
-                }
-                if chooser_open {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong(tr(lang, "Escolha de Plug-in"));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut chooser_filter)
-                                .desired_width(200.0)
-                                .hint_text(tr(lang, "Filtrar plug-ins...")),
-                        );
-                    });
-                    let q = chooser_filter.trim().to_lowercase();
-                    let list: &[FxKind] = if audio {
-                        &FxKind::AUDIO
-                    } else {
-                        &FxKind::VIDEO
-                    };
-                    let cats: [&str; 3] = [
-                        tr(lang, "Todos"),
-                        tr(lang, "Favoritos"),
-                        tr(lang, "Nativos"),
-                    ];
-                    let favs = &self.prefs.fx_favorites;
-                    ui.columns(2, |cols| {
-                        cols[0].strong(tr(lang, "Pastas"));
-                        for (ci, cname) in cats.iter().enumerate() {
-                            if cols[0]
-                                .selectable_label(chooser_cat == ci, *cname)
-                                .clicked()
-                            {
-                                chooser_cat = ci;
-                            }
-                        }
-                        cols[1].strong(tr(lang, "Plug-ins disponíveis"));
-                        egui::ScrollArea::vertical()
-                            .id_salt("fx_chooser_list")
-                            .max_height(150.0)
-                            .show(&mut cols[1], |ui| {
-                                for &k in list {
-                                    let kname = k.name_in(lang);
-                                    if !q.is_empty() && !kname.to_lowercase().contains(&q) {
-                                        continue;
-                                    }
-                                    if chooser_cat == 1
-                                        && !favs.iter().any(|f| f == &format!("{k:?}"))
-                                    {
-                                        continue;
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.label(kname);
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui.small_button(tr(lang, "Adicionar")).clicked() {
-                                                    add = Some(k);
-                                                }
-                                                if let Some(slot) =
-                                                    sel_slot.filter(|&s| s < chain_copy.len())
-                                                {
-                                                    if ui
-                                                        .small_button(tr(lang, "Substituir"))
-                                                        .clicked()
-                                                    {
-                                                        replace_slot = Some((slot, k));
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    });
-                                }
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button(tr(lang, "Fechar seletor")).clicked() {
-                            chooser_open = false;
                         }
                     });
                 }
@@ -3620,16 +4065,70 @@ impl App {
         self.dlg.fx_chooser_open = chooser_open;
         self.dlg.fx_chooser_cat = chooser_cat;
         self.dlg.fx_chooser_filter = chooser_filter;
+        self.dlg.fx_chooser_selected = chooser_selected;
         self.dlg.fx_selected_slot = sel_slot;
-        if let Some((slot, k)) = replace_slot {
+        let make_instances = |item: FxChooserItem| -> Vec<FxInstance> {
+            match item {
+                FxChooserItem::Native(k) => vec![FxInstance::new(k)],
+                FxChooserItem::SavedChain(ci) => self
+                    .prefs
+                    .fx_chains
+                    .get(ci)
+                    .map(EditorSession::instantiate_saved_fx_chain)
+                    .unwrap_or_default(),
+                FxChooserItem::Ofx {
+                    binary,
+                    identifier,
+                    label,
+                } => vec![FxInstance::new_ofx(&binary, &identifier, &label)],
+                FxChooserItem::Vst3 {
+                    binary,
+                    class_id,
+                    name,
+                    is_instrument,
+                } => vec![FxInstance::new_vst3_with_kind(
+                    &binary,
+                    &class_id,
+                    &name,
+                    is_instrument,
+                )],
+            }
+        };
+        if let Some((slot, item)) = replace_item {
             if slot < chain_copy.len() {
-                chain_copy[slot] = FxInstance::new(k);
+                let insts = make_instances(item);
+                if let Some(first) = insts.into_iter().next() {
+                    chain_copy[slot] = first;
+                    self.dlg.fx_selected_slot = Some(slot);
+                    changed = true;
+                }
+            }
+        }
+        if let Some(item) = add_item {
+            let insts = make_instances(item);
+            if !insts.is_empty() {
+                chain_copy.extend(insts);
+                self.dlg.fx_selected_slot = Some(chain_copy.len().saturating_sub(1));
                 changed = true;
             }
         }
-        if let Some(k) = add {
-            chain_copy.push(FxInstance::new(k));
-            changed = true;
+        if chooser_ok {
+            self.dlg.fx_chooser_open = false;
+            self.dlg.fx_chooser_snapshot = None;
+            if chain_copy.is_empty() {
+                open = false;
+            }
+        }
+        if chooser_cancel {
+            if let Some(snap) = self.dlg.fx_chooser_snapshot.take() {
+                let was_empty = snap.is_empty();
+                chain_copy = snap;
+                changed = true;
+                if was_empty {
+                    open = false;
+                }
+            }
+            self.dlg.fx_chooser_open = false;
         }
         if let Some((i, what)) = op {
             match what {

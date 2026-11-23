@@ -1028,7 +1028,7 @@ impl App {
                         self.changed();
                     }
                     if ui.small_button("FX").clicked() {
-                        self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
+                        self.open_fx_target(FxTarget::AudioBus(bid));
                     }
                     ui.end_row();
                 }

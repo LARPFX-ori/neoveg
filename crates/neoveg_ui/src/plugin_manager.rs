@@ -103,6 +103,29 @@ pub(crate) fn probed_ofx_plugins(ctx: &egui::Context) -> Vec<(PathBuf, OfxPlugin
     out.sort_by(|a, b| a.1.identifier.cmp(&b.1.identifier));
     out
 }
+
+/// Plug-ins VST3 já consultados no Plug-In Manager (binário e classe), para o Plug-In Chooser.
+pub(crate) fn probed_vst3_plugins(ctx: &egui::Context) -> Vec<(PathBuf, Vst3ClassInfo)> {
+    let key = egui::Id::new("plugin_manager_vst3_probes");
+    let Some(map) = ctx.data(|d| d.get_temp::<ProbeMap<Vst3ClassInfo>>(key)) else {
+        return Vec::new();
+    };
+    let map = map.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut out: Vec<(PathBuf, Vst3ClassInfo)> = map
+        .iter()
+        .filter_map(|(bin, st)| match st {
+            ProbeState::Done(Ok(list)) => Some(
+                list.iter()
+                    .map(|i| (bin.clone(), i.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    out
+}
 type ProbeFn<T> = fn(&Path, &Path, Duration) -> Result<Vec<T>, String>;
 
 type Vst3ParamsState = Option<Result<Arc<Vec<Vst3ParamInfo>>, String>>;
@@ -781,8 +804,11 @@ impl App {
         let lang = self.lang();
         let filter_key = egui::Id::new("plugin_manager_filter");
         let sel_key = egui::Id::new("plugin_manager_selected");
+        let sel_ofx_key = egui::Id::new("plugin_manager_selected_ofx");
         let mut filter: String = ui.data(|d| d.get_temp(filter_key)).unwrap_or_default();
         let mut selected: Option<PluginEntry> = ui.data(|d| d.get_temp(sel_key));
+        let mut selected_ofx: Option<(PathBuf, OfxPluginInfo)> =
+            ui.data(|d| d.get_temp(sel_ofx_key));
         ui.horizontal(|ui| {
             ui.label(tr(lang, "Pesquisar:"));
             ui.add(egui::TextEdit::singleline(&mut filter).desired_width(160.0));
@@ -794,13 +820,14 @@ impl App {
         ui.columns(2, |cols| {
             egui::ScrollArea::vertical()
                 .id_salt("plugin_tree")
+                .auto_shrink([false, false])
                 .show(&mut cols[0], |ui| {
                     for cat in PluginCategory::ALL {
                         let items = plugin_catalog_in(cat, &filter, lang);
                         let header = format!("{} ({})", cat.name_in(lang), items.len());
                         egui::CollapsingHeader::new(header)
                             .id_salt(("plugin_cat", cat))
-                            .default_open(!filter.is_empty())
+                            .default_open(!filter.is_empty() || cat == PluginCategory::VideoFx)
                             .show(ui, |ui| {
                                 for e in items {
                                     let id = egui::Id::new(("plugin_item", cat, e.name()));
@@ -813,40 +840,61 @@ impl App {
                                     };
                                     let is_sel = selected == Some(e);
                                     let label = e.name_in(lang);
-                                    let resp = match payload {
+                                    let clicked = match payload {
                                         Some(p) => {
-                                            ui.dnd_drag_source(id, p, |ui| {
+                                            let drag = ui.dnd_drag_source(id, p, |ui| {
                                                 ui.selectable_label(is_sel, label)
-                                            })
-                                            .inner
+                                            });
+                                            let click_resp = ui.interact(
+                                                drag.response.rect,
+                                                id.with("click"),
+                                                egui::Sense::click(),
+                                            );
+                                            drag.inner.clicked()
+                                                || drag.response.clicked()
+                                                || click_resp.clicked()
+                                                || drag.response.drag_started()
                                         }
-                                        None => ui.selectable_label(is_sel, label),
+                                        None => ui.selectable_label(is_sel, label).clicked(),
                                     };
-                                    if resp.clicked() {
+                                    if clicked {
                                         selected = Some(e);
+                                        selected_ofx = None;
                                     }
                                 }
                             });
                     }
                     egui::CollapsingHeader::new(tr(lang, "Plug-ins externos (VST3 / OFX)"))
                         .id_salt("plugin_cat_external")
-                        .show(ui, |ui| self.external_plugins_list(ui, &filter));
+                        .show(ui, |ui| {
+                            if let Some(ofx_pick) =
+                                self.external_plugins_list(ui, &filter, &selected_ofx)
+                            {
+                                selected_ofx = Some(ofx_pick);
+                                selected = None;
+                            }
+                        });
                 });
-            let ui = &mut cols[1];
-            match selected {
-                Some(e) => self.plugin_details(ui, e),
-                None => {
-                    ui.label(
-                        egui::RichText::new(tr(
-                            lang,
-                            "Selecione um plug-in para ver os detalhes. Arraste efeitos e \
-                             transições até um evento ou trilha.",
-                        ))
-                        .small()
-                        .color(self.theme.text_muted),
-                    );
-                }
-            }
+            egui::ScrollArea::vertical()
+                .id_salt("plugin_details_scroll")
+                .auto_shrink([false, false])
+                .show(&mut cols[1], |ui| {
+                    if let Some((ref bin, ref info)) = selected_ofx {
+                        self.external_ofx_details(ui, bin, info);
+                    } else if let Some(e) = selected {
+                        self.plugin_details(ui, e);
+                    } else {
+                        ui.label(
+                            egui::RichText::new(tr(
+                                lang,
+                                "Selecione um plug-in para ver os detalhes. Arraste efeitos e \
+                                 transições até um evento ou trilha.",
+                            ))
+                            .small()
+                            .color(self.theme.text_muted),
+                        );
+                    }
+                });
         });
         ui.data_mut(|d| {
             d.insert_temp(filter_key, filter);
@@ -854,12 +902,21 @@ impl App {
                 Some(s) => d.insert_temp(sel_key, s),
                 None => d.remove::<PluginEntry>(sel_key),
             }
+            match selected_ofx {
+                Some(s) => d.insert_temp(sel_ofx_key, s),
+                None => d.remove::<(PathBuf, OfxPluginInfo)>(sel_ofx_key),
+            }
         });
     }
 
     /// Plug-ins VST3/OFX encontrados nas pastas padrão. Binários OFX só são
     /// carregados sob pedido e sempre no subprocesso isolado.
-    fn external_plugins_list(&mut self, ui: &mut egui::Ui, filter: &str) {
+    fn external_plugins_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        filter: &str,
+        selected_ofx: &Option<(PathBuf, OfxPluginInfo)>,
+    ) -> Option<(PathBuf, OfxPluginInfo)> {
         let lang = self.lang();
         let key = egui::Id::new("plugin_manager_external_scan");
         let slot: ScanSlot = ui.data_mut(|d| d.get_temp_mut_or_default::<ScanSlot>(key).clone());
@@ -891,14 +948,14 @@ impl App {
             Some(Ok(r)) => r.clone(),
             Some(Err(e)) => {
                 ui.colored_label(self.theme.offline_fg, e.as_str());
-                return;
+                return None;
             }
             None => {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(tr(lang, "Procurando plug-ins..."));
                 });
-                return;
+                return None;
             }
         };
         let f = filter.trim().to_lowercase();
@@ -916,8 +973,9 @@ impl App {
                 .small()
                 .color(self.theme.text_muted),
             );
-            return;
+            return None;
         }
+        let mut picked_ofx: Option<(PathBuf, OfxPluginInfo)> = None;
         for p in shown {
             let mut tip = format!("{}\n{}", p.kind.name(), p.path.display());
             if let Some(v) = &p.vendor {
@@ -937,7 +995,11 @@ impl App {
                 (Some(bin), ExternalKind::Ofx) => {
                     egui::CollapsingHeader::new(title)
                         .id_salt(("plugin_ext", p.path.display().to_string()))
-                        .show(ui, |ui| self.ofx_probe_view(ui, bin));
+                        .show(ui, |ui| {
+                            if let Some(sel) = self.ofx_probe_view(ui, bin, selected_ofx) {
+                                picked_ofx = Some(sel);
+                            }
+                        });
                 }
                 (Some(bin), ExternalKind::Vst3) => {
                     egui::CollapsingHeader::new(title)
@@ -950,6 +1012,7 @@ impl App {
                 }
             }
         }
+        picked_ofx
     }
 
     /// Pastas de plug-ins mapeadas pelo usuário (ex.: uma pasta do Google
@@ -1073,7 +1136,12 @@ impl App {
 
     /// Lista os plug-ins de um binário OFX, sondado no subprocesso isolado
     /// `neoveg --plugin-host` numa thread de fundo (a UI nunca bloqueia).
-    fn ofx_probe_view(&mut self, ui: &mut egui::Ui, bin: &Path) {
+    fn ofx_probe_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        bin: &Path,
+        selected_ofx: &Option<(PathBuf, OfxPluginInfo)>,
+    ) -> Option<(PathBuf, OfxPluginInfo)> {
         let lang = self.lang();
         let key = egui::Id::new("plugin_manager_ofx_probes");
         let probes: ProbeMap<OfxPluginInfo> = ui.data_mut(|d| {
@@ -1085,6 +1153,7 @@ impl App {
             .unwrap_or_else(PoisonError::into_inner)
             .get(bin)
             .cloned();
+        let mut picked: Option<(PathBuf, OfxPluginInfo)> = None;
         match state {
             None => {
                 if ui
@@ -1152,7 +1221,14 @@ impl App {
                                 let apiv = info.api_version.to_string();
                                 let maj = info.version_major.to_string();
                                 let min = info.version_minor.to_string();
-                                ui.label(egui::RichText::new(&info.identifier).small().monospace())
+                                let is_sel = selected_ofx.as_ref().is_some_and(|(b, i)| {
+                                    b == bin && i.identifier == info.identifier
+                                });
+                                if ui
+                                    .selectable_label(
+                                        is_sel,
+                                        egui::RichText::new(&info.identifier).small().monospace(),
+                                    )
                                     .on_hover_text(tr_args(
                                         lang,
                                         "{api} v{apiv} — versão {maj}.{min}",
@@ -1162,12 +1238,17 @@ impl App {
                                             ("maj", &maj),
                                             ("min", &min),
                                         ],
-                                    ));
+                                    ))
+                                    .clicked()
+                                {
+                                    picked = Some((bin.to_path_buf(), info.clone()));
+                                }
                             });
                         }
                     });
             }
         }
+        picked
     }
 
     /// Lista as classes de efeito de um módulo VST3, sondado no subprocesso
@@ -1270,6 +1351,70 @@ impl App {
         }
     }
 
+    fn external_ofx_details(&mut self, ui: &mut egui::Ui, bin: &Path, info: &OfxPluginInfo) {
+        let lang = self.lang();
+        icons::icon_label(ui, Icon::FxSparkle, 16.0, &info.identifier, &self.theme);
+        let apiv = info.api_version.to_string();
+        let maj = info.version_major.to_string();
+        let min = info.version_minor.to_string();
+        ui.label(
+            egui::RichText::new(tr_args(
+                lang,
+                "{api} v{apiv} — versão {maj}.{min}",
+                &[
+                    ("api", &info.api),
+                    ("apiv", &apiv),
+                    ("maj", &maj),
+                    ("min", &min),
+                ],
+            ))
+            .small()
+            .color(self.theme.text_muted),
+        );
+        ui.separator();
+        let preview_sz = egui::vec2(192.0, 108.0);
+        let bin_s = bin.to_string_lossy().to_string();
+        let ctx = ui.ctx().clone();
+        match self.fx_browser.ofx.get(&ctx, &bin_s, &info.identifier) {
+            crate::fx_browser::OfxThumb::Ready(tex) => {
+                ui.image((tex.id(), preview_sz));
+            }
+            crate::fx_browser::OfxThumb::Pending => {
+                let (r, _) = ui.allocate_exact_size(preview_sz, egui::Sense::hover());
+                ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                ui.painter().text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    tr(lang, "Gerando prévia..."),
+                    egui::FontId::proportional(11.0),
+                    self.theme.text_muted,
+                );
+            }
+            crate::fx_browser::OfxThumb::Failed(e) => {
+                let e = e.clone();
+                let (r, resp) = ui.allocate_exact_size(preview_sz, egui::Sense::hover());
+                ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
+                ui.painter().text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    tr(lang, "sem prévia"),
+                    egui::FontId::proportional(11.0),
+                    self.theme.text_muted,
+                );
+                resp.on_hover_text(e);
+            }
+        }
+        ui.add_space(6.0);
+        let can_apply = !self.selected_video_events().is_empty();
+        if ui
+            .add_enabled(can_apply, egui::Button::new(tr(lang, "Aplicar")))
+            .on_disabled_hover_text(tr(lang, "Selecione eventos de vídeo na timeline"))
+            .clicked()
+        {
+            self.apply_ofx_to_selection(bin, &info.identifier);
+        }
+    }
+
     fn plugin_details(&mut self, ui: &mut egui::Ui, e: PluginEntry) {
         let lang = self.lang();
         icons::icon_label(ui, e.category().icon(), 16.0, e.name_in(lang), &self.theme);
@@ -1290,6 +1435,32 @@ impl App {
         ui.separator();
         match e {
             PluginEntry::Fx(k) => {
+                if !k.is_audio() {
+                    let preview_sz = egui::vec2(192.0, 108.0);
+                    let (rect, _) = ui.allocate_exact_size(preview_sz, egui::Sense::hover());
+                    let hovered = ui.rect_contains_pointer(rect);
+                    let ctx = ui.ctx().clone();
+                    if let Some(tex) = self.fx_browser.preview_texture(&ctx, k, hovered) {
+                        egui::Image::new((tex.id(), preview_sz)).paint_at(ui, rect);
+                    } else {
+                        ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
+                    }
+                    ui.painter().rect_stroke(
+                        rect,
+                        2.0,
+                        egui::Stroke::new(1.0_f32, self.theme.border),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.horizontal_wrapped(|ui| {
+                    self.fx_apply_instance_buttons(
+                        ui,
+                        crate::model::FxInstance::new(k),
+                        k.is_audio(),
+                    );
+                });
+                ui.separator();
                 let params = k.params();
                 if params.is_empty() {
                     ui.label(tr(lang, "Sem parâmetros."));
@@ -1317,7 +1488,25 @@ impl App {
                         });
                 }
             }
-            PluginEntry::Transition(_) => {
+            PluginEntry::Transition(tk) => {
+                if let Some(idx) = TransitionKind::ALL.iter().position(|x| *x == tk) {
+                    let preview_sz = egui::vec2(192.0, 108.0);
+                    let (rect, _) = ui.allocate_exact_size(preview_sz, egui::Sense::hover());
+                    let hovered = ui.rect_contains_pointer(rect);
+                    let ctx = ui.ctx().clone();
+                    if let Some(tex) = self.fx_browser.transitions.texture(&ctx, idx, hovered) {
+                        egui::Image::new((tex.id(), preview_sz)).paint_at(ui, rect);
+                    } else {
+                        ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
+                    }
+                    ui.painter().rect_stroke(
+                        rect,
+                        2.0,
+                        egui::Stroke::new(1.0_f32, self.theme.border),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.add_space(4.0);
+                }
                 ui.label(tr(
                     lang,
                     "Arraste até um evento de vídeo para usar no crossfade ou fade.",

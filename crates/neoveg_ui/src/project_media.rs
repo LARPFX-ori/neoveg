@@ -9,12 +9,61 @@ use crate::model::*;
 use crate::{rgba_to_color_image, App, DndPayload};
 use eframe::egui;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, TextureHandle};
+use neoveg_common::{tr, tr_args};
 use neoveg_engine::media;
 use neoveg_engine::time::Ticks;
 use std::collections::{HashMap, HashSet};
 
 const MAX_SCRUB_CACHE: usize = 64;
 const SCRUB_STEPS: f32 = 23.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MediaThumbSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl MediaThumbSize {
+    pub const ALL: [MediaThumbSize; 3] = [
+        MediaThumbSize::Small,
+        MediaThumbSize::Medium,
+        MediaThumbSize::Large,
+    ];
+
+    pub fn card_width(self) -> f32 {
+        match self {
+            MediaThumbSize::Small => 132.0,
+            MediaThumbSize::Medium => 168.0,
+            MediaThumbSize::Large => 216.0,
+        }
+    }
+
+    pub fn thumb_height(self) -> f32 {
+        match self {
+            MediaThumbSize::Small => 68.0,
+            MediaThumbSize::Medium => 90.0,
+            MediaThumbSize::Large => 116.0,
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            MediaThumbSize::Small => "P",
+            MediaThumbSize::Medium => "M",
+            MediaThumbSize::Large => "G",
+        }
+    }
+
+    pub fn tip_key(self) -> &'static str {
+        match self {
+            MediaThumbSize::Small => "Miniaturas pequenas",
+            MediaThumbSize::Medium => "Miniaturas médias",
+            MediaThumbSize::Large => "Miniaturas grandes",
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum MediaViewMode {
@@ -74,6 +123,7 @@ pub enum MediaSortCol {
 
 pub struct ProjectMediaState {
     pub view_mode: MediaViewMode,
+    pub thumb_size: MediaThumbSize,
     pub filter_target: MediaFilterTarget,
     pub search: String,
     pub sort_col: MediaSortCol,
@@ -95,6 +145,7 @@ impl Default for ProjectMediaState {
     fn default() -> Self {
         Self {
             view_mode: MediaViewMode::Thumbnails,
+            thumb_size: MediaThumbSize::Medium,
             filter_target: MediaFilterTarget::All,
             search: String::new(),
             sort_col: MediaSortCol::Original,
@@ -311,27 +362,32 @@ impl App {
         self.draw_smart_bin_editor(ui);
 
         let visible_w = (ui.clip_rect().right() - ui.cursor().left()).min(ui.available_width());
-        let avail_h = ui.available_height().max(120.0);
+        let footer_h = 22.0;
+        let avail_h = (ui.available_height() - footer_h - 6.0).max(110.0);
         if visible_w < 430.0 {
             self.draw_compact_bin_selector(ui);
             ui.separator();
             ui.vertical(|ui| {
                 ui.set_width(visible_w.max(200.0));
+                ui.set_min_height(avail_h);
                 if self.project_media.view_mode == MediaViewMode::Storyboard {
                     self.draw_storyboard_view(ui);
                 } else {
                     self.draw_media_collection(ui);
                 }
             });
+            ui.separator();
+            self.draw_media_status_footer(ui);
             return;
         }
-        let left_w = (visible_w * 0.24).clamp(145.0, 220.0);
+        let left_w = (visible_w * 0.24).clamp(150.0, 225.0);
         let right_w = (visible_w - left_w - 18.0).max(200.0);
 
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(left_w);
                 ui.set_min_height(avail_h);
+                ui.set_max_height(avail_h);
                 egui::ScrollArea::vertical()
                     .id_salt("pm_bins_tree")
                     .auto_shrink([false, false])
@@ -343,11 +399,75 @@ impl App {
             ui.vertical(|ui| {
                 ui.set_width(right_w);
                 ui.set_min_height(avail_h);
+                ui.set_max_height(avail_h);
                 if self.project_media.view_mode == MediaViewMode::Storyboard {
                     self.draw_storyboard_view(ui);
                 } else {
                     self.draw_media_collection(ui);
                 }
+            });
+        });
+        ui.separator();
+        self.draw_media_status_footer(ui);
+    }
+
+    /// Barra inferior de metadados estilo VEGAS Pro (manual p. 142): mostra formato,
+    /// duração e uso da mídia selecionada, além do total exibido.
+    fn draw_media_status_footer(&self, ui: &mut egui::Ui) {
+        let lang = self.lang();
+        let shown = self.filtered_project_media().len();
+        let total = self.project.media.len();
+        let summary = self
+            .session
+            .active_media_id
+            .and_then(|id| self.project.media(id))
+            .map(|m| {
+                let dur = m
+                    .duration
+                    .map(|d| self.fmt_time(d))
+                    .unwrap_or_else(|| tr(lang, "estática").to_string());
+                let fmt = if m.has_video && m.width > 0 {
+                    match m.fps {
+                        Some(fps) => format!("{}×{} @ {}", m.width, m.height, fps.label()),
+                        None => format!("{}×{}", m.width, m.height),
+                    }
+                } else if !m.info.is_empty() {
+                    m.info.clone()
+                } else {
+                    media_kind_tag(m).to_string()
+                };
+                let usage = self.project.media_usage_count(m.id);
+                format!(
+                    "{}  |  {}  |  {}  |  {}: {usage}",
+                    m.name,
+                    fmt,
+                    dur,
+                    tr(lang, "Uso")
+                )
+            })
+            .unwrap_or_else(|| tr(lang, "Selecione uma mídia para ver os detalhes").to_string());
+
+        ui.horizontal(|ui| {
+            let count_txt = if shown == total {
+                let n_s = total.to_string();
+                tr_args(lang, "{n} mídia(s)", &[("n", &n_s)])
+            } else {
+                format!("{shown}/{total}")
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(summary)
+                        .small()
+                        .color(self.theme.text_muted),
+                )
+                .truncate(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(count_txt)
+                        .small()
+                        .color(self.theme.text_muted),
+                );
             });
         });
     }
@@ -468,38 +588,58 @@ impl App {
     }
 
     fn draw_media_toolbar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
             if icons::icon_button(
                 ui,
                 Icon::ImportMedia,
-                Some("Importar..."),
+                Some(tr(lang, "Importar...")),
+                false,
+                true,
+                &self.theme,
+            )
+            .on_hover_text(tr(lang, "Importar mídia para o projeto"))
+            .clicked()
+            {
+                self.import_dialog();
+            }
+            if icons::icon_button(
+                ui,
+                Icon::GeneratorFrame,
+                Some(tr(lang, "Sequência de imagens...")),
                 false,
                 true,
                 &self.theme,
             )
             .clicked()
             {
-                self.import_dialog();
-            }
-            if ui.button("Sequência de imagens...").clicked() {
                 self.import_sequence_dialog();
             }
-            if ui.button("Remover não usadas").clicked() {
+            if icons::icon_button(
+                ui,
+                Icon::DeleteTrash,
+                Some(tr(lang, "Remover não usadas")),
+                false,
+                true,
+                &self.theme,
+            )
+            .on_hover_text(tr(
+                lang,
+                "Remover mídias que não estão em nenhuma sequência",
+            ))
+            .clicked()
+            {
                 self.remove_unused_media();
             }
             ui.separator();
             for mode in MediaViewMode::ALL {
                 let active = self.project_media.view_mode == mode;
-                let resp = icons::icon_button(
-                    ui,
-                    mode.icon(),
-                    Some(mode.label()),
-                    active,
-                    true,
-                    &self.theme,
-                );
+                let lbl = tr(lang, mode.label());
+                let resp =
+                    icons::icon_button(ui, mode.icon(), Some(lbl), active, true, &self.theme);
                 if resp
-                    .on_hover_text(format!("Exibir como {}", mode.label()))
+                    .on_hover_text(tr_args(lang, "Exibir como {mode}", &[("mode", &lbl)]))
                     .clicked()
                 {
                     self.project_media.view_mode = mode;
@@ -509,13 +649,28 @@ impl App {
                     }
                 }
             }
+            if self.project_media.view_mode == MediaViewMode::Thumbnails {
+                ui.separator();
+                for sz in MediaThumbSize::ALL {
+                    let active = self.project_media.thumb_size == sz;
+                    if ui
+                        .selectable_label(active, sz.short_label())
+                        .on_hover_text(tr(lang, sz.tip_key()))
+                        .clicked()
+                    {
+                        self.project_media.thumb_size = sz;
+                    }
+                }
+            }
             ui.separator();
             ui.add(
                 egui::TextEdit::singleline(&mut self.project_media.search)
-                    .hint_text("Filtrar mídias...")
+                    .hint_text(tr(lang, "Filtrar mídias..."))
                     .desired_width(140.0),
             );
-            if !self.project_media.search.is_empty() && ui.small_button("Limpar").clicked() {
+            if !self.project_media.search.is_empty()
+                && ui.small_button(tr(lang, "Limpar")).clicked()
+            {
                 self.project_media.search.clear();
             }
         });
@@ -579,28 +734,45 @@ impl App {
     }
 
     fn draw_bins_rail(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang();
         let total = self.project.media.len();
         let all_sel = self.project_media.filter_target == MediaFilterTarget::All;
-        if ui
-            .selectable_label(all_sel, format!("Todas as Mídias ({total})"))
-            .clicked()
-        {
-            self.project_media.filter_target = MediaFilterTarget::All;
-            if self.project_media.view_mode == MediaViewMode::Storyboard {
-                self.project_media.view_mode = MediaViewMode::Thumbnails;
+        ui.horizontal(|ui| {
+            icons::paint_inline(ui, Icon::MediaItem, 13.0, &self.theme);
+            if ui
+                .selectable_label(
+                    all_sel,
+                    format!("{} ({total})", tr(lang, "Todas as Mídias")),
+                )
+                .clicked()
+            {
+                self.project_media.filter_target = MediaFilterTarget::All;
+                if self.project_media.view_mode == MediaViewMode::Storyboard {
+                    self.project_media.view_mode = MediaViewMode::Thumbnails;
+                }
             }
-        }
+        });
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Pastas (Bins)").strong().small());
+            ui.label(
+                egui::RichText::new(tr(lang, "Pastas (Bins)"))
+                    .strong()
+                    .small(),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r =
                     icons::small_icon_button(ui, Icon::FolderItem, Some("+"), false, &self.theme);
                 r.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Nova pasta (Bin)")
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        tr(lang, "Nova pasta (Bin)"),
+                    )
                 });
-                if r.on_hover_text("Criar nova pasta de mídia (Bin)").clicked() {
+                if r.on_hover_text(tr(lang, "Criar nova pasta de mídia (Bin)"))
+                    .clicked()
+                {
                     let parent = match self.project_media.filter_target {
                         MediaFilterTarget::Bin(pid) => Some(pid),
                         _ => None,
@@ -688,15 +860,18 @@ impl App {
                 .filter(|m| rule.matches("", m, &used))
                 .count();
             let sel = self.project_media.filter_target == MediaFilterTarget::BuiltinSmart(rule);
-            if ui
-                .selectable_label(sel, format!("{} ({count})", rule.label()))
-                .clicked()
-            {
-                self.project_media.filter_target = MediaFilterTarget::BuiltinSmart(rule);
-                if self.project_media.view_mode == MediaViewMode::Storyboard {
-                    self.project_media.view_mode = MediaViewMode::Thumbnails;
+            ui.horizontal(|ui| {
+                icons::paint_inline(ui, Icon::SmartFolder, 12.0, &self.theme);
+                if ui
+                    .selectable_label(sel, format!("{} ({count})", tr(lang, rule.label())))
+                    .clicked()
+                {
+                    self.project_media.filter_target = MediaFilterTarget::BuiltinSmart(rule);
+                    if self.project_media.view_mode == MediaViewMode::Storyboard {
+                        self.project_media.view_mode = MediaViewMode::Thumbnails;
+                    }
                 }
-            }
+            });
         }
 
         let custom_bins = self.project.smart_bins.clone();
@@ -709,7 +884,12 @@ impl App {
                 .filter(|m| sb.rule.matches(&sb.query, m, &used))
                 .count();
             let sel = self.project_media.filter_target == MediaFilterTarget::CustomSmart(sb.id);
-            let resp = ui.selectable_label(sel, format!("* {} ({count})", sb.name));
+            let resp = ui
+                .horizontal(|ui| {
+                    icons::paint_inline(ui, Icon::SmartFolder, 12.0, &self.theme);
+                    ui.selectable_label(sel, format!("{} ({count})", sb.name))
+                })
+                .inner;
             if resp.clicked() {
                 self.project_media.filter_target = MediaFilterTarget::CustomSmart(sb.id);
                 if self.project_media.view_mode == MediaViewMode::Storyboard {
@@ -832,28 +1012,33 @@ impl App {
                     .horizontal(|ui| {
                         ui.add_space(depth as f32 * 12.0);
                         ui.dnd_drop_zone::<DndPayload, ()>(egui::Frame::NONE, |ui| {
-                            let label = format!("{} ({count})", bin.name);
-                            let r = ui.selectable_label(sel, label);
-                            if r.clicked() {
-                                self.project_media.filter_target = MediaFilterTarget::Bin(bin.id);
-                                if self.project_media.view_mode == MediaViewMode::Storyboard {
-                                    self.project_media.view_mode = MediaViewMode::Thumbnails;
+                            ui.horizontal(|ui| {
+                                icons::paint_inline(ui, Icon::FolderItem, 12.0, &self.theme);
+                                let label = format!("{} ({count})", bin.name);
+                                let r = ui.selectable_label(sel, label);
+                                if r.clicked() {
+                                    self.project_media.filter_target =
+                                        MediaFilterTarget::Bin(bin.id);
+                                    if self.project_media.view_mode == MediaViewMode::Storyboard {
+                                        self.project_media.view_mode = MediaViewMode::Thumbnails;
+                                    }
                                 }
-                            }
-                            r.context_menu(|ui| {
-                                if ui.button("Nova subpasta").clicked() {
-                                    *create_sub = Some(bin.id);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Renomear pasta").clicked() {
-                                    self.project_media.renaming_bin = Some(bin.id);
-                                    self.project_media.bin_name_buf = bin.name.clone();
-                                    ui.close_menu();
-                                }
-                                if ui.button("Excluir pasta").clicked() {
-                                    *delete_bin = Some(bin.id);
-                                    ui.close_menu();
-                                }
+                                let lang = self.lang();
+                                r.context_menu(|ui| {
+                                    if ui.button(tr(lang, "Nova subpasta")).clicked() {
+                                        *create_sub = Some(bin.id);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button(tr(lang, "Renomear pasta")).clicked() {
+                                        self.project_media.renaming_bin = Some(bin.id);
+                                        self.project_media.bin_name_buf = bin.name.clone();
+                                        ui.close_menu();
+                                    }
+                                    if ui.button(tr(lang, "Excluir pasta")).clicked() {
+                                        *delete_bin = Some(bin.id);
+                                        ui.close_menu();
+                                    }
+                                });
                             });
                         })
                     })
@@ -912,10 +1097,29 @@ impl App {
         items: &[MediaItem],
         actions: &mut Vec<MediaRowAction>,
     ) {
-        let card_w = 168.0;
+        let lang = self.lang();
+        let card_w = self.project_media.thumb_size.card_width();
+        let thumb_h = self.project_media.thumb_size.thumb_height();
         let cols = ((ui.available_width() + 8.0) / (card_w + 8.0))
             .floor()
             .max(1.0) as usize;
+        let paint_aspect_tex = |painter: &egui::Painter, rect: Rect, t: &TextureHandle| {
+            let [tw, th] = t.size();
+            let asp = (tw.max(1) as f32) / (th.max(1) as f32);
+            let mut dw = rect.width();
+            let mut dh = dw / asp.max(0.01);
+            if dh > rect.height() {
+                dh = rect.height();
+                dw = dh * asp;
+            }
+            let fit_r = Rect::from_center_size(rect.center(), vec2(dw, dh));
+            painter.image(
+                t.id(),
+                fit_r,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        };
         egui::Grid::new("pm_thumbs_grid")
             .spacing([8.0, 8.0])
             .show(ui, |ui| {
@@ -927,7 +1131,7 @@ impl App {
                         self.theme.panel_fill
                     };
                     let stroke = Stroke::new(
-                        1.0_f32,
+                        if selected { 1.5_f32 } else { 1.0_f32 },
                         if selected {
                             self.theme.accent
                         } else {
@@ -935,45 +1139,51 @@ impl App {
                         },
                     );
                     let id = egui::Id::new(("pm_thumb_card", m.id));
+                    let dur = m
+                        .duration
+                        .map(|d| self.fmt_time(d))
+                        .unwrap_or_else(|| tr(lang, "estática").to_string());
+                    let tag = media_kind_tag(m);
+                    let use_cnt = self.project.media_usage_count(m.id);
+                    let offline = !self.media.contains(m.id)
+                        && !matches!(
+                            m.source,
+                            MediaSource::Generated(_) | MediaSource::Sequence { .. }
+                        );
                     let drag_resp = ui
                         .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                             ui.set_min_width(card_w);
+                            ui.set_max_width(card_w);
                             egui::Frame::new()
                                 .fill(frame_fill)
                                 .stroke(stroke)
-                                .corner_radius(3.0)
+                                .corner_radius(2.0)
                                 .inner_margin(4.0)
                                 .show(ui, |ui| {
                                     ui.set_width(card_w - 8.0);
-                                    let thumb_size = vec2(card_w - 10.0, 74.0);
+                                    ui.set_max_width(card_w - 8.0);
+                                    let thumb_size = vec2(card_w - 8.0, thumb_h);
                                     let (thumb_rect, thumb_sense) =
                                         ui.allocate_exact_size(thumb_size, Sense::hover());
+                                    ui.painter().rect_filled(
+                                        thumb_rect,
+                                        1.0,
+                                        self.theme.extreme_bg,
+                                    );
                                     let pointer_hover = thumb_sense
                                         .hovered()
                                         .then(|| ui.input(|i| i.pointer.hover_pos()))
                                         .flatten();
-                                    if let Some(pos) =
-                                        pointer_hover.filter(|p| thumb_rect.contains(*p))
-                                    {
+                                    let scrubbing =
+                                        pointer_hover.filter(|p| thumb_rect.contains(*p));
+                                    if let Some(pos) = scrubbing {
                                         let frac = ((pos.x - thumb_rect.left())
                                             / thumb_rect.width().max(1.0))
                                         .clamp(0.0, 1.0);
                                         let (scrub_tex, sample_t) =
                                             self.thumb_scrub(ctx, m.id, frac);
                                         if let Some(t) = scrub_tex {
-                                            ui.painter().image(
-                                                t.id(),
-                                                thumb_rect,
-                                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                                Color32::WHITE,
-                                            );
-                                        } else {
-                                            ui.painter().rect_filled(
-                                                thumb_rect,
-                                                2.0,
-                                                self.theme.extreme_bg,
-                                            );
+                                            paint_aspect_tex(ui.painter(), thumb_rect, &t);
                                         }
                                         let sx = thumb_rect.left() + frac * thumb_rect.width();
                                         ui.painter().line_segment(
@@ -988,7 +1198,7 @@ impl App {
                                             Rect::from_min_max(
                                                 pos2(
                                                     thumb_rect.left() + 2.0,
-                                                    thumb_rect.bottom() - 14.0,
+                                                    thumb_rect.bottom() - 15.0,
                                                 ),
                                                 pos2(
                                                     thumb_rect.right() - 2.0,
@@ -996,82 +1206,145 @@ impl App {
                                                 ),
                                             ),
                                             2.0,
-                                            Color32::from_black_alpha(180),
+                                            Color32::from_black_alpha(190),
                                         );
                                         ui.painter().text(
-                                            pos2(thumb_rect.center().x, thumb_rect.bottom() - 7.5),
+                                            pos2(thumb_rect.center().x, thumb_rect.bottom() - 8.0),
                                             egui::Align2::CENTER_CENTER,
                                             tc,
                                             egui::FontId::monospace(9.5),
                                             Color32::WHITE,
                                         );
-                                    } else if let Some(t) = self.thumb(ctx, m.id) {
-                                        ui.painter().image(
-                                            t.id(),
-                                            thumb_rect,
-                                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                    } else {
+                                        if let Some(t) = self.thumb(ctx, m.id) {
+                                            paint_aspect_tex(ui.painter(), thumb_rect, &t);
+                                        } else {
+                                            let icon = if matches!(
+                                                m.source,
+                                                MediaSource::Sequence { .. }
+                                                    | MediaSource::NestedProject { .. }
+                                            ) {
+                                                Icon::NestedTimeline
+                                            } else if m.has_audio {
+                                                Icon::AudioTrack
+                                            } else {
+                                                Icon::MediaItem
+                                            };
+                                            let icon_box = Rect::from_center_size(
+                                                thumb_rect.center(),
+                                                vec2(24.0, 24.0),
+                                            );
+                                            icons::paint(
+                                                ui.painter(),
+                                                icon_box,
+                                                icon,
+                                                &self.theme,
+                                                true,
+                                            );
+                                        }
+                                        // Selo superior esquerdo (tipo de mídia, estilo VEGAS Pro)
+                                        let tag_r = Rect::from_min_size(
+                                            thumb_rect.left_top() + vec2(3.0, 3.0),
+                                            vec2(28.0, 14.0),
+                                        );
+                                        ui.painter().rect_filled(
+                                            tag_r,
+                                            2.0,
+                                            Color32::from_black_alpha(175),
+                                        );
+                                        ui.painter().text(
+                                            tag_r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            tag,
+                                            egui::FontId::proportional(9.0),
                                             Color32::WHITE,
                                         );
-                                    } else {
+                                        // Selo inferior direito (duração)
+                                        let dur_w = (dur.len() as f32 * 5.6 + 8.0)
+                                            .clamp(42.0, thumb_rect.width() - 6.0);
+                                        let dur_r = Rect::from_min_size(
+                                            pos2(
+                                                thumb_rect.right() - dur_w - 3.0,
+                                                thumb_rect.bottom() - 16.0,
+                                            ),
+                                            vec2(dur_w, 13.0),
+                                        );
                                         ui.painter().rect_filled(
-                                            thumb_rect,
+                                            dur_r,
                                             2.0,
-                                            self.theme.extreme_bg,
+                                            Color32::from_black_alpha(180),
                                         );
-                                        let icon = if matches!(
-                                            m.source,
-                                            MediaSource::Sequence { .. }
-                                                | MediaSource::NestedProject { .. }
-                                        ) {
-                                            Icon::NestedTimeline
-                                        } else if m.has_audio {
-                                            Icon::AudioTrack
-                                        } else {
-                                            Icon::MediaItem
-                                        };
-                                        let icon_box = Rect::from_center_size(
-                                            thumb_rect.center(),
-                                            vec2(22.0, 22.0),
-                                        );
-                                        icons::paint(
-                                            ui.painter(),
-                                            icon_box,
-                                            icon,
-                                            &self.theme,
-                                            true,
+                                        ui.painter().text(
+                                            dur_r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            &dur,
+                                            egui::FontId::monospace(9.0),
+                                            Color32::WHITE,
                                         );
                                     }
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&m.name).strong().small(),
-                                        )
-                                        .extend(),
+                                    ui.painter().rect_stroke(
+                                        thumb_rect,
+                                        1.0,
+                                        Stroke::new(1.0_f32, self.theme.border),
+                                        egui::StrokeKind::Inside,
                                     );
-                                    let dur = m
-                                        .duration
-                                        .map(|d| self.fmt_time(d))
-                                        .unwrap_or_else(|| "estática".into());
-                                    let tag = media_kind_tag(m);
-                                    let offline = !self.media.contains(m.id)
-                                        && !matches!(
-                                            m.source,
-                                            MediaSource::Generated(_)
-                                                | MediaSource::Sequence { .. }
-                                        );
+                                    ui.add_space(2.0);
+                                    let name_fg = if selected {
+                                        crate::theme::contrast_on(self.theme.selection_bg)
+                                    } else {
+                                        self.theme.text_primary
+                                    };
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("{dur} • {tag}"))
-                                                .small()
-                                                .weak(),
+                                        ui.set_max_width(card_w - 10.0);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&m.name)
+                                                    .strong()
+                                                    .small()
+                                                    .color(name_fg),
+                                            )
+                                            .truncate(),
                                         );
                                         if offline {
-                                            ui.colored_label(self.theme.offline_fg, "offline");
+                                            ui.colored_label(
+                                                self.theme.offline_fg,
+                                                egui::RichText::new("offline").small(),
+                                            );
+                                        } else if use_cnt > 0 {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(format!("{use_cnt}×"))
+                                                            .small()
+                                                            .weak(),
+                                                    );
+                                                },
+                                            );
                                         }
                                     });
                                 });
                         })
                         .response;
-                    let click_resp = ui.interact(drag_resp.rect, id.with("click"), Sense::click());
+                    let fmt_tip = if m.has_video && m.width > 0 {
+                        match m.fps {
+                            Some(fps) => format!("{}×{} @ {}", m.width, m.height, fps.label()),
+                            None => format!("{}×{}", m.width, m.height),
+                        }
+                    } else {
+                        m.info.clone()
+                    };
+                    let tip = format!(
+                        "{}\n{} • {} • {}: {use_cnt}\n{}",
+                        m.name,
+                        tag,
+                        dur,
+                        tr(lang, "Uso"),
+                        fmt_tip
+                    );
+                    let click_resp = ui
+                        .interact(drag_resp.rect, id.with("click"), Sense::click())
+                        .on_hover_text(tip);
                     click_resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &m.name)
                     });
@@ -1153,16 +1426,17 @@ impl App {
         items: &[MediaItem],
         actions: &mut Vec<MediaRowAction>,
     ) {
+        let lang = self.lang();
         egui::Grid::new("pm_details_table")
             .striped(true)
             .spacing([12.0, 4.0])
             .show(ui, |ui| {
-                self.sort_header_btn(ui, "Nome", MediaSortCol::Name);
-                self.sort_header_btn(ui, "Tipo", MediaSortCol::Type);
-                self.sort_header_btn(ui, "Duração", MediaSortCol::Duration);
-                ui.label(egui::RichText::new("Formato").strong());
-                self.sort_header_btn(ui, "Uso", MediaSortCol::Usage);
-                ui.label(egui::RichText::new("Origem").strong());
+                self.sort_header_btn(ui, tr(lang, "Nome"), MediaSortCol::Name);
+                self.sort_header_btn(ui, tr(lang, "Tipo"), MediaSortCol::Type);
+                self.sort_header_btn(ui, tr(lang, "Duração"), MediaSortCol::Duration);
+                ui.label(egui::RichText::new(tr(lang, "Formato")).strong());
+                self.sort_header_btn(ui, tr(lang, "Uso"), MediaSortCol::Usage);
+                ui.label(egui::RichText::new(tr(lang, "Origem")).strong());
                 ui.end_row();
 
                 for m in items {
@@ -1170,17 +1444,38 @@ impl App {
                     let id = egui::Id::new(("pm_det_row", m.id));
                     let resp = ui
                         .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
-                            let label = if selected {
-                                egui::RichText::new(&m.name)
-                                    .strong()
-                                    .color(self.theme.accent)
-                            } else {
-                                egui::RichText::new(&m.name)
-                            };
-                            ui.label(label);
+                            ui.horizontal(|ui| {
+                                ui.set_max_width(220.0);
+                                icons::paint_inline(
+                                    ui,
+                                    if matches!(
+                                        m.source,
+                                        MediaSource::Sequence { .. }
+                                            | MediaSource::NestedProject { .. }
+                                    ) {
+                                        Icon::NestedTimeline
+                                    } else if m.has_video {
+                                        Icon::MediaItem
+                                    } else {
+                                        Icon::AudioTrack
+                                    },
+                                    13.0,
+                                    &self.theme,
+                                );
+                                let label = if selected {
+                                    egui::RichText::new(&m.name)
+                                        .strong()
+                                        .color(self.theme.accent)
+                                } else {
+                                    egui::RichText::new(&m.name)
+                                };
+                                ui.add(egui::Label::new(label).truncate());
+                            });
                         })
                         .response;
-                    let click_resp = ui.interact(resp.rect, id.with("click"), Sense::click());
+                    let click_resp = ui
+                        .interact(resp.rect, id.with("click"), Sense::click())
+                        .on_hover_text(&m.name);
                     click_resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &m.name)
                     });
@@ -1196,24 +1491,24 @@ impl App {
                     ui.label(
                         m.duration
                             .map(|d| self.fmt_time(d))
-                            .unwrap_or_else(|| "estática".into()),
+                            .unwrap_or_else(|| tr(lang, "estática").to_string()),
                     );
                     let fmt = if m.has_video && m.width > 0 {
                         match m.fps {
-                            Some(fps) => format!("{}x{} @ {}", m.width, m.height, fps.label()),
-                            None => format!("{}x{}", m.width, m.height),
+                            Some(fps) => format!("{}×{} @ {}", m.width, m.height, fps.label()),
+                            None => format!("{}×{}", m.width, m.height),
                         }
                     } else {
                         m.info.clone()
                     };
-                    ui.label(egui::RichText::new(fmt).small());
+                    ui.add(egui::Label::new(egui::RichText::new(fmt).small()).truncate());
                     let use_cnt = self.project.media_usage_count(m.id);
-                    ui.label(format!("{use_cnt} ev."));
-                    ui.label(
-                        egui::RichText::new(media_source_label(&m.source))
-                            .small()
-                            .weak(),
-                    );
+                    ui.label(format!("{use_cnt}"));
+                    let src_txt = media_source_label(&m.source);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&src_txt).small().weak()).truncate(),
+                    )
+                    .on_hover_text(src_txt);
                     ui.end_row();
                 }
             });

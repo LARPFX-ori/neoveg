@@ -1632,8 +1632,11 @@ impl App {
         let seq_count = tabs.len();
 
         for (seq_id, seq_name, is_active) in tabs {
-            // a aba mostra o arquivo da sequência dentro do pacote .neoveg
-            let seq_label = crate::model::sequence_file_label(&seq_name);
+            // exibe apenas "Sequência XX" na aba (sem extensão .nvegseq)
+            let seq_label = seq_name
+                .strip_suffix(&format!(".{}", neoveg_engine::package::SEQUENCE_EXT))
+                .unwrap_or(&seq_name)
+                .to_string();
             let text_w = ui
                 .painter()
                 .layout_no_wrap(seq_label.clone(), font_id.clone(), Color32::WHITE)
@@ -3240,16 +3243,16 @@ impl App {
                     more = Some(HeaderAction::ToggleCompositingChild);
                 }
                 if show_btns && btns.height && !is_folder {
-                    // ⏶ / ⏷ estão na fonte de ícones embutida (sempre presente)
+                    // ▲ / ▼ têm cobertura garantida em todas as fontes (fonts.rs)
                     if ui
-                        .small_button("⏶")
+                        .small_button("▲")
                         .on_hover_text(tr(lang, "Minimizar a altura da trilha"))
                         .clicked()
                     {
                         more = Some(HeaderAction::Minimize);
                     }
                     if ui
-                        .small_button("⏷")
+                        .small_button("▼")
                         .on_hover_text(tr(lang, "Maximizar a altura da trilha"))
                         .clicked()
                     {
@@ -3290,7 +3293,7 @@ impl App {
                     want_checkpoint = true;
                     changed_track = true;
                 }
-                Some(HeaderAction::Fx) => self.dlg.fx_target = Some(FxTarget::Track(tid)),
+                Some(HeaderAction::Fx) => self.open_fx_target(FxTarget::Track(tid)),
                 Some(HeaderAction::TrackMotion) => self.dlg.track_motion = Some(tid),
                 Some(HeaderAction::Minimize) => self.toggle_track_height(ti, false),
                 Some(HeaderAction::Maximize) => self.toggle_track_height(ti, true),
@@ -3604,7 +3607,7 @@ impl App {
                     .on_hover_text(tr(lang, "Efeitos do barramento"))
                     .clicked()
                 {
-                    self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
+                    self.open_fx_target(FxTarget::AudioBus(bid));
                 }
             });
             let lang = self.lang();
@@ -3650,7 +3653,7 @@ impl App {
         let kind = self.project.tracks[ti].kind;
         let tid = self.project.tracks[ti].id;
         if ui.button(tr(lang, "Efeitos da trilha...")).clicked() {
-            self.dlg.fx_target = Some(FxTarget::Track(tid));
+            self.open_fx_target(FxTarget::Track(tid));
             ui.close_menu();
         }
         if kind == TrackKind::Video && ui.button(tr(lang, "Movimento da trilha...")).clicked() {
@@ -3882,7 +3885,7 @@ impl App {
             return;
         };
         if ui.button(tr(lang, "Efeitos do barramento...")).clicked() {
-            self.dlg.fx_target = Some(FxTarget::AudioBus(bid));
+            self.open_fx_target(FxTarget::AudioBus(bid));
             ui.close_menu();
         }
         ui.separator();
@@ -5224,7 +5227,7 @@ impl App {
             }
             match zone {
                 Zone::FxButton => {
-                    self.dlg.fx_target = Some(FxTarget::Event(id));
+                    self.open_fx_target(FxTarget::Event(id));
                     return;
                 }
                 Zone::PanCropButton => {
@@ -5780,7 +5783,7 @@ impl App {
             ui.close_menu();
         }
         if ui.button(tr(lang, "Efeitos do evento...")).clicked() {
-            self.dlg.fx_target = Some(FxTarget::Event(id));
+            self.open_fx_target(FxTarget::Event(id));
             ui.close_menu();
         }
         if media_generated && ui.button(tr(lang, "Editar mídia gerada...")).clicked() {

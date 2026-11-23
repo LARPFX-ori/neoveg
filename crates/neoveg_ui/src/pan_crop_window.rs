@@ -222,10 +222,10 @@ impl App {
         .min_size([640.0, 420.0])
         .resizable(true)
         .show(ctx, |ui| {
-            // Cabeçalho com cadeia em pílulas `o—[Pan/Crop]—[FX]—o` e 3 arranjos de janela
+            // Cabeçalho com cadeia em pílulas `●—[Pan/Crop]—[FX]—●` e 3 arranjos de janela
             ui.horizontal(|ui| {
                 icons::paint_inline(ui, Icon::PanCrop, 14.0, &theme);
-                ui.label(egui::RichText::new("○—").weak());
+                ui.label(egui::RichText::new("●—").weak());
                 let _ = ui.selectable_label(true, tr(lang, "Pan/Crop"));
                 ui.label(egui::RichText::new("—").weak());
                 let fx_lbl = if ev.fx.is_empty() {
@@ -240,29 +240,38 @@ impl App {
                 {
                     actions.push(PcAction::OpenEventFx);
                 }
-                ui.label(egui::RichText::new("—○").weak());
+                ui.label(egui::RichText::new("—●").weak());
                 ui.separator();
-                ui.label(&ev.name);
+                ui.add(egui::Label::new(&ev.name).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .selectable_label(st.compact_header, "▪")
+                    if icons::small_icon_button(ui, Icon::ViewList, None, st.compact_header, &theme)
                         .on_hover_text(tr(lang, "Arranjo compacto"))
                         .clicked()
                     {
                         st.compact_header = !st.compact_header;
                     }
-                    if ui
-                        .selectable_label(!st.show_props && !st.compact_header, "□")
-                        .on_hover_text(tr(lang, "Somente área de trabalho"))
-                        .clicked()
+                    if icons::small_icon_button(
+                        ui,
+                        Icon::LayoutWindow,
+                        None,
+                        !st.show_props && !st.compact_header,
+                        &theme,
+                    )
+                    .on_hover_text(tr(lang, "Somente área de trabalho"))
+                    .clicked()
                     {
                         st.show_props = false;
                         st.compact_header = false;
                     }
-                    if ui
-                        .selectable_label(st.show_props && !st.compact_header, "◧")
-                        .on_hover_text(tr(lang, "Propriedades e área de trabalho"))
-                        .clicked()
+                    if icons::small_icon_button(
+                        ui,
+                        Icon::GearProps,
+                        None,
+                        st.show_props && !st.compact_header,
+                        &theme,
+                    )
+                    .on_hover_text(tr(lang, "Propriedades e área de trabalho"))
+                    .clicked()
                     {
                         st.show_props = true;
                         st.compact_header = false;
@@ -1980,7 +1989,7 @@ impl App {
                     }
                 }
                 PcAction::OpenEventFx => {
-                    self.dlg.fx_target = Some(crate::FxTarget::Event(id));
+                    self.open_fx_target(crate::FxTarget::Event(id));
                 }
                 _ => {}
             }
