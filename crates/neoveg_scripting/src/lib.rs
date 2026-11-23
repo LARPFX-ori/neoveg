@@ -1664,6 +1664,7 @@ public class EntryPoint
             t: Ticks::from_secs_i64(1),
             v: 0.25,
             curve: Default::default(),
+            smoothness: 0.0,
         });
         p.tracks[1].envelopes.push(env);
         let corpo = r#"

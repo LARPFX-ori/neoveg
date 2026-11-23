@@ -1787,6 +1787,7 @@ impl Project {
             }
             b.volume_db = clampf(fin32(b.volume_db, 0.0), -120.0, 24.0);
             b.pan = clampf(fin32(b.pan, 0.0), -1.0, 1.0);
+            b.default_env_smoothness = clampf(fin32(b.default_env_smoothness, 0.0), 0.0, 1.0);
             b.surround = b.surround.sanitized();
             for f in &mut b.fx {
                 sanitize_fx(f);
@@ -1988,6 +1989,7 @@ fn sanitize_tracks_slice(
         t.pan = clampf(fin32(t.pan, 0.0), -1.0, 1.0);
         t.surround = t.surround.sanitized();
         t.opacity = clampf(fin32(t.opacity, 1.0), 0.0, 1.0);
+        t.default_env_smoothness = clampf(fin32(t.default_env_smoothness, 0.0), 0.0, 1.0);
         let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
             for k in &mut mk.keys {
                 k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
@@ -2036,6 +2038,7 @@ fn sanitize_tracks_slice(
                 e.rate = Rate::from_ratio(100, 1).unwrap_or(Rate::NORMAL);
             }
             e.gain_db = clampf(fin32(e.gain_db, 0.0), -120.0, 24.0);
+            e.opacity = clampf(fin32(e.opacity, 1.0), 0.0, 1.0);
             e.pitch_semitones = clampf(fin32(e.pitch_semitones, 0.0), -24.0, 24.0);
             e.fade_in.len = e.fade_in.len.clamp_safe(Ticks::ZERO, e.length);
             e.fade_out.len = e
@@ -2201,6 +2204,11 @@ fn sanitize_envelopes(envelopes: &mut Vec<Envelope>, allowed: &[EnvKind]) {
         for p in &mut env.points {
             p.t = p.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
             p.v = crate::util::clampf(p.v, lo, hi);
+            p.smoothness = if p.smoothness.is_finite() {
+                crate::util::clampf(p.smoothness, 0.0, 1.0)
+            } else {
+                0.0
+            };
         }
         env.sort();
         if env.points.is_empty() {
@@ -3077,6 +3085,18 @@ impl EnvKind {
     }
 }
 
+fn is_one_f32(v: &f32) -> bool {
+    (*v - 1.0).abs() <= f32::EPSILON
+}
+
+fn is_zero_f32_env(v: &f32) -> bool {
+    v.abs() <= f32::EPSILON
+}
+
+fn is_default_curve(c: &Curve) -> bool {
+    *c == Curve::Linear
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnvPoint {
     /// Tempo absoluto na timeline (em ticks).
@@ -3084,6 +3104,9 @@ pub struct EnvPoint {
     pub v: f32,
     #[serde(default)]
     pub curve: Curve,
+    /// Suavização (0.0..=1.0) da interpolação a partir deste ponto (tangentes suaves / Hermite).
+    #[serde(default, skip_serializing_if = "is_zero_f32_env")]
+    pub smoothness: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3106,6 +3129,7 @@ impl Envelope {
                 t: Ticks::ZERO,
                 v: kind.default_value(),
                 curve: Curve::Linear,
+                smoothness: 0.0,
             }],
             visible: true,
         }
@@ -3118,17 +3142,74 @@ impl Envelope {
         if t <= p[0].t {
             return p[0].v;
         }
-        for w in p.windows(2) {
-            if t >= w[0].t && t < w[1].t {
-                let x = Ticks::lerp_factor(t, w[0].t, w[1].t);
-                let y = w[0].curve.shape(x);
-                return w[0].v + (w[1].v - w[0].v) * y;
+        let (lo, hi) = self.kind.range();
+        for i in 0..p.len().saturating_sub(1) {
+            let a = &p[i];
+            let b = &p[i + 1];
+            if t >= a.t && t < b.t {
+                let x = Ticks::lerp_factor(t, a.t, b.t);
+                let y = a.curve.shape(x);
+                let base = a.v + (b.v - a.v) * y;
+                let sm = if a.smoothness.is_finite() {
+                    a.smoothness.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                if sm > 0.0 && a.curve != Curve::Hold {
+                    let prev_v = if i > 0 { p[i - 1].v } else { a.v };
+                    let next_v = p.get(i + 2).map(|q| q.v).unwrap_or(b.v);
+                    let m0 = 0.5 * (b.v - prev_v);
+                    let m1 = 0.5 * (next_v - a.v);
+                    let u = y;
+                    let u2 = u * u;
+                    let u3 = u2 * u;
+                    let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+                    let h10 = u3 - 2.0 * u2 + u;
+                    let h01 = -2.0 * u3 + 3.0 * u2;
+                    let h11 = u3 - u2;
+                    let hermite = (h00 * a.v + h10 * m0 + h01 * b.v + h11 * m1).clamp(lo, hi);
+                    return base + (hermite - base) * sm;
+                }
+                return base;
             }
         }
         p.last().map(|x| x.v).unwrap_or(self.kind.default_value())
     }
     pub fn sort(&mut self) {
         self.points.sort_by_key(|p| p.t);
+    }
+
+    /// Índice do ponto inicial do segmento que contém `t` (para editar a curva do segmento).
+    pub fn segment_index_at(&self, t: Ticks) -> Option<usize> {
+        if self.points.is_empty() {
+            return None;
+        }
+        if self.points.len() == 1 || t <= self.points[0].t {
+            return Some(0);
+        }
+        for i in 0..self.points.len().saturating_sub(1) {
+            if t >= self.points[i].t && t < self.points[i + 1].t {
+                return Some(i);
+            }
+        }
+        Some(self.points.len().saturating_sub(1))
+    }
+
+    /// Aplica uma curva (e opcionalmente suavização) a todos os pontos do envelope.
+    pub fn set_all_curves(&mut self, curve: Curve, smoothness: Option<f32>) {
+        let sm = smoothness.map(|s| {
+            if s.is_finite() {
+                s.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        for p in &mut self.points {
+            p.curve = curve;
+            if let Some(s) = sm {
+                p.smoothness = s;
+            }
+        }
     }
 
     pub fn set_point(&mut self, t: Ticks, v: f32, tol: Ticks) {
@@ -3146,6 +3227,7 @@ impl Envelope {
                 t,
                 v,
                 curve: Curve::Linear,
+                smoothness: 0.0,
             });
             self.sort();
         }
@@ -3376,6 +3458,12 @@ pub struct Track {
     pub motion: Keyframes<MotionKey>,
     #[serde(default)]
     pub fx: Vec<FxInstance>,
+    /// Curva padrão de suavização para novos pontos de envelope desta trilha (áudio e vídeo).
+    #[serde(default, skip_serializing_if = "is_default_curve")]
+    pub default_env_curve: Curve,
+    /// Intensidade padrão de suavização (0.0..=1.0) para novos pontos de envelope desta trilha.
+    #[serde(default, skip_serializing_if = "is_zero_f32_env")]
+    pub default_env_smoothness: f32,
     #[serde(default)]
     pub envelopes: Vec<Envelope>,
     #[serde(default)]
@@ -3528,6 +3616,12 @@ pub struct AudioBus {
     pub output_bus: Option<Id>,
     #[serde(default)]
     pub fx: Vec<FxInstance>,
+    /// Curva padrão de suavização para novos pontos de envelope desta trilha (áudio e vídeo).
+    #[serde(default, skip_serializing_if = "is_default_curve")]
+    pub default_env_curve: Curve,
+    /// Intensidade padrão de suavização (0.0..=1.0) para novos pontos de envelope desta trilha.
+    #[serde(default, skip_serializing_if = "is_zero_f32_env")]
+    pub default_env_smoothness: f32,
     #[serde(default)]
     pub envelopes: Vec<Envelope>,
     #[serde(default)]
@@ -3546,6 +3640,8 @@ impl AudioBus {
             surround: SurroundPan::default(),
             output_bus: None,
             fx: vec![],
+            default_env_curve: Curve::Linear,
+            default_env_smoothness: 0.0,
             envelopes: vec![],
             automation_mode: AutomationMode::Read,
         }
@@ -3616,6 +3712,8 @@ impl Track {
             blend: BlendMode::SourceAlpha,
             motion: Keyframes::default(),
             fx: vec![],
+            default_env_curve: Curve::Linear,
+            default_env_smoothness: 0.0,
             envelopes: vec![],
             color: TRACK_COLORS[(id as usize) % TRACK_COLORS.len()],
             output_bus: None,
@@ -3952,6 +4050,9 @@ pub struct Event {
     /// Ganho do evento de áudio (dB).
     #[serde(default)]
     pub gain_db: f32,
+    /// Opacidade do evento de vídeo (0.0..=1.0; padrão 1.0 = 100%).
+    #[serde(default = "one", skip_serializing_if = "is_one_f32")]
+    pub opacity: f32,
     /// Manter proporção da mídia (letterbox) em eventos de vídeo.
     #[serde(default = "yes")]
     pub maintain_aspect: bool,
@@ -4038,6 +4139,7 @@ impl Event {
             looped: media.duration.is_some(),
             reverse: false,
             gain_db: 0.0,
+            opacity: 1.0,
             maintain_aspect: true,
             pan_crop_stretch_to_fill: true,
             pan_crop: Keyframes::default(),
@@ -4129,6 +4231,67 @@ impl Event {
             }
         }
         Some(mt.max(Ticks::ZERO))
+    }
+
+    /// Calcula os marcadores de início, fim e repetição (loop) da mídia subjacente
+    /// no evento, no estilo dos triângulos invertidos do VEGAS Pro:
+    /// - `at_start`: borda inicial do evento coincide com o início físico (`0`) da mídia;
+    /// - `at_end`: borda final do evento coincide com o fim físico (`media_dur`) da mídia;
+    /// - `interior`: instantes internos `(start < t < end)` onde a mídia reinicia/termina
+    ///   (limitado a 128 entradas contra entradas hostis, §0.5).
+    pub fn media_boundary_ticks(&self, media_dur: Option<Ticks>) -> (bool, bool, Vec<Ticks>) {
+        let Some(d) = media_dur else {
+            return (false, false, Vec::new());
+        };
+        if d <= Ticks::ZERO || self.length <= Ticks::ZERO {
+            return (false, false, Vec::new());
+        }
+        let tol = Ticks::from_millis_i64(2);
+        let scaled_len = self.rate.scale_ticks(self.length);
+        if scaled_len <= Ticks::ZERO {
+            return (false, false, Vec::new());
+        }
+        let start_mt = self.offset;
+        let end_mt = Ticks::from_raw(start_mt.0.saturating_add(scaled_len.0));
+        let at_start = start_mt.abs_diff(Ticks::ZERO) <= tol;
+        let at_end = end_mt.abs_diff(d) <= tol;
+
+        let mut interior = Vec::new();
+        let first_k = (start_mt.0 / d.0).saturating_add(1).max(1);
+        const MAX_NOTCHES: usize = 128;
+        let mut k = first_k;
+        while interior.len() < MAX_NOTCHES {
+            let Some(boundary_mt) = d.0.checked_mul(k) else {
+                break;
+            };
+            let boundary = Ticks::from_raw(boundary_mt);
+            if boundary >= end_mt - tol {
+                break;
+            }
+            if boundary > start_mt + tol {
+                let delta_mt = boundary - start_mt;
+                if let Some(delta_tl) = self.rate.unscale_ticks(delta_mt) {
+                    let t_notch = if self.reverse {
+                        self.end() - delta_tl
+                    } else {
+                        self.start + delta_tl
+                    };
+                    if t_notch > self.start + tol && t_notch < self.end() - tol {
+                        interior.push(t_notch);
+                    }
+                }
+            }
+            let Some(next_k) = k.checked_add(1) else {
+                break;
+            };
+            k = next_k;
+        }
+        if self.reverse {
+            interior.sort();
+            (at_end, at_start, interior)
+        } else {
+            (at_start, at_end, interior)
+        }
     }
 
     /// Ganho dos fades de entrada/saída (0..1) no tempo `t`.
@@ -6081,9 +6244,85 @@ mod tests {
             t: Ticks::from_secs_i64(2),
             v: 0.0,
             curve: Curve::Linear,
+            smoothness: 0.0,
         });
         assert!((e.eval(Ticks::from_secs_i64(1)) - 0.5).abs() < 1e-6);
         assert_eq!(e.eval(Ticks::from_secs_i64(5)), 0.0);
+    }
+
+    #[test]
+    fn envelope_smoothness_and_segment_lookup() {
+        let mut e = Envelope::new(EnvKind::Volume);
+        e.points = vec![
+            EnvPoint {
+                t: Ticks::ZERO,
+                v: 0.0,
+                curve: Curve::Smooth,
+                smoothness: 0.0,
+            },
+            EnvPoint {
+                t: Ticks::from_secs_i64(2),
+                v: 1.0,
+                curve: Curve::Linear,
+                smoothness: 1.0,
+            },
+            EnvPoint {
+                t: Ticks::from_secs_i64(4),
+                v: 0.2,
+                curve: Curve::Linear,
+                smoothness: 0.0,
+            },
+        ];
+        assert_eq!(e.segment_index_at(Ticks::from_secs_i64(1)), Some(0));
+        assert_eq!(e.segment_index_at(Ticks::from_secs_i64(3)), Some(1));
+        let v_mid = e.eval(Ticks::from_secs_i64(3));
+        assert!(v_mid.is_finite() && (0.0..=2.0).contains(&v_mid));
+        e.set_all_curves(Curve::Smooth, Some(0.5));
+        assert!(e
+            .points
+            .iter()
+            .all(|p| p.curve == Curve::Smooth && (p.smoothness - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn event_opacity_and_media_boundary_notches() {
+        let m = MediaItem {
+            id: new_id(),
+            name: "solid".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [1.0, 0.0, 0.0, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(4)),
+            has_video: true,
+            has_audio: false,
+            width: 16,
+            height: 16,
+            fps: Some(FrameRate::FPS_30),
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mut e = Event::new(&m, Ticks::from_secs_i64(2), Ticks::from_secs_i64(4));
+        assert!((e.opacity - 1.0).abs() < 1e-6);
+        // Exatamente início e fim da mídia (4s): sem notches internos
+        let (st, en, notches) = e.media_boundary_ticks(m.duration);
+        assert!(st && en && notches.is_empty());
+        // Esticado para 10s (2,5 ciclos de 4s): notches internos em 2+4=6s e 2+8=10s
+        e.length = Ticks::from_secs_i64(10);
+        let (st2, en2, notches2) = e.media_boundary_ticks(m.duration);
+        assert!(st2 && !en2);
+        assert_eq!(
+            notches2,
+            vec![Ticks::from_secs_i64(6), Ticks::from_secs_i64(10)]
+        );
+        // Entradas hostis (duração nula / negativa) não entram em pânico
+        assert_eq!(
+            e.media_boundary_ticks(Some(Ticks::ZERO)),
+            (false, false, vec![])
+        );
+        assert_eq!(
+            e.media_boundary_ticks(Some(Ticks::from_secs_i64(-3))),
+            (false, false, vec![])
+        );
     }
 
     #[test]
