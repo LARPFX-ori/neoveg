@@ -160,7 +160,7 @@ fn folder_row(
         let p = Path::new(effective);
         if p.is_dir() {
             ui.label(
-                egui::RichText::new(format!("✔ {}", tr(lang, "Pasta existente")))
+                egui::RichText::new(format!("● {}", tr(lang, "Pasta existente")))
                     .color(egui::Color32::from_rgb(80, 200, 100))
                     .small(),
             );

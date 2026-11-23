@@ -2322,3 +2322,25 @@ fn barra_da_previa_cabe_numa_linha_com_menu_de_excedentes() {
     assert_eq!(PreviewTool::ALL[1], PreviewTool::ExternalMonitor);
     assert_eq!(PreviewTool::ALL.last(), Some(&PreviewTool::ClearRam));
 }
+
+#[test]
+fn open_fx_target_abre_plugin_chooser_quando_cadeia_vazia() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let tid = app.project.tracks[0].id;
+
+    // Sem efeitos na trilha: abre o Plug-In Chooser (semântica VEGAS Pro)
+    app.open_fx_target(FxTarget::Track(tid));
+    assert_eq!(app.dlg.fx_target, Some(FxTarget::Track(tid)));
+    assert!(
+        app.dlg.fx_chooser_open,
+        "clicar em FX com cadeia vazia deve abrir o Plug-In Chooser"
+    );
+
+    // Com efeito já aplicado: abre direto no editor de parâmetros da cadeia
+    app.project.tracks[0]
+        .fx
+        .push(crate::model::FxInstance::new(crate::model::FxKind::Invert));
+    app.open_fx_target(FxTarget::Track(tid));
+    assert!(!app.dlg.fx_chooser_open);
+}

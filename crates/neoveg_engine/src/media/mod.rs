@@ -81,7 +81,39 @@ pub struct NestedSequenceEntry {
     pub name: String,
     pub tracks: Vec<crate::model::Track>,
     pub settings: crate::model::ProjectSettings,
+    /// Mídias do projeto pai necessárias para resolver os eventos dentro da sequência.
+    pub project_media: Vec<crate::model::MediaItem>,
+    pub audio_buses: Vec<crate::model::AudioBus>,
+    pub master: crate::model::MasterBus,
     pub media: Arc<MediaCache>,
+}
+
+std::thread_local! {
+    static NESTED_SEQ_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct NestedSeqDepthGuard;
+
+impl NestedSeqDepthGuard {
+    fn enter() -> Option<Self> {
+        NESTED_SEQ_DEPTH.with(|c| {
+            let cur = c.get();
+            if cur >= crate::model::MAX_NESTED_SEQUENCE_DEPTH {
+                None
+            } else {
+                c.set(cur + 1);
+                Some(Self)
+            }
+        })
+    }
+}
+
+impl Drop for NestedSeqDepthGuard {
+    fn drop(&mut self) {
+        NESTED_SEQ_DEPTH.with(|c| {
+            c.set(c.get().saturating_sub(1));
+        });
+    }
 }
 
 pub fn is_supported(path: &Path) -> bool {
@@ -419,8 +451,13 @@ impl MediaCache {
                     let capped_samples = total_samples
                         .min((sr as usize).saturating_mul(MAX_NESTED_AUDIO_SECS as usize));
                     let sub_proj = crate::model::Project {
+                        media: project.media.clone(),
                         tracks: tracks.clone(),
                         settings: settings.clone(),
+                        audio_buses: project.audio_buses.clone(),
+                        master: project.master.clone(),
+                        active_sequence_id: Some(seq_id),
+                        active_sequence_name: Some(name.clone()),
                         ..crate::model::Project::new_default()
                     };
                     let audio_map = shared_cache.audio_map();
@@ -448,6 +485,9 @@ impl MediaCache {
                             name,
                             tracks,
                             settings,
+                            project_media: project.media.clone(),
+                            audio_buses: project.audio_buses.clone(),
+                            master: project.master.clone(),
                             media: shared_cache.clone(),
                         }),
                         Mutex::new(FrameCache::new(16)),
@@ -690,6 +730,7 @@ impl MediaCache {
                 Some(img)
             }
             VideoSource::NestedSequence(nested, cache) => {
+                let _depth_guard = NestedSeqDepthGuard::enter()?;
                 let fps = item.fps.unwrap_or(nested.settings.fps);
                 let max_idx = item
                     .duration
@@ -707,8 +748,13 @@ impl MediaCache {
                 let rh = nested.settings.height.clamp(16, 1080) as usize;
                 let ft = fps.frame_to_ticks(idx as i64);
                 let sub_proj = crate::model::Project {
+                    media: nested.project_media.clone(),
                     tracks: nested.tracks.clone(),
                     settings: nested.settings.clone(),
+                    audio_buses: nested.audio_buses.clone(),
+                    master: nested.master.clone(),
+                    active_sequence_id: Some(nested.sequence_id),
+                    active_sequence_name: Some(nested.name.clone()),
                     ..crate::model::Project::new_default()
                 };
                 let frame = crate::engine::video::render_frame_preview(
@@ -973,6 +1019,9 @@ fn load_entry_inner(
                         name: item.name.clone(),
                         tracks: Vec::new(),
                         settings: crate::model::ProjectSettings::default(),
+                        project_media: Vec::new(),
+                        audio_buses: Vec::new(),
+                        master: crate::model::MasterBus::default(),
                         media: Arc::new(MediaCache::default()),
                     }),
                     Mutex::new(FrameCache::new(16)),
@@ -1731,5 +1780,43 @@ mod system_contract_tests {
         assert_eq!(px[2], 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sequencia_aninhada_renderiza_midia_interna_sem_tela_preta() {
+        let mut p = crate::model::Project::new_default();
+        p.settings.width = 32;
+        p.settings.height = 18;
+        let red_imp = import_generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        });
+        let red_m = red_imp.item;
+        let red_ev = crate::model::Event::new(&red_m, Ticks::ZERO, Ticks::from_secs_i64(4));
+        let red_ev_id = red_ev.id;
+        p.media.push(red_m);
+        p.tracks[0].events.push(red_ev);
+
+        let mut session = crate::session::EditorSession::new(p);
+        session.sel_events.insert(red_ev_id);
+        let _seq_id = session
+            .nest_selection(Some("Sequência 02"))
+            .expect("aninhamento da seleção");
+
+        let cache = Arc::new(MediaCache::default());
+        cache.sync_sequence_media(&session.project, cache.clone());
+
+        let frame = crate::engine::video::render_frame_preview(
+            &session.project,
+            &cache,
+            Ticks::from_secs_i64(1),
+            32,
+            18,
+            false,
+        );
+        let px = frame.px[9 * 32 + 16];
+        assert!(
+            px[0] > 0.9 && px[1] < 0.05 && px[2] < 0.05,
+            "prévia de sequência aninhada não deve ficar preta; pixel={px:?}"
+        );
     }
 }

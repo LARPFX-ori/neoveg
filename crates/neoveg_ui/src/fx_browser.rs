@@ -345,6 +345,64 @@ impl FxBrowser {
         }
     }
 
+    /// Miniatura de prévia de um efeito de vídeo nativo (estática ou animada ao passar o mouse).
+    /// Reutilizada no navegador *Efeitos de Vídeo*, no *Plug-In Manager* e no *Plug-In Chooser*.
+    pub(crate) fn preview_texture(
+        &mut self,
+        ctx: &egui::Context,
+        k: FxKind,
+        hovered: bool,
+    ) -> Option<egui::TextureHandle> {
+        if k.is_audio() {
+            return None;
+        }
+        self.start_thumbs();
+        self.poll(ctx);
+        if !hovered {
+            return self.thumbs.get(&k).cloned();
+        }
+        let fx = FxInstance::new(k);
+        let needs_new = self
+            .hover_anim
+            .as_ref()
+            .is_none_or(|h| h.kind != k || h.preset_idx != usize::MAX);
+        if needs_new {
+            let f = render_preview_at(&fx, Ticks::ZERO, FrameRate::FPS_30, THUMB_W, THUMB_H);
+            let img = egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8());
+            let tex = ctx.load_texture(
+                format!("fx_preview_hover_{}", k.id()),
+                img,
+                egui::TextureOptions::LINEAR,
+            );
+            self.hover_anim = Some(FxHoverAnim {
+                kind: k,
+                preset_idx: usize::MAX,
+                tex,
+                started: std::time::Instant::now(),
+                bucket: 0,
+            });
+        }
+        if let Some(h) = self.hover_anim.as_mut() {
+            let bucket = (h.started.elapsed().as_millis() / 80) as u64;
+            if bucket != h.bucket {
+                h.bucket = bucket;
+                let ms = ((bucket % 50) * 80) as i64;
+                let f = render_preview_at(
+                    &fx,
+                    Ticks::from_millis_i64(ms),
+                    FrameRate::FPS_30,
+                    THUMB_W,
+                    THUMB_H,
+                );
+                let img = egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8());
+                h.tex.set(img, egui::TextureOptions::LINEAR);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+            return Some(h.tex.clone());
+        }
+        self.thumbs.get(&k).cloned()
+    }
+
     fn matches(&self, k: FxKind, favs: &[String], q: &str, lang: Language) -> bool {
         let in_cat = match self.cat {
             BrowserCat::All => true,
@@ -445,12 +503,20 @@ impl App {
                                     toggle_fav = Some(*k);
                                 }
                                 let sel = self.fx_browser.selected == Some(*k);
-                                let r = ui.dnd_drag_source(
-                                    egui::Id::new(("fxb_item", *k as u32)),
-                                    DndPayload::Fx(*k),
-                                    |ui| ui.selectable_label(sel, k.name_in(lang)),
+                                let item_id = egui::Id::new(("fxb_item", *k as u32));
+                                let r = ui.dnd_drag_source(item_id, DndPayload::Fx(*k), |ui| {
+                                    ui.selectable_label(sel, k.name_in(lang))
+                                });
+                                let click_resp = ui.interact(
+                                    r.response.rect,
+                                    item_id.with("click"),
+                                    egui::Sense::click(),
                                 );
-                                if r.inner.clicked() {
+                                if r.inner.clicked()
+                                    || r.response.clicked()
+                                    || click_resp.clicked()
+                                    || r.response.drag_started()
+                                {
                                     select = Some(*k);
                                 }
                             });
@@ -501,8 +567,11 @@ impl App {
                                 |ui| {
                                     ui.vertical(|ui| {
                                         let size = egui::vec2(THUMB_W as f32, THUMB_H as f32);
-                                        let (rect, _) =
-                                            ui.allocate_exact_size(size, egui::Sense::hover());
+                                        let (rect, thumb_resp) =
+                                            ui.allocate_exact_size(size, egui::Sense::click());
+                                        if thumb_resp.clicked() {
+                                            pick_preset = Some(i);
+                                        }
                                         let hovered = ui.rect_contains_pointer(rect);
                                         let tex = if hovered {
                                             any_hovered = true;
@@ -607,7 +676,14 @@ impl App {
                             )
                             .response
                             .on_hover_text(tr(lang, "Arraste para um evento ou trilha de vídeo"));
-                        let _ = r;
+                        let card_click = ui.interact(
+                            r.rect,
+                            egui::Id::new(("fxb_preset_click", k as u32, i)),
+                            egui::Sense::click(),
+                        );
+                        if r.clicked() || card_click.clicked() {
+                            pick_preset = Some(i);
+                        }
                     }
                 });
                 if !any_hovered {

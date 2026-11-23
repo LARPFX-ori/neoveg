@@ -970,6 +970,13 @@ impl<'open> DialogWindow<'open> {
                         if sizing {
                             new_natural_w = Some(size.x.clamp(1.0, fit_w.max(1.0)));
                             ui.ctx().request_repaint();
+                        } else if auto_w {
+                            if let Some(prev_w) = natural_w {
+                                if size.x > prev_w + 2.0 {
+                                    new_natural_w = Some(size.x.clamp(prev_w, max_inner.x));
+                                    ui.ctx().request_repaint();
+                                }
+                            }
                         }
                         Some(size)
                     } else {
