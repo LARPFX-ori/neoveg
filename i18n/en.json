@@ -189,6 +189,8 @@
   "Animado": "Animated",
   "Animar (criar keyframe ao editar)": "Animate (create keyframe on edit)",
   "Animação": "Animation",
+  "Animação de máscara": "Mask animation",
+  "Animação de posição": "Position animation",
   "Aninhar seleção em nova sequência": "Nest selection into new sequence",
   "Análise de loudness: {err}": "Loudness analysis error: {err}",
   "Ao importar o primeiro arquivo de mídia, o formato do projeto é ajustado automaticamente somente se as propriedades do projeto ainda não foram personalizadas.": "When importing the first media file, project format auto-matches only if Project Properties have not been customized.",

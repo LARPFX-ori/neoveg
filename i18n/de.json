@@ -189,6 +189,8 @@
   "Animado": "Animiert",
   "Animar (criar keyframe ao editar)": "Animieren (Keyframe beim Bearbeiten)",
   "Animação": "Animation",
+  "Animação de máscara": "Maskenanimation",
+  "Animação de posição": "Positionsanimation",
   "Aninhar seleção em nova sequência": "Auswahl in neue Sequenz verschachteln",
   "Análise de loudness: {err}": "Lautheitsanalyse: {err}",
   "Ao importar o primeiro arquivo de mídia, o formato do projeto é ajustado automaticamente somente se as propriedades do projeto ainda não foram personalizadas.": "Beim Import der ersten Datei wird das Projektformat nur angepasst, solange die Projekteigenschaften unverändert sind.",

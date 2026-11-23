@@ -771,9 +771,9 @@ impl App {
             th,
             |ui| {
                 let target_lbl = if st.mask_mode {
-                    tr(lang, "Máscara")
+                    tr(lang, "Animação de máscara")
                 } else {
-                    tr(lang, "Posição")
+                    tr(lang, "Animação de posição")
                 };
                 kf_window::prop_row(ui, tr(lang, "Linha ativa:"), |ui| {
                     ui.label(egui::RichText::new(target_lbl).strong().small());

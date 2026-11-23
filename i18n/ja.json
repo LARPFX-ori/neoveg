@@ -189,6 +189,8 @@
   "Animado": "アニメーションあり",
   "Animar (criar keyframe ao editar)": "アニメーション (編集時にキーフレーム作成)",
   "Animação": "アニメーション",
+  "Animação de máscara": "マスクアニメーション",
+  "Animação de posição": "位置アニメーション",
   "Aninhar seleção em nova sequência": "選択範囲を新規シーケンスにネスト",
   "Análise de loudness: {err}": "ラウドネス解析エラー: {err}",
   "Ao importar o primeiro arquivo de mídia, o formato do projeto é ajustado automaticamente somente se as propriedades do projeto ainda não foram personalizadas.": "最初のメディア読み込み時、プロジェクト設定が未変更の場合のみ形式を自動一致させます。",
