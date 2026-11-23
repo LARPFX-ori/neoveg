@@ -3691,8 +3691,56 @@ impl App {
                                     op = Some((slot, "del"));
                                 }
                             }
+                            ui.add_space(10.0);
+                            let has_saveable = chain_copy
+                                .iter()
+                                .any(|fx| !matches!(fx.kind, FxKind::Ofx | FxKind::Vst3));
+                            if ui
+                                .add_enabled_ui(has_saveable, |ui| {
+                                    ui.add_sized(
+                                        [bw, 24.0],
+                                        egui::Button::new(tr(lang, "Salvar cadeia...")),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text(tr(
+                                    lang,
+                                    "Salvar esta sequência de efeitos como pacote reutilizável (Filter Package)",
+                                ))
+                                .clicked()
+                            {
+                                self.dlg.save_chain_target = Some(target);
+                                if self.dlg.save_chain_name.trim().is_empty() {
+                                    self.dlg.save_chain_name = if audio {
+                                        tr(lang, "Cadeia de áudio").into()
+                                    } else {
+                                        tr(lang, "Cadeia de vídeo").into()
+                                    };
+                                }
+                            }
                         });
                     });
+                    if self.dlg.save_chain_target == Some(target) {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "Nome da cadeia:"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.dlg.save_chain_name)
+                                    .desired_width(180.0),
+                            );
+                            let valid = !self.dlg.save_chain_name.trim().is_empty();
+                            if ui
+                                .add_enabled(valid, egui::Button::new(tr(lang, "Salvar")))
+                                .clicked()
+                            {
+                                confirm_save_chain =
+                                    Some(self.dlg.save_chain_name.trim().to_string());
+                            }
+                            if ui.button(tr(lang, "Fechar")).clicked() {
+                                self.dlg.save_chain_target = None;
+                            }
+                        });
+                    }
                     return;
                 }
 
