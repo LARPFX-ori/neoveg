@@ -186,7 +186,7 @@ python build_portable.py
 
 A CI do GitHub (`.github/workflows/ci.yml`) roda esses portões em todo pull request, no Windows e no Linux (Ubuntu), com os testes um por vez e as fixtures de mídia geradas na hora.
 
-O script `build_portable.py` compila em modo release e gera o pacote portátil em `dist/` na raiz do repositório, com as fontes abertas `assets/fonts/` (`OFL-1.1`) e os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos. Depois de confirmar e verificar a cópia (`SHA-256`), ele apaga a pasta de build do cargo (`target/` ou `CARGO_TARGET_DIR`); se a compilação, verificação ou a cópia falhar, a pasta é mantida e o erro é informado. Use `--keep-target` para manter a pasta de build e `--out` para gravar o pacote em outro lugar. `dist/` e `target/` ficam no `.gitignore`.
+O script `build_portable.py` compila em modo release e gera o pacote portátil em `dist/` na raiz do repositório, com as fontes abertas `assets/fonts/` (`OFL-1.1`) e os catálogos `i18n/*.json`, sem dependência de instalador, fontes proprietárias ou binários externos. Depois de confirmar e verificar a cópia (`SHA-256`), ele apaga a pasta de build do cargo (`target/` ou `CARGO_TARGET_DIR`); se a compilação, verificação ou a cópia falhar, a pasta é mantida, o erro é informado e — fora do GitHub Actions — o script dispara automaticamente `gh workflow run build-packages.yml -R LARPFX-ori/neoveg` e baixa os pacotes verificados por SHA-256 (use `--no-gh-fallback` para desativar). Use `--keep-target` para manter a pasta de build e `--out` para gravar o pacote em outro lugar. `dist/` e `target/` ficam no `.gitignore`.
 
 ### Instalador para Windows
 
@@ -194,7 +194,7 @@ O script `build_portable.py` compila em modo release e gera o pacote portátil e
 python build_installer.py
 ```
 
-O `build_installer.py` gera o pacote portátil com o `build_portable.py`, compacta a pasta `dist/` e anexa o ZIP ao fim do `neoveg-setup.exe`, o instalador próprio escrito em Rust (`crates/neoveg/src/setup/`, licença `MIT OR Apache-2.0`, sem ferramenta de terceiros). O resultado vai para `dist-installer/Neoveg-Setup-<versão>.exe`, também no `.gitignore`. Ele aceita as mesmas opções `--no-build` e `--keep-target`.
+O `build_installer.py` gera o pacote portátil com o `build_portable.py`, compacta a pasta `dist/` e anexa o ZIP ao fim do `neoveg-setup.exe`, o instalador próprio escrito em Rust (`crates/neoveg/src/setup/`, licença `MIT OR Apache-2.0`, sem ferramenta de terceiros). O resultado vai para `dist-installer/Neoveg-Setup-<versão>.exe`, também no `.gitignore`. Ele aceita as mesmas opções `--no-build`, `--keep-target` e `--no-gh-fallback` (acionando o mesmo fallback via GitHub Actions quando a compilação local falhar).
 
 O instalador pergunta para quem instalar:
 
