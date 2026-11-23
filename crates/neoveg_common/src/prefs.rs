@@ -318,6 +318,40 @@ impl Default for EditLayoutPrefs {
     }
 }
 
+/// Modo de fluxo de trabalho escolhido em *Preferências > Aparência e Layout*.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowMode {
+    /// Aparência e fluxo de trabalho fiéis ao VEGAS clássico: sem barra separada
+    /// de sequências; sequências aninhadas são tratadas como projetos internos
+    /// na faixa de projetos abertos.
+    Classic,
+    /// Fluxo intermediário com recursos adicionais do Neoveg além do fluxo
+    /// original, incluindo a barra dedicada de abas de sequências abaixo da
+    /// faixa de projetos abertos.
+    #[default]
+    Intermediate,
+}
+
+impl WorkflowMode {
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Intermediate];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            Self::Classic => "Clássico",
+            Self::Intermediate => "Intermediário",
+        };
+        crate::i18n::tr(lang, key)
+    }
+
+    pub fn description_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            Self::Classic => "Aparência e fluxo de trabalho fiéis ao VEGAS original. As sequências são tratadas como projetos internos na faixa de projetos abertos.",
+            Self::Intermediate => "Inclui recursos adicionais do Neoveg além do programa original, como a barra de abas de sequências abaixo dos projetos abertos.",
+        };
+        crate::i18n::tr(lang, key)
+    }
+}
+
 /// Tipos de envelope com cor própria na aba Exibição.
 pub const DISPLAY_ENVELOPES: [&str; 4] = ["Volume", "Pan", "Opacidade", "Fade para cor"];
 /// Quantas cores tem a paleta de cores de trilha.
@@ -689,6 +723,9 @@ pub struct Preferences {
     /// Tipo e disposição clássica de layout configurados em `Editar > Propriedades > Layout`.
     #[serde(default)]
     pub edit_layout: EditLayoutPrefs,
+    /// Modo de fluxo de trabalho (Clássico ou Intermediário).
+    #[serde(default)]
+    pub workflow_mode: WorkflowMode,
     /// Botões visíveis nos cabeçalhos de faixa (botão Mais).
     #[serde(default)]
     pub track_header: TrackHeaderPrefs,
@@ -1374,6 +1411,7 @@ impl Default for Preferences {
             shortcuts: HashMap::new(),
             window_layout: None,
             edit_layout: EditLayoutPrefs::default(),
+            workflow_mode: WorkflowMode::default(),
             track_header: TrackHeaderPrefs::default(),
             trimmer_hidden_buttons: Vec::new(),
             event_hidden_buttons_video: Vec::new(),
@@ -1911,5 +1949,28 @@ mod tests {
         h.sanitize();
         assert_eq!(h.ui_scale_pct, UI_SCALE_MAX);
         assert!(serde_json::from_str::<Preferences>(r#"{"ui_scale_pct":-5}"#).is_err());
+    }
+
+    #[test]
+    fn workflow_mode_padrao_e_roundtrip_json() {
+        let def = Preferences::default();
+        assert_eq!(def.workflow_mode, WorkflowMode::Intermediate);
+
+        // JSON antigo sem o campo cai no padrão Intermediário
+        let legacy: Preferences = serde_json::from_str(r#"{"language":"pt-BR"}"#).unwrap();
+        assert_eq!(legacy.workflow_mode, WorkflowMode::Intermediate);
+
+        let classic = Preferences {
+            workflow_mode: WorkflowMode::Classic,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&classic).unwrap();
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.workflow_mode, WorkflowMode::Classic);
+
+        for m in WorkflowMode::ALL {
+            assert!(!m.label_in(Language::PtBr).is_empty());
+            assert!(!m.description_in(Language::PtBr).is_empty());
+        }
     }
 }

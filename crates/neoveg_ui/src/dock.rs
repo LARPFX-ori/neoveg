@@ -254,6 +254,139 @@ pub fn build_dock_tree_with(
     Tree::new(TREE_SALT, root, tiles)
 }
 
+/// Constrói uma árvore acoplada multi-colunas garantindo que todos os painéis
+/// canônicos apareçam exatamente uma vez (painéis extras entram no primeiro grupo).
+fn build_grouped_dock_tree(groups: &[(&[DockPane], DockPane, f32)]) -> Tree<DockPane> {
+    let mut tiles = Tiles::default();
+    let mut placed = HashSet::new();
+    let mut cols_panes: Vec<(Vec<DockPane>, DockPane, f32)> = Vec::with_capacity(groups.len());
+    for (panes, active, share) in groups {
+        let mut list = Vec::new();
+        for p in *panes {
+            if !matches!(p, DockPane::Tab(t) if crate::layout::window_only(*t)) && placed.insert(*p)
+            {
+                list.push(*p);
+            }
+        }
+        cols_panes.push((list, *active, share.clamp(0.05, 20.0)));
+    }
+    if let Some((first_list, _, _)) = cols_panes.first_mut() {
+        for p in DockPane::all_canonical() {
+            if placed.insert(p) {
+                first_list.push(p);
+            }
+        }
+    }
+    let mut col_ids = Vec::with_capacity(cols_panes.len());
+    let mut col_shares = Vec::with_capacity(cols_panes.len());
+    for (list, active, share) in cols_panes {
+        if list.is_empty() {
+            continue;
+        }
+        let mut ids = Vec::with_capacity(list.len());
+        let mut active_id = None;
+        for p in list {
+            let id = tiles.insert_pane(p);
+            if p == active {
+                active_id = Some(id);
+            }
+            ids.push(id);
+        }
+        let mut tabs = Tabs::new(ids);
+        if let Some(id) = active_id {
+            tabs.set_active(id);
+        }
+        let gid = tiles.insert_container(Container::Tabs(tabs));
+        col_ids.push(gid);
+        col_shares.push(share);
+    }
+    let mut linear = Linear::new(LinearDir::Horizontal, col_ids.clone());
+    for (gid, share) in col_ids.into_iter().zip(col_shares) {
+        linear.shares.set_share(gid, share);
+    }
+    let root = tiles.insert_container(Container::Linear(linear));
+    Tree::new(TREE_SALT, root, tiles)
+}
+
+/// Layout clássico de edição com Trimmer dedicado (manual do VEGAS Pro 21, pp. 87–89):
+/// Mídia/Explorer | Trimmer | Prévia de Vídeo | Master Bus lado a lado.
+pub fn build_trimmer_editing_tree() -> Tree<DockPane> {
+    build_grouped_dock_tree(&[
+        (
+            &[
+                DockPane::Tab(DockTab::ProjectMedia),
+                DockPane::Tab(DockTab::Explorer),
+                DockPane::Tab(DockTab::Transitions),
+                DockPane::Tab(DockTab::VideoFx),
+                DockPane::Tab(DockTab::Generators),
+                DockPane::Tab(DockTab::PluginManager),
+            ],
+            DockPane::Tab(DockTab::ProjectMedia),
+            1.00,
+        ),
+        (
+            &[DockPane::Tab(DockTab::Trimmer)],
+            DockPane::Tab(DockTab::Trimmer),
+            0.92,
+        ),
+        (&[DockPane::Preview], DockPane::Preview, 0.92),
+        (&[DockPane::MasterBus], DockPane::MasterBus, 0.36),
+    ])
+}
+
+/// Layout acoplado de Correção de Cor do VEGAS Pro (pp. 87–89):
+/// Color Grading + Efeitos de Vídeo | Prévia de Vídeo | Video Scopes lado a lado.
+pub fn build_color_grading_tree() -> Tree<DockPane> {
+    build_grouped_dock_tree(&[
+        (
+            &[
+                DockPane::Tab(DockTab::ColorGrading),
+                DockPane::Tab(DockTab::VideoFx),
+                DockPane::Tab(DockTab::ProjectMedia),
+                DockPane::Tab(DockTab::Transitions),
+                DockPane::Tab(DockTab::Generators),
+                DockPane::Tab(DockTab::PluginManager),
+            ],
+            DockPane::Tab(DockTab::ColorGrading),
+            1.08,
+        ),
+        (
+            &[DockPane::Preview, DockPane::Tab(DockTab::Trimmer)],
+            DockPane::Preview,
+            1.08,
+        ),
+        (
+            &[DockPane::Tab(DockTab::Scopes), DockPane::MasterBus],
+            DockPane::Tab(DockTab::Scopes),
+            0.84,
+        ),
+    ])
+}
+
+/// Layout acoplado de Mixagem de Áudio do VEGAS Pro (pp. 87–89):
+/// Console de Mixagem + Efeitos de Áudio + Loudness + Surround | Prévia compacta | Master Bus.
+pub fn build_audio_mixing_tree() -> Tree<DockPane> {
+    build_grouped_dock_tree(&[
+        (
+            &[
+                DockPane::Tab(DockTab::Mixer),
+                DockPane::Tab(DockTab::AudioFx),
+                DockPane::Tab(DockTab::Loudness),
+                DockPane::Tab(DockTab::SurroundPanner),
+                DockPane::Tab(DockTab::ProjectMedia),
+            ],
+            DockPane::Tab(DockTab::Mixer),
+            1.68,
+        ),
+        (
+            &[DockPane::Preview, DockPane::Tab(DockTab::Trimmer)],
+            DockPane::Preview,
+            0.90,
+        ),
+        (&[DockPane::MasterBus], DockPane::MasterBus, 0.42),
+    ])
+}
+
 /// Valida uma árvore vinda de arquivo `.neoveglayout` contra ciclos, IDs inválidos,
 /// panes faltantes ou duplicados e pesos inválidos (`AGENTS.md §0.4`).
 pub fn sanitize_tile_tree(

@@ -6699,6 +6699,19 @@ fn prefs_appearance(
     });
 
     let inner_lw = inner_label_w(cx.label_w);
+    prefs_group_box(ui, cx.theme, tr(lang, "Fluxo de trabalho"), |ui| {
+        for mode in neoveg_common::WorkflowMode::ALL {
+            ui.radio_value(&mut draft.workflow_mode, mode, mode.label_in(lang));
+            ui.indent(("prefs_workflow_desc", mode as u8), |ui| {
+                ui.label(
+                    egui::RichText::new(mode.description_in(lang))
+                        .small()
+                        .color(cx.theme.text_muted),
+                );
+            });
+            ui.add_space(2.0);
+        }
+    });
     prefs_group_box(
         ui,
         cx.theme,

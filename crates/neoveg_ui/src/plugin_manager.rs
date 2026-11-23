@@ -830,34 +830,9 @@ impl App {
                             .default_open(!filter.is_empty() || cat == PluginCategory::VideoFx)
                             .show(ui, |ui| {
                                 for e in items {
-                                    let id = egui::Id::new(("plugin_item", cat, e.name()));
-                                    let payload = match e {
-                                        PluginEntry::Fx(k) => Some(DndPayload::Fx(k)),
-                                        PluginEntry::Transition(k) => {
-                                            Some(DndPayload::Transition(k))
-                                        }
-                                        PluginEntry::Compositor(_) => None,
-                                    };
                                     let is_sel = selected == Some(e);
                                     let label = e.name_in(lang);
-                                    let clicked = match payload {
-                                        Some(p) => {
-                                            let drag = ui.dnd_drag_source(id, p, |ui| {
-                                                ui.selectable_label(is_sel, label)
-                                            });
-                                            let click_resp = ui.interact(
-                                                drag.response.rect,
-                                                id.with("click"),
-                                                egui::Sense::click(),
-                                            );
-                                            drag.inner.clicked()
-                                                || drag.response.clicked()
-                                                || click_resp.clicked()
-                                                || drag.response.drag_started()
-                                        }
-                                        None => ui.selectable_label(is_sel, label).clicked(),
-                                    };
-                                    if clicked {
+                                    if ui.selectable_label(is_sel, label).clicked() {
                                         selected = Some(e);
                                         selected_ofx = None;
                                     }
@@ -1437,20 +1412,57 @@ impl App {
             PluginEntry::Fx(k) => {
                 if !k.is_audio() {
                     let preview_sz = egui::vec2(192.0, 108.0);
-                    let (rect, _) = ui.allocate_exact_size(preview_sz, egui::Sense::hover());
-                    let hovered = ui.rect_contains_pointer(rect);
-                    let ctx = ui.ctx().clone();
-                    if let Some(tex) = self.fx_browser.preview_texture(&ctx, k, hovered) {
-                        egui::Image::new((tex.id(), preview_sz)).paint_at(ui, rect);
-                    } else {
-                        ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
-                    }
-                    ui.painter().rect_stroke(
-                        rect,
-                        2.0,
-                        egui::Stroke::new(1.0_f32, self.theme.border),
-                        egui::StrokeKind::Inside,
+                    let drag = ui.dnd_drag_source(
+                        egui::Id::new(("pm_fx_preview_drag", k as u32)),
+                        DndPayload::Fx(k),
+                        |ui| {
+                            ui.vertical(|ui| {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(preview_sz, egui::Sense::hover());
+                                let hovered = ui.rect_contains_pointer(rect);
+                                let ctx = ui.ctx().clone();
+                                if let Some(tex) = self.fx_browser.preview_texture(&ctx, k, hovered)
+                                {
+                                    egui::Image::new((tex.id(), preview_sz)).paint_at(ui, rect);
+                                } else {
+                                    ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
+                                }
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    2.0,
+                                    egui::Stroke::new(1.5_f32, self.theme.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.label(egui::RichText::new(k.name_in(lang)).small().strong());
+                            });
+                        },
                     );
+                    drag.response
+                        .on_hover_text(tr(lang, "Arraste para um evento ou trilha de vídeo"));
+                    ui.add_space(4.0);
+                } else {
+                    let drag = ui.dnd_drag_source(
+                        egui::Id::new(("pm_afx_preview_drag", k as u32)),
+                        DndPayload::Fx(k),
+                        |ui| {
+                            egui::Frame::new()
+                                .fill(self.theme.widget_bg)
+                                .stroke(egui::Stroke::new(1.0_f32, self.theme.accent))
+                                .corner_radius(3.0)
+                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                .show(ui, |ui| {
+                                    icons::icon_label(
+                                        ui,
+                                        Icon::FxAudio,
+                                        14.0,
+                                        k.name_in(lang),
+                                        &self.theme,
+                                    );
+                                });
+                        },
+                    );
+                    drag.response
+                        .on_hover_text(tr(lang, "Arraste para um evento ou trilha de áudio"));
                     ui.add_space(4.0);
                 }
                 ui.horizontal_wrapped(|ui| {
@@ -1491,20 +1503,36 @@ impl App {
             PluginEntry::Transition(tk) => {
                 if let Some(idx) = TransitionKind::ALL.iter().position(|x| *x == tk) {
                     let preview_sz = egui::vec2(192.0, 108.0);
-                    let (rect, _) = ui.allocate_exact_size(preview_sz, egui::Sense::hover());
-                    let hovered = ui.rect_contains_pointer(rect);
-                    let ctx = ui.ctx().clone();
-                    if let Some(tex) = self.fx_browser.transitions.texture(&ctx, idx, hovered) {
-                        egui::Image::new((tex.id(), preview_sz)).paint_at(ui, rect);
-                    } else {
-                        ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
-                    }
-                    ui.painter().rect_stroke(
-                        rect,
-                        2.0,
-                        egui::Stroke::new(1.0_f32, self.theme.border),
-                        egui::StrokeKind::Inside,
+                    let drag = ui.dnd_drag_source(
+                        egui::Id::new(("pm_tr_preview_drag", tk as u32)),
+                        DndPayload::Transition(tk),
+                        |ui| {
+                            ui.vertical(|ui| {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(preview_sz, egui::Sense::hover());
+                                let hovered = ui.rect_contains_pointer(rect);
+                                let ctx = ui.ctx().clone();
+                                if let Some(tex) =
+                                    self.fx_browser.transitions.texture(&ctx, idx, hovered)
+                                {
+                                    egui::Image::new((tex.id(), preview_sz)).paint_at(ui, rect);
+                                } else {
+                                    ui.painter().rect_filled(rect, 2.0, self.theme.widget_bg);
+                                }
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    2.0,
+                                    egui::Stroke::new(1.5_f32, self.theme.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.label(egui::RichText::new(tk.name_in(lang)).small().strong());
+                            });
+                        },
                     );
+                    drag.response.on_hover_text(tr(
+                        lang,
+                        "Arraste até um evento de vídeo para usar no crossfade ou fade.",
+                    ));
                     ui.add_space(4.0);
                 }
                 ui.label(tr(

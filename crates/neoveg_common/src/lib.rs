@@ -26,6 +26,7 @@ pub use error::{NeovegError, Result};
 pub use i18n::{active_language, set_active_language, tr, tr_args, tr_menu_path, Language};
 pub use prefs::{
     recommended_worker_threads, EditLayoutPrefs, LayoutType, Preferences, PreviewQuality,
+    WorkflowMode,
 };
 pub use time::{
     format_ticks, parse_time, FrameRate, Rate, Ticks, TimeFormat, TICKS_PER_MS, TICKS_PER_SEC,

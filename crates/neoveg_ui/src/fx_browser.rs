@@ -503,20 +503,7 @@ impl App {
                                     toggle_fav = Some(*k);
                                 }
                                 let sel = self.fx_browser.selected == Some(*k);
-                                let item_id = egui::Id::new(("fxb_item", *k as u32));
-                                let r = ui.dnd_drag_source(item_id, DndPayload::Fx(*k), |ui| {
-                                    ui.selectable_label(sel, k.name_in(lang))
-                                });
-                                let click_resp = ui.interact(
-                                    r.response.rect,
-                                    item_id.with("click"),
-                                    egui::Sense::click(),
-                                );
-                                if r.inner.clicked()
-                                    || r.response.clicked()
-                                    || click_resp.clicked()
-                                    || r.response.drag_started()
-                                {
+                                if ui.selectable_label(sel, k.name_in(lang)).clicked() {
                                     select = Some(*k);
                                 }
                             });
@@ -524,7 +511,7 @@ impl App {
                     });
             });
             ui.separator();
-            // direita: as miniaturas dos presets do efeito escolhido
+            // direita: as miniaturas dos presets do efeito escolhido (mesmo fluxo de Geradores de Mídia)
             ui.vertical(|ui| {
                 ui.set_max_width(right_w);
                 let Some(k) = self.fx_browser.selected else {
@@ -545,34 +532,42 @@ impl App {
                     "Presets: {name}",
                     &[("name", &k.name_in(lang))],
                 ));
-                ui.horizontal_wrapped(|ui| {
-                    for (i, (name, fx, is_user)) in all_presets.iter().enumerate() {
-                        let cache_key = (k.id().to_string(), name.clone());
-                        if *is_user && !self.fx_browser.user_thumbs.contains_key(&cache_key) {
-                            let f = render_preview(fx, THUMB_W, THUMB_H);
-                            let img =
-                                egui::ColorImage::from_rgba_unmultiplied([f.w, f.h], &f.to_rgba8());
-                            let tex = ui.ctx().load_texture(
-                                format!("fx_user_thumb_{}_{}", k.id(), name),
-                                img,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            self.fx_browser.user_thumbs.insert(cache_key.clone(), tex);
-                        }
-                        let chosen = chosen_idx == i;
-                        let r = ui
-                            .dnd_drag_source(
+                let per_row = ((right_w + 8.0) / (THUMB_W as f32 + 24.0)).floor().max(1.0) as usize;
+                let idxs: Vec<usize> = (0..all_presets.len()).collect();
+                for row in idxs.chunks(per_row) {
+                    ui.horizontal(|ui| {
+                        for &i in row {
+                            let Some((name, fx, is_user)) = all_presets.get(i) else {
+                                continue;
+                            };
+                            let cache_key = (k.id().to_string(), name.clone());
+                            if *is_user && !self.fx_browser.user_thumbs.contains_key(&cache_key) {
+                                let f = render_preview(fx, THUMB_W, THUMB_H);
+                                let img = egui::ColorImage::from_rgba_unmultiplied(
+                                    [f.w, f.h],
+                                    &f.to_rgba8(),
+                                );
+                                let tex = ui.ctx().load_texture(
+                                    format!("fx_user_thumb_{}_{}", k.id(), name),
+                                    img,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.fx_browser.user_thumbs.insert(cache_key.clone(), tex);
+                            }
+                            let chosen = chosen_idx == i;
+                            let r = ui.dnd_drag_source(
                                 egui::Id::new(("fxb_preset", k as u32, i)),
                                 DndPayload::FxPreset(fx.clone()),
                                 |ui| {
                                     ui.vertical(|ui| {
                                         let size = egui::vec2(THUMB_W as f32, THUMB_H as f32);
-                                        let (rect, thumb_resp) =
-                                            ui.allocate_exact_size(size, egui::Sense::click());
-                                        if thumb_resp.clicked() {
+                                        let (rect, _) =
+                                            ui.allocate_exact_size(size, egui::Sense::hover());
+                                        let hovered = ui.rect_contains_pointer(rect);
+                                        if hovered && ui.input(|inp| inp.pointer.primary_clicked())
+                                        {
                                             pick_preset = Some(i);
                                         }
-                                        let hovered = ui.rect_contains_pointer(rect);
                                         let tex = if hovered {
                                             any_hovered = true;
                                             let needs_new =
@@ -653,15 +648,10 @@ impl App {
                                             );
                                         }
                                         ui.horizontal(|ui| {
-                                            if ui
-                                                .selectable_label(
-                                                    chosen,
-                                                    egui::RichText::new(tr(lang, name)).small(),
-                                                )
-                                                .clicked()
-                                            {
-                                                pick_preset = Some(i);
-                                            }
+                                            let lbl_r = ui.selectable_label(
+                                                chosen,
+                                                egui::RichText::new(tr(lang, name)).small(),
+                                            );
                                             if *is_user
                                                 && ui
                                                     .small_button("×")
@@ -670,22 +660,23 @@ impl App {
                                             {
                                                 del_user_preset = Some(name.clone());
                                             }
-                                        });
-                                    });
+                                            lbl_r
+                                        })
+                                        .inner
+                                    })
+                                    .inner
                                 },
-                            )
-                            .response
-                            .on_hover_text(tr(lang, "Arraste para um evento ou trilha de vídeo"));
-                        let card_click = ui.interact(
-                            r.rect,
-                            egui::Id::new(("fxb_preset_click", k as u32, i)),
-                            egui::Sense::click(),
-                        );
-                        if r.clicked() || card_click.clicked() {
-                            pick_preset = Some(i);
+                            );
+                            if r.inner.clicked() {
+                                pick_preset = Some(i);
+                            }
+                            r.response.on_hover_text(tr(
+                                lang,
+                                "Arraste para um evento ou trilha de vídeo",
+                            ));
                         }
-                    }
-                });
+                    });
+                }
                 if !any_hovered {
                     self.fx_browser.hover_anim = None;
                 }
