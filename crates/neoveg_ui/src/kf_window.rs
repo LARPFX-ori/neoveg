@@ -16,7 +16,7 @@ use neoveg_common::i18n::{tr, Language};
 use neoveg_common::time::Ticks;
 
 /// Largura da coluna de nomes na grade de propriedades.
-const PROP_LABEL_W: f32 = 92.0;
+const PROP_LABEL_W: f32 = 122.0;
 
 /// Cabeçalho de seção da grade de propriedades, com o quadradinho `+`/`−`.
 /// O estado aberto/fechado fica na memória do egui, por `id`.
@@ -293,6 +293,167 @@ impl Workspace {
             painter.line_segment([pos2(area.left(), y), pos2(area.right(), y)], st);
         }
     }
+}
+
+/// Processa roda do mouse, pinça/Ctrl+scroll, atalhos `+`/`-` (quando em hover)
+/// e arrasto com botão do meio para zoom e deslocamento da área de trabalho.
+pub(crate) fn handle_workspace_wheel_and_zoom(
+    ui: &Ui,
+    resp: &egui::Response,
+    area: Rect,
+    frame: Vec2,
+    ws: &mut Workspace,
+) {
+    if resp.hovered() {
+        let (scroll, pinch, plus, minus) = ui.input(|i| {
+            let sy = if i.raw_scroll_delta.y.abs() > 0.0 {
+                i.raw_scroll_delta.y
+            } else {
+                i.smooth_scroll_delta.y
+            };
+            let p = i.zoom_delta();
+            let wants_kb = !ui.ctx().wants_keyboard_input();
+            let plus =
+                wants_kb && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals));
+            let minus = wants_kb && i.key_pressed(egui::Key::Minus);
+            (sy, p, plus, minus)
+        });
+        let anchor = resp.hover_pos().unwrap_or_else(|| area.center());
+        if (pinch - 1.0).abs() > 1e-3 {
+            ws.zoom_at(area, frame, anchor, pinch.clamp(0.5, 2.0));
+        } else if scroll != 0.0 {
+            let f = (1.0 + scroll * 0.002).clamp(0.5, 2.0);
+            ws.zoom_at(area, frame, anchor, f);
+        }
+        if plus {
+            ws.zoom_at(area, frame, anchor, 1.25);
+        }
+        if minus {
+            ws.zoom_at(area, frame, anchor, 0.8);
+        }
+    }
+    if resp.dragged_by(egui::PointerButton::Middle) {
+        let d = resp.drag_delta();
+        ws.offset -= vec2(ws.frame_len(d.x), ws.frame_len(d.y));
+    }
+}
+
+/// Barra flutuante de zoom no canto inferior direito da área de trabalho
+/// (`-`, `XX%`, `+`, `Ajustar`). Devolve o retângulo ocupado pela barra.
+pub(crate) fn workspace_zoom_bar(
+    ui: &mut Ui,
+    id: egui::Id,
+    area: Rect,
+    frame: Vec2,
+    ws: &mut Workspace,
+    theme: &ThemeColors,
+    lang: Language,
+) -> Rect {
+    let bar_w = 164.0_f32.min((area.width() - 8.0).max(96.0));
+    let bar_h = 22.0;
+    let bar_rect = Rect::from_min_size(
+        pos2(area.right() - bar_w - 6.0, area.bottom() - bar_h - 6.0),
+        vec2(bar_w, bar_h),
+    );
+    let bg = if theme.high_contrast {
+        theme.window_fill
+    } else {
+        Color32::from_rgba_unmultiplied(
+            theme.panel_fill.r(),
+            theme.panel_fill.g(),
+            theme.panel_fill.b(),
+            232,
+        )
+    };
+    ui.painter().rect_filled(bar_rect, 3.0, bg);
+    ui.painter().rect_stroke(
+        bar_rect,
+        3.0,
+        Stroke::new(1.0_f32, theme.border),
+        StrokeKind::Inside,
+    );
+    let inner = bar_rect.shrink2(vec2(3.0, 1.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id)
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = 2.0;
+    if child
+        .small_button("−")
+        .on_hover_text(tr(lang, "Reduzir zoom"))
+        .clicked()
+    {
+        ws.zoom_at(area, frame, area.center(), 0.8);
+    }
+    let pct_lbl = format!("{:.0}%", ws.zoom_pct);
+    if child
+        .small_button(pct_lbl)
+        .on_hover_text(tr(lang, "Redefinir zoom para 100%"))
+        .clicked()
+    {
+        ws.zoom_pct = 100.0;
+        ws.offset = Vec2::ZERO;
+    }
+    if child
+        .small_button("+")
+        .on_hover_text(tr(lang, "Ampliar zoom"))
+        .clicked()
+    {
+        ws.zoom_at(area, frame, area.center(), 1.25);
+    }
+    if child
+        .small_button(tr(lang, "Ajustar"))
+        .on_hover_text(tr(lang, "Ajustar a área de trabalho ao quadro"))
+        .clicked()
+    {
+        ws.fit(area, frame);
+    }
+    bar_rect
+}
+
+/// Prévia gráfica compacta da curva de suavização (`Curve` + `Suavidade 0..100`).
+pub(crate) fn paint_curve_preview(ui: &mut Ui, curve: Curve, smoothness: f32, theme: &ThemeColors) {
+    let (r, _) = ui.allocate_exact_size(
+        vec2(ui.available_width().clamp(80.0, 180.0), 34.0),
+        Sense::hover(),
+    );
+    let p = ui.painter_at(r);
+    p.rect_filled(r, 2.0, theme.extreme_bg);
+    p.rect_stroke(
+        r,
+        2.0,
+        Stroke::new(1.0_f32, theme.border),
+        StrokeKind::Inside,
+    );
+    let inner = r.shrink(4.0);
+    // linha de referência linear
+    p.line_segment(
+        [inner.left_bottom(), inner.right_top()],
+        Stroke::new(1.0_f32, theme.border),
+    );
+    let steps = 28usize;
+    let mut pts = Vec::with_capacity(steps + 1);
+    let sm = if smoothness.is_finite() {
+        (smoothness * 0.01).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    for i in 0..=steps {
+        let lin = i as f32 / steps as f32;
+        let mut u = curve.shape(lin);
+        if sm > 0.0 && curve != Curve::Hold {
+            let hermite = u * u * (3.0 - 2.0 * u);
+            let quintic = u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+            let target = hermite * (1.0 - sm) + quintic * sm;
+            u = u + (target - u) * sm;
+        }
+        let x = inner.left() + lin * inner.width();
+        let y = inner.bottom() - u.clamp(0.0, 1.0) * inner.height();
+        pts.push(pos2(x, y));
+    }
+    p.add(Shape::line(pts, Stroke::new(2.0_f32, theme.accent)));
 }
 
 /// Uma trilha de animação na linha do tempo de quadros-chave.
