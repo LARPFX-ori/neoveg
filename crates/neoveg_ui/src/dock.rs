@@ -436,6 +436,8 @@ struct NeovegTileBehavior<'a> {
     pending_close: Vec<DockPane>,
     pending_toggle_preview: bool,
     pending_toggle_master: bool,
+    /// Mídia arrastada diretamente sobre a aba do Trimmer para abrir no Trimmer.
+    pending_trimmer_drop: Option<crate::model::Id>,
 }
 
 impl NeovegTileBehavior<'_> {
@@ -708,8 +710,20 @@ impl NeovegTileBehavior<'_> {
                                 title,
                             )
                         });
+                        let dragging_media = egui::DragAndDrop::payload::<crate::DndPayload>(
+                            ui.ctx(),
+                        )
+                        .and_then(|p| match *p {
+                            crate::DndPayload::Media(mid) => Some(mid),
+                            _ => None,
+                        });
+                        let trimmer_drop_hover = sib_pane == DockPane::Tab(DockTab::Trimmer)
+                            && dragging_media.is_some()
+                            && ui.rect_contains_pointer(r);
                         if ui.is_rect_visible(r) {
-                            let bg = if active {
+                            let bg = if trimmer_drop_hover {
+                                th.accent.gamma_multiply(0.32)
+                            } else if active {
                                 if th.high_contrast {
                                     th.selection_bg
                                 } else {
@@ -722,6 +736,14 @@ impl NeovegTileBehavior<'_> {
                             };
                             if bg != Color32::TRANSPARENT {
                                 ui.painter().rect_filled(r, 0.0, bg);
+                            }
+                            if trimmer_drop_hover {
+                                ui.painter().rect_stroke(
+                                    r,
+                                    1.0,
+                                    Stroke::new(2.0_f32, th.accent),
+                                    StrokeKind::Inside,
+                                );
                             }
                             if active {
                                 let bar_col = if th.high_contrast {
@@ -758,6 +780,21 @@ impl NeovegTileBehavior<'_> {
                                 galley,
                                 text_col,
                             );
+                        }
+                        if trimmer_drop_hover {
+                            if !active {
+                                self.pending_activate =
+                                    Some((snapshot.container_id, sib_id, sib_pane));
+                            }
+                            if ui.input(|i| i.pointer.any_released()) {
+                                if let Some(payload) =
+                                    egui::DragAndDrop::take_payload::<crate::DndPayload>(ui.ctx())
+                                {
+                                    if let crate::DndPayload::Media(mid) = *payload {
+                                        self.pending_trimmer_drop = Some(mid);
+                                    }
+                                }
+                            }
                         }
                         let resp = resp.on_hover_text(neoveg_common::tr(
                             lang,
@@ -1082,15 +1119,29 @@ impl Behavior<DockPane> for NeovegTileBehavior<'_> {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
         });
 
+        let dragging_media =
+            egui::DragAndDrop::payload::<crate::DndPayload>(ui.ctx()).and_then(|p| match *p {
+                crate::DndPayload::Media(mid) => Some(mid),
+                _ => None,
+            });
+        let trimmer_drop_hover = pane == DockPane::Tab(DockTab::Trimmer)
+            && dragging_media.is_some()
+            && ui.rect_contains_pointer(tab_rect);
         if ui.is_rect_visible(tab_rect) && !state.is_being_dragged {
-            let bg = if state.active {
+            let bg = if trimmer_drop_hover {
+                self.app.theme.accent.gamma_multiply(0.32)
+            } else if state.active {
                 self.app.theme.selection_bg
             } else if resp.hovered() {
                 self.app.theme.widget_hover_bg
             } else {
                 self.app.theme.widget_bg
             };
-            let stroke = self.tab_outline_stroke(ui.visuals(), tiles, tile_id, state);
+            let stroke = if trimmer_drop_hover {
+                Stroke::new(2.0_f32, self.app.theme.accent)
+            } else {
+                self.tab_outline_stroke(ui.visuals(), tiles, tile_id, state)
+            };
             ui.painter()
                 .rect(tab_rect.shrink(0.5), 2.0, bg, stroke, StrokeKind::Inside);
 
@@ -1114,6 +1165,23 @@ impl Behavior<DockPane> for NeovegTileBehavior<'_> {
                 galley,
                 text_color,
             );
+        }
+
+        if trimmer_drop_hover {
+            if !state.active {
+                if let Some(snap) = self.tabs_info.get(&tile_id) {
+                    self.pending_activate = Some((snap.container_id, tile_id, pane));
+                }
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                if let Some(payload) =
+                    egui::DragAndDrop::take_payload::<crate::DndPayload>(ui.ctx())
+                {
+                    if let crate::DndPayload::Media(mid) = *payload {
+                        self.pending_trimmer_drop = Some(mid);
+                    }
+                }
+            }
         }
 
         if resp.clicked() {
@@ -1244,6 +1312,7 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
         pending_close,
         pending_toggle_preview,
         pending_toggle_master,
+        pending_trimmer_drop,
     ) = {
         let mut behavior = NeovegTileBehavior {
             app,
@@ -1259,6 +1328,7 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
             pending_close: Vec::new(),
             pending_toggle_preview: false,
             pending_toggle_master: false,
+            pending_trimmer_drop: None,
         };
         tree.ui(&mut behavior, &mut ui_child);
         (
@@ -1272,8 +1342,13 @@ pub(crate) fn draw_dock_tree(app: &mut App, ui: &mut Ui) {
             behavior.pending_close,
             behavior.pending_toggle_preview,
             behavior.pending_toggle_master,
+            behavior.pending_trimmer_drop,
         )
     };
+
+    if let Some(mid) = pending_trimmer_drop {
+        app.open_in_trimmer(mid);
+    }
 
     if let Some((container_id, tab_id, pane)) = pending_activate {
         if let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(container_id) {
@@ -1424,6 +1499,7 @@ fn draw_maximized_pane(app: &mut App, ui: &mut Ui, avail: Rect, pane: DockPane) 
             pending_close: Vec::new(),
             pending_toggle_preview: false,
             pending_toggle_master: false,
+            pending_trimmer_drop: None,
         };
         behavior.render_pane_body(&mut body_ui, pane);
     }

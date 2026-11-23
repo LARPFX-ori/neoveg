@@ -1150,8 +1150,8 @@ impl App {
                             m.source,
                             MediaSource::Generated(_) | MediaSource::Sequence { .. }
                         );
-                    let drag_resp = ui
-                        .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
+                    let card_resp = ui
+                        .scope(|ui| {
                             ui.set_min_width(card_w);
                             ui.set_max_width(card_w);
                             egui::Frame::new()
@@ -1342,20 +1342,27 @@ impl App {
                         tr(lang, "Uso"),
                         fmt_tip
                     );
-                    let click_resp = ui
-                        .interact(drag_resp.rect, id.with("click"), Sense::click())
+                    let resp = ui
+                        .interact(card_resp.rect, id, Sense::click_and_drag())
                         .on_hover_text(tip);
-                    click_resp.widget_info(|| {
+                    resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &m.name)
                     });
-                    if click_resp.clicked() {
+                    if resp.drag_started() {
                         self.session.active_media_id = Some(m.id);
                     }
-                    if click_resp.double_clicked() {
+                    if resp.drag_started() || resp.dragged() {
+                        egui::DragAndDrop::set_payload(ui.ctx(), DndPayload::Media(m.id));
+                        paint_media_drag_ghost(ui.ctx(), &m.name, &self.theme);
+                    }
+                    if resp.clicked() {
+                        self.session.active_media_id = Some(m.id);
+                    }
+                    if resp.double_clicked() {
                         self.session.active_media_id = Some(m.id);
                         actions.push(MediaRowAction::AddAtCursor(m.id));
                     }
-                    self.media_item_context_menu(&click_resp, m, actions);
+                    self.media_item_context_menu(&resp, m, actions);
                     if (idx + 1) % cols == 0 {
                         ui.end_row();
                     }
@@ -1372,8 +1379,8 @@ impl App {
         for m in items {
             let selected = self.session.active_media_id == Some(m.id);
             let id = egui::Id::new(("pm_list_row", m.id));
-            let drag = ui
-                .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
+            let row_resp = ui
+                .scope(|ui| {
                     ui.horizontal(|ui| {
                         icons::paint_inline(
                             ui,
@@ -1407,16 +1414,22 @@ impl App {
                     });
                 })
                 .response;
-            let click_resp = ui.interact(drag.rect, id.with("click"), Sense::click());
-            click_resp
-                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &m.name));
-            if click_resp.clicked() {
+            let resp = ui.interact(row_resp.rect, id, Sense::click_and_drag());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &m.name));
+            if resp.drag_started() {
                 self.session.active_media_id = Some(m.id);
             }
-            if click_resp.double_clicked() {
+            if resp.drag_started() || resp.dragged() {
+                egui::DragAndDrop::set_payload(ui.ctx(), DndPayload::Media(m.id));
+                paint_media_drag_ghost(ui.ctx(), &m.name, &self.theme);
+            }
+            if resp.clicked() {
+                self.session.active_media_id = Some(m.id);
+            }
+            if resp.double_clicked() {
                 actions.push(MediaRowAction::AddAtCursor(m.id));
             }
-            self.media_item_context_menu(&click_resp, m, actions);
+            self.media_item_context_menu(&resp, m, actions);
         }
     }
 
@@ -1442,8 +1455,8 @@ impl App {
                 for m in items {
                     let selected = self.session.active_media_id == Some(m.id);
                     let id = egui::Id::new(("pm_det_row", m.id));
-                    let resp = ui
-                        .dnd_drag_source(id, DndPayload::Media(m.id), |ui| {
+                    let row_resp = ui
+                        .scope(|ui| {
                             ui.horizontal(|ui| {
                                 ui.set_max_width(220.0);
                                 icons::paint_inline(
@@ -1473,19 +1486,26 @@ impl App {
                             });
                         })
                         .response;
-                    let click_resp = ui
-                        .interact(resp.rect, id.with("click"), Sense::click())
+                    let resp = ui
+                        .interact(row_resp.rect, id, Sense::click_and_drag())
                         .on_hover_text(&m.name);
-                    click_resp.widget_info(|| {
+                    resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &m.name)
                     });
-                    if click_resp.clicked() {
+                    if resp.drag_started() {
                         self.session.active_media_id = Some(m.id);
                     }
-                    if click_resp.double_clicked() {
+                    if resp.drag_started() || resp.dragged() {
+                        egui::DragAndDrop::set_payload(ui.ctx(), DndPayload::Media(m.id));
+                        paint_media_drag_ghost(ui.ctx(), &m.name, &self.theme);
+                    }
+                    if resp.clicked() {
+                        self.session.active_media_id = Some(m.id);
+                    }
+                    if resp.double_clicked() {
                         actions.push(MediaRowAction::AddAtCursor(m.id));
                     }
-                    self.media_item_context_menu(&click_resp, m, actions);
+                    self.media_item_context_menu(&resp, m, actions);
 
                     ui.label(media_kind_tag(m));
                     ui.label(
@@ -1956,4 +1976,35 @@ fn media_source_label(src: &MediaSource) -> String {
         MediaSource::NestedProject { path } => format!("Projeto aninhado: {path}"),
         MediaSource::Sequence { id } => format!("Sequência aninhada (ID: {id})"),
     }
+}
+
+/// Etiqueta flutuante exibida sob o cursor enquanto o usuário arrasta uma mídia
+/// ou seleção do Trimmer (para a timeline, Storyboard ou janela Trimmer).
+pub(crate) fn paint_media_drag_ghost(
+    ctx: &egui::Context,
+    name: &str,
+    theme: &crate::theme::ThemeColors,
+) {
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    let layer = egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("neoveg_media_drag_ghost"),
+    );
+    let painter = ctx.layer_painter(layer);
+    let font = egui::FontId::proportional(11.5);
+    let fg = crate::theme::contrast_on(theme.selection_bg);
+    let galley = painter.layout_no_wrap(name.to_string(), font, fg);
+    let pad = vec2(8.0, 4.0);
+    let rect = Rect::from_min_size(pos + vec2(14.0, 10.0), galley.size() + pad * 2.0);
+    painter.rect_filled(rect, 3.0, theme.selection_bg.gamma_multiply(0.95));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0_f32, theme.accent),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + pad, galley, fg);
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
 }

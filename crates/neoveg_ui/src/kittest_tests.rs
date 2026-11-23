@@ -2754,3 +2754,80 @@ fn kittest_faixa_projetos_acima_da_faixa_sequencias_e_retangulo_selecao() {
         "retângulo de seleção deve selecionar o evento alcançado (lanes={lanes:?}, ev={ev_rect:?}, p0={p0:?}, p1={p1:?})"
     );
 }
+
+/// Arrastar uma mídia da Mídia do Projeto para a aba do Trimmer abre a mídia
+/// diretamente no Trimmer (manual do VEGAS Pro 21, p. 313).
+#[test]
+fn kittest_arrastar_midia_do_projeto_para_o_trimmer() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    let (mid, mname) = {
+        let app = harness.state_mut();
+        app.insert_generated(crate::model::GenSpec::ColorBars);
+        app.dlg.gen_editor = None;
+        app.trimmer.media_id = None;
+        app.dock_visible = true;
+        app.dock_tab = crate::DockTab::ProjectMedia;
+        app.pending_dock_focus = Some(crate::DockTab::ProjectMedia);
+        let m = app.project.media.first().expect("mídia criada");
+        (m.id, m.name.clone())
+    };
+    harness.run_steps(3);
+
+    let from = harness
+        .query_all_by_label(&mname)
+        .filter_map(|n| n.raw_bounds())
+        .filter(|b| (b.y0 as f32) < 360.0)
+        .max_by(|a, b| {
+            let area_a = (a.x1 - a.x0) * (a.y1 - a.y0);
+            let area_b = (b.x1 - b.x0) * (b.y1 - b.y0);
+            area_a.total_cmp(&area_b)
+        })
+        .map(|b| egui::pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32))
+        .expect("cartão da mídia na Mídia do Projeto");
+    let to = harness
+        .query_all_by_label("Trimmer")
+        .filter_map(|n| n.raw_bounds())
+        .find(|b| (b.y0 as f32) < 380.0)
+        .map(|b| egui::pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32))
+        .expect("aba Trimmer no dock");
+
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(from));
+    harness.run_steps(1);
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(1);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(from + egui::vec2(14.0, 4.0)));
+    harness.run_steps(2);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(to));
+    harness.run_steps(2);
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(2);
+
+    assert_eq!(
+        harness.state().trimmer.media_id,
+        Some(mid),
+        "soltar mídia da Mídia do Projeto sobre a aba Trimmer deve abrir a mídia no Trimmer"
+    );
+}
