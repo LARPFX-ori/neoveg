@@ -127,12 +127,48 @@ impl BoxGeom {
     }
 
     /// `tol` é a distância de toque das alças, em pixels do quadro.
+    /// Prioriza os 4 cantos (largura+altura), depois as 4 alças laterais e, em seguida,
+    /// as próprias bordas do retângulo para facilitar o redimensionamento.
     pub(crate) fn hit(&self, p: Vec2, tol: f32) -> Hit {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return Hit::Rotate;
+        }
         let tol = finite_or(tol, 0.0).max(0.0);
-        if let Some(i) = (0..8).find(|&i| (self.handle(i) - p).length() <= tol) {
+        let closest_in = |indices: &[usize]| -> Option<usize> {
+            indices
+                .iter()
+                .copied()
+                .filter_map(|i| {
+                    let d = (self.handle(i) - p).length();
+                    (d <= tol).then_some((i, d))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        if let Some(i) = closest_in(&[0, 2, 4, 6]) {
+            return Hit::Handle(i);
+        }
+        if let Some(i) = closest_in(&[1, 3, 5, 7]) {
             return Hit::Handle(i);
         }
         let l = self.to_local(p);
+        let edge_tol = (tol * 0.65).min(self.half.x.min(self.half.y) * 0.45);
+        if edge_tol > 0.0 {
+            let near_x = l.x.abs() <= self.half.x + edge_tol;
+            let near_y = l.y.abs() <= self.half.y + edge_tol;
+            if near_x && (l.y + self.half.y).abs() <= edge_tol {
+                return Hit::Handle(1);
+            }
+            if near_x && (l.y - self.half.y).abs() <= edge_tol {
+                return Hit::Handle(5);
+            }
+            if near_y && (l.x - self.half.x).abs() <= edge_tol {
+                return Hit::Handle(3);
+            }
+            if near_y && (l.x + self.half.x).abs() <= edge_tol {
+                return Hit::Handle(7);
+            }
+        }
         if l.x.abs() <= self.half.x && l.y.abs() <= self.half.y {
             Hit::Inside
         } else {
@@ -332,6 +368,9 @@ mod tests {
         assert_eq!(g.hit(vec2(500.0, 500.0), 6.0), Hit::Inside);
         assert_eq!(g.hit(vec2(-200.0, 500.0), 6.0), Hit::Rotate);
         assert_eq!(g.hit(vec2(f32::NAN, 0.0), f32::NAN), Hit::Rotate);
+        // tocar diretamente em uma borda longe da alça central também permite redimensionar
+        assert_eq!(g.hit(vec2(1919.0, 200.0), 12.0), Hit::Handle(3));
+        assert_eq!(g.hit(vec2(300.0, 2.0), 12.0), Hit::Handle(1));
     }
 
     #[test]
