@@ -11,10 +11,12 @@ use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
 use egui::{
-    pos2, vec2, Align2, Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, TextureHandle,
+    pos2, vec2, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
+    TextureHandle,
 };
 use neoveg_common::time::{format_ticks, parse_time};
 use neoveg_common::{tr, tr_args, Language};
+use neoveg_engine::media::audio::WaveChannel;
 use std::collections::HashMap;
 
 /// Quantas mídias o histórico guarda.
@@ -65,6 +67,48 @@ impl TrimmerStreamMode {
             (Self::VideoOnly, true) => Self::Both,
         }
     }
+}
+
+/// Modo de exibição dos canais de áudio na forma de onda do Trimmer (VEGAS Pro p. 312/315).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrimmerAudioView {
+    #[default]
+    Both,
+    LeftOnly,
+    RightOnly,
+    Combine,
+}
+
+impl TrimmerAudioView {
+    pub const ALL: [Self; 4] = [Self::Both, Self::LeftOnly, Self::RightOnly, Self::Combine];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            Self::Both => "Ambos os canais (Estéreo)",
+            Self::LeftOnly => "Somente canal esquerdo",
+            Self::RightOnly => "Somente canal direito",
+            Self::Combine => "Combinar (Mono)",
+        };
+        tr(lang, key)
+    }
+}
+
+/// Ação ativa durante o arrasto na barra de rolagem horizontal do Trimmer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScrollbarDragMode {
+    Pan { offset_px: f32 },
+    LeftEdge,
+    RightEdge,
+}
+
+/// Modo de arrasto sobre régua, monitor de vídeo ou forma de onda do Trimmer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TrimmerDragMode {
+    PendingInSelection { origin: Pos2, anchor_t: Ticks },
+    Select { anchor_t: Ticks },
+    EdgeIn,
+    EdgeOut,
+    DragToTimeline,
 }
 
 /// Campo de tempo sendo editado por duplo clique na barra inferior do Trimmer.
@@ -232,8 +276,13 @@ pub struct TrimmerState {
     pub view_start: Ticks,
     /// Duração da janela visível (`Ticks::ZERO` ou `>= dur` = mídia inteira).
     pub view_span: Ticks,
+    /// Posição/duração interpoladas para animação suave de zoom (igual à timeline).
+    pub anim_view_start: Option<f64>,
+    pub anim_view_span: Option<f64>,
     /// Zoom vertical da forma de onda de áudio (`0.25..=8.0`).
     pub wave_zoom: f32,
+    /// Exibição de canais na forma de onda (Estéreo L/R, L, R ou Mono).
+    pub audio_view: TrimmerAudioView,
     /// Proporção de altura reservada ao monitor de vídeo quando vídeo e áudio coexistem.
     pub video_split_ratio: f32,
     /// Exibir monitor de vídeo embutido no Trimmer (VEGAS Pro p. 314).
@@ -254,8 +303,12 @@ pub struct TrimmerState {
     pub subclip_dlg: Option<SubclipDraft>,
     /// Edição inline de timecode na barra inferior (duplo clique, VEGAS Pro p. 316).
     pub time_edit: Option<(TrimmerTimeField, String)>,
-    /// Deslocamento do arrasto da barra de rolagem horizontal.
-    pub scrollbar_drag_offset: Option<f32>,
+    /// Modo ativo de arrasto na barra de rolagem horizontal (pan ou zoom pelas bordas).
+    pub scrollbar_drag: Option<ScrollbarDragMode>,
+    /// Modo ativo de arrasto sobre régua/vídeo/forma de onda (seleção, bordas In/Out ou arrasto vertical à timeline).
+    pub drag_mode: Option<TrimmerDragMode>,
+    /// Temporizador para repetição contínua ao segurar Quadro anterior / Próximo quadro (VEGAS Pro p. 315).
+    pub step_hold_accum: f32,
 }
 
 impl Default for TrimmerState {
@@ -281,7 +334,10 @@ impl Default for TrimmerState {
             visible_this_frame: false,
             view_start: Ticks::ZERO,
             view_span: Ticks::ZERO,
+            anim_view_start: None,
+            anim_view_span: None,
             wave_zoom: 1.0,
+            audio_view: TrimmerAudioView::Both,
             video_split_ratio: 0.62,
             show_video_monitor: true,
             show_in_preview: false,
@@ -292,7 +348,9 @@ impl Default for TrimmerState {
             media_regions: HashMap::new(),
             subclip_dlg: None,
             time_edit: None,
-            scrollbar_drag_offset: None,
+            scrollbar_drag: None,
+            drag_mode: None,
+            step_hold_accum: 0.0,
         }
     }
 }
@@ -415,9 +473,13 @@ impl TrimmerState {
         self.playing = false;
         self.shuttle = 0.0;
         self.drag_anchor = None;
+        self.drag_mode = None;
+        self.scrollbar_drag = None;
         self.hover_time = None;
         self.view_start = Ticks::ZERO;
         self.view_span = len;
+        self.anim_view_start = None;
+        self.anim_view_span = None;
         self.time_edit = None;
         push_history(&mut self.history, id);
     }
@@ -511,6 +573,70 @@ impl TrimmerState {
         self.view_start = Ticks::from_raw(new_start_raw.clamp(0, max_start));
     }
 
+    /// Zoom horizontal centrado na agulha de reprodução do Trimmer, exatamente
+    /// como `TimelineState::zoom_around_playhead` na linha do tempo: se a agulha
+    /// estiver visível, ela permanece no mesmo pixel; se estiver fora da tela,
+    /// é centralizada.
+    pub fn zoom_around_playhead(&mut self, factor: f64, dur: Ticks, frame_dur: Ticks) {
+        self.zoom_around(self.cursor, factor, dur, frame_dur);
+    }
+
+    /// Avança a animação suave de zoom/deslocamento da janela visível em direção
+    /// ao alvo (`view_start`, `view_span`). Devolve `true` enquanto ainda está animando.
+    pub fn step_zoom_animation(&mut self, dur: Ticks, dt: f32) -> bool {
+        let (target_s, target_sp) = self.effective_view(dur);
+        let ts = target_s.0 as f64;
+        let tsp = target_sp.0.max(1) as f64;
+        let (Some(cur_s), Some(cur_sp)) = (self.anim_view_start, self.anim_view_span) else {
+            self.anim_view_start = Some(ts);
+            self.anim_view_span = Some(tsp);
+            return false;
+        };
+        if !cur_s.is_finite() || !cur_sp.is_finite() || cur_sp <= 0.0 {
+            self.anim_view_start = Some(ts);
+            self.anim_view_span = Some(tsp);
+            return false;
+        }
+        let eps = (tsp * 0.0015).max(1.0);
+        if (cur_s - ts).abs() <= eps && (cur_sp - tsp).abs() <= eps {
+            self.anim_view_start = Some(ts);
+            self.anim_view_span = Some(tsp);
+            return false;
+        }
+        let dt_c = if dt.is_finite() {
+            f64::from(dt.clamp(0.001, 0.1))
+        } else {
+            0.016
+        };
+        let alpha = (1.0 - (-dt_c * 24.0).exp()).clamp(0.08, 1.0);
+        let next_s = cur_s + (ts - cur_s) * alpha;
+        let next_sp = (cur_sp + (tsp - cur_sp) * alpha).clamp(1.0, dur.0.max(1) as f64);
+        self.anim_view_start = Some(next_s);
+        self.anim_view_span = Some(next_sp);
+        true
+    }
+
+    /// Janela visível usada na renderização (usa o valor suavemente animado quando ativo).
+    pub fn display_view(&self, dur: Ticks) -> (Ticks, Ticks) {
+        let d = dur.max(Ticks::from_raw(1));
+        if let (Some(as_), Some(asp)) = (self.anim_view_start, self.anim_view_span) {
+            if as_.is_finite() && asp.is_finite() && asp >= 1.0 {
+                let span = Ticks::from_raw((asp.round() as i64).clamp(1, d.0));
+                let max_start = d.0.saturating_sub(span.0).max(0);
+                let start = Ticks::from_raw((as_.round() as i64).clamp(0, max_start));
+                return (start, span);
+            }
+        }
+        self.effective_view(d)
+    }
+
+    /// Sincroniza imediatamente a animação com a janela atual (usado durante arrasto de barra de rolagem).
+    pub fn snap_zoom_animation(&mut self, dur: Ticks) {
+        let (s, sp) = self.effective_view(dur);
+        self.anim_view_start = Some(s.0 as f64);
+        self.anim_view_span = Some(sp.0.max(1) as f64);
+    }
+
     pub fn zoom_fit(&mut self, dur: Ticks) {
         let d = dur.max(Ticks::from_raw(1));
         self.view_start = Ticks::ZERO;
@@ -567,7 +693,7 @@ impl TrimmerState {
 
     /// Converte um tempo da mídia para coordenada X na faixa visível `[view_start..view_end]`.
     pub fn x_of(&self, t: Ticks, strip: Rect, dur: Ticks) -> f32 {
-        let (start, span) = self.effective_view(dur);
+        let (start, span) = self.display_view(dur);
         let frac = (t.0.saturating_sub(start.0) as f64 / span.0.max(1) as f64) as f32;
         strip.left() + frac * strip.width().max(1.0)
     }
@@ -575,7 +701,7 @@ impl TrimmerState {
     /// Converte uma coordenada X da faixa visível para tempo exato da mídia.
     pub fn t_of(&self, x: f32, strip: Rect, dur: Ticks) -> Ticks {
         let d = dur.max(Ticks::from_raw(1));
-        let (start, span) = self.effective_view(d);
+        let (start, span) = self.display_view(d);
         let frac = ((x - strip.left()) / strip.width().max(1.0)).clamp(0.0, 1.0);
         let off = (span.0 as f64 * f64::from(frac)).round() as i64;
         Ticks::from_raw(start.0.saturating_add(off)).clamp_safe(Ticks::ZERO, d)
@@ -1116,7 +1242,13 @@ impl App {
         }
 
         // Ctrl+Shift+Up/Down: ajustar altura de vídeo vs áudio (VEGAS Pro p. 314)
+        // Ctrl+Shift+O: limpar seleção personalizada (restaurar clipe inteiro)
         if ctrl && shift && !alt {
+            if pressed(Key::O) {
+                self.trimmer.sel_in = Ticks::ZERO;
+                self.trimmer.sel_out = dur;
+                return true;
+            }
             if pressed(Key::ArrowUp) {
                 self.trimmer.video_split_ratio =
                     (self.trimmer.video_split_ratio + 0.12).clamp(SPLIT_RATIO_MIN, SPLIT_RATIO_MAX);
@@ -1297,13 +1429,11 @@ impl App {
                 return true;
             }
             if pressed(Key::ArrowUp) || pressed(Key::Equals) || pressed(Key::Plus) {
-                let anchor = self.trimmer.cursor;
-                self.trimmer.zoom_around(anchor, 1.5, dur, frame_dur);
+                self.trimmer.zoom_around_playhead(1.25, dur, frame_dur);
                 return true;
             }
             if pressed(Key::ArrowDown) || pressed(Key::Minus) {
-                let anchor = self.trimmer.cursor;
-                self.trimmer.zoom_around(anchor, 1.0 / 1.5, dur, frame_dur);
+                self.trimmer.zoom_around_playhead(0.8, dur, frame_dur);
                 return true;
             }
             if pressed(Key::M) {
@@ -1438,17 +1568,39 @@ impl App {
             .media_regions
             .retain(|id, _| project_ids.contains(id));
 
-        // Área de soltura: arrastar mídia da Mídia do Projeto ou Explorer para o Trimmer abre a mídia (VEGAS Pro p. 313).
-        let drop_res = ui.dnd_drop_zone::<DndPayload, ()>(egui::Frame::NONE, |ui| {
-            self.trimmer_body_ui(ui, lang);
-        });
-        if let Some(payload) = drop_res.1 {
-            if let DndPayload::Media(mid) = *payload {
-                self.trimmer_pause();
-                let dur = self.media_trimmer_duration(mid);
-                self.trimmer.load_media(mid, dur);
-                self.trimmer.has_focus = true;
+        // Área de soltura em todo o painel: arrastar mídia da Mídia do Projeto ou Explorer
+        // para o Trimmer (vazio ou já com mídia aberta) carrega a mídia imediatamente (VEGAS Pro p. 313).
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.interact_pos()));
+        let hover_media_drag = pointer_pos.is_some_and(|p| panel_rect.contains(p))
+            && egui::DragAndDrop::payload::<DndPayload>(ui.ctx())
+                .is_some_and(|pl| matches!(*pl, DndPayload::Media(_)));
+        let mut dropped_media: Option<Id> = None;
+        if hover_media_drag && ui.input(|i| i.pointer.any_released()) {
+            if let Some(payload) = egui::DragAndDrop::take_payload::<DndPayload>(ui.ctx()) {
+                if let DndPayload::Media(mid) = *payload {
+                    dropped_media = Some(mid);
+                }
             }
+        }
+
+        self.trimmer_body_ui(ui, lang, hover_media_drag);
+
+        if let Some(mid) = dropped_media {
+            self.trimmer_pause();
+            let dur = self.media_trimmer_duration(mid);
+            self.trimmer.load_media(mid, dur);
+            self.trimmer.has_focus = true;
+        }
+
+        if hover_media_drag {
+            ui.painter()
+                .rect_filled(panel_rect, 2.0, self.theme.accent.gamma_multiply(0.14));
+            ui.painter().rect_stroke(
+                panel_rect,
+                2.0,
+                Stroke::new(2.0_f32, self.theme.accent),
+                StrokeKind::Inside,
+            );
         }
 
         // Contorno discreto de foco quando o Trimmer está recebendo atalhos de teclado.
@@ -1465,17 +1617,56 @@ impl App {
         self.trimmer_subclip_dialog(ui.ctx(), lang);
     }
 
-    fn trimmer_body_ui(&mut self, ui: &mut egui::Ui, lang: Language) {
+    fn trimmer_body_ui(&mut self, ui: &mut egui::Ui, lang: Language, hover_media_drag: bool) {
         self.trimmer_history_row(ui, lang);
 
         let Some(media_id) = self.trimmer.media_id else {
             ui.separator();
-            ui.label(
-                egui::RichText::new(tr(
+            let empty_size = ui.available_size().max(vec2(180.0, 110.0));
+            let (empty_rect, _) = ui.allocate_exact_size(empty_size, Sense::hover());
+            let p = ui.painter_at(empty_rect);
+            let box_rect = empty_rect.shrink2(vec2(14.0, 14.0));
+            let stroke_col = if hover_media_drag {
+                self.theme.accent
+            } else {
+                self.theme.border
+            };
+            p.rect_filled(box_rect, 4.0, self.theme.extreme_bg.gamma_multiply(0.65));
+            p.rect_stroke(
+                box_rect,
+                4.0,
+                Stroke::new(if hover_media_drag { 2.0_f32 } else { 1.0_f32 }, stroke_col),
+                StrokeKind::Inside,
+            );
+            let icon_r = Rect::from_center_size(
+                pos2(box_rect.center().x, box_rect.center().y - 16.0),
+                vec2(26.0, 26.0),
+            );
+            icons::paint(
+                &p,
+                icon_r,
+                Icon::TrimmerBlade,
+                &self.theme,
+                hover_media_drag,
+            );
+            let prompt = if hover_media_drag {
+                tr(lang, "Solte aqui para abrir no Trimmer")
+            } else {
+                tr(
                     lang,
-                    "Abra uma mídia no Trimmer pela Mídia do projeto ou selecione um evento e use o botão acima.",
-                ))
-                .color(self.theme.text_muted),
+                    "Arraste uma mídia da Mídia do Projeto para cá ou use 'Abrir no Trimmer'.",
+                )
+            };
+            p.text(
+                pos2(box_rect.center().x, box_rect.center().y + 14.0),
+                Align2::CENTER_CENTER,
+                prompt,
+                FontId::proportional(11.5),
+                if hover_media_drag {
+                    self.theme.accent
+                } else {
+                    self.theme.text_muted
+                },
             );
             return;
         };
@@ -1485,6 +1676,10 @@ impl App {
         let frame_dur = self.project.settings.frame_dur().max(Ticks::from_raw(1));
         let dur = self.media_trimmer_duration(media_id);
         self.trimmer.clamp_bounds(dur, frame_dur);
+        let dt_anim = ui.input(|i| i.stable_dt);
+        if self.trimmer.step_zoom_animation(dur, dt_anim) {
+            ui.ctx().request_repaint();
+        }
 
         // Reprodução da prévia no Trimmer (áudio via streaming + shuttle e vídeo sincronizado)
         if self.trimmer.playing {
@@ -1786,7 +1981,7 @@ impl App {
         let th = &self.theme;
         p.rect_filled(strip, 0.0, th.tl_ruler_bg);
 
-        let (v_start, v_span) = self.trimmer.effective_view(dur);
+        let (v_start, v_span) = self.trimmer.display_view(dur);
         let fps = self.project.settings.fps;
         let sr = self.project.settings.sample_rate;
         let fmt = self.opts.time_format;
@@ -1879,12 +2074,22 @@ impl App {
                     th.tl_sel_band,
                 );
             }
-            for x in [a, b] {
+            for (idx, x) in [a, b].into_iter().enumerate() {
                 if x >= strip.left() - 1.0 && x <= strip.right() + 1.0 {
                     p.line_segment(
                         [pos2(x, strip.top()), pos2(x, strip.bottom())],
                         Stroke::new(1.5_f32, th.accent),
                     );
+                    let dir = if idx == 0 { 1.0_f32 } else { -1.0_f32 };
+                    p.add(Shape::convex_polygon(
+                        vec![
+                            pos2(x, strip.bottom() - 7.0),
+                            pos2(x + dir * 5.0, strip.bottom() - 7.0),
+                            pos2(x, strip.bottom() - 1.0),
+                        ],
+                        th.accent,
+                        Stroke::NONE,
+                    ));
                 }
             }
         }
@@ -1926,15 +2131,16 @@ impl App {
         );
 
         self.trimmer_wheel_zoom(ui, &resp, strip, dur, frame_dur, false);
-        self.trimmer_pointer(&resp, strip, dur, frame_dur);
+        self.trimmer_pointer(ui, &resp, strip, item, media_id, dur, frame_dur, true);
         resp.context_menu(|ui| {
             self.trimmer_context_menu(ui, item, media_id, dur, frame_dur, lang);
         });
     }
 
-    /// Trata roda do mouse sobre régua ou forma de onda:
-    /// roda = zoom horizontal sob o ponteiro; Shift+roda = rolagem horizontal;
-    /// Alt+roda (na forma de onda) = zoom vertical da forma de onda.
+    /// Trata roda do mouse sobre régua, monitor de vídeo ou forma de onda
+    /// usando exatamente a mesma fórmula e ancoragem na agulha da linha do tempo:
+    /// roda = zoom contínuo em torno da agulha; Shift+roda = rolagem horizontal;
+    /// Ctrl+roda / Alt+roda (na forma de onda) = zoom vertical da forma de onda.
     fn trimmer_wheel_zoom(
         &mut self,
         ui: &egui::Ui,
@@ -1947,71 +2153,174 @@ impl App {
         if !resp.hovered() {
             return;
         }
-        let (scroll_y, scroll_x, mods, pointer) = ui.input(|i| {
-            (
-                i.smooth_scroll_delta.y,
-                i.smooth_scroll_delta.x,
-                i.modifiers,
-                i.pointer.hover_pos(),
-            )
-        });
-        if scroll_x.abs() > 0.5 {
-            let (_, span) = self.trimmer.effective_view(dur);
-            let frac = f64::from(-scroll_x) / f64::from(strip.width().max(1.0));
-            let delta = Ticks::from_raw((span.0 as f64 * frac * 1.5).round() as i64);
-            self.trimmer.pan_by(delta, dur);
-        }
-        if scroll_y.abs() <= 0.5 {
+        let (raw_scroll, smooth_scroll, mods) =
+            ui.input(|i| (i.raw_scroll_delta, i.smooth_scroll_delta, i.modifiers));
+        let scroll = if raw_scroll != egui::Vec2::ZERO {
+            raw_scroll
+        } else {
+            smooth_scroll
+        };
+        if scroll == egui::Vec2::ZERO {
             return;
         }
+        let d = if scroll.y != 0.0 { scroll.y } else { scroll.x };
         if allow_wave_zoom && mods.alt {
-            let factor = if scroll_y > 0.0 { 1.15 } else { 1.0 / 1.15 };
+            let factor = (1.0 + d * 0.0025).clamp(0.5, 2.0);
             self.trimmer.zoom_wave(factor);
             return;
         }
-        if mods.shift {
-            let (_, span) = self.trimmer.effective_view(dur);
-            let frac = f64::from(-scroll_y) / f64::from(strip.width().max(1.0));
-            let delta = Ticks::from_raw((span.0 as f64 * frac * 2.0).round() as i64);
-            self.trimmer.pan_by(delta, dur);
+        let horiz_mode = self.prefs.timeline_mouse_scroll
+            == neoveg_common::prefs::TimelineMouseScroll::HorizontalScroll;
+        if horiz_mode {
+            if mods.command {
+                let factor = f64::from((1.0 + d * 0.0025).clamp(0.5, 2.0));
+                self.trimmer.zoom_around_playhead(factor, dur, frame_dur);
+                ui.ctx().request_repaint();
+            } else {
+                let (_, span) = self.trimmer.effective_view(dur);
+                let frac = f64::from(-d) / f64::from(strip.width().max(1.0));
+                let delta = Ticks::from_raw((span.0 as f64 * frac * 1.5).round() as i64);
+                self.trimmer.pan_by(delta, dur);
+                ui.ctx().request_repaint();
+            }
             return;
         }
-        let anchor = pointer
-            .map(|p| self.trimmer.t_of(p.x, strip, dur))
-            .unwrap_or(self.trimmer.cursor);
-        let factor = if scroll_y > 0.0 { 1.25 } else { 1.0 / 1.25 };
-        self.trimmer.zoom_around(anchor, factor, dur, frame_dur);
+        if mods.shift || (scroll.x != 0.0 && scroll.y == 0.0) {
+            let (_, span) = self.trimmer.effective_view(dur);
+            let frac = f64::from(-d) / f64::from(strip.width().max(1.0));
+            let delta = Ticks::from_raw((span.0 as f64 * frac * 1.5).round() as i64);
+            self.trimmer.pan_by(delta, dur);
+            ui.ctx().request_repaint();
+            return;
+        }
+        if allow_wave_zoom && mods.command {
+            let factor = (1.0 + d * 0.0025).clamp(0.5, 2.0);
+            self.trimmer.zoom_wave(factor);
+            return;
+        }
+        let factor = f64::from((1.0 + d * 0.0025).clamp(0.5, 2.0));
+        self.trimmer.zoom_around_playhead(factor, dur, frame_dur);
+        ui.ctx().request_repaint();
     }
 
-    /// Clique, arrasto e duplo clique na régua, vídeo ou forma de onda.
+    /// Clique, arrasto de seleção, ajuste direto das bordas In/Out, arrasto vertical
+    /// da seleção para a timeline (VEGAS Pro 21, p. 317) e duplo clique para selecionar tudo.
+    #[allow(clippy::too_many_arguments)]
     fn trimmer_pointer(
         &mut self,
+        ui: &egui::Ui,
         resp: &egui::Response,
         strip: Rect,
+        item: &MediaItem,
+        media_id: Id,
         dur: Ticks,
         frame_dur: Ticks,
+        allow_edge_trim: bool,
     ) {
+        let full = self.trimmer.sel_in == Ticks::ZERO && self.trimmer.sel_out >= dur;
+        let x_in = self.trimmer.x_of(self.trimmer.sel_in, strip, dur);
+        let x_out = self.trimmer.x_of(self.trimmer.sel_out, strip, dur);
+        if allow_edge_trim && !full && resp.hovered() && !resp.dragged() {
+            if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) {
+                if (hp.x - x_in).abs() <= 6.0 || (hp.x - x_out).abs() <= 6.0 {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+            }
+        }
         if resp.double_clicked() {
             self.trimmer.sel_in = Ticks::ZERO;
             self.trimmer.sel_out = dur;
+            self.trimmer.drag_mode = None;
+            self.trimmer.drag_anchor = None;
             return;
         }
         if resp.drag_started() {
-            self.trimmer.drag_anchor = resp
-                .interact_pointer_pos()
-                .map(|p| self.trimmer.t_of(p.x, strip, dur));
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let t = self.trimmer.t_of(pos.x, strip, dur);
+                self.trimmer.drag_anchor = Some(t);
+                let dist_in = (pos.x - x_in).abs();
+                let dist_out = (pos.x - x_out).abs();
+                if allow_edge_trim && !full && (dist_in <= 6.0 || dist_out <= 6.0) {
+                    self.trimmer.drag_mode = if dist_in <= dist_out {
+                        Some(TrimmerDragMode::EdgeIn)
+                    } else {
+                        Some(TrimmerDragMode::EdgeOut)
+                    };
+                } else {
+                    self.trimmer.drag_mode = Some(TrimmerDragMode::PendingInSelection {
+                        origin: pos,
+                        anchor_t: t,
+                    });
+                }
+            }
         }
         if let Some(pos) = resp.interact_pointer_pos() {
             let t = self.trimmer.t_of(pos.x, strip, dur);
             if resp.dragged() {
-                if let Some(a) = self.trimmer.drag_anchor {
-                    let (lo, hi) = (a.min(t), a.max(t));
-                    if hi - lo >= frame_dur {
-                        self.trimmer.sel_in = lo;
-                        self.trimmer.sel_out = hi;
+                if let Some(TrimmerDragMode::PendingInSelection { origin, anchor_t }) =
+                    self.trimmer.drag_mode
+                {
+                    let dx = (pos.x - origin.x).abs();
+                    let dy = (pos.y - origin.y).abs();
+                    if dy > 6.0 && dy > dx * 1.15 {
+                        self.trimmer.drag_mode = Some(TrimmerDragMode::DragToTimeline);
+                    } else if dx >= 4.0 {
+                        self.trimmer.drag_mode = Some(TrimmerDragMode::Select { anchor_t });
                     }
                 }
-                self.trimmer.cursor = t;
+                match self.trimmer.drag_mode {
+                    Some(TrimmerDragMode::EdgeIn) => {
+                        let max_in = Ticks::from_raw(
+                            self.trimmer.sel_out.0.saturating_sub(frame_dur.0).max(0),
+                        );
+                        self.trimmer.sel_in = t.clamp_safe(Ticks::ZERO, max_in);
+                        self.trimmer.cursor = self.trimmer.sel_in;
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    Some(TrimmerDragMode::EdgeOut) => {
+                        let min_out = Ticks::from_raw(
+                            self.trimmer.sel_in.0.saturating_add(frame_dur.0).min(dur.0),
+                        );
+                        self.trimmer.sel_out = t.clamp_safe(min_out, dur);
+                        self.trimmer.cursor = self.trimmer.sel_out;
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    Some(TrimmerDragMode::DragToTimeline) => {
+                        let len = (self.trimmer.sel_out - self.trimmer.sel_in).max(frame_dur);
+                        let (inc_v, inc_a) = match self.trimmer.stream_mode {
+                            TrimmerStreamMode::Both => (true, true),
+                            TrimmerStreamMode::VideoOnly => (true, false),
+                            TrimmerStreamMode::AudioOnly => (false, true),
+                        };
+                        egui::DragAndDrop::set_payload(
+                            ui.ctx(),
+                            DndPayload::TrimmedMedia {
+                                media_id,
+                                offset: self.trimmer.sel_in,
+                                length: len,
+                                include_video: inc_v,
+                                include_audio: inc_a,
+                            },
+                        );
+                        let len_s = format_ticks(
+                            len,
+                            self.project.settings.fps,
+                            self.project.settings.sample_rate,
+                            self.opts.time_format,
+                        );
+                        let ghost = format!("{} [{}]", item.name, len_s);
+                        crate::project_media::paint_media_drag_ghost(ui.ctx(), &ghost, &self.theme);
+                    }
+                    Some(TrimmerDragMode::Select { anchor_t }) => {
+                        let (lo, hi) = (anchor_t.min(t), anchor_t.max(t));
+                        if hi - lo >= frame_dur {
+                            self.trimmer.sel_in = lo;
+                            self.trimmer.sel_out = hi;
+                        }
+                        self.trimmer.cursor = t;
+                    }
+                    Some(TrimmerDragMode::PendingInSelection { .. }) | None => {}
+                }
             } else if resp.clicked() {
                 self.trimmer.cursor = t;
                 if self.trimmer.playing {
@@ -2022,6 +2331,7 @@ impl App {
         }
         if resp.drag_stopped() {
             self.trimmer.drag_anchor = None;
+            self.trimmer.drag_mode = None;
         }
     }
 
@@ -2168,9 +2478,9 @@ impl App {
             StrokeKind::Inside,
         );
 
-        // Arrastar no monitor de vídeo seleciona In..Out e duplo clique seleciona tudo (VEGAS Pro p. 316)
+        // Arrastar horizontalmente no monitor de vídeo seleciona In..Out, arrastar verticalmente leva à timeline e duplo clique seleciona tudo (VEGAS Pro pp. 316–317)
         self.trimmer_wheel_zoom(ui, &resp, rect, dur, frame_dur, false);
-        self.trimmer_pointer(&resp, rect, dur, frame_dur);
+        self.trimmer_pointer(ui, &resp, rect, item, media_id, dur, frame_dur, false);
         resp.context_menu(|ui| {
             self.trimmer_context_menu(ui, item, media_id, dur, frame_dur, lang);
         });
@@ -2226,7 +2536,7 @@ impl App {
             let (strip, resp) = ui.allocate_exact_size(vec2(wave_w, h), Sense::click_and_drag());
             let p = ui.painter_at(strip);
             p.rect_filled(strip, 0.0, self.theme.tl_lane_even);
-            let (v_start, v_span) = self.trimmer.effective_view(dur);
+            let (v_start, v_span) = self.trimmer.display_view(dur);
 
             let full = self.trimmer.sel_in == Ticks::ZERO && self.trimmer.sel_out >= dur;
             if !full {
@@ -2247,40 +2557,130 @@ impl App {
                 }
             }
 
-            // Linha central de 0 dB
-            let mid = strip.center().y;
-            p.line_segment(
-                [pos2(strip.left(), mid), pos2(strip.right(), mid)],
-                Stroke::new(0.5_f32, self.theme.border.gamma_multiply(0.6)),
-            );
-
+            // Forma de onda fiel às faixas de áudio da linha do tempo (`timeline.rs`):
+            // estéreo L/R em duas subfaixas separadas com linha central 0 dB própria,
+            // barras de pico por pixel e curva contínua amostra a amostra sob zoom alto.
+            let wave_col = if self.theme.high_contrast {
+                self.theme.accent
+            } else {
+                self.theme.tl_gain_line
+            };
+            let center_col = wave_col.gamma_multiply(0.45);
             if let Some(audio) = self.media.audio_map().get(&media_id) {
-                let cols = (strip.width() as usize).clamp(1, 1024);
-                let half_h = (strip.height() * 0.45).max(2.0);
-                let wz = self.trimmer.wave_zoom;
-                let wave_col = if self.theme.high_contrast {
-                    self.theme.accent
-                } else {
-                    self.theme.tl_gain_line
+                let chans: Vec<(WaveChannel, Rect, Option<&'static str>)> = match (
+                    self.trimmer.audio_view,
+                    audio.mono_source || strip.height() < 30.0,
+                ) {
+                    (TrimmerAudioView::Both, false) => {
+                        let my = strip.center().y;
+                        vec![
+                            (
+                                WaveChannel::Left,
+                                Rect::from_min_max(strip.min, pos2(strip.right(), my)),
+                                Some("L"),
+                            ),
+                            (
+                                WaveChannel::Right,
+                                Rect::from_min_max(pos2(strip.left(), my), strip.max),
+                                Some("R"),
+                            ),
+                        ]
+                    }
+                    (TrimmerAudioView::LeftOnly, _) => {
+                        vec![(WaveChannel::Left, strip, Some("L"))]
+                    }
+                    (TrimmerAudioView::RightOnly, _) => {
+                        vec![(WaveChannel::Right, strip, Some("R"))]
+                    }
+                    (TrimmerAudioView::Combine, _) | (TrimmerAudioView::Both, true) => {
+                        vec![(WaveChannel::Mix, strip, None)]
+                    }
                 };
-                for i in 0..cols {
-                    let x = strip.left() + (i as f32 + 0.5) * strip.width() / cols as f32;
-                    let t0 =
-                        Ticks::from_raw(v_start.0.saturating_add(
-                            (i128::from(v_span.0) * i as i128 / cols as i128) as i64,
-                        ));
-                    let t1 = Ticks::from_raw(v_start.0.saturating_add(
-                        (i128::from(v_span.0) * (i as i128 + 1) / cols as i128) as i64,
-                    ));
-                    let (lo, hi) = audio.peak_range(t0, t1);
-                    let y_top = (mid - (hi * wz).clamp(-1.0, 1.0) * half_h)
-                        .clamp(strip.top() + 1.0, strip.bottom() - 1.0);
-                    let y_bot = (mid - (lo * wz).clamp(-1.0, 1.0) * half_h)
-                        .clamp(strip.top() + 1.0, strip.bottom() - 1.0);
+                if chans.len() == 2 {
+                    let my = strip.center().y;
                     p.line_segment(
-                        [pos2(x, y_top), pos2(x, y_bot)],
-                        Stroke::new(1.0_f32, wave_col),
+                        [pos2(strip.left(), my), pos2(strip.right(), my)],
+                        Stroke::new(1.0_f32, self.theme.border.gamma_multiply(0.55)),
                     );
+                }
+                let cols = (strip.width().ceil() as usize).clamp(1, 2048);
+                let wz = self.trimmer.wave_zoom;
+                let one_sample = Ticks::from_samples(1, audio.sample_rate).0.max(1);
+                let ticks_per_px = v_span.0 as f64 / cols as f64;
+                let sample_mode = ticks_per_px < one_sample as f64;
+                let stroke = Stroke::new(1.0_f32, wave_col);
+                let curve = Stroke::new(1.2_f32, wave_col);
+                let mut shapes = Vec::with_capacity(cols * chans.len() + 4);
+                for (ch, cr, tag) in &chans {
+                    let ya = cr.top().min(cr.bottom()) + 1.0;
+                    let yb = (cr.top().max(cr.bottom()) - 1.0).max(ya);
+                    let mid = cr.center().y;
+                    let amp = (cr.height() * 0.46 * wz).max(1.0);
+                    let y_of = |v: f32| (mid - v * amp).clamp(ya, yb);
+                    shapes.push(Shape::line_segment(
+                        [pos2(cr.left(), mid), pos2(cr.right(), mid)],
+                        Stroke::new(1.0_f32, center_col),
+                    ));
+                    if sample_mode {
+                        let mut pts = Vec::with_capacity(cols);
+                        for i in 0..cols {
+                            let x = cr.left() + (i as f32 + 0.5) * cr.width() / cols as f32;
+                            let tc = Ticks::from_raw(v_start.0.saturating_add(
+                                ((i128::from(v_span.0) * (2 * i as i128 + 1)) / (2 * cols as i128))
+                                    as i64,
+                            ));
+                            let v = audio.sample_channel(*ch, tc);
+                            pts.push(pos2(x, y_of(v)));
+                        }
+                        if pts.len() > 1 {
+                            shapes.push(Shape::line(pts, curve));
+                        }
+                    } else {
+                        for i in 0..cols {
+                            let x = cr.left() + (i as f32 + 0.5) * cr.width() / cols as f32;
+                            let t0 = Ticks::from_raw(v_start.0.saturating_add(
+                                (i128::from(v_span.0) * i as i128 / cols as i128) as i64,
+                            ));
+                            let t1 = Ticks::from_raw(v_start.0.saturating_add(
+                                (i128::from(v_span.0) * (i as i128 + 1) / cols as i128) as i64,
+                            ));
+                            let (lo, hi) = audio.channel_range(*ch, t0, t1);
+                            shapes.push(Shape::line_segment(
+                                [pos2(x, y_of(hi)), pos2(x, y_of(lo) + 0.5)],
+                                stroke,
+                            ));
+                        }
+                    }
+                    if let Some(lbl) = tag {
+                        if cr.height() >= 14.0 {
+                            p.text(
+                                pos2(cr.left() + 3.0, cr.top() + 2.0),
+                                Align2::LEFT_TOP,
+                                *lbl,
+                                FontId::monospace(8.5),
+                                self.theme.text_muted.gamma_multiply(0.8),
+                            );
+                        }
+                    }
+                }
+                p.extend(shapes);
+            } else {
+                let mid = strip.center().y;
+                p.line_segment(
+                    [pos2(strip.left(), mid), pos2(strip.right(), mid)],
+                    Stroke::new(1.0_f32, center_col),
+                );
+            }
+
+            if !full {
+                for edge_t in [self.trimmer.sel_in, self.trimmer.sel_out] {
+                    let ex = self.trimmer.x_of(edge_t, strip, dur);
+                    if ex >= strip.left() - 1.0 && ex <= strip.right() + 1.0 {
+                        p.line_segment(
+                            [pos2(ex, strip.top()), pos2(ex, strip.bottom())],
+                            Stroke::new(1.25_f32, self.theme.accent.gamma_multiply(0.85)),
+                        );
+                    }
                 }
             }
 
@@ -2346,14 +2746,15 @@ impl App {
         }
         if let Some((strip, resp)) = wave_strip_opt {
             self.trimmer_wheel_zoom(ui, &resp, strip, dur, frame_dur, true);
-            self.trimmer_pointer(&resp, strip, dur, frame_dur);
+            self.trimmer_pointer(ui, &resp, strip, item, media_id, dur, frame_dur, true);
             resp.context_menu(|ui| {
                 self.trimmer_context_menu(ui, item, media_id, dur, frame_dur, lang);
             });
         }
     }
 
-    /// Barra de rolagem horizontal e controles de zoom do Trimmer (VEGAS Pro p. 312).
+    /// Barra de rolagem horizontal e controles de zoom do Trimmer (VEGAS Pro p. 312),
+    /// incluindo alças arrastáveis nas bordas esquerda/direita para zoom interativo.
     fn trimmer_zoom_scrollbar(
         &mut self,
         ui: &mut egui::Ui,
@@ -2383,7 +2784,8 @@ impl App {
                 StrokeKind::Inside,
             );
 
-            let (v_start, v_span) = self.trimmer.effective_view(dur);
+            let (v_start, v_span) = self.trimmer.display_view(dur);
+            let (eff_start, eff_span) = self.trimmer.effective_view(dur);
             let d = dur.0.max(1) as f64;
             let start_frac = (v_start.0 as f64 / d).clamp(0.0, 1.0) as f32;
             let span_frac = (v_span.0 as f64 / d).clamp(0.04, 1.0) as f32;
@@ -2400,28 +2802,113 @@ impl App {
                 self.theme.text_muted.gamma_multiply(0.65)
             };
             p.rect_filled(thumb_r, 2.0, thumb_col);
+            // Alças visuais nas bordas esquerda/direita do polegar para zoom (VEGAS Pro p. 312)
+            let grip_col = crate::theme::contrast_on(thumb_col).gamma_multiply(0.75);
+            if thumb_r.width() >= 20.0 {
+                let gy0 = thumb_r.top() + 2.5;
+                let gy1 = thumb_r.bottom() - 2.5;
+                p.line_segment(
+                    [
+                        pos2(thumb_r.left() + 3.0, gy0),
+                        pos2(thumb_r.left() + 3.0, gy1),
+                    ],
+                    Stroke::new(1.25_f32, grip_col),
+                );
+                p.line_segment(
+                    [
+                        pos2(thumb_r.right() - 3.0, gy0),
+                        pos2(thumb_r.right() - 3.0, gy1),
+                    ],
+                    Stroke::new(1.25_f32, grip_col),
+                );
+            }
 
-            if resp.drag_started() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    if thumb_r.contains(pos) {
-                        self.trimmer.scrollbar_drag_offset = Some(pos.x - thumb_r.left());
-                    } else {
-                        self.trimmer.scrollbar_drag_offset = Some(thumb_w * 0.5);
+            let edge_hit_px = 6.0_f32;
+            if resp.hovered() && !resp.dragged() {
+                if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) {
+                    if (hp.x - thumb_r.left()).abs() <= edge_hit_px
+                        || (hp.x - thumb_r.right()).abs() <= edge_hit_px
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
                 }
             }
-            if (resp.dragged() || resp.clicked()) && travel > 0.5 {
+
+            if resp.drag_started() {
                 if let Some(pos) = resp.interact_pointer_pos() {
-                    let off = self.trimmer.scrollbar_drag_offset.unwrap_or(thumb_w * 0.5);
-                    let new_thumb_x = (pos.x - off - inner.left()).clamp(0.0, travel);
-                    let ratio = f64::from(new_thumb_x / travel);
-                    let max_start = dur.0.saturating_sub(v_span.0).max(0);
-                    self.trimmer.view_start =
-                        Ticks::from_raw((max_start as f64 * ratio).round() as i64);
+                    let dl = (pos.x - thumb_r.left()).abs();
+                    let dr = (pos.x - thumb_r.right()).abs();
+                    if dl <= edge_hit_px && dl <= dr {
+                        self.trimmer.scrollbar_drag = Some(ScrollbarDragMode::LeftEdge);
+                    } else if dr <= edge_hit_px {
+                        self.trimmer.scrollbar_drag = Some(ScrollbarDragMode::RightEdge);
+                    } else if thumb_r.contains(pos) {
+                        self.trimmer.scrollbar_drag = Some(ScrollbarDragMode::Pan {
+                            offset_px: pos.x - thumb_r.left(),
+                        });
+                    } else {
+                        self.trimmer.scrollbar_drag = Some(ScrollbarDragMode::Pan {
+                            offset_px: thumb_w * 0.5,
+                        });
+                    }
+                }
+            }
+            if resp.dragged() || resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let min_span = TrimmerState::min_view_span(dur, frame_dur);
+                    let mode = self
+                        .trimmer
+                        .scrollbar_drag
+                        .unwrap_or(ScrollbarDragMode::Pan {
+                            offset_px: thumb_w * 0.5,
+                        });
+                    match mode {
+                        ScrollbarDragMode::Pan { offset_px } => {
+                            if travel > 0.5 {
+                                let new_thumb_x =
+                                    (pos.x - offset_px - inner.left()).clamp(0.0, travel);
+                                let ratio = f64::from(new_thumb_x / travel);
+                                let max_start = dur.0.saturating_sub(eff_span.0).max(0);
+                                self.trimmer.view_start =
+                                    Ticks::from_raw((max_start as f64 * ratio).round() as i64);
+                                self.trimmer.snap_zoom_animation(dur);
+                            }
+                        }
+                        ScrollbarDragMode::LeftEdge => {
+                            let view_end =
+                                Ticks::from_raw(eff_start.0.saturating_add(eff_span.0).min(dur.0));
+                            let frac =
+                                ((pos.x - inner.left()) / inner.width().max(1.0)).clamp(0.0, 1.0);
+                            let max_start =
+                                Ticks::from_raw(view_end.0.saturating_sub(min_span.0).max(0));
+                            let new_start = Ticks::from_raw((d * f64::from(frac)).round() as i64)
+                                .clamp_safe(Ticks::ZERO, max_start);
+                            self.trimmer.view_start = new_start;
+                            self.trimmer.view_span =
+                                Ticks::from_raw(view_end.0.saturating_sub(new_start.0))
+                                    .clamp_safe(min_span, dur);
+                            self.trimmer.snap_zoom_animation(dur);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                        ScrollbarDragMode::RightEdge => {
+                            let frac =
+                                ((pos.x - inner.left()) / inner.width().max(1.0)).clamp(0.0, 1.0);
+                            let min_end =
+                                Ticks::from_raw(eff_start.0.saturating_add(min_span.0).min(dur.0));
+                            let new_end = Ticks::from_raw((d * f64::from(frac)).round() as i64)
+                                .clamp_safe(min_end, dur);
+                            self.trimmer.view_start = eff_start;
+                            self.trimmer.view_span =
+                                Ticks::from_raw(new_end.0.saturating_sub(eff_start.0))
+                                    .clamp_safe(min_span, dur);
+                            self.trimmer.snap_zoom_animation(dur);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                    }
                 }
             }
             if resp.drag_stopped() {
-                self.trimmer.scrollbar_drag_offset = None;
+                self.trimmer.scrollbar_drag = None;
             }
 
             if ui
@@ -2462,15 +2949,18 @@ impl App {
             }
         });
 
-        let anchor = self.trimmer.cursor;
         if act_zoom_in {
-            self.trimmer.zoom_around(anchor, 1.5, dur, frame_dur);
+            self.trimmer.zoom_around_playhead(1.25, dur, frame_dur);
+            ui.ctx().request_repaint();
         } else if act_zoom_out {
-            self.trimmer.zoom_around(anchor, 1.0 / 1.5, dur, frame_dur);
+            self.trimmer.zoom_around_playhead(0.8, dur, frame_dur);
+            ui.ctx().request_repaint();
         } else if act_zoom_sel {
             self.trimmer.zoom_to_selection(dur, frame_dur);
+            ui.ctx().request_repaint();
         } else if act_zoom_fit {
             self.trimmer.zoom_fit(dur);
+            ui.ctx().request_repaint();
         }
     }
 
@@ -2540,6 +3030,19 @@ impl App {
                 }
             }
         });
+        if item.has_audio {
+            ui.menu_button(tr(lang, "Canais de áudio"), |ui| {
+                for view in TrimmerAudioView::ALL {
+                    if ui
+                        .radio(self.trimmer.audio_view == view, view.label_in(lang))
+                        .clicked()
+                    {
+                        self.trimmer.audio_view = view;
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
         if ui
             .button(format!("{} (I)", tr(lang, "Definir ponto de entrada")))
             .clicked()
@@ -2646,19 +3149,18 @@ impl App {
         ui.separator();
 
         ui.menu_button(tr(lang, "Zoom"), |ui| {
-            let anchor = self.trimmer.cursor;
             if ui
                 .button(format!("{} (↑)", tr(lang, "Ampliar zoom")))
                 .clicked()
             {
-                self.trimmer.zoom_around(anchor, 1.5, dur, frame_dur);
+                self.trimmer.zoom_around_playhead(1.25, dur, frame_dur);
                 ui.close_menu();
             }
             if ui
                 .button(format!("{} (↓)", tr(lang, "Reduzir zoom")))
                 .clicked()
             {
-                self.trimmer.zoom_around(anchor, 1.0 / 1.5, dur, frame_dur);
+                self.trimmer.zoom_around_playhead(0.8, dur, frame_dur);
                 ui.close_menu();
             }
             if ui.button(tr(lang, "Zoom na seleção")).clicked() {
@@ -2812,6 +3314,7 @@ impl App {
             .filter(|b| !hidden.iter().any(|h| h == b.id()))
             .collect();
         let mut pressed: Option<TrimBtn> = None;
+        let mut holding_step: Option<TrimBtn> = None;
         let mut more = false;
         let groups = visible.iter().filter(|b| b.starts_group()).count();
         let btn_w = 25.0;
@@ -2832,17 +3335,20 @@ impl App {
                     TrimBtn::OverwriteTimeline => self.trimmer.overwrite_timeline,
                     _ => false,
                 };
-                if icons::icon_button_named(
+                let resp = icons::icon_button_named(
                     ui,
                     b.icon(),
                     tr(lang, b.name()),
                     active,
                     true,
                     &self.theme,
-                )
-                .clicked()
-                {
+                );
+                if resp.clicked() {
                     pressed = Some(*b);
+                } else if matches!(b, TrimBtn::PrevFrame | TrimBtn::NextFrame)
+                    && resp.is_pointer_button_down_on()
+                {
+                    holding_step = Some(*b);
                 }
             }
             if icons::icon_button_named(
@@ -2860,7 +3366,20 @@ impl App {
         });
         if let Some(b) = pressed {
             self.trimmer.has_focus = true;
+            self.trimmer.step_hold_accum = 0.0;
             self.trimmer_button(b, media_id, dur, frame_dur);
+        } else if let Some(b) = holding_step {
+            self.trimmer.has_focus = true;
+            let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.1);
+            self.trimmer.step_hold_accum += dt;
+            if self.trimmer.step_hold_accum >= 0.30 {
+                self.trimmer.step_hold_accum -= 0.06;
+                self.trimmer_button(b, media_id, dur, frame_dur);
+                self.trimmer.ensure_cursor_visible(dur);
+            }
+            ui.ctx().request_repaint();
+        } else {
+            self.trimmer.step_hold_accum = 0.0;
         }
         if more {
             self.trimmer.buttons_draft = Some(hidden);
@@ -3345,5 +3864,63 @@ mod tests {
             assert!(app.handle_trimmer_shortcuts(c));
         });
         assert_eq!(app.trimmer.media_markers.get(&mid).map(Vec::len), Some(1));
+
+        // Ctrl+Shift+O restaura a seleção para toda a mídia
+        let mut ctrl_shift = egui::Modifiers::COMMAND;
+        ctrl_shift.shift = true;
+        let _ = ctx.run(press_key(&ctx, Key::O, ctrl_shift), |c| {
+            assert!(app.handle_trimmer_shortcuts(c));
+        });
+        assert_eq!(app.trimmer.sel_in, Ticks::ZERO);
+        assert_eq!(app.trimmer.sel_out, s(10));
+    }
+
+    #[test]
+    fn animacao_zoom_suave_agulha_e_canais_trimmer() {
+        let mut st = TrimmerState::default();
+        let dur = s(20);
+        let fd = Ticks::from_millis_i64(40);
+        st.load_media(99, dur);
+        st.cursor = s(6);
+        let strip = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 40.0));
+        let cx_before = st.x_of(st.cursor, strip, dur);
+
+        // Inicializa animação no primeiro quadro (sem animação pendente)
+        assert!(!st.step_zoom_animation(dur, 0.016));
+        st.zoom_around_playhead(2.0, dur, fd);
+        assert!(st.step_zoom_animation(dur, 0.016));
+
+        // Converge suavemente para o alvo em número finito de quadros
+        let mut still_running = true;
+        for _ in 0..80 {
+            still_running = st.step_zoom_animation(dur, 0.016);
+            if !still_running {
+                break;
+            }
+        }
+        assert!(!still_running);
+        assert_eq!(st.display_view(dur), st.effective_view(dur));
+        let cx_after = st.x_of(st.cursor, strip, dur);
+        assert!(
+            (cx_after - cx_before).abs() < 1.5,
+            "zoom centrado na agulha deve manter posição da agulha (antes={cx_before}, depois={cx_after})"
+        );
+
+        // Snap sincroniza imediatamente sem esperar quadros
+        st.zoom_fit(dur);
+        st.snap_zoom_animation(dur);
+        assert_eq!(st.display_view(dur), (Ticks::ZERO, dur));
+
+        // Entradas hostis (dt NaN / negativo) nunca entram em pânico
+        assert!(!st.step_zoom_animation(dur, f32::NAN));
+        assert!(!st.step_zoom_animation(dur, -1.0));
+
+        // Todos os modos de visualização de canais têm rótulos distintos
+        let labels: Vec<&str> = TrimmerAudioView::ALL
+            .iter()
+            .map(|v| v.label_in(Language::PtBr))
+            .collect();
+        assert_eq!(labels.len(), 4);
+        assert!(labels.iter().all(|l| !l.is_empty()));
     }
 }
