@@ -2691,12 +2691,15 @@ fn kittest_faixa_projetos_acima_da_faixa_sequencias_e_retangulo_selecao() {
         "faixa de projetos ({doc_bar:?}) deve ficar acima da faixa de sequências ({seq_bar:?})"
     );
 
-    // Insere evento e arrasta a caixa de seleção com EditTool::Selection ao redor dele
+    // Insere evento em t=2s (dentro da área das faixas), fecha o editor de
+    // gerador e arrasta a caixa de seleção com EditTool::Selection sobre ele.
     let eid = {
         let app = harness.state_mut();
+        app.cursor = Ticks::from_secs_i64(2);
         app.insert_generated(crate::model::GenSpec::SolidColor {
             color: [0.2, 0.6, 0.9, 1.0],
         });
+        app.dlg.gen_editor = None;
         app.sel_events.clear();
         app.session.edit_tool = neoveg_engine::session::EditTool::Selection;
         app.project
@@ -2708,23 +2711,32 @@ fn kittest_faixa_projetos_acima_da_faixa_sequencias_e_retangulo_selecao() {
             .expect("evento gerado")
     };
     harness.run_steps(2);
+    let lanes = harness.state().tl.last_lanes;
     let ev_rect = harness
         .state()
         .event_screen_rect(eid)
         .expect("evento visível na timeline");
-    let p0 = egui::pos2(ev_rect.left() - 6.0, ev_rect.top() - 4.0);
-    let p1 = egui::pos2(ev_rect.center().x + 8.0, ev_rect.bottom() + 4.0);
+    let p0 = egui::pos2(
+        (ev_rect.left() - 12.0).max(lanes.left() + 4.0),
+        (ev_rect.top() + 4.0).max(lanes.top() + 4.0),
+    );
+    let p1 = egui::pos2(
+        (ev_rect.center().x + 12.0).min(lanes.right() - 4.0),
+        (ev_rect.bottom() - 4.0).min(lanes.bottom() - 4.0),
+    );
+    assert!(lanes.contains(p0) && lanes.contains(p1));
     harness
         .input_mut()
         .events
         .push(egui::Event::PointerMoved(p0));
+    harness.run_steps(1);
     harness.input_mut().events.push(egui::Event::PointerButton {
         pos: p0,
         button: egui::PointerButton::Primary,
         pressed: true,
         modifiers: egui::Modifiers::NONE,
     });
-    harness.run_steps(2);
+    harness.run_steps(1);
     harness
         .input_mut()
         .events
@@ -2739,6 +2751,6 @@ fn kittest_faixa_projetos_acima_da_faixa_sequencias_e_retangulo_selecao() {
     harness.run_steps(2);
     assert!(
         harness.state().sel_events.contains(&eid),
-        "retângulo de seleção deve selecionar o evento alcançado"
+        "retângulo de seleção deve selecionar o evento alcançado (lanes={lanes:?}, ev={ev_rect:?}, p0={p0:?}, p1={p1:?})"
     );
 }
