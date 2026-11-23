@@ -699,9 +699,22 @@ impl EditorSession {
 
     /// Cria uma nova sequência no projeto e a torna ativa.
     pub fn create_sequence(&mut self, name: Option<&str>) -> Id {
+        self.create_sequence_with_view(name, Ticks::ZERO, 100.0)
+    }
+
+    /// Cria uma nova sequência preservando cursor, rolagem e zoom da sequência anterior.
+    pub fn create_sequence_with_view(
+        &mut self,
+        name: Option<&str>,
+        scroll_x: Ticks,
+        px_per_sec: f32,
+    ) -> Id {
         self.checkpoint();
-        let id = self.project.create_sequence(name);
+        let id = self
+            .project
+            .create_sequence_with_view(name, self.cursor, scroll_x, px_per_sec);
         self.cursor = Ticks::ZERO;
+        self.play_start = Ticks::ZERO;
         self.sel_events.clear();
         self.sel_track = if self.project.tracks.is_empty() {
             None

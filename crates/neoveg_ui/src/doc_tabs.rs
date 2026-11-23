@@ -133,6 +133,19 @@ impl App {
             .collect()
     }
 
+    /// Entradas exibidas na faixa de projetos abertos: sempre inclui o projeto
+    /// principal (mesmo quando não há projetos aninhados abertos em aba) mais
+    /// todos os projetos aninhados abertos.
+    pub(crate) fn doc_bar_entries(&self) -> Vec<(usize, String, bool, bool)> {
+        if self.has_doc_tabs() {
+            return self.doc_tab_labels();
+        }
+        let lang = self.lang();
+        let name = file_label(self.session.path.as_deref())
+            .unwrap_or_else(|| tr(lang, "Sem título").to_string());
+        vec![(0, name, true, self.session.dirty)]
+    }
+
     fn swap_live(&mut self, st: &mut DocStash) {
         std::mem::swap(&mut self.session, &mut st.session);
         std::mem::swap(&mut self.media, &mut st.media);
@@ -144,9 +157,10 @@ impl App {
     }
 
     /// Antes de trocar de documento: trabalhos, caches e diálogos que
-    /// guardam ids do documento que sai.
+    /// guardam ids do documento que sai. Preserva exatamente a posição da
+    /// agulha do documento que sai.
     fn leave_document(&mut self) {
-        self.stop(false);
+        self.stop_preserving_cursor();
         if let Some(job) = self.ram_preview_job.take() {
             job.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -198,7 +212,14 @@ impl App {
             t.stash = Some(incoming);
         }
         self.active_doc = i;
+        let restored_cursor = self.session.cursor;
+        {
+            let sr = self.audio.sr;
+            let mut audio_s = util::lock(&self.audio.shared);
+            audio_s.pos = restored_cursor.to_samples_round(sr);
+        }
         let s = &mut self.session;
+        s.play_start = restored_cursor;
         s.opts = opts;
         s.edit_mode = edit_mode;
         s.edit_tool = edit_tool;

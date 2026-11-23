@@ -34,7 +34,8 @@ const TRACK_FOOTER_H: f32 = 26.0;
 const STATUS_BAR_H: f32 = 22.0;
 const BOTTOM_BARS_H: f32 = TRACK_FOOTER_H + STATUS_BAR_H;
 const EDGE_PX: f32 = 5.0;
-const SEQ_TAB_H: f32 = 24.0;
+const DOC_TAB_H: f32 = 22.0;
+const SEQ_TAB_H: f32 = 22.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EnvOwner {
@@ -259,6 +260,14 @@ pub struct TimelineState {
     pub kf_collapsed: HashSet<Id>,
     /// Ponto atual da caixa das ferramentas Seleção e Zoom.
     box_cur: Option<Pos2>,
+    /// Origem e seleção de tempo anterior ao arrastar espaço vazio (permite
+    /// clique-esquerdo + clique-direito virar caixa de seleção, VEGAS Pro p. 238).
+    time_sel_origin: Option<(Pos2, Option<(Ticks, Ticks)>)>,
+    /// Suprime menu de contexto quando o botão direito alternou modo da caixa durante arrasto.
+    suppress_ctx_menu: bool,
+    /// Retângulos das barras de projetos abertos e de sequências no último quadro.
+    pub(crate) last_doc_bar: Rect,
+    pub(crate) last_seq_bar: Rect,
     /// Área das faixas e posição de cada trilha no último quadro.
     pub(crate) last_lanes: Rect,
     pub(crate) last_rows: Vec<(f32, f32)>,
@@ -288,6 +297,10 @@ impl Default for TimelineState {
             drop_context_menu: None,
             kf_collapsed: HashSet::new(),
             box_cur: None,
+            time_sel_origin: None,
+            suppress_ctx_menu: false,
+            last_doc_bar: Rect::NOTHING,
+            last_seq_bar: Rect::NOTHING,
             last_lanes: Rect::NOTHING,
             last_rows: Vec::new(),
             header_w: HEADER_W,
@@ -875,13 +888,30 @@ impl App {
         }) {
             self.trimmer.has_focus = false;
         }
-        let show_seq_tabs = full.height() > TOP_H + BOTTOM_BARS_H + SEQ_TAB_H + 40.0;
+        // Faixa de projetos abertos no topo e faixa de sequências logo abaixo dela.
+        let show_doc_tabs = full.height() > TOP_H + BOTTOM_BARS_H + DOC_TAB_H + 36.0;
+        let doc_bar_h = if show_doc_tabs { DOC_TAB_H } else { 0.0 };
+        self.tl.last_doc_bar = if show_doc_tabs {
+            let doc_bar_rect = Rect::from_min_size(full.min, vec2(full.width(), DOC_TAB_H));
+            self.document_tab_bar_ui(ui, doc_bar_rect);
+            doc_bar_rect
+        } else {
+            Rect::NOTHING
+        };
+        let show_seq_tabs = full.height() > TOP_H + BOTTOM_BARS_H + doc_bar_h + SEQ_TAB_H + 36.0;
         let seq_bar_h = if show_seq_tabs { SEQ_TAB_H } else { 0.0 };
-        if show_seq_tabs {
-            let seq_bar_rect = Rect::from_min_size(full.min, vec2(full.width(), SEQ_TAB_H));
+        self.tl.last_seq_bar = if show_seq_tabs {
+            let seq_bar_rect = Rect::from_min_size(
+                pos2(full.left(), full.top() + doc_bar_h),
+                vec2(full.width(), SEQ_TAB_H),
+            );
             self.sequence_tab_bar_ui(ui, seq_bar_rect);
-        }
-        let content_top = full.top() + seq_bar_h;
+            seq_bar_rect
+        } else {
+            Rect::NOTHING
+        };
+        let top_bars_h = doc_bar_h + seq_bar_h;
+        let content_top = full.top() + top_bars_h;
 
         if self.tl.header_auto_fit && !self.tl.header_collapsed() {
             let req = self.required_header_w_for_buttons();
@@ -894,9 +924,9 @@ impl App {
         let hdr_w = self.tl.header_w.clamp(TimelineState::MIN_HEADER_W, max_hdr);
         let left = full.left() + hdr_w;
         let show_h_col = full.width() > hdr_w + crate::scrollbars::TIMELINE_V_SCROLL_W + 72.0;
-        let show_footer = full.height() > seq_bar_h + TOP_H + BOTTOM_BARS_H + 40.0;
+        let show_footer = full.height() > top_bars_h + TOP_H + BOTTOM_BARS_H + 40.0;
         let bottom_h = if show_footer { BOTTOM_BARS_H } else { 0.0 };
-        let show_v_col = show_h_col && full.height() > seq_bar_h + TOP_H + bottom_h + 60.0;
+        let show_v_col = show_h_col && full.height() > top_bars_h + TOP_H + bottom_h + 60.0;
         let v_col_w = if show_v_col {
             crate::scrollbars::TIMELINE_V_SCROLL_W
         } else {
@@ -963,6 +993,9 @@ impl App {
         let rows = self.timeline_rows(lanes.top());
         self.draw_lanes(ui, lanes, &rows);
         self.draw_keyframe_rows(ui, lanes, &rows);
+        // Desenha o retângulo de seleção/zoom e o destaque de SplitTrim ACIMA das
+        // trilhas e eventos para não ser encoberto pelo fundo opaco das faixas.
+        self.draw_lane_drag_overlays(ui, lanes, &rows);
         self.headers_ui(ui, headers, &rows);
         self.draw_keyframe_labels(ui, headers, &rows);
 
@@ -1489,8 +1522,161 @@ impl App {
         }
     }
 
-    /// Barra de abas de sequências na timeline (item 13 do backlog / VEGAS Pro).
+    /// Faixa de projetos abertos (projeto principal e projetos `.neoveg` aninhados
+    /// abertos em aba), sempre posicionada acima da faixa de sequências.
+    fn document_tab_bar_ui(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let lang = self.lang();
+        let p = ui.painter();
+        p.rect_filled(rect, egui::CornerRadius::ZERO, self.theme.extreme_bg);
+        p.line_segment(
+            [
+                pos2(rect.left(), rect.bottom() - 0.5),
+                pos2(rect.right(), rect.bottom() - 0.5),
+            ],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let font_id = FontId::proportional(11.0);
+        let tab_h = (rect.height() - 3.0).max(14.0);
+        let mut cur_x = rect.left() + 5.0;
+
+        // Rótulo discreto identificando a faixa de projetos abertos
+        let hdr_lbl = tr(lang, "Projetos");
+        let hdr_galley = p.layout_no_wrap(
+            hdr_lbl.to_string(),
+            FontId::proportional(10.0),
+            self.theme.text_muted,
+        );
+        let icon_r = Rect::from_center_size(pos2(cur_x + 6.0, rect.center().y), vec2(11.0, 11.0));
+        icons::paint(p, icon_r, Icon::OpenFolder, &self.theme, false);
+        p.galley(
+            pos2(
+                icon_r.right() + 3.0,
+                rect.center().y - hdr_galley.size().y * 0.5,
+            ),
+            hdr_galley.clone(),
+            self.theme.text_muted,
+        );
+        cur_x = icon_r.right() + 3.0 + hdr_galley.size().x + 8.0;
+        p.line_segment(
+            [
+                pos2(cur_x - 4.0, rect.top() + 4.0),
+                pos2(cur_x - 4.0, rect.bottom() - 4.0),
+            ],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
+
+        let mut doc_switch = None;
+        let mut doc_close = None;
+        for (di, dname, dactive, ddirty) in self.doc_bar_entries() {
+            let label = if ddirty { format!("{dname}*") } else { dname };
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
+                .size()
+                .x;
+            let close_w = if di > 0 { 16.0 } else { 0.0 };
+            let tab_w = (text_w + 22.0 + close_w).clamp(72.0, 220.0);
+            if cur_x + tab_w > rect.right() - 8.0 {
+                break;
+            }
+            let tab_rect = Rect::from_min_size(pos2(cur_x, rect.top() + 2.0), vec2(tab_w, tab_h));
+            let resp = ui
+                .interact(tab_rect, ui.id().with(("doc_tab", di)), Sense::click())
+                .on_hover_text(if di == 0 {
+                    tr(lang, "Projeto principal")
+                } else {
+                    tr(lang, "Projeto aninhado aberto em aba (Ctrl+S salva todos)")
+                });
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+            let bg = if dactive {
+                self.theme.tl_header_bg
+            } else if resp.hovered() {
+                self.theme.widget_hover_bg
+            } else {
+                self.theme.panel_fill
+            };
+            let radius = egui::CornerRadius {
+                nw: 3,
+                ne: 3,
+                sw: 0,
+                se: 0,
+            };
+            p.rect_filled(tab_rect, radius, bg);
+            p.rect_stroke(
+                tab_rect,
+                radius,
+                Stroke::new(
+                    1.0_f32,
+                    if dactive {
+                        self.theme.accent
+                    } else {
+                        self.theme.border
+                    },
+                ),
+                StrokeKind::Inside,
+            );
+            // marca lateral do documento
+            p.rect_filled(
+                Rect::from_min_size(
+                    tab_rect.left_top() + vec2(1.0, 3.0),
+                    vec2(3.0, (tab_h - 6.0).max(4.0)),
+                ),
+                egui::CornerRadius::ZERO,
+                self.theme.accent,
+            );
+            let text_color = if dactive {
+                self.theme.text_primary
+            } else {
+                self.theme.text_muted
+            };
+            p.text(
+                pos2(tab_rect.left() + 9.0, tab_rect.center().y),
+                Align2::LEFT_CENTER,
+                &label,
+                font_id.clone(),
+                text_color,
+            );
+            let mut closing = false;
+            if di > 0 {
+                let close_rect = Rect::from_center_size(
+                    pos2(tab_rect.right() - 10.0, tab_rect.center().y),
+                    vec2(12.0, 12.0),
+                );
+                let close_resp = ui
+                    .interact(close_rect, ui.id().with(("doc_close", di)), Sense::click())
+                    .on_hover_text(tr(lang, "Fechar a aba"));
+                p.text(
+                    close_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "×",
+                    FontId::proportional(12.0),
+                    if close_resp.hovered() {
+                        self.theme.offline_fg
+                    } else {
+                        self.theme.text_muted
+                    },
+                );
+                if close_resp.clicked() {
+                    doc_close = Some(di);
+                    closing = true;
+                }
+            }
+            if resp.clicked() && !closing && !dactive {
+                doc_switch = Some(di);
+            }
+            cur_x += tab_w + 3.0;
+        }
+        if let Some(i) = doc_close {
+            self.request_close_doc_tab(i);
+        } else if let Some(i) = doc_switch {
+            self.switch_doc_tab(i);
+        }
+    }
+
+    /// Barra de abas de sequências na timeline, logo abaixo da faixa de projetos abertos.
     fn sequence_tab_bar_ui(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let lang = self.lang();
         let p = ui.painter();
         p.rect_filled(rect, egui::CornerRadius::ZERO, self.theme.panel_fill);
         p.line_segment(
@@ -1501,139 +1687,39 @@ impl App {
             Stroke::new(1.0_f32, self.theme.border),
         );
 
-        let mut cur_x = rect.left() + 4.0;
-        let font_id = FontId::proportional(11.5);
-        let tab_h = rect.height() - 3.0;
+        let font_id = FontId::proportional(11.0);
+        let tab_h = (rect.height() - 3.0).max(14.0);
+        let mut cur_x = rect.left() + 5.0;
+
+        let hdr_lbl = tr(lang, "Sequências");
+        let hdr_galley = p.layout_no_wrap(
+            hdr_lbl.to_string(),
+            FontId::proportional(10.0),
+            self.theme.text_muted,
+        );
+        let icon_r = Rect::from_center_size(pos2(cur_x + 6.0, rect.center().y), vec2(11.0, 11.0));
+        icons::paint(p, icon_r, Icon::NestedTimeline, &self.theme, false);
+        p.galley(
+            pos2(
+                icon_r.right() + 3.0,
+                rect.center().y - hdr_galley.size().y * 0.5,
+            ),
+            hdr_galley.clone(),
+            self.theme.text_muted,
+        );
+        cur_x = icon_r.right() + 3.0 + hdr_galley.size().x + 8.0;
+        p.line_segment(
+            [
+                pos2(cur_x - 4.0, rect.top() + 4.0),
+                pos2(cur_x - 4.0, rect.bottom() - 4.0),
+            ],
+            Stroke::new(1.0_f32, self.theme.border),
+        );
 
         let mut action_switch: Option<Id> = None;
         let mut action_delete: Option<Id> = None;
         let mut action_duplicate: Option<Id> = None;
         let mut action_rename: Option<(Id, String)> = None;
-
-        // abas de documento: o projeto principal e os projetos .neoveg
-        // aninhados abertos em aba (doc_tabs), antes das abas de sequência
-        if self.has_doc_tabs() {
-            let lang = self.lang();
-            let mut doc_switch = None;
-            let mut doc_close = None;
-            for (di, dname, dactive, ddirty) in self.doc_tab_labels() {
-                let label = if ddirty { format!("{dname}*") } else { dname };
-                let text_w = ui
-                    .painter()
-                    .layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
-                    .size()
-                    .x;
-                let close_w = if di > 0 { 16.0 } else { 0.0 };
-                let tab_w = (text_w + 22.0 + close_w).clamp(70.0, 200.0);
-                if cur_x + tab_w > rect.right() - 32.0 {
-                    break;
-                }
-                let tab_rect =
-                    Rect::from_min_size(pos2(cur_x, rect.top() + 3.0), vec2(tab_w, tab_h));
-                let resp = ui
-                    .interact(tab_rect, ui.id().with(("doc_tab", di)), Sense::click())
-                    .on_hover_text(if di == 0 {
-                        tr(lang, "Projeto principal")
-                    } else {
-                        tr(lang, "Projeto aninhado aberto em aba (Ctrl+S salva todos)")
-                    });
-                resp.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label)
-                });
-                let bg = if dactive {
-                    self.theme.tl_header_bg
-                } else if resp.hovered() {
-                    self.theme.widget_hover_bg
-                } else {
-                    self.theme.panel_fill
-                };
-                let radius = egui::CornerRadius {
-                    nw: 3,
-                    ne: 3,
-                    sw: 0,
-                    se: 0,
-                };
-                p.rect_filled(tab_rect, radius, bg);
-                p.rect_stroke(
-                    tab_rect,
-                    radius,
-                    Stroke::new(
-                        1.0_f32,
-                        if dactive {
-                            self.theme.accent
-                        } else {
-                            self.theme.border
-                        },
-                    ),
-                    StrokeKind::Inside,
-                );
-                // marca de documento: faixa à esquerda
-                p.rect_filled(
-                    Rect::from_min_size(
-                        tab_rect.left_top() + vec2(1.0, 3.0),
-                        vec2(3.0, tab_h - 6.0),
-                    ),
-                    egui::CornerRadius::ZERO,
-                    self.theme.accent,
-                );
-                let text_color = if dactive {
-                    self.theme.text_primary
-                } else {
-                    self.theme.text_muted
-                };
-                p.text(
-                    pos2(tab_rect.left() + 9.0, tab_rect.center().y),
-                    Align2::LEFT_CENTER,
-                    &label,
-                    font_id.clone(),
-                    text_color,
-                );
-                let mut closing = false;
-                if di > 0 {
-                    let close_rect = Rect::from_center_size(
-                        pos2(tab_rect.right() - 10.0, tab_rect.center().y),
-                        vec2(12.0, 12.0),
-                    );
-                    let close_resp = ui
-                        .interact(close_rect, ui.id().with(("doc_close", di)), Sense::click())
-                        .on_hover_text(tr(lang, "Fechar a aba"));
-                    p.text(
-                        close_rect.center(),
-                        Align2::CENTER_CENTER,
-                        "×",
-                        FontId::proportional(12.0),
-                        if close_resp.hovered() {
-                            self.theme.offline_fg
-                        } else {
-                            self.theme.text_muted
-                        },
-                    );
-                    if close_resp.clicked() {
-                        doc_close = Some(di);
-                        closing = true;
-                    }
-                }
-                if resp.clicked() && !closing {
-                    doc_switch = Some(di);
-                }
-                cur_x += tab_w + 2.0;
-            }
-            // separa as abas de documento das de sequência
-            cur_x += 4.0;
-            p.line_segment(
-                [
-                    pos2(cur_x, rect.top() + 5.0),
-                    pos2(cur_x, rect.bottom() - 4.0),
-                ],
-                Stroke::new(1.0_f32, self.theme.border),
-            );
-            cur_x += 6.0;
-            if let Some(i) = doc_close {
-                self.request_close_doc_tab(i);
-            } else if let Some(i) = doc_switch {
-                self.switch_doc_tab(i);
-            }
-        }
 
         let tabs = self.project.sequence_tab_info();
         let seq_count = tabs.len();
@@ -1800,7 +1886,7 @@ impl App {
             self.theme.text_primary,
         );
         if add_resp.clicked() {
-            self.create_sequence(None);
+            self.create_sequence_app(None);
         }
 
         if let Some(target_id) = action_switch {
@@ -4190,6 +4276,33 @@ impl App {
             self.start_lane_drag(origin, left, rows, mods);
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
+            let sec_pressed =
+                ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+            if sec_pressed {
+                if matches!(self.tl.drag, Drag::TimeSel { .. }) {
+                    // Acesso imediato à Ferramenta de Seleção a partir da Normal
+                    // (manual do VEGAS Pro 21, p. 238): segurar esquerdo e clicar direito.
+                    if let Some((orig_pos, prev_sel)) = self.tl.time_sel_origin.take() {
+                        self.time_sel = prev_sel;
+                        self.project.loop_region = prev_sel;
+                        self.tl.drag = Drag::Box {
+                            zoom: false,
+                            start: orig_pos,
+                        };
+                        self.tl.box_cur = resp.interact_pointer_pos().or(Some(orig_pos));
+                        self.tl.suppress_ctx_menu = true;
+                    }
+                } else if matches!(self.tl.drag, Drag::Box { .. }) {
+                    // Manual do VEGAS Pro 21, p. 240: clique direito durante a caixa
+                    // alterna entre Livre (Both), Horizontal e Vertical.
+                    self.session.box_axis = match self.session.box_axis {
+                        BoxAxisMode::Both => BoxAxisMode::Horizontal,
+                        BoxAxisMode::Horizontal => BoxAxisMode::Vertical,
+                        BoxAxisMode::Vertical => BoxAxisMode::Both,
+                    };
+                    self.tl.suppress_ctx_menu = true;
+                }
+            }
             if let Some(p) = resp.interact_pointer_pos() {
                 self.update_lane_drag(p, left, rows, mods);
                 // rolagem automática perto das bordas
@@ -4198,44 +4311,6 @@ impl App {
                 } else if p.x < lanes.left() + 10.0 && self.tl.scroll_x > Ticks::ZERO {
                     self.tl.scroll_x =
                         (self.tl.scroll_x - self.tl.dx_to_ticks(8.0)).max(Ticks::ZERO);
-                }
-            }
-        }
-        // caixa das ferramentas Seleção e Zoom
-        if let (Drag::Box { start, .. }, Some(cur)) = (&self.tl.drag, self.tl.box_cur) {
-            let r = self.effective_box_rect(Rect::from_two_pos(*start, cur), lanes);
-            let stroke = Stroke::new(1.0_f32, self.theme.text_primary);
-            let corners = [
-                r.left_top(),
-                r.right_top(),
-                r.right_bottom(),
-                r.left_bottom(),
-                r.left_top(),
-            ];
-            ui.painter()
-                .with_clip_rect(lanes)
-                .extend(Shape::dashed_line(&corners, stroke, 4.0, 3.0));
-        }
-        if let Drag::SplitTrim {
-            event_id,
-            origin_t,
-            cur_t,
-        } = &self.tl.drag
-        {
-            if let Some((ti, _)) = self.project.find_event(*event_id) {
-                if let Some(&(y0, h)) = layout.get(ti) {
-                    let lo = origin_t.min(cur_t);
-                    let hi = origin_t.max(cur_t);
-                    let x0 = self.tl.t2x(*lo, left).max(lanes.left());
-                    let x1 = self.tl.t2x(*hi, left).min(lanes.right());
-                    if x1 > x0 {
-                        let cut_rect = Rect::from_min_max(pos2(x0, y0), pos2(x1, y0 + h));
-                        ui.painter().with_clip_rect(lanes).rect_filled(
-                            cut_rect,
-                            0.0,
-                            self.theme.offline_fg.gamma_multiply(0.35),
-                        );
-                    }
                 }
             }
         }
@@ -4254,6 +4329,7 @@ impl App {
                 self.sync_after_session();
             }
             self.tl.box_cur = None;
+            self.tl.time_sel_origin = None;
             if matches!(
                 self.tl.drag,
                 Drag::Move { .. }
@@ -4353,7 +4429,10 @@ impl App {
                 }
             }
         }
-        if resp.secondary_clicked() {
+        let suppress_ctx = self.tl.suppress_ctx_menu
+            || ui.input(|i| i.pointer.primary_down())
+            || matches!(self.tl.drag, Drag::Box { .. });
+        if resp.secondary_clicked() && !suppress_ctx {
             if let Some(p) = resp.interact_pointer_pos() {
                 let t = self.tl.x2t(p.x, left);
                 self.tl.ctx_target = if let Some(kf) = self.keyframe_ctx(p, left, rows) {
@@ -4383,7 +4462,120 @@ impl App {
                 };
             }
         }
-        resp.context_menu(|ui| self.lane_context_menu(ui));
+        if !suppress_ctx {
+            resp.context_menu(|ui| self.lane_context_menu(ui));
+        } else if !ui.input(|i| i.pointer.primary_down() || i.pointer.secondary_down()) {
+            self.tl.suppress_ctx_menu = false;
+        }
+    }
+
+    /// Desenha sobreposições de arrasto (`Drag::Box` das ferramentas Seleção/Zoom
+    /// e corte `Drag::SplitTrim`) DEPOIS de `draw_lanes` para permanecerem sempre
+    /// visíveis acima das faixas e dos eventos (manual do VEGAS Pro 21, pp. 239–241).
+    fn draw_lane_drag_overlays(&self, ui: &egui::Ui, lanes: Rect, rows: &TimelineRows) {
+        let left = lanes.left();
+        let layout = &rows.track_rects;
+        if let (Drag::Box { zoom, start }, Some(cur)) = (&self.tl.drag, self.tl.box_cur) {
+            let r = self
+                .effective_box_rect(Rect::from_two_pos(*start, cur), lanes)
+                .intersect(lanes);
+            if r.width() > 0.5 || r.height() > 0.5 {
+                let p = ui.painter().with_clip_rect(lanes);
+                let axis = self.session.box_axis;
+                // Destaque ao vivo dos eventos alcançados pelo retângulo de seleção
+                if !*zoom {
+                    let hit_stroke = Stroke::new(2.0_f32, self.theme.tl_event_sel_border);
+                    for (ti, tr) in self.project.tracks.iter().enumerate() {
+                        let Some(&(y0, h)) = layout.get(ti) else {
+                            continue;
+                        };
+                        if axis == BoxAxisMode::Vertical && (y0 + h < r.top() || y0 > r.bottom()) {
+                            continue;
+                        }
+                        for e in &tr.events {
+                            let er = self.event_rect(e, left, y0, h);
+                            if axis == BoxAxisMode::Vertical || er.intersects(r) {
+                                p.rect_stroke(er, 2.0, hit_stroke, StrokeKind::Inside);
+                            }
+                        }
+                    }
+                }
+                let fill = if *zoom {
+                    self.theme.accent.gamma_multiply(0.18)
+                } else {
+                    self.theme.selection_bg.gamma_multiply(0.22)
+                };
+                p.rect_filled(r, 0.0, fill);
+                let corners = [
+                    r.left_top(),
+                    r.right_top(),
+                    r.right_bottom(),
+                    r.left_bottom(),
+                    r.left_top(),
+                ];
+                let backing = if self.theme.dark_mode {
+                    Color32::from_black_alpha(180)
+                } else {
+                    Color32::from_white_alpha(200)
+                };
+                p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, backing), StrokeKind::Inside);
+                let fg = if *zoom || self.theme.high_contrast {
+                    self.theme.accent
+                } else {
+                    self.theme.text_primary
+                };
+                p.extend(Shape::dashed_line(
+                    &corners,
+                    Stroke::new(1.5_f32, fg),
+                    5.0,
+                    3.0,
+                ));
+                if axis != BoxAxisMode::Both {
+                    let badge = axis.name();
+                    let g = p.layout_no_wrap(
+                        badge.to_string(),
+                        FontId::proportional(10.0),
+                        self.theme.text_primary,
+                    );
+                    let pos = pos2(
+                        (r.left() + 4.0).min((lanes.right() - g.size().x - 10.0).max(lanes.left())),
+                        (r.top() + 4.0).min((lanes.bottom() - g.size().y - 6.0).max(lanes.top())),
+                    );
+                    let bg = Rect::from_min_size(pos, g.size() + vec2(6.0, 3.0));
+                    p.rect_filled(bg, 2.0, self.theme.extreme_bg.gamma_multiply(0.9));
+                    p.rect_stroke(
+                        bg,
+                        2.0,
+                        Stroke::new(1.0_f32, self.theme.border),
+                        StrokeKind::Inside,
+                    );
+                    p.galley(bg.min + vec2(3.0, 1.5), g, self.theme.text_primary);
+                }
+            }
+        }
+        if let Drag::SplitTrim {
+            event_id,
+            origin_t,
+            cur_t,
+        } = &self.tl.drag
+        {
+            if let Some((ti, _)) = self.project.find_event(*event_id) {
+                if let Some(&(y0, h)) = layout.get(ti) {
+                    let lo = origin_t.min(cur_t);
+                    let hi = origin_t.max(cur_t);
+                    let x0 = self.tl.t2x(*lo, left).max(lanes.left());
+                    let x1 = self.tl.t2x(*hi, left).min(lanes.right());
+                    if x1 > x0 {
+                        let cut_rect = Rect::from_min_max(pos2(x0, y0), pos2(x1, y0 + h));
+                        ui.painter().with_clip_rect(lanes).rect_filled(
+                            cut_rect,
+                            0.0,
+                            self.theme.offline_fg.gamma_multiply(0.35),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn start_lane_drag(
@@ -4705,11 +4897,13 @@ impl App {
             }
             return;
         }
-        // área vazia: seleção de tempo
+        // área vazia: seleção de tempo (clique direito enquanto arrasta alterna para
+        // caixa de seleção, manual do VEGAS Pro 21, p. 238)
         let s = self.snap(ot, &HashSet::new(), mods.shift);
         if let Some(ti) = self.track_at(origin.y, &rows.track_spans) {
             self.sel_track = Some(ti);
         }
+        self.tl.time_sel_origin = Some((origin, self.time_sel));
         self.tl.drag = Drag::TimeSel { anchor: s };
     }
 
@@ -5427,9 +5621,9 @@ impl App {
                         e.fade_out.curve
                     }
                 });
+                let th = self.theme.clone();
                 for c in Curve::ALL.iter().take(5) {
-                    if ui
-                        .selectable_label(cur == Some(*c), c.name_in(lang))
+                    if fade_curve_menu_item(ui, *c, fade_in, cur == Some(*c), c.name_in(lang), &th)
                         .clicked()
                     {
                         self.checkpoint();
@@ -5931,10 +6125,10 @@ impl App {
             self.changed();
         }
         ui.separator();
+        let th = self.theme.clone();
         ui.menu_button(tr(lang, "Curva do fade de entrada"), |ui| {
             for c in Curve::ALL.iter().take(5) {
-                if ui
-                    .selectable_label(e.fade_in.curve == *c, c.name_in(lang))
+                if fade_curve_menu_item(ui, *c, true, e.fade_in.curve == *c, c.name_in(lang), &th)
                     .clicked()
                 {
                     self.checkpoint();
@@ -5948,8 +6142,7 @@ impl App {
         });
         ui.menu_button(tr(lang, "Curva do fade de saída"), |ui| {
             for c in Curve::ALL.iter().take(5) {
-                if ui
-                    .selectable_label(e.fade_out.curve == *c, c.name_in(lang))
+                if fade_curve_menu_item(ui, *c, false, e.fade_out.curve == *c, c.name_in(lang), &th)
                     .clicked()
                 {
                     self.checkpoint();
@@ -7148,6 +7341,158 @@ mod zoom_tests {
             }
         }
     }
+
+    #[test]
+    fn icones_curvas_de_fade_sobem_na_entrada_e_descem_na_saida() {
+        let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(28.0, 14.0));
+        for c in Curve::ALL.iter().take(5) {
+            let pin = fade_curve_points(r, *c, true);
+            let pout = fade_curve_points(r, *c, false);
+            assert_eq!(pin.len(), 17);
+            assert_eq!(pout.len(), 17);
+            // Na entrada, começa embaixo (y maior) e termina em cima (y menor)
+            assert!(pin[0].y > pin[16].y, "{c:?} fade-in deve subir");
+            // Na saída, começa em cima (y menor) e termina embaixo (y maior)
+            assert!(pout[0].y < pout[16].y, "{c:?} fade-out deve descer");
+        }
+        // Fast sobe mais rápido que Slow no ponto médio (y menor na tela)
+        let fast_mid = fade_curve_points(r, Curve::Fast, true)[8].y;
+        let slow_mid = fade_curve_points(r, Curve::Slow, true)[8].y;
+        assert!(fast_mid < slow_mid);
+
+        // Renderiza o item de menu em todos os 7 temas sem pânico
+        let ctx = egui::Context::default();
+        for tid in crate::theme::ThemeId::ALL {
+            let th = crate::theme::palette(tid);
+            let _ = ctx.run(egui::RawInput::default(), |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    for &fade_in in &[true, false] {
+                        for cur in Curve::ALL.iter().take(5) {
+                            let _ = fade_curve_menu_item(
+                                ui,
+                                *cur,
+                                fade_in,
+                                *cur == Curve::Smooth,
+                                cur.name(),
+                                &th,
+                            );
+                        }
+                    }
+                });
+            });
+        }
+    }
+}
+
+/// Pontos da curva de fade normalizados dentro de `rect` (`fade_in`: sobe da
+/// esquerda para a direita; `!fade_in`: desce da esquerda para a direita).
+fn fade_curve_points(rect: Rect, curve: Curve, fade_in: bool) -> Vec<Pos2> {
+    const STEPS: usize = 16;
+    let mut pts = Vec::with_capacity(STEPS + 1);
+    for i in 0..=STEPS {
+        let frac = i as f32 / STEPS as f32;
+        let v = if fade_in {
+            curve.shape(frac)
+        } else {
+            1.0 - curve.shape(frac)
+        };
+        let x = rect.left() + frac * rect.width();
+        let y = rect.bottom() - v.clamp(0.0, 1.0) * rect.height();
+        pts.push(pos2(x, y));
+    }
+    pts
+}
+
+/// Desenha a miniatura vetorial da curva de fade (entrada ou saída),
+/// seguindo o submenu *Fade Type* do VEGAS Pro (desenhado do zero em código).
+fn paint_fade_curve_icon(
+    painter: &egui::Painter,
+    rect: Rect,
+    curve: Curve,
+    fade_in: bool,
+    selected: bool,
+    theme: &crate::theme::ThemeColors,
+) {
+    let bg = if selected && theme.high_contrast {
+        theme.window_fill
+    } else {
+        theme.extreme_bg
+    };
+    painter.rect_filled(rect, 1.5, bg);
+    let inner = rect.shrink2(vec2(2.0, 2.0));
+    if inner.width() > 2.0 && inner.height() > 2.0 {
+        let pts = fade_curve_points(inner, curve, fade_in);
+        let fill_col = if theme.high_contrast {
+            theme.accent.gamma_multiply(0.35)
+        } else {
+            theme.accent.gamma_multiply(0.28)
+        };
+        // Preenche em faixas verticais sob a curva (evita polígono não-convexo)
+        for seg in pts.windows(2) {
+            let [a, b] = [seg[0], seg[1]];
+            let quad = vec![a, b, pos2(b.x, inner.bottom()), pos2(a.x, inner.bottom())];
+            painter.add(Shape::convex_polygon(quad, fill_col, Stroke::NONE));
+        }
+        let line_col = if selected || theme.high_contrast {
+            theme.accent
+        } else {
+            theme.tl_fade
+        };
+        painter.add(Shape::line(pts, Stroke::new(1.5_f32, line_col)));
+    }
+    painter.rect_stroke(
+        rect,
+        1.5,
+        Stroke::new(1.0_f32, if selected { theme.accent } else { theme.border }),
+        StrokeKind::Inside,
+    );
+}
+
+/// Item de menu com representação gráfica da curva de fade ao lado do nome.
+fn fade_curve_menu_item(
+    ui: &mut egui::Ui,
+    curve: Curve,
+    fade_in: bool,
+    selected: bool,
+    label: &str,
+    theme: &crate::theme::ThemeColors,
+) -> egui::Response {
+    let desired_w = ui.available_width().max(138.0);
+    let (row_r, resp) = ui.allocate_exact_size(vec2(desired_w, 22.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let p = ui.painter_at(row_r);
+    if selected {
+        p.rect_filled(row_r, 2.0, theme.selection_bg);
+    } else if resp.hovered() {
+        p.rect_filled(row_r, 2.0, theme.widget_hover_bg);
+    }
+    let icon_r = Rect::from_min_size(
+        pos2(row_r.left() + 4.0, row_r.center().y - 7.0),
+        vec2(28.0, 14.0),
+    );
+    paint_fade_curve_icon(&p, icon_r, curve, fade_in, selected, theme);
+    let fg = if selected {
+        crate::theme::contrast_on(theme.selection_bg)
+    } else {
+        theme.text_primary
+    };
+    p.text(
+        pos2(icon_r.right() + 7.0, row_r.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        fg,
+    );
+    if selected {
+        p.text(
+            pos2(row_r.right() - 6.0, row_r.center().y),
+            Align2::RIGHT_CENTER,
+            "✓",
+            FontId::proportional(11.0),
+            fg,
+        );
+    }
+    resp
 }
 
 /// Ação pedida por um botão do cabeçalho de faixa ou pelo menu do botão Mais.
