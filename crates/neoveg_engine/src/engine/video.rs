@@ -359,11 +359,21 @@ pub fn blend(dst: &mut Frame, top: &Frame, mode: BlendMode, opacity: f32) {
         });
 }
 
-/// Alfa de um evento considerando fades, com opção de ignorar fade de
-/// entrada/saída (quando substituído por uma transição).
+/// Alfa de um evento considerando opacidade do evento, envelope de opacidade e fades,
+/// com opção de ignorar fade de entrada/saída (quando substituído por uma transição).
 fn event_alpha(e: &Event, t: Ticks, ignore_in: bool, ignore_out: bool) -> f32 {
-    let mut g = 1.0;
+    let mut g = if e.opacity.is_finite() {
+        e.opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let local = t - e.start;
+    if let Some(env) = e.envelope(EnvKind::Opacity) {
+        let ev_op = env.eval(local);
+        if ev_op.is_finite() {
+            g *= ev_op.clamp(0.0, 1.0);
+        }
+    }
     if !ignore_in && e.fade_in.len > Ticks::ZERO && local < e.fade_in.len {
         g *= e
             .fade_in
@@ -1334,6 +1344,49 @@ mod adjustment_tests {
         let mut p = project_with_adjustment(Some(FxKind::Invert));
         p.tracks[0].opacity = f32::NAN;
         assert!(first_red(&p).abs() < 1e-4);
+    }
+
+    #[test]
+    fn video_event_opacity_scales_rendered_alpha() {
+        let mut p = Project::new_default();
+        let m = MediaItem {
+            id: new_id(),
+            name: "branco".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [1.0, 1.0, 1.0, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(10)),
+            has_video: true,
+            has_audio: false,
+            width: 8,
+            height: 8,
+            fps: Some(FrameRate::FPS_30),
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mid = m.id;
+        p.media.push(m);
+        let mut ev = Event::new(
+            p.media(mid).expect("mídia presente"),
+            Ticks::ZERO,
+            Ticks::from_secs_i64(5),
+        );
+        ev.opacity = 0.5;
+        p.tracks[0].events.push(ev);
+        let cache = MediaCache::default();
+        let f = render_frame_preview(&p, &cache, Ticks::from_secs_i64(1), 8, 8, false);
+        let px = f.px[0];
+        assert!(
+            px[0] > 0.45 && px[0] < 0.55,
+            "opacidade 0.5 do evento deve reduzir a luminância pela metade: {px:?}"
+        );
+        p.tracks[0].events[0].opacity = 0.0;
+        let f0 = render_frame_preview(&p, &cache, Ticks::from_secs_i64(1), 8, 8, false);
+        assert!(
+            f0.px[0][0] < 0.02,
+            "opacidade 0.0 do evento deve ficar transparente: {:?}",
+            f0.px[0]
+        );
     }
 
     #[test]

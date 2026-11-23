@@ -121,6 +121,7 @@ mod tests {
                 t: s(x),
                 v: x as f32,
                 curve: Default::default(),
+                smoothness: 0.0,
             })
             .collect();
         t.envelopes.push(env);

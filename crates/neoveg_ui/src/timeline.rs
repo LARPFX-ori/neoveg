@@ -84,6 +84,7 @@ enum Zone {
     FadeIn,
     FadeOut,
     GainHandle,
+    OpacityHandle,
     FxButton,
     PanCropButton,
     MoreButton,
@@ -130,6 +131,13 @@ enum Drag {
         id: Id,
         orig_db: f32,
         origin_y: f32,
+        event_h: f32,
+    },
+    Opacity {
+        id: Id,
+        orig_opacity: f32,
+        origin_y: f32,
+        event_h: f32,
     },
     Slip {
         origin_t: Ticks,
@@ -210,6 +218,7 @@ enum CtxTarget {
     #[default]
     None,
     Event(Id),
+    EventFade(Id, bool),
     EnvPoint(EnvOwner, EnvKind, usize),
     EnvLine(EnvOwner, EnvKind, Ticks),
     Lane(usize, Ticks),
@@ -256,6 +265,8 @@ pub struct TimelineState {
     /// Largura atual e anterior do painel esquerdo de cabeçalhos de trilha (p. 69).
     pub header_w: f32,
     pub header_prev_w: f32,
+    /// Ajusta automaticamente a largura horizontal do cabeçalho para comportar os botões visíveis.
+    pub header_auto_fit: bool,
     /// Valor fixado em automação *Latch* enquanto a reprodução continua.
     latch_hold: Option<(usize, EnvKind, f32)>,
     /// Altura de cada trilha antes de Minimizar/Maximizar (p. 388).
@@ -281,6 +292,7 @@ impl Default for TimelineState {
             last_rows: Vec::new(),
             header_w: HEADER_W,
             header_prev_w: HEADER_W,
+            header_auto_fit: true,
             latch_hold: None,
             height_restore: HashMap::new(),
         }
@@ -315,9 +327,11 @@ impl TimelineState {
     pub fn toggle_header_collapse(&mut self) {
         if self.header_collapsed() {
             self.header_w = self.header_prev_w.clamp(180.0, Self::MAX_HEADER_W);
+            self.header_auto_fit = true;
         } else {
             self.header_prev_w = self.header_w;
             self.header_w = Self::COLLAPSED_HEADER_W;
+            self.header_auto_fit = false;
         }
     }
 
@@ -555,8 +569,94 @@ impl App {
         // Na semântica do VEGAS Pro, 0 dB fica no topo do evento de áudio e
         // arrastar para baixo atenua até -36 dB.
         let t = (-gain_db / 36.0).clamp(0.0, 1.0);
-        let span = (r.height() - 8.0).max(0.0);
-        (r.top() + 3.0 + t * span).clamp(r.top() + 2.0, (r.bottom() - 3.0).max(r.top() + 2.0))
+        let span = (r.height() - 10.0).max(0.0);
+        (r.top() + 5.0 + t * span).clamp(r.top() + 4.0, (r.bottom() - 4.0).max(r.top() + 4.0))
+    }
+
+    fn opacity_handle_y(r: Rect, opacity: f32) -> f32 {
+        // Na semântica do VEGAS Pro, 100% de opacidade fica no topo do evento
+        // de vídeo e arrastar para baixo reduz até 0%.
+        let t = (1.0 - opacity.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let span = (r.height() - 10.0).max(0.0);
+        (r.top() + 5.0 + t * span).clamp(r.top() + 4.0, (r.bottom() - 4.0).max(r.top() + 4.0))
+    }
+
+    /// Calcula a largura horizontal necessária para exibir todos os botões ativos
+    /// nas faixas de áudio e vídeo sem cortar nenhum controle.
+    pub fn required_header_w_for_buttons(&self) -> f32 {
+        let btns_width =
+            |is_video: bool, has_kf: bool, has_extra_badge: bool, depth: usize| -> f32 {
+                let b = self.prefs.track_header.get(is_video);
+                // Gutter lateral (26 px) + margem direita (16 px) + recuo de hierarquia + campo de nome mínimo (72 px)
+                let mut w = 26.0 + 16.0 + (depth.min(4) as f32) * 8.0 + 72.0;
+                if has_extra_badge {
+                    w += 26.0;
+                }
+                if b.mute {
+                    w += 24.0;
+                }
+                if b.solo {
+                    w += 24.0;
+                }
+                if b.fx {
+                    w += 30.0;
+                }
+                // Selo de automação (Off/Read/Touch/Latch)
+                w += 42.0;
+                if is_video {
+                    if b.track_motion {
+                        w += 24.0;
+                    }
+                    if b.compositing_child {
+                        w += 24.0;
+                    }
+                } else if b.record_arm {
+                    w += 24.0;
+                }
+                if b.height {
+                    w += 46.0;
+                }
+                if has_kf {
+                    w += 24.0;
+                }
+                w
+            };
+        let mut req = 180.0_f32;
+        let mut saw_video = false;
+        let mut saw_audio = false;
+        for t in &self.project.tracks {
+            let is_video = t.kind == TrackKind::Video;
+            if is_video {
+                saw_video = true;
+            } else {
+                saw_audio = true;
+            }
+            let depth = self.project.track_depth(t.id);
+            let has_kf = is_video
+                && !neoveg_engine::track_keyframes::track_rows(t, self.kf_tol()).is_empty();
+            let has_badge = t.is_adjustment()
+                || (is_video && self.project.has_track_children(t.id))
+                || (is_video && t.mask_mode != neoveg_engine::model::TrackMaskMode::None)
+                || t.multicam;
+            req = req.max(btns_width(is_video, has_kf, has_badge, depth));
+        }
+        if !saw_video {
+            req = req.max(btns_width(true, false, false, 0));
+        }
+        if !saw_audio {
+            req = req.max(btns_width(false, false, false, 0));
+        }
+        req.clamp(180.0, TimelineState::MAX_HEADER_W)
+    }
+
+    /// Ajusta a largura horizontal do cabeçalho das faixas para acomodar os
+    /// botões atualmente visíveis.
+    pub fn sync_header_width_to_buttons(&mut self) {
+        self.tl.header_auto_fit = true;
+        if !self.tl.header_collapsed() {
+            let req = self.required_header_w_for_buttons();
+            self.tl.set_header_w(req);
+        }
     }
 
     fn event_button_hidden(&self, is_video: bool, key: &str) -> bool {
@@ -650,10 +750,17 @@ impl App {
                         return Some((ti, ei, Zone::FadeOut));
                     }
                 }
-                if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
-                    let gy = Self::gain_handle_y(r, e.gain_db);
-                    if (pos.y - gy).abs() <= 4.5 && pos.x > fi_x + 5.0 && pos.x < fo_x - 5.0 {
-                        return Some((ti, ei, Zone::GainHandle));
+                if r.width() > 24.0 && r.height() >= 18.0 {
+                    if track.kind == TrackKind::Audio {
+                        let gy = Self::gain_handle_y(r, e.gain_db);
+                        if (pos.y - gy).abs() <= 7.5 && pos.x > fi_x + 6.0 && pos.x < fo_x - 6.0 {
+                            return Some((ti, ei, Zone::GainHandle));
+                        }
+                    } else if track.kind == TrackKind::Video {
+                        let oy = Self::opacity_handle_y(r, e.opacity);
+                        if (pos.y - oy).abs() <= 7.5 && pos.x > fi_x + 6.0 && pos.x < fo_x - 6.0 {
+                            return Some((ti, ei, Zone::OpacityHandle));
+                        }
                     }
                 }
                 if (pos.x - r.left()).abs() <= EDGE_PX && r.width() > 12.0 {
@@ -769,6 +876,12 @@ impl App {
         }
         let content_top = full.top() + seq_bar_h;
 
+        if self.tl.header_auto_fit && !self.tl.header_collapsed() {
+            let req = self.required_header_w_for_buttons();
+            if self.tl.header_w < req {
+                self.tl.set_header_w(req);
+            }
+        }
         let max_hdr =
             (full.width() - 96.0).clamp(TimelineState::MIN_HEADER_W, TimelineState::MAX_HEADER_W);
         let hdr_w = self.tl.header_w.clamp(TimelineState::MIN_HEADER_W, max_hdr);
@@ -873,6 +986,7 @@ impl App {
         }
         if edge_resp.dragged() {
             let dx = edge_resp.drag_delta().x;
+            self.tl.header_auto_fit = false;
             self.tl.set_header_w(self.tl.header_w + dx);
         }
         if edge_resp.double_clicked() {
@@ -2980,7 +3094,38 @@ impl App {
                 }
                 let t = &mut self.project.tracks[ti];
                 if show_name {
-                    let name_w = (hdr_w - 194.0).clamp(40.0, 72.0);
+                    let mut btns_w = 0.0_f32;
+                    if show_btns {
+                        if btns.mute {
+                            btns_w += 22.0;
+                        }
+                        if btns.solo && !is_folder {
+                            btns_w += 22.0;
+                        }
+                        if btns.fx && !is_folder {
+                            btns_w += 28.0;
+                        }
+                        if show_auto_badge && !is_folder {
+                            btns_w += 40.0;
+                        }
+                        if is_video && btns.track_motion && !is_adjustment && !is_folder {
+                            btns_w += 22.0;
+                        }
+                        if !is_video && !is_folder && btns.record_arm {
+                            btns_w += 22.0;
+                        }
+                        if is_video && btns.compositing_child && !is_folder && !is_adjustment {
+                            btns_w += 22.0;
+                        }
+                        if btns.height && !is_folder {
+                            btns_w += 44.0;
+                        }
+                        if kf_has {
+                            btns_w += 22.0;
+                        }
+                    }
+                    let avail_for_name = inner.width() - btns_w - 16.0;
+                    let name_w = avail_for_name.clamp(42.0, 120.0);
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut t.name)
                             .desired_width(name_w)
@@ -3539,6 +3684,54 @@ impl App {
                 ui.close_menu();
             }
         }
+        // Curvas de suavização da faixa (áudio e vídeo): define a curva padrão da trilha
+        // e permite aplicar suavização imediatamente aos envelopes e fades da faixa.
+        let cur_def_curve = self.project.tracks[ti].default_env_curve;
+        let cur_def_sm = self.project.tracks[ti].default_env_smoothness;
+        ui.menu_button(tr(lang, "Curva de suavização da trilha"), |ui| {
+            for c in Curve::ALL {
+                if ui
+                    .selectable_label(cur_def_curve == c, c.name_in(lang))
+                    .clicked()
+                {
+                    self.checkpoint();
+                    let t = &mut self.project.tracks[ti];
+                    t.default_env_curve = c;
+                    for env in &mut t.envelopes {
+                        env.set_all_curves(c, None);
+                    }
+                    if c != Curve::Hold {
+                        for ev in &mut t.events {
+                            ev.fade_in.curve = c;
+                            ev.fade_out.curve = c;
+                        }
+                    }
+                    self.changed();
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            let mut sm_pct = (cur_def_sm * 100.0).clamp(0.0, 100.0);
+            ui.label(tr(lang, "Suavização (%)"));
+            if ui
+                .add(
+                    egui::Slider::new(&mut sm_pct, 0.0..=100.0)
+                        .suffix(" %")
+                        .fixed_decimals(0),
+                )
+                .changed()
+            {
+                let sm = (sm_pct / 100.0).clamp(0.0, 1.0);
+                let t = &mut self.project.tracks[ti];
+                t.default_env_smoothness = sm;
+                for env in &mut t.envelopes {
+                    for pt in &mut env.points {
+                        pt.smoothness = sm;
+                    }
+                }
+                self.changed();
+            }
+        });
         if kind == TrackKind::Audio && !self.project.audio_buses.is_empty() {
             ui.menu_button(tr(lang, "Roteamento de saída"), |ui| {
                 let cur_out = self.project.tracks[ti].output_bus;
@@ -3880,7 +4073,7 @@ impl App {
                                             crate::cursors::NeovegCursor::FadeOffset,
                                         );
                                     }
-                                    Zone::GainHandle => {
+                                    Zone::GainHandle | Zone::OpacityHandle => {
                                         self.set_cursor_shape(
                                             crate::cursors::NeovegCursor::EnvelopeHand,
                                         );
@@ -3959,7 +4152,7 @@ impl App {
             Drag::Slide { .. } => {
                 self.set_cursor_shape(crate::cursors::NeovegCursor::Slide);
             }
-            Drag::Gain { .. } | Drag::EnvPoint { .. } => {
+            Drag::Gain { .. } | Drag::Opacity { .. } | Drag::EnvPoint { .. } => {
                 self.set_cursor_shape(crate::cursors::NeovegCursor::EnvelopeHand);
             }
             Drag::Scrub => {
@@ -4082,6 +4275,20 @@ impl App {
                     if let Some((y0, h)) = rows.row_rect(owner) {
                         self.checkpoint();
                         let v = kind.value_from_norm((y0 + h - 4.0 - p.y) / (h - 8.0));
+                        let (def_curve, def_sm) = match owner {
+                            EnvOwner::Track(ti) => self
+                                .project
+                                .tracks
+                                .get(ti)
+                                .map(|tr| (tr.default_env_curve, tr.default_env_smoothness))
+                                .unwrap_or((Curve::Linear, 0.0)),
+                            EnvOwner::Bus(bi) => self
+                                .project
+                                .audio_buses
+                                .get(bi)
+                                .map(|b| (b.default_env_curve, b.default_env_smoothness))
+                                .unwrap_or((Curve::Linear, 0.0)),
+                        };
                         let Some(env) = self
                             .owner_envelopes_mut(owner)
                             .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
@@ -4096,13 +4303,22 @@ impl App {
                         env.points.push(EnvPoint {
                             t,
                             v,
-                            curve: Curve::Linear,
+                            curve: def_curve,
+                            smoothness: def_sm,
                         });
                         env.sort();
                         self.changed();
                     }
                 } else if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
-                    if matches!(zone, Zone::LeftEdge | Zone::RightEdge)
+                    if zone == Zone::GainHandle {
+                        self.checkpoint();
+                        self.project.tracks[ti].events[ei].gain_db = 0.0;
+                        self.changed();
+                    } else if zone == Zone::OpacityHandle {
+                        self.checkpoint();
+                        self.project.tracks[ti].events[ei].opacity = 1.0;
+                        self.changed();
+                    } else if matches!(zone, Zone::LeftEdge | Zone::RightEdge)
                         && self.project.tracks[ti].kind == TrackKind::Video
                     {
                         let eid = self.project.tracks[ti].events[ei].id;
@@ -4137,14 +4353,18 @@ impl App {
                         Some(i) => CtxTarget::EnvPoint(owner, k, i),
                         None => CtxTarget::EnvLine(owner, k, t),
                     }
-                } else if let Some((ti, ei, _)) = self.hit_event(p, left, layout) {
+                } else if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
                     let id = self.project.tracks[ti].events[ei].id;
                     if !self.sel_events.contains(&id) {
                         self.sel_events.clear();
                         self.sel_events.insert(id);
                     }
                     self.sel_track = Some(ti);
-                    CtxTarget::Event(id)
+                    if matches!(zone, Zone::FadeIn | Zone::FadeOut) {
+                        CtxTarget::EventFade(id, zone == Zone::FadeIn)
+                    } else {
+                        CtxTarget::Event(id)
+                    }
                 } else if let Some(ti) = self.track_at(p.y, layout) {
                     self.sel_track = Some(ti);
                     CtxTarget::Lane(ti, t)
@@ -4213,11 +4433,24 @@ impl App {
                 }
                 Zone::GainHandle => {
                     let orig_db = self.project.tracks[ti].events[ei].gain_db;
+                    let event_h = layout[ti].1.max(18.0);
                     self.checkpoint();
                     self.tl.drag = Drag::Gain {
                         id,
                         orig_db,
                         origin_y: origin.y,
+                        event_h,
+                    };
+                }
+                Zone::OpacityHandle => {
+                    let orig_opacity = self.project.tracks[ti].events[ei].opacity;
+                    let event_h = layout[ti].1.max(18.0);
+                    self.checkpoint();
+                    self.tl.drag = Drag::Opacity {
+                        id,
+                        orig_opacity,
+                        origin_y: origin.y,
+                        event_h,
                     };
                 }
                 Zone::LeftEdge | Zone::RightEdge => {
@@ -4554,9 +4787,11 @@ impl App {
                 id,
                 orig_db,
                 origin_y,
+                event_h,
             } => {
                 let dy = p.y - origin_y;
-                let raw = (orig_db - dy * 0.35).clamp(-36.0, 12.0);
+                let span = (event_h - 10.0).max(20.0);
+                let raw = (orig_db - (dy / span) * 36.0).clamp(-36.0, 12.0);
                 let snapped = if raw.abs() < 0.4 {
                     0.0
                 } else {
@@ -4564,6 +4799,27 @@ impl App {
                 };
                 if let Some(e) = self.project.event_mut(id) {
                     e.gain_db = snapped;
+                }
+                self.changed();
+            }
+            Drag::Opacity {
+                id,
+                orig_opacity,
+                origin_y,
+                event_h,
+            } => {
+                let dy = p.y - origin_y;
+                let span = (event_h - 10.0).max(20.0);
+                let raw = (orig_opacity - dy / span).clamp(0.0, 1.0);
+                let snapped = if (1.0 - raw).abs() < 0.015 {
+                    1.0
+                } else if raw < 0.015 {
+                    0.0
+                } else {
+                    (raw * 100.0).round() / 100.0
+                };
+                if let Some(e) = self.project.event_mut(id) {
+                    e.opacity = snapped;
                 }
                 self.changed();
             }
@@ -5117,6 +5373,40 @@ impl App {
         let lang = self.lang();
         match self.tl.ctx_target.clone() {
             CtxTarget::Event(id) => self.event_context_menu(ui, id),
+            CtxTarget::EventFade(id, fade_in) => {
+                let title = if fade_in {
+                    tr(lang, "Curva do fade (entrada)")
+                } else {
+                    tr(lang, "Curva do fade (saída)")
+                };
+                ui.label(egui::RichText::new(title).strong());
+                let cur = self.project.event(id).map(|e| {
+                    if fade_in {
+                        e.fade_in.curve
+                    } else {
+                        e.fade_out.curve
+                    }
+                });
+                for c in Curve::ALL.iter().take(5) {
+                    if ui
+                        .selectable_label(cur == Some(*c), c.name_in(lang))
+                        .clicked()
+                    {
+                        self.checkpoint();
+                        if let Some(ev) = self.project.event_mut(id) {
+                            if fade_in {
+                                ev.fade_in.curve = *c;
+                            } else {
+                                ev.fade_out.curve = *c;
+                            }
+                        }
+                        self.changed();
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                self.event_context_menu(ui, id);
+            }
             CtxTarget::Keyframe {
                 track,
                 row,
@@ -5133,22 +5423,25 @@ impl App {
                     ))
                     .strong(),
                 );
+                let mut cur_curve = Curve::Linear;
+                let mut cur_sm = 0.0_f32;
                 if let Some(env) = self
                     .owner_envelopes(owner)
                     .and_then(|list| list.iter().find(|e| e.kind == kind))
                 {
                     if let Some(p) = env.points.get(idx) {
                         ui.label(format!("{}  @ {}", kind.format(p.v), self.fmt_time(p.t)));
+                        cur_curve = p.curve;
+                        cur_sm = p.smoothness;
                     }
                 }
                 ui.separator();
                 for c in Curve::ALL {
                     if ui
-                        .button(tr_args(
-                            lang,
-                            "Curva: {curve}",
-                            &[("curve", &c.name_in(lang))],
-                        ))
+                        .selectable_label(
+                            cur_curve == c,
+                            tr_args(lang, "Curva: {curve}", &[("curve", &c.name_in(lang))]),
+                        )
                         .clicked()
                     {
                         self.checkpoint();
@@ -5163,6 +5456,26 @@ impl App {
                         self.changed();
                         ui.close_menu();
                     }
+                }
+                let mut sm_pct = (cur_sm * 100.0).clamp(0.0, 100.0);
+                ui.label(tr(lang, "Suavização (%)"));
+                if ui
+                    .add(
+                        egui::Slider::new(&mut sm_pct, 0.0..=100.0)
+                            .suffix(" %")
+                            .fixed_decimals(0),
+                    )
+                    .changed()
+                {
+                    if let Some(env) = self
+                        .owner_envelopes_mut(owner)
+                        .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
+                    {
+                        if let Some(p) = env.points.get_mut(idx) {
+                            p.smoothness = (sm_pct / 100.0).clamp(0.0, 1.0);
+                        }
+                    }
+                    self.changed();
                 }
                 ui.separator();
                 if ui.button(tr(lang, "Redefinir valor")).clicked() {
@@ -5195,6 +5508,20 @@ impl App {
             CtxTarget::EnvLine(owner, kind, t) => {
                 if ui.button(tr(lang, "Adicionar ponto aqui")).clicked() {
                     self.checkpoint();
+                    let (def_curve, def_sm) = match owner {
+                        EnvOwner::Track(ti) => self
+                            .project
+                            .tracks
+                            .get(ti)
+                            .map(|tr| (tr.default_env_curve, tr.default_env_smoothness))
+                            .unwrap_or((Curve::Linear, 0.0)),
+                        EnvOwner::Bus(bi) => self
+                            .project
+                            .audio_buses
+                            .get(bi)
+                            .map(|b| (b.default_env_curve, b.default_env_smoothness))
+                            .unwrap_or((Curve::Linear, 0.0)),
+                    };
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
                         .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
@@ -5203,13 +5530,66 @@ impl App {
                         env.points.push(EnvPoint {
                             t,
                             v,
-                            curve: Curve::Linear,
+                            curve: def_curve,
+                            smoothness: def_sm,
                         });
                         env.sort();
                     }
                     self.changed();
                     ui.close_menu();
                 }
+                let seg_info = self
+                    .owner_envelopes(owner)
+                    .and_then(|list| list.iter().find(|e| e.kind == kind))
+                    .and_then(|env| {
+                        let seg_i = env.segment_index_at(t)?;
+                        let pt = env.points.get(seg_i)?;
+                        Some((seg_i, pt.curve, pt.smoothness))
+                    });
+                if let Some((seg_i, seg_curve, seg_sm)) = seg_info {
+                    ui.separator();
+                    ui.menu_button(tr(lang, "Curva deste segmento"), |ui| {
+                        for c in Curve::ALL {
+                            if ui
+                                .selectable_label(seg_curve == c, c.name_in(lang))
+                                .clicked()
+                            {
+                                self.checkpoint();
+                                if let Some(env) = self
+                                    .owner_envelopes_mut(owner)
+                                    .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
+                                {
+                                    if let Some(pt) = env.points.get_mut(seg_i) {
+                                        pt.curve = c;
+                                    }
+                                }
+                                self.changed();
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    let mut sm_pct = (seg_sm * 100.0).clamp(0.0, 100.0);
+                    ui.label(tr(lang, "Suavização (%)"));
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut sm_pct, 0.0..=100.0)
+                                .suffix(" %")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        if let Some(env) = self
+                            .owner_envelopes_mut(owner)
+                            .and_then(|list| list.iter_mut().find(|e| e.kind == kind))
+                        {
+                            if let Some(pt) = env.points.get_mut(seg_i) {
+                                pt.smoothness = (sm_pct / 100.0).clamp(0.0, 1.0);
+                            }
+                        }
+                        self.changed();
+                    }
+                }
+                ui.separator();
                 if ui.button(tr(lang, "Redefinir todos os pontos")).clicked() {
                     self.checkpoint();
                     if let Some(env) = self
@@ -6203,41 +6583,186 @@ impl App {
                         self.theme.tl_fade,
                     );
                 }
-                // alça de ganho no topo do evento de áudio
-                if track.kind == TrackKind::Audio && r.width() > 24.0 && r.height() >= 18.0 {
-                    let gy = Self::gain_handle_y(r, e.gain_db);
-                    let x0 = (fi_x + 4.0).min(r.right() - 4.0);
-                    let x1 = (fo_x - 4.0).max(x0);
-                    painter.line_segment(
-                        [pos2(x0, gy), pos2(x1, gy)],
-                        Stroke::new(1.0_f32, self.theme.tl_gain_line),
-                    );
-                    let dragging_gain = matches!(self.tl.drag, Drag::Gain { id, .. } if id == e.id);
-                    if dragging_gain || e.gain_db.abs() > 0.05 {
-                        painter.rect_filled(
-                            Rect::from_center_size(pos2((x0 + x1) * 0.5, gy), vec2(5.0, 5.0)),
-                            1.0,
-                            self.theme.tl_gain_line,
-                        );
+                // Triângulos invertidos estilo VEGAS Pro indicando início, fim e
+                // pontos de repetição (loop) da mídia subjacente no topo do evento.
+                let media_dur = self.project.media(e.media_id).and_then(|m| m.duration);
+                let (at_start, at_end, interior_notches) = e.media_boundary_ticks(media_dur);
+                let notch_fill = if self.theme.dark_mode {
+                    Color32::from_rgb(236, 240, 246)
+                } else {
+                    Color32::from_rgb(28, 32, 40)
+                };
+                let notch_stroke = Stroke::new(
+                    1.0_f32,
+                    if self.theme.dark_mode {
+                        Color32::from_rgb(20, 22, 26)
+                    } else {
+                        Color32::from_rgb(245, 246, 250)
+                    },
+                );
+                let draw_notch = |cx: f32, half_w: f32, nh: f32| {
+                    let y_top = r.top() + 0.5;
+                    painter.add(Shape::convex_polygon(
+                        vec![
+                            pos2(cx - half_w, y_top),
+                            pos2(cx + half_w, y_top),
+                            pos2(cx, y_top + nh),
+                        ],
+                        notch_fill,
+                        notch_stroke,
+                    ));
+                };
+                for t_notch in interior_notches {
+                    let nx = self.tl.t2x(t_notch, left);
+                    if nx > r.left() + 4.0 && nx < r.right() - 4.0 {
+                        draw_notch(nx, 4.5, 6.5);
                     }
-                    if dragging_gain {
-                        let g = painter.layout_no_wrap(
-                            format!("{:+.1} dB", e.gain_db),
-                            FontId::monospace(10.0),
-                            self.theme.text_primary,
-                        );
-                        let bg = Rect::from_center_size(
-                            pos2((x0 + x1) * 0.5, (gy - 12.0).max(r.top() + 8.0)),
-                            g.size() + vec2(8.0, 4.0),
-                        );
-                        painter.rect_filled(bg, 2.0, self.theme.extreme_bg);
-                        painter.rect_stroke(
-                            bg,
-                            2.0,
-                            Stroke::new(1.0_f32, self.theme.border),
-                            StrokeKind::Inside,
-                        );
-                        painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
+                }
+                if r.width() >= 22.0 {
+                    if at_start && e.fade_in.len <= Ticks::ZERO {
+                        let y_top = r.top() + 0.5;
+                        painter.add(Shape::convex_polygon(
+                            vec![
+                                pos2(r.left() + 1.0, y_top),
+                                pos2(r.left() + 7.5, y_top),
+                                pos2(r.left() + 1.0, y_top + 6.0),
+                            ],
+                            notch_fill,
+                            notch_stroke,
+                        ));
+                    }
+                    if at_end && e.fade_out.len <= Ticks::ZERO {
+                        let y_top = r.top() + 0.5;
+                        painter.add(Shape::convex_polygon(
+                            vec![
+                                pos2(r.right() - 7.5, y_top),
+                                pos2(r.right() - 1.0, y_top),
+                                pos2(r.right() - 1.0, y_top + 6.0),
+                            ],
+                            notch_fill,
+                            notch_stroke,
+                        ));
+                    }
+                }
+                // Barra grossa de ganho (áudio) ou opacidade/nível (vídeo) no evento
+                let pointer_pos = ui.ctx().pointer_hover_pos();
+                if r.width() > 24.0 && r.height() >= 18.0 {
+                    let x0 = (fi_x + 5.0).min(r.right() - 5.0);
+                    let x1 = (fo_x - 5.0).max(x0);
+                    if x1 > x0 + 4.0 {
+                        let backing_col = if self.theme.dark_mode {
+                            Color32::from_rgba_unmultiplied(10, 12, 16, 200)
+                        } else {
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 210)
+                        };
+                        if track.kind == TrackKind::Audio {
+                            let gy = Self::gain_handle_y(r, e.gain_db);
+                            let dragging_gain =
+                                matches!(self.tl.drag, Drag::Gain { id, .. } if id == e.id);
+                            let hovering_gain = pointer_pos.is_some_and(|hp| {
+                                (hp.y - gy).abs() <= 7.5 && hp.x >= x0 && hp.x <= x1
+                            });
+                            let thick = if dragging_gain || hovering_gain {
+                                4.5_f32
+                            } else {
+                                3.0_f32
+                            };
+                            painter.line_segment(
+                                [pos2(x0, gy), pos2(x1, gy)],
+                                Stroke::new(thick + 2.0, backing_col),
+                            );
+                            painter.line_segment(
+                                [pos2(x0, gy), pos2(x1, gy)],
+                                Stroke::new(thick, self.theme.tl_gain_line),
+                            );
+                            if dragging_gain || hovering_gain || e.gain_db.abs() > 0.05 {
+                                painter.rect_filled(
+                                    Rect::from_center_size(
+                                        pos2((x0 + x1) * 0.5, gy),
+                                        vec2(18.0, 5.5),
+                                    ),
+                                    2.5,
+                                    self.theme.tl_gain_line,
+                                );
+                            }
+                            if dragging_gain || hovering_gain {
+                                let g = painter.layout_no_wrap(
+                                    format!("{:+.1} dB", e.gain_db),
+                                    FontId::monospace(10.0),
+                                    self.theme.text_primary,
+                                );
+                                let bg = Rect::from_center_size(
+                                    pos2((x0 + x1) * 0.5, (gy + 14.0).min(r.bottom() - 9.0)),
+                                    g.size() + vec2(8.0, 4.0),
+                                );
+                                painter.rect_filled(bg, 2.0, self.theme.extreme_bg);
+                                painter.rect_stroke(
+                                    bg,
+                                    2.0,
+                                    Stroke::new(1.0_f32, self.theme.border),
+                                    StrokeKind::Inside,
+                                );
+                                painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
+                            }
+                        } else if track.kind == TrackKind::Video {
+                            let oy = Self::opacity_handle_y(r, e.opacity);
+                            let dragging_op =
+                                matches!(self.tl.drag, Drag::Opacity { id, .. } if id == e.id);
+                            let hovering_op = pointer_pos.is_some_and(|hp| {
+                                (hp.y - oy).abs() <= 7.5 && hp.x >= x0 && hp.x <= x1
+                            });
+                            let op_col = if self.theme.dark_mode {
+                                Color32::from_rgb(95, 185, 255)
+                            } else {
+                                Color32::from_rgb(20, 105, 205)
+                            };
+                            let thick = if dragging_op || hovering_op {
+                                4.5_f32
+                            } else {
+                                3.0_f32
+                            };
+                            painter.line_segment(
+                                [pos2(x0, oy), pos2(x1, oy)],
+                                Stroke::new(thick + 2.0, backing_col),
+                            );
+                            painter.line_segment(
+                                [pos2(x0, oy), pos2(x1, oy)],
+                                Stroke::new(thick, op_col),
+                            );
+                            if dragging_op || hovering_op || (1.0 - e.opacity).abs() > 0.005 {
+                                painter.rect_filled(
+                                    Rect::from_center_size(
+                                        pos2((x0 + x1) * 0.5, oy),
+                                        vec2(18.0, 5.5),
+                                    ),
+                                    2.5,
+                                    op_col,
+                                );
+                            }
+                            if dragging_op || hovering_op {
+                                let pct_str =
+                                    format!("{:.0}", (e.opacity * 100.0).clamp(0.0, 100.0));
+                                let txt =
+                                    tr_args(self.lang(), "Opacidade: {pct}%", &[("pct", &pct_str)]);
+                                let g = painter.layout_no_wrap(
+                                    txt,
+                                    FontId::monospace(10.0),
+                                    self.theme.text_primary,
+                                );
+                                let bg = Rect::from_center_size(
+                                    pos2((x0 + x1) * 0.5, (oy + 14.0).min(r.bottom() - 9.0)),
+                                    g.size() + vec2(8.0, 4.0),
+                                );
+                                painter.rect_filled(bg, 2.0, self.theme.extreme_bg);
+                                painter.rect_stroke(
+                                    bg,
+                                    2.0,
+                                    Stroke::new(1.0_f32, self.theme.border),
+                                    StrokeKind::Inside,
+                                );
+                                painter.galley(bg.min + vec2(4.0, 2.0), g, self.theme.text_primary);
+                            }
+                        }
                     }
                 }
                 let border = if sel {

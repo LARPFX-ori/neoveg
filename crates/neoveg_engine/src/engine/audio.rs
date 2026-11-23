@@ -1974,12 +1974,14 @@ mod tests {
             t: Ticks::ZERO,
             v: 0.25,
             curve: Curve::Linear,
+            smoothness: 0.0,
         }];
         let mut env_pan = Envelope::new(EnvKind::Pan);
         env_pan.points = vec![EnvPoint {
             t: Ticks::ZERO,
             v: -1.0,
             curve: Curve::Linear,
+            smoothness: 0.0,
         }];
         let bus = p.audio_bus_mut(bus_id).expect("bus A");
         bus.envelopes.push(env_vol);

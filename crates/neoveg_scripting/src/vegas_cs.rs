@@ -3342,6 +3342,7 @@ fn script_envelopes(
                 t: script_ticks(p.x, "tempo do ponto de envelope")?,
                 v: (p.y as f32).clamp(lo, hi),
                 curve: curve_from_name(&p.curve)?,
+                smoothness: 0.0,
             });
         }
         points.sort_by_key(|p| p.t);
