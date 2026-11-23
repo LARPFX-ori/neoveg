@@ -1,0 +1,176 @@
+# Geração sob demanda (`workflow_dispatch`) dos pacotes portáteis e instaladores
+# do Neoveg no GitHub Actions (Windows e Linux), sem `target-cpu=native`
+# (AGENTS.md §3.4 item 5 e §3.6).
+#
+# Por quê: permite gerar `dist/` empacotado, instalador próprio e somas SHA-256
+# em ambiente limpo quando o build local está indisponível ou bloqueado por
+# antivírus corporativo, sem alterar os portões de PR em `ci.yml`.
+#
+# Provisório: AGENTS.md (Regras da Casa, regra 11) pede que os workflows chamem
+# `neoveg/common-actions`. Esse repositório ainda não existe; quando existir,
+# troque estes passos pelos workflows reutilizáveis de lá.
+
+name: Pacotes (Portátil e Instalador)
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "Gerar pacote portátil e instalador para Windows (x86_64)"
+        type: boolean
+        default: true
+      linux:
+        description: "Gerar pacote portátil e instalador para Linux (x86_64)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  package-windows:
+    name: Pacote e Instalador (Windows)
+    if: ${{ inputs.windows }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Auditoria de licenças
+        run: python tools/check_licenses.py
+
+      # Usa --keep-target para que o Swatinem/rust-cache aproveite os artefatos
+      # de release; toda auditoria (fontes/arquivos proibidos e SHA-256) continua ativa.
+      - name: Gerar pacote portátil e instalador
+        run: python build_installer.py --keep-target
+
+      - name: Empacotar ZIP portátil e gerar SHA256SUMS.txt
+        shell: python
+        run: |
+          import hashlib, pathlib, struct, tomllib, zipfile
+
+          root = pathlib.Path(".")
+          with (root / "Cargo.toml").open("rb") as f:
+              version = str(tomllib.load(f)["workspace"]["package"]["version"])
+
+          dist = root / "dist"
+          out_dir = root / "dist-installer"
+          setup_exe = out_dir / f"Neoveg-Setup-{version}.exe"
+          portable_zip = out_dir / f"Neoveg-{version}-windows-x86_64-portable.zip"
+          sums_txt = out_dir / "SHA256SUMS.txt"
+
+          with setup_exe.open("rb") as f:
+              f.seek(-16, 2)
+              payload_size, magic = struct.unpack("<Q8s", f.read(16))
+          assert magic == b"NVSETUP1", f"Trailer inválido: {magic!r}"
+          assert payload_size > 1_000_000, f"Payload suspeito: {payload_size}"
+
+          top = f"Neoveg-{version}-portable"
+          with zipfile.ZipFile(portable_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+              for p in sorted(dist.rglob("*")):
+                  rel = p.relative_to(dist)
+                  arc = f"{top}/{rel.as_posix()}"
+                  if p.is_dir():
+                      z.writestr(arc + "/", b"")
+                  else:
+                      z.write(p, arc)
+
+          with zipfile.ZipFile(portable_zip, "r") as z:
+              bad = z.testzip()
+              assert bad is None, f"Entrada corrompida no ZIP: {bad}"
+
+          def sha256(path: pathlib.Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for chunk in iter(lambda: f.read(65536), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          lines = [f"{sha256(a)}  {a.name}" for a in (setup_exe, portable_zip)]
+          sums_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(sums_txt.read_text(encoding="utf-8"))
+
+      - name: Publicar artefatos Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoveg-windows-x86_64
+          path: dist-installer/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package-linux:
+    name: Pacote e Instalador (Linux)
+    if: ${{ inputs.linux }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bibliotecas do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Auditoria de licenças
+        run: python3 tools/check_licenses.py
+
+      - name: Gerar pacote portátil e instalador
+        run: python3 build_installer.py --keep-target
+
+      - name: Gerar SHA256SUMS.txt
+        shell: python
+        run: |
+          import hashlib, pathlib
+
+          out_dir = pathlib.Path("dist-installer")
+          files = sorted(p for p in out_dir.iterdir() if p.is_file() and p.name != "SHA256SUMS.txt")
+          assert files, "Nenhum pacote gerado em dist-installer/"
+
+          def sha256(path: pathlib.Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for chunk in iter(lambda: f.read(65536), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          lines = [f"{sha256(a)}  {a.name}" for a in files]
+          sums_txt = out_dir / "SHA256SUMS.txt"
+          sums_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(sums_txt.read_text(encoding="utf-8"))
+
+      - name: Publicar artefatos Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoveg-linux-x86_64
+          path: dist-installer/*
+          if-no-files-found: error
+          retention-days: 14
