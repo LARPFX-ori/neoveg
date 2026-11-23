@@ -2557,7 +2557,6 @@ fn kittest_pan_crop_grade_de_propriedades_recolhivel() {
         "Área de trabalho",
         "Largura:",
         "Zoom (%):",
-        "Ajustar",
     ] {
         assert!(
             harness.query_by_label(label).is_some(),
@@ -2570,17 +2569,17 @@ fn kittest_pan_crop_grade_de_propriedades_recolhivel() {
         .get_by_label("Largura:")
         .raw_bounds()
         .expect("Largura: deve ter limites");
-    let fit_bounds = harness
-        .get_by_label("Ajustar")
-        .raw_bounds()
-        .expect("botão Ajustar da área de trabalho deve ter limites");
     assert!(
         props_bounds.x0 >= 0.0 && props_bounds.x1 < 700.0,
         "coluna de propriedades fora da área visível: {props_bounds:?}"
     );
+    let has_visible_workspace_fit = harness
+        .query_all_by_label("Ajustar")
+        .filter_map(|n| n.raw_bounds())
+        .any(|b| b.x0 > props_bounds.x1 && b.x1 <= 1500.0 && b.y1 <= 920.0);
     assert!(
-        fit_bounds.x0 > props_bounds.x1 && fit_bounds.x1 <= 1500.0,
-        "área de trabalho de Pan/Crop empurrada para fora da janela: props={props_bounds:?}, fit={fit_bounds:?}"
+        has_visible_workspace_fit,
+        "área de trabalho de Pan/Crop empurrada para fora da janela: props={props_bounds:?}"
     );
     // seção recolhida esconde as linhas dela
     harness.get_by_label("Posição").click();
