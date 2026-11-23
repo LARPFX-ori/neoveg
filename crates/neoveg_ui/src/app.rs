@@ -382,6 +382,10 @@ pub struct App {
     pub(crate) recovery_offer: bool,
     /// Sessões anteriores que não fecharam normalmente (janela de relatório).
     pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
+    /// Descrição opcional digitada pelo usuário no relatório de problema.
+    pub(crate) crash_report_notes: String,
+    /// Se a caixa de detalhes técnicos do relatório de problema está expandida.
+    pub(crate) crash_details_open: bool,
     pub(crate) splash: crate::splash::SplashState,
     /// A janela ainda está no modo tela de abertura (sem bordas, tamanho da abertura).
     pub(crate) startup_window: bool,
@@ -601,6 +605,8 @@ impl App {
             last_autosave: Instant::now(),
             recovery_offer,
             crash_reports: Vec::new(),
+            crash_report_notes: String::new(),
+            crash_details_open: false,
             splash,
             startup_window: false,
             window_fit_frames: 0,

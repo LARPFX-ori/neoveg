@@ -61,6 +61,7 @@ pub use app::{
     App, DndPayload, DockTab, EditLayoutPrefs, FxTarget, LayoutType, PlaybackScrollMode,
     Preferences, PreviewQuality, RenderJob, TimelineMouseScroll, TimelineState,
 };
+pub use crash_report::run_crash_dialog;
 pub use neoveg_engine::{media, model, playback, recovery, render, session, util};
 
 use eframe::egui;
@@ -121,12 +122,28 @@ pub fn run_gui(
     run_gui_in(open, crash_reports, None)
 }
 
+struct GuiActiveGuard;
+
+impl GuiActiveGuard {
+    fn enter() -> Self {
+        util::set_gui_active(true);
+        Self
+    }
+}
+
+impl Drop for GuiActiveGuard {
+    fn drop(&mut self) {
+        util::set_gui_active(false);
+    }
+}
+
 /// Versão de [`run_gui`] com idioma inicial explícito (por exemplo `--lang` na CLI).
 pub fn run_gui_in(
     open: Option<PathBuf>,
     crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
     initial_lang: Option<neoveg_common::Language>,
 ) -> eframe::Result<()> {
+    let _gui_guard = GuiActiveGuard::enter();
     let open_wgpu = open.clone();
     let crash_wgpu = crash_reports.clone();
     let splash_window = Preferences::load_or_default().show_splash;

@@ -65,6 +65,9 @@ impl Frame {
     /// Amostragem bilinear (coordenadas em pixels, centro do pixel em +0.5).
     #[inline]
     pub fn sample(&self, x: f32, y: f32) -> [f32; 4] {
+        if self.w == 0 || self.h == 0 || !x.is_finite() || !y.is_finite() {
+            return [0.0; 4];
+        }
         let fx = x - 0.5;
         let fy = y - 0.5;
         let x0 = fx.floor();
@@ -72,10 +75,12 @@ impl Frame {
         let ax = fx - x0;
         let ay = fy - y0;
         let (x0, y0) = (x0 as isize, y0 as isize);
+        let x1 = x0.saturating_add(1);
+        let y1 = y0.saturating_add(1);
         let p00 = self.get(x0, y0);
-        let p10 = self.get(x0 + 1, y0);
-        let p01 = self.get(x0, y0 + 1);
-        let p11 = self.get(x0 + 1, y0 + 1);
+        let p10 = self.get(x1, y0);
+        let p01 = self.get(x0, y1);
+        let p11 = self.get(x1, y1);
         let mut o = [0.0; 4];
         for k in 0..4 {
             let a = p00[k] + (p10[k] - p00[k]) * ax;

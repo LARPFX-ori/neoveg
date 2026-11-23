@@ -753,6 +753,14 @@ fn kittest_crash_report_janela_e_acoes() {
     assert!(harness
         .query_by_label_contains("Erros internos isolados nesta sessão (1)")
         .is_some());
+    assert!(harness
+        .query_by_label("Mostrar detalhes do problema")
+        .is_some());
+    harness.get_by_label("Mostrar detalhes do problema").click();
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("Ocultar detalhes do problema")
+        .is_some());
 
     harness.get_by_label("Copiar relatório").click();
     harness.run_steps(2);
@@ -2555,6 +2563,24 @@ fn kittest_pan_crop_grade_de_propriedades_recolhivel() {
             "falta '{label}' na janela Pan/Crop"
         );
     }
+    // Regressão: a barra vertical esquerda não pode expandir com `ui.separator()`
+    // e empurrar as propriedades nem a área de trabalho para fora da janela.
+    let props_bounds = harness
+        .get_by_label("Largura:")
+        .raw_bounds()
+        .expect("Largura: deve ter limites");
+    assert!(
+        props_bounds.x0 >= 0.0 && props_bounds.x1 < 700.0,
+        "coluna de propriedades fora da área visível: {props_bounds:?}"
+    );
+    let has_visible_workspace_fit = harness
+        .query_all_by_label("Ajustar")
+        .filter_map(|n| n.raw_bounds())
+        .any(|b| b.x0 > props_bounds.x1 && b.x1 <= 1500.0 && b.y1 <= 920.0);
+    assert!(
+        has_visible_workspace_fit,
+        "área de trabalho de Pan/Crop empurrada para fora da janela: props={props_bounds:?}"
+    );
     // seção recolhida esconde as linhas dela
     harness.get_by_label("Posição").click();
     harness.run_steps(2);

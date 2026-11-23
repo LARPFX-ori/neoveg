@@ -242,13 +242,17 @@ impl BoxGeom {
             return *self;
         }
         let delta = (b.y.atan2(b.x) - a.y.atan2(a.x)).to_degrees();
-        let mut rot = self.rot_deg + delta;
-        while rot > 180.0 {
-            rot -= 360.0;
-        }
-        while rot < -180.0 {
-            rot += 360.0;
-        }
+        let raw = self.rot_deg + delta;
+        let rot = if raw.is_finite() {
+            let wrapped = (raw + 180.0).rem_euclid(360.0) - 180.0;
+            if wrapped <= -180.0 && raw > 0.0 {
+                180.0
+            } else {
+                wrapped
+            }
+        } else {
+            self.rot_deg
+        };
         BoxGeom {
             rot_deg: finite_or(rot, self.rot_deg),
             ..*self
@@ -413,5 +417,21 @@ mod tests {
         assert!(g.center.x.is_finite() && g.half.x.is_finite() && g.rot_deg.is_finite());
         let back = g.to_key(&hostil, F);
         assert!(back.cx.is_finite() && back.size.is_finite());
+
+        // Ângulo extremo ou não finito não pode travar o laço de normalização (§0.5)
+        for bad_rot in [
+            1e30_f32,
+            -1e30_f32,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            let mut g_bad = BoxGeom::from_key(&PanCropKey::default(), F);
+            g_bad.rot_deg = bad_rot;
+            let r = g_bad.rotate(vec2(1960.0, 540.0), vec2(960.0, 1540.0));
+            if bad_rot.is_finite() {
+                assert!(r.rot_deg.is_finite() && (-180.0..=180.0).contains(&r.rot_deg));
+            }
+        }
     }
 }

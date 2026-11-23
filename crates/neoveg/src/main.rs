@@ -43,6 +43,7 @@ enum Cli {
         out: Option<PathBuf>,
     },
     ProbeIntegrations,
+    CrashDialog(PathBuf),
 }
 
 fn help_text(lang: Language) -> &'static str {
@@ -111,6 +112,7 @@ fn parse_args_in(args: &[String], fallback: Language) -> Result<(Option<Language
         ["-h"] | ["--help"] | ["/?"] => Cli::Help,
         ["--list-commands"] => Cli::ListCommands,
         ["--probe-integrations"] => Cli::ProbeIntegrations,
+        ["--crash-dialog", p] => Cli::CrashDialog(PathBuf::from(p)),
         ["--open", p] | [p] if !p.starts_with('-') => Cli::Gui(Some(PathBuf::from(p))),
         ["--render", proj, out] => Cli::Render {
             proj: PathBuf::from(proj),
@@ -466,6 +468,15 @@ fn main() -> anyhow::Result<()> {
             let rep = neoveg_engine::integrations::discovery::discover_all(&p.external_apps, true);
             std::process::exit(print_probe(Ok(rep)));
         }
+        Cli::CrashDialog(payload_path) => {
+            // Mostra a janela de erro em processo separado sem criar marcador
+            // de sessão nem acionar novo diálogo de erro em cascata.
+            if let Err(e) = neoveg_ui::run_crash_dialog(&payload_path, explicit_lang) {
+                eprintln!("Neoveg: falha ao abrir janela de relatório de erro: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         Cli::Gui(p) => p,
     };
 
@@ -543,6 +554,10 @@ mod tests {
         assert_eq!(
             parse_args(&a(&["neoveg", "--probe-integrations"])),
             Ok(Cli::ProbeIntegrations)
+        );
+        assert_eq!(
+            parse_args(&a(&["neoveg", "--crash-dialog", "logs/ultimo_crash.json"])),
+            Ok(Cli::CrashDialog(PathBuf::from("logs/ultimo_crash.json")))
         );
         assert!(parse_args(&a(&["neoveg", "--render"])).is_err());
         assert!(parse_args(&a(&["neoveg", "--xyz", "1", "2", "3", "4"])).is_err());

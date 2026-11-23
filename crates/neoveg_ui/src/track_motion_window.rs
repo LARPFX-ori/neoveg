@@ -368,7 +368,7 @@ impl App {
                 ui.label(tr(lang, "Predefinição:"));
                 let sel = PRESETS.get(st.preset).copied().unwrap_or(PRESETS[0]);
                 egui::ComboBox::from_id_salt("tm_preset")
-                    .width(ui.available_width() - 8.0)
+                    .width((ui.available_width() - 8.0).max(120.0))
                     .selected_text(tr(lang, sel))
                     .show_ui(ui, |ui| {
                         for (i, p) in PRESETS.iter().enumerate() {
@@ -417,7 +417,7 @@ impl App {
                                 });
                         },
                     );
-                    let canvas = vec2(ui.available_width(), top_h);
+                    let canvas = vec2(ui.available_width().max(64.0), top_h.max(64.0));
                     let edited = if is_3d {
                         self.tm_workspace_3d(ui, canvas, &cur, frame, &mut st, &mut actions, lang)
                     } else {

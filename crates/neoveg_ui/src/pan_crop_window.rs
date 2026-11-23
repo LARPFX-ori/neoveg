@@ -345,7 +345,7 @@ impl App {
             let top_w = ui.available_width();
             ui.allocate_ui(vec2(top_w, top_h), |ui| {
                 ui.horizontal_top(|ui| {
-                    self.pc_toolbar(ui, &mut st, lang);
+                    self.pc_toolbar(ui, top_h, &mut st, lang);
                     if st.show_props {
                         // coluna das propriedades: layout vertical explícito; herdando o
                         // horizontal do pai, as seções saíam lado a lado e se sobrepunham
@@ -376,7 +376,7 @@ impl App {
                             },
                         );
                     }
-                    let canvas = vec2(ui.available_width(), top_h);
+                    let canvas = vec2(ui.available_width().max(120.0), top_h.max(64.0));
                     if let Some(k) = self.pc_workspace(
                         ui,
                         canvas,
@@ -559,150 +559,168 @@ impl App {
     }
 
     /// Barra de ferramentas vertical (manual do VEGAS Pro 21, pp. 250–251).
-    fn pc_toolbar(&self, ui: &mut egui::Ui, st: &mut PanCropUi, lang: Language) {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let th = &self.theme;
-            if icons::icon_button(ui, Icon::GearProps, None, st.show_props, true, th)
-                .on_hover_text(tr(lang, "Mostrar propriedades"))
-                .clicked()
-            {
-                st.show_props = !st.show_props;
-            }
-            if icons::icon_button(
-                ui,
-                Icon::NormalTool,
-                None,
-                st.tool == PcTool::Normal,
-                true,
-                th,
-            )
-            .on_hover_text(tr(lang, "Ferramenta de edição normal"))
-            .clicked()
-            {
-                st.tool = PcTool::Normal;
-            }
-            if icons::icon_button(ui, Icon::ZoomGlass, None, st.tool == PcTool::Zoom, true, th)
-                .on_hover_text(tr(
-                    lang,
-                    "Ferramenta de zoom (clique amplia, botão direito reduz)",
-                ))
-                .clicked()
-            {
-                st.tool = PcTool::Zoom;
-            }
-            if icons::icon_button(ui, Icon::MagnetSnap, None, st.snap, true, th)
-                .on_hover_text(tr(lang, "Encaixar na grade"))
-                .clicked()
-            {
-                st.snap = !st.snap;
-            }
-            if icons::icon_button(ui, Icon::LockClosed, None, st.lock_aspect, true, th)
-                .on_hover_text(tr(lang, "Travar proporção"))
-                .clicked()
-            {
-                st.lock_aspect = !st.lock_aspect;
-            }
-            if icons::icon_button(ui, Icon::ScaleAboutCenter, None, st.about_center, true, th)
-                .on_hover_text(tr(lang, "Dimensionar em torno do centro"))
-                .clicked()
-            {
-                st.about_center = !st.about_center;
-            }
-            let (icon, tip, next) = match st.move_mode {
-                MoveMode::Free => (Icon::MoveFree, "Mover livremente", MoveMode::XOnly),
-                MoveMode::XOnly => (Icon::MoveXOnly, "Mover só em X", MoveMode::YOnly),
-                MoveMode::YOnly => (Icon::MoveYOnly, "Mover só em Y", MoveMode::Free),
-            };
-            if icons::icon_button(ui, icon, None, false, true, th)
-                .on_hover_text(tr(lang, tip))
-                .clicked()
-            {
-                st.move_mode = next;
-            }
-            if st.mask_mode {
-                ui.separator();
-                if icons::icon_button(
-                    ui,
-                    Icon::TrackMask,
-                    None,
-                    st.tool == PcTool::Normal && st.mask_tool == MaskTool::Normal,
-                    true,
-                    th,
-                )
-                .on_hover_text(tr(
-                    lang,
-                    "Máscara: selecionar e mover vértices, tangentes ou a máscara inteira",
-                ))
-                .clicked()
+    /// Largura fixa de 34 px para que separadores internos nunca expandam a
+    /// coluna sobre as propriedades e a área de trabalho.
+    fn pc_toolbar(&self, ui: &mut egui::Ui, height: f32, st: &mut PanCropUi, lang: Language) {
+        let th = &self.theme;
+        let paint_bar_sep = |ui: &mut egui::Ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(24.0, 6.0), Sense::hover());
+            ui.painter().line_segment(
+                [
+                    pos2(r.left() + 2.0, r.center().y),
+                    pos2(r.right() - 2.0, r.center().y),
+                ],
+                Stroke::new(1.0_f32, th.border),
+            );
+        };
+        ui.allocate_ui_with_layout(
+            vec2(34.0, height.max(64.0)),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_width(34.0);
+                ui.set_max_width(34.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if icons::icon_button(ui, Icon::GearProps, None, st.show_props, true, th)
+                    .on_hover_text(tr(lang, "Mostrar propriedades"))
+                    .clicked()
                 {
-                    st.tool = PcTool::Normal;
-                    st.mask_tool = MaskTool::Normal;
+                    st.show_props = !st.show_props;
                 }
                 if icons::icon_button(
                     ui,
-                    Icon::InsertMarker,
+                    Icon::NormalTool,
                     None,
-                    st.tool == PcTool::Normal && st.mask_tool == MaskTool::AddAnchor,
+                    st.tool == PcTool::Normal,
                     true,
                     th,
                 )
-                .on_hover_text(tr(
-                    lang,
-                    "Máscara: criar âncora (clique na borda ou arraste para curvar)",
-                ))
+                .on_hover_text(tr(lang, "Ferramenta de edição normal"))
                 .clicked()
                 {
                     st.tool = PcTool::Normal;
-                    st.mask_tool = MaskTool::AddAnchor;
                 }
-                if icons::icon_button(
-                    ui,
-                    Icon::KeyframeDelete,
-                    None,
-                    st.tool == PcTool::Normal && st.mask_tool == MaskTool::DelAnchor,
-                    true,
-                    th,
-                )
-                .on_hover_text(tr(lang, "Máscara: excluir âncora"))
-                .clicked()
+                if icons::icon_button(ui, Icon::ZoomGlass, None, st.tool == PcTool::Zoom, true, th)
+                    .on_hover_text(tr(
+                        lang,
+                        "Ferramenta de zoom (clique amplia, botão direito reduz)",
+                    ))
+                    .clicked()
                 {
-                    st.tool = PcTool::Normal;
-                    st.mask_tool = MaskTool::DelAnchor;
+                    st.tool = PcTool::Zoom;
                 }
-                if icons::icon_button(
-                    ui,
-                    Icon::Envelopes,
-                    None,
-                    st.tool == PcTool::Normal && st.mask_tool == MaskTool::SplitTangent,
-                    true,
-                    th,
-                )
-                .on_hover_text(tr(lang, "Máscara: alternar tangente suave/canto"))
-                .clicked()
+                if icons::icon_button(ui, Icon::MagnetSnap, None, st.snap, true, th)
+                    .on_hover_text(tr(lang, "Encaixar na grade"))
+                    .clicked()
                 {
-                    st.tool = PcTool::Normal;
-                    st.mask_tool = MaskTool::SplitTangent;
+                    st.snap = !st.snap;
                 }
-            }
-            ui.separator();
-            if ui
-                .small_button("+")
-                .on_hover_text(tr(lang, "Ampliar zoom"))
-                .clicked()
-            {
-                st.ws.zoom_pct =
-                    (st.ws.zoom_pct * 1.25).clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
-            }
-            if ui
-                .small_button("−")
-                .on_hover_text(tr(lang, "Reduzir zoom"))
-                .clicked()
-            {
-                st.ws.zoom_pct =
-                    (st.ws.zoom_pct * 0.8).clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
-            }
-        });
+                if icons::icon_button(ui, Icon::LockClosed, None, st.lock_aspect, true, th)
+                    .on_hover_text(tr(lang, "Travar proporção"))
+                    .clicked()
+                {
+                    st.lock_aspect = !st.lock_aspect;
+                }
+                if icons::icon_button(ui, Icon::ScaleAboutCenter, None, st.about_center, true, th)
+                    .on_hover_text(tr(lang, "Dimensionar em torno do centro"))
+                    .clicked()
+                {
+                    st.about_center = !st.about_center;
+                }
+                let (icon, tip, next) = match st.move_mode {
+                    MoveMode::Free => (Icon::MoveFree, "Mover livremente", MoveMode::XOnly),
+                    MoveMode::XOnly => (Icon::MoveXOnly, "Mover só em X", MoveMode::YOnly),
+                    MoveMode::YOnly => (Icon::MoveYOnly, "Mover só em Y", MoveMode::Free),
+                };
+                if icons::icon_button(ui, icon, None, false, true, th)
+                    .on_hover_text(tr(lang, tip))
+                    .clicked()
+                {
+                    st.move_mode = next;
+                }
+                if st.mask_mode {
+                    paint_bar_sep(ui);
+                    if icons::icon_button(
+                        ui,
+                        Icon::TrackMask,
+                        None,
+                        st.tool == PcTool::Normal && st.mask_tool == MaskTool::Normal,
+                        true,
+                        th,
+                    )
+                    .on_hover_text(tr(
+                        lang,
+                        "Máscara: selecionar e mover vértices, tangentes ou a máscara inteira",
+                    ))
+                    .clicked()
+                    {
+                        st.tool = PcTool::Normal;
+                        st.mask_tool = MaskTool::Normal;
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Icon::InsertMarker,
+                        None,
+                        st.tool == PcTool::Normal && st.mask_tool == MaskTool::AddAnchor,
+                        true,
+                        th,
+                    )
+                    .on_hover_text(tr(
+                        lang,
+                        "Máscara: criar âncora (clique na borda ou arraste para curvar)",
+                    ))
+                    .clicked()
+                    {
+                        st.tool = PcTool::Normal;
+                        st.mask_tool = MaskTool::AddAnchor;
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Icon::KeyframeDelete,
+                        None,
+                        st.tool == PcTool::Normal && st.mask_tool == MaskTool::DelAnchor,
+                        true,
+                        th,
+                    )
+                    .on_hover_text(tr(lang, "Máscara: excluir âncora"))
+                    .clicked()
+                    {
+                        st.tool = PcTool::Normal;
+                        st.mask_tool = MaskTool::DelAnchor;
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Icon::Envelopes,
+                        None,
+                        st.tool == PcTool::Normal && st.mask_tool == MaskTool::SplitTangent,
+                        true,
+                        th,
+                    )
+                    .on_hover_text(tr(lang, "Máscara: alternar tangente suave/canto"))
+                    .clicked()
+                    {
+                        st.tool = PcTool::Normal;
+                        st.mask_tool = MaskTool::SplitTangent;
+                    }
+                }
+                paint_bar_sep(ui);
+                if ui
+                    .small_button("+")
+                    .on_hover_text(tr(lang, "Ampliar zoom"))
+                    .clicked()
+                {
+                    st.ws.zoom_pct = (st.ws.zoom_pct * 1.25)
+                        .clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
+                }
+                if ui
+                    .small_button("−")
+                    .on_hover_text(tr(lang, "Reduzir zoom"))
+                    .clicked()
+                {
+                    st.ws.zoom_pct = (st.ws.zoom_pct * 0.8)
+                        .clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
+                }
+            },
+        );
     }
 
     /// Grade de propriedades. Devolve o quadro-chave editado, se houver.

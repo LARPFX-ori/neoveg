@@ -266,16 +266,24 @@ impl Workspace {
         }
         let tl = self.to_frame(area, frame, area.left_top());
         let br = self.to_frame(area, frame, area.right_bottom());
-        let x0 = (tl.x / step).floor() as i64;
-        let x1 = (br.x / step).ceil() as i64;
-        let y0 = (tl.y / step).floor() as i64;
-        let y1 = (br.y / step).ceil() as i64;
-        if (x1 - x0) < 400 && (y1 - y0) < 400 {
-            for gy in y0..=y1 {
-                for gx in x0..=x1 {
-                    let s = self.to_screen(area, frame, vec2(gx as f32 * step, gy as f32 * step));
-                    if area.contains(s) {
-                        painter.rect_filled(Rect::from_min_size(s, vec2(1.0, 1.0)), 0.0, dot);
+        if tl.x.is_finite()
+            && tl.y.is_finite()
+            && br.x.is_finite()
+            && br.y.is_finite()
+            && step > 0.0
+        {
+            let x0 = (tl.x / step).floor() as i64;
+            let x1 = (br.x / step).ceil() as i64;
+            let y0 = (tl.y / step).floor() as i64;
+            let y1 = (br.y / step).ceil() as i64;
+            if x1 >= x0 && y1 >= y0 && x1.saturating_sub(x0) < 400 && y1.saturating_sub(y0) < 400 {
+                for gy in y0..=y1 {
+                    for gx in x0..=x1 {
+                        let s =
+                            self.to_screen(area, frame, vec2(gx as f32 * step, gy as f32 * step));
+                        if area.contains(s) {
+                            painter.rect_filled(Rect::from_min_size(s, vec2(1.0, 1.0)), 0.0, dot);
+                        }
                     }
                 }
             }
@@ -305,6 +313,11 @@ pub(crate) fn handle_workspace_wheel_and_zoom(
     ws: &mut Workspace,
 ) {
     if resp.hovered() {
+        // Lê `wants_keyboard_input()` FORA de `ui.input(...)`: `ui.input` mantém
+        // um read-lock em `ContextImpl` (`parking_lot::RwLock`) e um segundo
+        // read-lock aninhado causa deadlock quando a thread de prévia chama
+        // `ctx.request_repaint()` concorrentemente (AGENTS.md §0).
+        let wants_kb = !ui.ctx().wants_keyboard_input();
         let (scroll, pinch, plus, minus) = ui.input(|i| {
             let sy = if i.raw_scroll_delta.y.abs() > 0.0 {
                 i.raw_scroll_delta.y
@@ -312,7 +325,6 @@ pub(crate) fn handle_workspace_wheel_and_zoom(
                 i.smooth_scroll_delta.y
             };
             let p = i.zoom_delta();
-            let wants_kb = !ui.ctx().wants_keyboard_input();
             let plus =
                 wants_kb && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals));
             let minus = wants_kb && i.key_pressed(egui::Key::Minus);
@@ -541,17 +553,23 @@ pub(crate) fn keyframe_strip(
     let empty = Rect::from_min_max(pos2(lanes.left(), rows_bottom), lanes.max);
     let cell = 6.0;
     let c1 = theme.widget_bg;
-    let mut yy = empty.top();
-    let mut odd_row = false;
-    while yy < empty.bottom() {
-        let mut xx = empty.left() + if odd_row { cell } else { 0.0 };
-        while xx < empty.right() {
-            let r = Rect::from_min_size(pos2(xx, yy), vec2(cell, cell)).intersect(empty);
-            p.rect_filled(r, 0.0, c1);
-            xx += cell * 2.0;
+    if empty.is_positive() && empty.width().is_finite() && empty.height().is_finite() {
+        let mut yy = empty.top();
+        let mut odd_row = false;
+        let mut row_guard = 0usize;
+        while yy < empty.bottom() && row_guard < 400 {
+            let mut xx = empty.left() + if odd_row { cell } else { 0.0 };
+            let mut col_guard = 0usize;
+            while xx < empty.right() && col_guard < 800 {
+                let r = Rect::from_min_size(pos2(xx, yy), vec2(cell, cell)).intersect(empty);
+                p.rect_filled(r, 0.0, c1);
+                xx += cell * 2.0;
+                col_guard += 1;
+            }
+            yy += cell;
+            odd_row = !odd_row;
+            row_guard += 1;
         }
-        yy += cell;
-        odd_row = !odd_row;
     }
     let x_of = |t: Ticks| lanes.left() + t.fraction_in(Ticks::ZERO, len) * lanes.width();
     let t_of = |x: f32| -> Ticks {
@@ -876,5 +894,60 @@ mod tests {
         assert!(ruler_step_secs(10.0, 900.0) <= ruler_step_secs(600.0, 900.0));
         assert!(ruler_step_secs(0.0, 0.0) > 0.0);
         assert!(ruler_step_secs(1e9, 900.0) > 0.0);
+    }
+
+    #[test]
+    fn handle_workspace_wheel_and_zoom_nao_trava_com_repaint_concorrente() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        use std::time::Duration;
+
+        let ctx = egui::Context::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_bg = stop.clone();
+        let ctx_bg = ctx.clone();
+        // Simula o worker da prévia de vídeo chamando `request_repaint()` enquanto
+        // a janela Movimento da Trilha / Pan/Crop está sob o ponteiro do mouse.
+        let bg = std::thread::spawn(move || {
+            while !stop_bg.load(Ordering::Relaxed) {
+                ctx_bg.request_repaint();
+                std::thread::yield_now();
+            }
+        });
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let ctx_ui = ctx.clone();
+        let ui_thread = std::thread::spawn(move || {
+            let mut ws = Workspace::default();
+            let frame = vec2(1920.0, 1080.0);
+            for _ in 0..80 {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
+                    ..Default::default()
+                };
+                input
+                    .events
+                    .push(egui::Event::PointerMoved(pos2(200.0, 200.0)));
+                let _ = ctx_ui.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let (area, resp) =
+                            ui.allocate_exact_size(vec2(500.0, 400.0), Sense::click_and_drag());
+                        handle_workspace_wheel_and_zoom(ui, &resp, area, frame, &mut ws);
+                    });
+                });
+            }
+            let _ = done_tx.send(());
+        });
+
+        let finished = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        stop.store(true, Ordering::Relaxed);
+        let _ = bg.join();
+        assert!(
+            finished,
+            "handle_workspace_wheel_and_zoom entrou em deadlock sob request_repaint concorrente"
+        );
+        let _ = ui_thread.join();
     }
 }

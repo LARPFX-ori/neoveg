@@ -150,6 +150,9 @@ fn motion_2d_is_identity(m: &MotionKey) -> bool {
 /// Aplica Track Motion 2D (posição, escala, pivô e rotação + orientação Z) a uma camada.
 fn apply_motion(f: &Frame, m: &MotionKey) -> Frame {
     let (w, h) = (f.w, f.h);
+    if w == 0 || h == 0 {
+        return f.clone();
+    }
     let (wf, hf) = (w as f32, h as f32);
     let angle = if (m.rot + m.orient_z).is_finite() {
         m.rot + m.orient_z
@@ -1715,5 +1718,29 @@ mod pan_crop_tests {
             center[2] > 0.9 && center[0] < 0.1,
             "trilha 3D mais próxima deve ficar à frente: {center:?}"
         );
+    }
+
+    #[test]
+    fn apply_motion_quadro_vazio_e_parametros_hostis_nao_entram_em_panico() {
+        let empty = Frame::new(0, 0);
+        let hostile = MotionKey {
+            x: f32::NAN,
+            y: f32::INFINITY,
+            z: f32::NEG_INFINITY,
+            scale_x: 0.0,
+            scale_y: f32::NAN,
+            rot: f32::INFINITY,
+            orient_z: f32::NAN,
+            pivot_x: f32::INFINITY,
+            pivot_y: f32::NAN,
+            ..MotionKey::default()
+        };
+        let out_empty = apply_motion(&empty, &hostile);
+        assert_eq!(out_empty.w, 0);
+        assert_eq!(out_empty.h, 0);
+
+        let small = Frame::filled(8, 8, [0.5, 0.2, 0.8, 1.0]);
+        let out_small = apply_motion(&small, &hostile);
+        assert_eq!(out_small.px.len(), 64);
     }
 }
