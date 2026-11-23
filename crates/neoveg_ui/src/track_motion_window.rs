@@ -389,10 +389,10 @@ impl App {
                     // coluna das propriedades: layout vertical explícito; herdando o
                     // horizontal do pai, as seções saíam lado a lado e se sobrepunham
                     ui.allocate_ui_with_layout(
-                        vec2(230.0, top_h),
+                        vec2(256.0, top_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.set_width(230.0);
+                            ui.set_width(256.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("tm_props")
                                 .auto_shrink([false, false])
@@ -639,6 +639,50 @@ impl App {
                 &mut st.prevent_scale_y,
                 "Impedir dimensionar (Y)",
             );
+            ui.separator();
+            if ui
+                .small_button("−")
+                .on_hover_text(tr(lang, "Reduzir zoom"))
+                .clicked()
+            {
+                if is_3d {
+                    for v in &mut st.views {
+                        v.zoom_pct = (v.zoom_pct * 0.8)
+                            .clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
+                    }
+                } else {
+                    st.ws.zoom_pct = (st.ws.zoom_pct * 0.8)
+                        .clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
+                }
+            }
+            if ui
+                .small_button("+")
+                .on_hover_text(tr(lang, "Ampliar zoom"))
+                .clicked()
+            {
+                if is_3d {
+                    for v in &mut st.views {
+                        v.zoom_pct = (v.zoom_pct * 1.25)
+                            .clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
+                    }
+                } else {
+                    st.ws.zoom_pct = (st.ws.zoom_pct * 1.25)
+                        .clamp(kf_window::WS_MIN_ZOOM, kf_window::WS_MAX_ZOOM);
+                }
+            }
+            if ui
+                .small_button(tr(lang, "Ajustar"))
+                .on_hover_text(tr(lang, "Ajustar a área de trabalho ao quadro"))
+                .clicked()
+            {
+                if is_3d {
+                    for v in &mut st.views {
+                        v.fitted = false;
+                    }
+                } else {
+                    st.ws.fitted = false;
+                }
+            }
             if has_children {
                 ui.separator();
                 ui.selectable_value(&mut st.parent_mode, false, tr(lang, "Movimento da trilha"));
@@ -1064,10 +1108,51 @@ impl App {
             Stroke::new(stroke_w, frame_stroke_col),
             egui::StrokeKind::Middle,
         );
-        // camada: retângulo, círculo, pivô e eixos X/Y do objeto
+        // camada: retângulo, alças de redimensionamento, círculo, pivô e eixos X/Y do objeto
         let g = motion_to_geom(cur, frame);
+        let tol = ws.frame_len(13.0);
+        let ptr_screen = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
+        let ptr_frame = ptr_screen.map(|p| ws.to_frame(rect, frame, p));
+        let active_hit = st
+            .drag
+            .map(|d| d.hit)
+            .or_else(|| ptr_frame.map(|p| g.hit(p, tol)));
         let corners: Vec<Pos2> = g.corners().iter().map(|p| sc(*p)).collect();
-        painter.add(egui::Shape::closed_line(corners, thin));
+        painter.add(egui::Shape::closed_line(corners.clone(), thin));
+        if let Some(Hit::Handle(h_idx @ (1 | 3 | 5 | 7))) = active_hit {
+            let (a, b) = match h_idx {
+                1 => (corners[0], corners[1]),
+                3 => (corners[1], corners[2]),
+                5 => (corners[2], corners[3]),
+                _ => (corners[3], corners[0]),
+            };
+            painter.line_segment([a, b], Stroke::new(2.5_f32, self.theme.accent));
+        }
+        let handle_fill = if self.theme.high_contrast {
+            self.theme.accent
+        } else {
+            Color32::WHITE
+        };
+        for i in 0..8 {
+            let is_hot = active_hit == Some(Hit::Handle(i));
+            let sz = if is_hot { 11.0 } else { 9.0 };
+            let h = egui::Rect::from_center_size(sc(g.handle(i)), vec2(sz, sz));
+            painter.rect_filled(
+                h,
+                0.0,
+                if is_hot {
+                    self.theme.accent
+                } else {
+                    handle_fill
+                },
+            );
+            painter.rect_stroke(
+                h,
+                0.0,
+                Stroke::new(if is_hot { 1.5_f32 } else { stroke_w }, ink),
+                egui::StrokeKind::Inside,
+            );
+        }
         if cur.pivot_x.abs() > 1e-4 || cur.pivot_y.abs() > 1e-4 {
             let piv = sc(g.center + vec2(cur.pivot_x * frame.x, cur.pivot_y * frame.y));
             let p_st = Stroke::new(1.2_f32, self.theme.accent);
@@ -1110,9 +1195,22 @@ impl App {
             label_col,
         );
 
+        // barra flutuante de zoom no canto inferior direito
+        let zoom_bar_rect = kf_window::workspace_zoom_bar(
+            ui,
+            ui.id().with("tm_zoom_bar"),
+            rect,
+            frame,
+            &mut st.ws,
+            &self.theme,
+            lang,
+        );
+        let over_zoom_bar = ptr_screen.is_some_and(|p| zoom_bar_rect.contains(p));
+
         // interação
-        let tol = ws.frame_len(6.0);
-        if let Some(p) = resp.hover_pos().map(|p| ws.to_frame(rect, frame, p)) {
+        if let Some(p) =
+            ptr_frame.filter(|_| !over_zoom_bar && (resp.hovered() || st.drag.is_some()))
+        {
             let hit = st.drag.map(|d| d.hit).unwrap_or_else(|| g.hit(p, tol));
             let cur = match hit {
                 Hit::Inside => match (st.prevent_move_x, st.prevent_move_y) {
@@ -1133,75 +1231,55 @@ impl App {
             };
             crate::cursors::render_cursor(ui.ctx(), cur, &self.theme, self.prefs.custom_cursors);
         }
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
-            if scroll != 0.0 {
-                if let Some(hp) = resp.hover_pos() {
-                    st.ws
-                        .zoom_at(rect, frame, hp, (1.0 + scroll * 0.0015).clamp(0.5, 2.0));
-                }
-            }
-        }
-        if resp.dragged_by(egui::PointerButton::Middle) {
-            let d = resp.drag_delta();
-            st.ws.offset -= vec2(ws.frame_len(d.x), ws.frame_len(d.y));
-        }
+        kf_window::handle_workspace_wheel_and_zoom(ui, &resp, rect, frame, &mut st.ws);
         let mut out = None;
-        if resp.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(p) = resp
-                .interact_pointer_pos()
-                .map(|p| ws.to_frame(rect, frame, p))
-            {
-                st.drag = Some(TmDrag {
-                    hit: g.hit(p, tol),
-                    start: g,
-                    start_ptr: p,
-                });
+        if !over_zoom_bar {
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(p) = resp
+                    .interact_pointer_pos()
+                    .map(|p| ws.to_frame(rect, frame, p))
+                {
+                    st.drag = Some(TmDrag {
+                        hit: g.hit(p, tol),
+                        start: g,
+                        start_ptr: p,
+                    });
+                }
             }
-        }
-        if let (Some(d), true) = (st.drag, resp.dragged_by(egui::PointerButton::Primary)) {
-            if let Some(p) = resp
-                .interact_pointer_pos()
-                .map(|p| ws.to_frame(rect, frame, p))
-            {
-                let ng = match d.hit {
-                    Hit::Inside => Some(constrained_move(&d.start, p - d.start_ptr, st)),
-                    Hit::Handle(i) => Some(constrained_resize(&d.start, i, p, st)),
-                    Hit::Rotate if st.enable_rotation => {
-                        Some(constrained_rotate(&d.start, d.start_ptr, p, st))
+            if let (Some(d), true) = (st.drag, resp.dragged_by(egui::PointerButton::Primary)) {
+                if let Some(p) = resp
+                    .interact_pointer_pos()
+                    .map(|p| ws.to_frame(rect, frame, p))
+                {
+                    let ng = match d.hit {
+                        Hit::Inside => Some(constrained_move(&d.start, p - d.start_ptr, st)),
+                        Hit::Handle(i) => Some(constrained_resize(&d.start, i, p, st)),
+                        Hit::Rotate if st.enable_rotation => {
+                            Some(constrained_rotate(&d.start, d.start_ptr, p, st))
+                        }
+                        Hit::Rotate => None,
+                    };
+                    if let Some(ng) = ng {
+                        out = Some(geom_to_motion(&ng, frame, cur));
                     }
-                    Hit::Rotate => None,
-                };
-                if let Some(ng) = ng {
-                    out = Some(geom_to_motion(&ng, frame, cur));
                 }
             }
-        }
-        if resp.drag_stopped() {
-            st.drag = None;
-        }
-        // lupa e mão no canto, como no VEGAS Pro: ajustar a área ao quadro
-        let fit_btn =
-            egui::Rect::from_min_size(rect.right_bottom() - vec2(22.0, 22.0), vec2(18.0, 18.0));
-        let fit_resp = ui
-            .interact(fit_btn, ui.id().with("tm_fit"), Sense::click())
-            .on_hover_text(tr(lang, "Ajustar a área de trabalho ao quadro"));
-        icons::paint(ui.painter(), fit_btn, Icon::ZoomGlass, &self.theme, true);
-        if fit_resp.clicked() {
-            st.ws.fit(rect, frame);
-        }
-        resp.context_menu(|ui| {
-            for (a, label) in [
-                (TmAction::Restore, "Restaurar"),
-                (TmAction::Center, "Centralizar"),
-                (TmAction::MatchOutput, "Combinar proporção de saída"),
-            ] {
-                if ui.button(tr(lang, label)).clicked() {
-                    actions.push(a);
-                    ui.close_menu();
-                }
+            if resp.drag_stopped() {
+                st.drag = None;
             }
-        });
+            resp.context_menu(|ui| {
+                for (a, label) in [
+                    (TmAction::Restore, "Restaurar"),
+                    (TmAction::Center, "Centralizar"),
+                    (TmAction::MatchOutput, "Combinar proporção de saída"),
+                ] {
+                    if ui.button(tr(lang, label)).clicked() {
+                        actions.push(a);
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
         out
     }
 
@@ -1361,14 +1439,22 @@ impl App {
             egui::StrokeKind::Inside,
         );
 
-        // interação: roda = zoom da vista, botão do meio = deslocar a vista
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
-            if scroll != 0.0 {
-                if let Some(hp) = resp.hover_pos() {
-                    st.views[vi].zoom_at(rect, frame, hp, (1.0 + scroll * 0.0015).clamp(0.5, 2.0));
-                }
-            }
+        // barra flutuante de zoom nesta vista 3D
+        let zoom_bar_rect = kf_window::workspace_zoom_bar(
+            ui,
+            ui.id().with(("tm_view_zoom_bar", vi)),
+            rect,
+            frame,
+            &mut st.views[vi],
+            &self.theme,
+            lang,
+        );
+        let ptr_screen = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
+        let over_zoom_bar = ptr_screen.is_some_and(|p| zoom_bar_rect.contains(p));
+
+        // interação: roda/pinça/+/- = zoom da vista, botão do meio = deslocar a vista
+        kf_window::handle_workspace_wheel_and_zoom(ui, &resp, rect, frame, &mut st.views[vi]);
+        if resp.hovered() && !over_zoom_bar {
             crate::cursors::render_cursor(
                 ui.ctx(),
                 crate::cursors::NeovegCursor::Move,
@@ -1376,12 +1462,8 @@ impl App {
                 self.prefs.custom_cursors,
             );
         }
-        if resp.dragged_by(egui::PointerButton::Middle) {
-            let d = resp.drag_delta();
-            st.views[vi].offset -= vec2(ws.frame_len(d.x), ws.frame_len(d.y));
-        }
         let mut out = None;
-        if resp.dragged_by(egui::PointerButton::Primary) {
+        if !over_zoom_bar && resp.dragged_by(egui::PointerButton::Primary) {
             let d = resp.drag_delta();
             let (dx, dy, dz) =
                 view_drag(view, vec2(ws.frame_len(d.x), ws.frame_len(d.y)), frame, st);
@@ -1394,18 +1476,20 @@ impl App {
                 });
             }
         }
-        resp.context_menu(|ui| {
-            for (a, label) in [
-                (TmAction::Restore, "Restaurar"),
-                (TmAction::Center, "Centralizar"),
-                (TmAction::MatchOutput, "Combinar proporção de saída"),
-            ] {
-                if ui.button(tr(lang, label)).clicked() {
-                    actions.push(a);
-                    ui.close_menu();
+        if !over_zoom_bar {
+            resp.context_menu(|ui| {
+                for (a, label) in [
+                    (TmAction::Restore, "Restaurar"),
+                    (TmAction::Center, "Centralizar"),
+                    (TmAction::MatchOutput, "Combinar proporção de saída"),
+                ] {
+                    if ui.button(tr(lang, label)).clicked() {
+                        actions.push(a);
+                        ui.close_menu();
+                    }
                 }
-            }
-        });
+            });
+        }
         out
     }
 

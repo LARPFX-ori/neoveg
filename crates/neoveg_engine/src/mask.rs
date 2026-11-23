@@ -9,6 +9,7 @@
 
 use crate::engine::Frame;
 use crate::model::Ticks;
+use neoveg_common::curve::Curve;
 use serde::{Deserialize, Serialize};
 
 /// Constante matemática para aproximação de quarto de círculo por curva Bézier cúbica:
@@ -340,6 +341,142 @@ impl MaskPath {
             r1.interpolate(&r2, t)
         }
     }
+    /// Desloca todos os vértices da máscara por `(dx, dy)` em coordenadas normalizadas.
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
+        for v in &mut self.vertices {
+            v.point[0] = (v.point[0] + dx).clamp(-1.0, 2.0);
+            v.point[1] = (v.point[1] + dy).clamp(-1.0, 2.0);
+        }
+    }
+
+    /// Verifica se o ponto normalizado `p` está no interior da máscara (ray-casting).
+    pub fn contains_point(&self, p: [f32; 2]) -> bool {
+        if !p[0].is_finite() || !p[1].is_finite() || self.vertices.len() < 3 {
+            return false;
+        }
+        let poly = self.flatten(12);
+        let n = poly.len();
+        if n < 3 {
+            return false;
+        }
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let pi = poly[i];
+            let pj = poly[j];
+            let crosses = (pi[1] > p[1]) != (pj[1] > p[1]);
+            if crosses {
+                let dy = pj[1] - pi[1];
+                if dy.abs() > 1e-6 {
+                    let x_int = pi[0] + (p[1] - pi[1]) * (pj[0] - pi[0]) / dy;
+                    if p[0] < x_int {
+                        inside = !inside;
+                    }
+                }
+            }
+            j = i;
+        }
+        inside
+    }
+
+    /// Insere um novo vértice no segmento mais próximo de `p` (evitando laços cruzados).
+    /// Devolve o índice do vértice inserido.
+    pub fn insert_vertex_on_nearest_segment(&mut self, p: [f32; 2]) -> usize {
+        let p = [
+            if p[0].is_finite() {
+                p[0].clamp(-1.0, 2.0)
+            } else {
+                0.5
+            },
+            if p[1].is_finite() {
+                p[1].clamp(-1.0, 2.0)
+            } else {
+                0.5
+            },
+        ];
+        if self.vertices.len() >= 128 {
+            return self.vertices.len().saturating_sub(1);
+        }
+        let n = self.vertices.len();
+        if n < 2 {
+            self.vertices.push(MaskVertex::corner(p));
+            return self.vertices.len().saturating_sub(1);
+        }
+        let seg_count = if self.closed { n } else { n - 1 };
+        let mut best_seg = n - 1;
+        let mut best_dist2 = f32::INFINITY;
+        for i in 0..seg_count {
+            let a = self.vertices[i].point;
+            let b = self.vertices[(i + 1) % n].point;
+            let abx = b[0] - a[0];
+            let aby = b[1] - a[1];
+            let len2 = abx * abx + aby * aby;
+            let t = if len2 > 1e-8 {
+                (((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let proj = [a[0] + abx * t, a[1] + aby * t];
+            let d2 = (p[0] - proj[0]).powi(2) + (p[1] - proj[1]).powi(2);
+            if d2 < best_dist2 {
+                best_dist2 = d2;
+                best_seg = i;
+            }
+        }
+        let insert_idx = (best_seg + 1).min(self.vertices.len());
+        self.vertices.insert(insert_idx, MaskVertex::corner(p));
+        insert_idx
+    }
+
+    /// Alterna o vértice `idx` entre canto vivo (sem tangentes) e nó suave Bézier.
+    pub fn toggle_vertex_tangent(&mut self, idx: usize) {
+        let n = self.vertices.len();
+        if idx >= n || n < 2 {
+            return;
+        }
+        let v = self.vertices[idx];
+        let has_handles = v.handle_in[0].abs() > 1e-4
+            || v.handle_in[1].abs() > 1e-4
+            || v.handle_out[0].abs() > 1e-4
+            || v.handle_out[1].abs() > 1e-4;
+        if has_handles {
+            self.vertices[idx].handle_in = [0.0, 0.0];
+            self.vertices[idx].handle_out = [0.0, 0.0];
+        } else {
+            let prev = self.vertices[(idx + n - 1) % n].point;
+            let next = self.vertices[(idx + 1) % n].point;
+            let tx = (next[0] - prev[0]) * 0.2;
+            let ty = (next[1] - prev[1]) * 0.2;
+            self.vertices[idx].handle_in = [-tx, -ty];
+            self.vertices[idx].handle_out = [tx, ty];
+        }
+    }
+
+    /// Saneia vértices contra entradas hostis (NaN/infinito e quantidade excessiva).
+    pub fn sanitize(&mut self) {
+        if self.vertices.len() > 128 {
+            self.vertices.truncate(128);
+        }
+        for v in &mut self.vertices {
+            for c in &mut v.point {
+                *c = if c.is_finite() {
+                    c.clamp(-2.0, 3.0)
+                } else {
+                    0.5
+                };
+            }
+            for c in v.handle_in.iter_mut().chain(v.handle_out.iter_mut()) {
+                *c = if c.is_finite() {
+                    c.clamp(-2.0, 2.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
 }
 
 /// Quadro-chave de animação de máscara.
@@ -353,6 +490,21 @@ pub struct MaskKeyframe {
     pub opacity: f32,
     #[serde(default)]
     pub expansion: f32,
+    #[serde(default)]
+    pub curve: Curve,
+    /// Suavidade da curva de interpolação (`0..=100`, igual à linha de Posição).
+    #[serde(default)]
+    pub smoothness: f32,
+}
+
+impl MaskKeyframe {
+    pub fn smoothness_safe(&self) -> f32 {
+        if self.smoothness.is_finite() {
+            self.smoothness.clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 fn default_opacity() -> f32 {
@@ -392,6 +544,131 @@ impl Default for BezierMaskData {
 }
 
 impl BezierMaskData {
+    /// Aplica curva e suavidade (`0..=100`) sobre o progresso linear `[0, 1]`,
+    /// com a mesma matemática de `eval_pan_crop_smooth`.
+    pub fn shape_progress(curve: Curve, smoothness: f32, lin: f32) -> f32 {
+        let mut u = curve.shape(lin.clamp(0.0, 1.0));
+        let sm = if smoothness.is_finite() {
+            (smoothness * 0.01).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if sm > 0.0 && curve != Curve::Hold {
+            let hermite = u * u * (3.0 - 2.0 * u);
+            let quintic = u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+            let target = hermite * (1.0 - sm) + quintic * sm;
+            u = u + (target - u) * sm;
+        }
+        u.clamp(0.0, 1.0)
+    }
+
+    /// Índice do quadro-chave ativo no tempo `t` (último `<= t + tol`, ou 0).
+    pub fn active_key_index(&self, t: Ticks, tol: Ticks) -> Option<usize> {
+        if self.keyframes.is_empty() {
+            return None;
+        }
+        Some(
+            self.keyframes
+                .iter()
+                .rposition(|k| k.time <= t + tol)
+                .unwrap_or(0),
+        )
+    }
+
+    /// Atualiza o estado da máscara no tempo `t`: quando não há quadros-chave,
+    /// altera o caminho padrão; quando já há quadros-chave, atualiza o quadro
+    /// dentro de `tol` (preservando curva e suavidade) ou cria um novo quadro.
+    pub fn set_at(
+        &mut self,
+        t: Ticks,
+        tol: Ticks,
+        path: MaskPath,
+        feather: f32,
+        opacity: f32,
+        expansion: f32,
+    ) {
+        let feather = if feather.is_finite() {
+            feather.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let opacity = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let expansion = if expansion.is_finite() {
+            expansion.clamp(-100.0, 100.0)
+        } else {
+            0.0
+        };
+        if self.keyframes.is_empty() {
+            self.default_path = path;
+            self.feather = feather;
+            self.opacity = opacity;
+            self.expansion = expansion;
+            return;
+        }
+        if let Some(k) = self
+            .keyframes
+            .iter_mut()
+            .find(|k| k.time.abs_diff(t) <= tol)
+        {
+            k.path = path;
+            k.feather = feather;
+            k.opacity = opacity;
+            k.expansion = expansion;
+            return;
+        }
+        let (curve, smoothness) = self
+            .active_key_index(t, tol)
+            .and_then(|i| self.keyframes.get(i))
+            .map(|k| (k.curve, k.smoothness_safe()))
+            .unwrap_or((Curve::Smooth, 0.0));
+        self.keyframes.push(MaskKeyframe {
+            time: t.max(Ticks::ZERO),
+            path,
+            feather,
+            opacity,
+            expansion,
+            curve,
+            smoothness,
+        });
+        self.keyframes.sort_by_key(|k| k.time);
+    }
+
+    /// Garante que exista um quadro-chave em `t` (dentro de `tol`) e devolve o índice dele.
+    pub fn ensure_key_at(&mut self, t: Ticks, tol: Ticks) -> usize {
+        if let Some(idx) = self
+            .keyframes
+            .iter()
+            .position(|k| k.time.abs_diff(t) <= tol)
+        {
+            return idx;
+        }
+        let (path, feather, opacity, expansion) = self.evaluate_at(t);
+        let (curve, smoothness) = self
+            .active_key_index(t, tol)
+            .and_then(|i| self.keyframes.get(i))
+            .map(|k| (k.curve, k.smoothness_safe()))
+            .unwrap_or((Curve::Smooth, 0.0));
+        let clamped_t = t.max(Ticks::ZERO);
+        self.keyframes.push(MaskKeyframe {
+            time: clamped_t,
+            path,
+            feather,
+            opacity,
+            expansion,
+            curve,
+            smoothness,
+        });
+        self.keyframes.sort_by_key(|k| k.time);
+        self.keyframes
+            .iter()
+            .position(|k| k.time == clamped_t)
+            .unwrap_or(0)
+    }
+
     /// Avalia a máscara no instante de tempo `t`.
     pub fn evaluate_at(&self, t: Ticks) -> (MaskPath, f32, f32, f32) {
         if self.keyframes.is_empty() {
@@ -416,13 +693,13 @@ impl BezierMaskData {
             return (k.path.clone(), k.feather, k.opacity, k.expansion);
         }
 
-        // Busca binária / linear entre dois quadros-chave
+        // Busca entre dois quadros-chave aplicando curva e suavidade
         for i in 0..last_idx {
             let k0 = &self.keyframes[i];
             let k1 = &self.keyframes[i + 1];
             if t >= k0.time && t <= k1.time {
-                let span = (k1.time.0 - k0.time.0).max(1) as f32;
-                let progress = ((t.0 - k0.time.0) as f32 / span).clamp(0.0, 1.0);
+                let lin = t.fraction_in(k0.time, k1.time);
+                let progress = Self::shape_progress(k0.curve, k0.smoothness_safe(), lin);
                 let path = k0.path.interpolate(&k1.path, progress);
                 let feather = k0.feather + (k1.feather - k0.feather) * progress;
                 let opacity = k0.opacity + (k1.opacity - k0.opacity) * progress;
@@ -702,5 +979,74 @@ mod tests {
         assert!(frame.px[50 * w + 50][3] > 0.9);
         // Canto exterior foi cortado para 0
         assert!(frame.px[5 * w + 5][3] < 0.01);
+    }
+
+    #[test]
+    fn mascara_curva_suavidade_e_edicao_com_keyframes() {
+        let mut md = BezierMaskData {
+            default_path: MaskPath::rect([0.2, 0.2], [0.6, 0.6]),
+            ..BezierMaskData::default()
+        };
+        let tol = Ticks::from_millis_i64(16);
+        md.keyframes = vec![
+            MaskKeyframe {
+                time: Ticks::ZERO,
+                path: MaskPath::rect([0.1, 0.1], [0.3, 0.3]),
+                feather: 0.0,
+                opacity: 1.0,
+                expansion: 0.0,
+                curve: Curve::Fast,
+                smoothness: 0.0,
+            },
+            MaskKeyframe {
+                time: Ticks::from_secs_i64(2),
+                path: MaskPath::rect([0.5, 0.5], [0.9, 0.9]),
+                feather: 20.0,
+                opacity: 1.0,
+                expansion: 0.0,
+                curve: Curve::Linear,
+                smoothness: 0.0,
+            },
+        ];
+        // Em t=1s (metade), Curve::Fast deve avançar mais que 0.5 (feather > 10)
+        let (_, f_fast, _, _) = md.evaluate_at(Ticks::from_secs_i64(1));
+        assert!(f_fast > 14.0, "Curve::Fast esperado > 14, veio {f_fast}");
+
+        // Curve::Hold mantém o valor inicial até o próximo quadro-chave
+        md.keyframes[0].curve = Curve::Hold;
+        let (_, f_hold, _, _) = md.evaluate_at(Ticks::from_secs_i64(1));
+        assert!(f_hold < 0.01, "Curve::Hold esperado ~0, veio {f_hold}");
+
+        // Suavidade > 0 muda a curva em t=0.25s em relação a Linear puro
+        md.keyframes[0].curve = Curve::Linear;
+        let (_, f_lin, _, _) = md.evaluate_at(Ticks::from_millis_i64(500));
+        md.keyframes[0].smoothness = 100.0;
+        let (_, f_sm, _, _) = md.evaluate_at(Ticks::from_millis_i64(500));
+        assert!(
+            f_sm < f_lin - 1.0,
+            "suavidade 100 em 25% deve desacelerar no início: lin={f_lin}, sm={f_sm}"
+        );
+
+        // Editar em t=1s quando existem keyframes cria um keyframe novo e se reflete em evaluate_at
+        let mut p_mid = MaskPath::rect([0.2, 0.2], [0.8, 0.8]);
+        assert!(p_mid.contains_point([0.5, 0.5]));
+        assert!(!p_mid.contains_point([0.05, 0.05]));
+        p_mid.translate(0.1, 0.0);
+        assert!((p_mid.vertices[0].point[0] - 0.3).abs() < 1e-5);
+        let ins = p_mid.insert_vertex_on_nearest_segment([0.6, 0.2]);
+        assert_eq!(ins, 1);
+        assert_eq!(p_mid.vertices.len(), 5);
+        p_mid.toggle_vertex_tangent(ins);
+        assert!(p_mid.vertices[ins].handle_out[0].abs() > 1e-3);
+        p_mid.toggle_vertex_tangent(ins);
+        assert_eq!(p_mid.vertices[ins].handle_out, [0.0, 0.0]);
+
+        md.set_at(Ticks::from_secs_i64(1), tol, p_mid.clone(), 5.0, 0.8, 2.0);
+        assert_eq!(md.keyframes.len(), 3);
+        let (eval_p, eval_f, eval_o, eval_e) = md.evaluate_at(Ticks::from_secs_i64(1));
+        assert_eq!(eval_p.vertices.len(), 5);
+        assert!((eval_f - 5.0).abs() < 1e-4);
+        assert!((eval_o - 0.8).abs() < 1e-4);
+        assert!((eval_e - 2.0).abs() < 1e-4);
     }
 }
