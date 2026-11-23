@@ -1664,6 +1664,7 @@ impl App {
             Some(true) => {
                 self.prefs.track_header.set(video, draft);
                 let _ = self.prefs.save();
+                self.sync_header_width_to_buttons();
                 self.dlg.header_buttons = None;
             }
             Some(false) => self.dlg.header_buttons = None,
@@ -2871,6 +2872,22 @@ impl App {
                         }
                     }
                     ui.end_row();
+                    if is_video {
+                        ui.label(tr(lang, "Opacidade"));
+                        let mut pct = (e.opacity * 100.0).clamp(0.0, 100.0);
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut pct, 0.0..=100.0)
+                                    .suffix(" %")
+                                    .fixed_decimals(0),
+                            )
+                            .changed()
+                        {
+                            e.opacity = (pct / 100.0).clamp(0.0, 1.0);
+                            changed = true;
+                        }
+                        ui.end_row();
+                    }
                     if !is_video {
                         ui.label(tr(lang, "Ganho"));
                         changed |= ui
