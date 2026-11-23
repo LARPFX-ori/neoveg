@@ -1051,7 +1051,36 @@ impl App {
         let img_rect = Rect::from_center_size(rect.center() + self.preview_pan, vec2(w, h));
 
         let split_mode = self.opts.preview_split_mode;
-        if self.session.expanded_edit.is_some() {
+        if self.trimmer.show_in_preview && self.trimmer.has_focus && self.trimmer.media_id.is_some()
+        {
+            if let Some(tex) = &self.trimmer.tex {
+                let [iw, ih] = tex.size();
+                let t_asp = (iw.max(1) as f32) / (ih.max(1) as f32);
+                let mut tw = img_rect.width();
+                let mut th = tw / t_asp.max(0.01);
+                if th > img_rect.height() {
+                    th = img_rect.height();
+                    tw = th * t_asp;
+                }
+                let tr_rect = Rect::from_center_size(img_rect.center(), vec2(tw, th));
+                painter.image(
+                    tex.id(),
+                    tr_rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                let badge_r =
+                    Rect::from_min_size(img_rect.left_top() + vec2(6.0, 6.0), vec2(58.0, 16.0));
+                painter.rect_filled(badge_r, 3.0, Color32::from_black_alpha(180));
+                painter.text(
+                    badge_r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Trimmer",
+                    egui::FontId::proportional(10.0),
+                    Color32::from_rgb(240, 200, 40),
+                );
+            }
+        } else if self.session.expanded_edit.is_some() {
             if let Some((lt_tex, rt_tex)) = &self.expanded_ab_tex {
                 let mid_x = img_rect.center().x;
                 let left_r = Rect::from_min_max(

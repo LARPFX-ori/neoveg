@@ -114,6 +114,13 @@ mod more_tools_tests {
 #[derive(Clone, Debug)]
 pub enum DndPayload {
     Media(Id),
+    TrimmedMedia {
+        media_id: Id,
+        offset: Ticks,
+        length: Ticks,
+        include_video: bool,
+        include_audio: bool,
+    },
     Fx(FxKind),
     FxPreset(FxInstance),
     Transition(TransitionKind),
@@ -1041,11 +1048,21 @@ impl App {
     }
 
     pub fn trimmer_play(&mut self) {
+        self.trimmer.shuttle = 1.0;
+        self.trimmer_play_at_speed(1.0);
+    }
+
+    pub fn trimmer_play_at_speed(&mut self, speed: f64) {
         if self.is_playing() {
             self.stop(true);
         }
         let Some(mid) = self.trimmer.media_id else {
             return;
+        };
+        let spd = if speed.is_finite() && speed.abs() >= 0.05 {
+            speed.clamp(-8.0, 8.0)
+        } else {
+            1.0
         };
         self.sync_snapshot();
         let sr = self.audio.sr;
@@ -1063,12 +1080,15 @@ impl App {
             pos: self.trimmer.cursor.to_samples_round(sr),
             loop_range,
             playing: true,
+            speed: spd,
         });
         self.trimmer.playing = true;
+        self.trimmer.shuttle = spd;
     }
 
     pub fn trimmer_pause(&mut self) {
         self.trimmer.playing = false;
+        self.trimmer.shuttle = 0.0;
         let mut s = crate::util::lock(&self.audio.shared);
         if let Some(ref mut trim) = s.trimmer_audio {
             trim.playing = false;
@@ -1077,6 +1097,7 @@ impl App {
 
     pub fn trimmer_stop(&mut self) {
         self.trimmer.playing = false;
+        self.trimmer.shuttle = 0.0;
         self.trimmer.cursor = self.trimmer.play_origin;
         let mut s = crate::util::lock(&self.audio.shared);
         if let Some(ref mut trim) = s.trimmer_audio {
@@ -2867,6 +2888,10 @@ impl App {
                 self.detached_tabs.remove(&panel);
                 self.dock_tab = panel;
                 self.pending_dock_focus = Some(panel);
+                self.trimmer.has_focus = panel == DockTab::Trimmer;
+                if panel == DockTab::Trimmer {
+                    self.trimmer.visible_this_frame = true;
+                }
             }
             UiAction::TogglePreview => {
                 if self.preview_detached {
@@ -3120,6 +3145,18 @@ impl App {
         let ctrl = mods.command;
         let shift = mods.shift;
         let alt = mods.alt;
+
+        // Alt+0: devolve o foco de teclado para a timeline (manual do VEGAS Pro).
+        if !ctrl && !shift && alt && pressed(Key::Num0) {
+            self.trimmer.has_focus = false;
+            return;
+        }
+
+        // Quando o Trimmer está visível e em foco, intercepta os atalhos próprios
+        // antes dos comandos da timeline (VEGAS Pro 21, pp. 311–323; Atalhos pp. 11–12).
+        if self.handle_trimmer_shortcuts(ctx) {
+            return;
+        }
 
         // Alias clássico Ctrl+Shift+Z para Refazer além do Ctrl+Y da tabela
         if ctrl && shift && !alt && pressed(Key::Z) {
@@ -5034,6 +5071,7 @@ impl App {
         }
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
+        self.trimmer.visible_this_frame = false;
         self.update_meters(dt as f32);
         if let Some(rec) = &self.recorder {
             let pk = rec.take_peaks();

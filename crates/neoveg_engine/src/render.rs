@@ -1368,6 +1368,14 @@ pub fn run_with_options(
     Ok(())
 }
 
+/// Salva uma imagem RGBA arbitrária em arquivo (reutilizado pelo Trimmer e pela Prévia).
+pub fn save_rgba_snapshot(img: &image::RgbaImage, path: &Path) -> Result<()> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let bytes = encode_image_for_ext(img, ext, 95)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 /// Salva o quadro atual em arquivo de imagem (PNG, JPEG, TIFF, BMP, TGA, WebP, DPX, EXR, QOI, PNM, etc.).
 pub fn save_snapshot(p: &Project, media: &MediaCache, t: Ticks, path: &Path) -> Result<()> {
     let f = render_frame(
@@ -1380,10 +1388,7 @@ pub fn save_snapshot(p: &Project, media: &MediaCache, t: Ticks, path: &Path) -> 
     let Some(img) = f.to_image() else {
         bail!("quadro com tamanho inválido")
     };
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-    let bytes = encode_image_for_ext(&img, ext, 95)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
+    save_rgba_snapshot(&img, path)
 }
 
 #[cfg(test)]
