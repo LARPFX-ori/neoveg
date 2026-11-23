@@ -13,6 +13,11 @@ Uso:
     python build_portable.py --no-build
     python build_portable.py --keep-target
     python build_portable.py --out ../pacotes/neoveg-portable
+    python build_portable.py --no-gh-fallback
+
+Se a compilação local falhar fora do GitHub Actions, o script tenta
+automaticamente disparar `gh workflow run build-packages.yml -R LARPFX-ori/neoveg`
+e baixar os pacotes prontos (use `--no-gh-fallback` para desativar).
 """
 
 from __future__ import annotations
@@ -25,7 +30,16 @@ import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import time
+import zipfile
 from pathlib import Path
+
+DEFAULT_GH_REPO = "LARPFX-ori/neoveg"
+DEFAULT_GH_WORKFLOW = "build-packages.yml"
+GH_DISCOVERY_TIMEOUT_SECS = 90
+GH_POLL_INTERVAL_SECS = 3
 
 FORBIDDEN_MEDIA_EXTS = {
     ".mp4",
@@ -297,6 +311,277 @@ def remove_target_dir(target_dir: Path, repo_root: Path, out_dir: Path) -> None:
         shutil.rmtree(candidate)
 
 
+def should_use_gh_fallback(no_gh_fallback: bool, no_build: bool) -> bool:
+    """Retorna True quando o fallback pelo GitHub Actions pode ser acionado."""
+    if no_gh_fallback or no_build:
+        return False
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true":
+        return False
+    return True
+
+
+def build_gh_workflow_cmd(
+    repo: str = DEFAULT_GH_REPO,
+    system: str | None = None,
+) -> list[str]:
+    """Monta o comando `gh workflow run` correspondente ao sistema atual."""
+    sys_name = system if system is not None else platform.system()
+    if sys_name == "Linux":
+        win_flag, lin_flag = "false", "true"
+    else:
+        win_flag, lin_flag = "true", "false"
+    return [
+        "gh",
+        "workflow",
+        "run",
+        DEFAULT_GH_WORKFLOW,
+        "-R",
+        repo,
+        "-f",
+        f"windows={win_flag}",
+        "-f",
+        f"linux={lin_flag}",
+    ]
+
+
+def _list_workflow_run_ids(repo: str) -> list[dict[str, object]]:
+    res = subprocess.run(
+        [
+            "gh",
+            "run",
+            "list",
+            "--workflow",
+            DEFAULT_GH_WORKFLOW,
+            "-R",
+            repo,
+            "--limit",
+            "10",
+            "--json",
+            "databaseId,status,conclusion,url",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    data = json.loads(res.stdout or "[]")
+    return data if isinstance(data, list) else []
+
+
+def _wait_for_new_run(
+    repo: str,
+    known_ids: set[int],
+    timeout_secs: int = GH_DISCOVERY_TIMEOUT_SECS,
+) -> tuple[int, str]:
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        for run in _list_workflow_run_ids(repo):
+            rid = run.get("databaseId")
+            if isinstance(rid, int) and rid not in known_ids:
+                url = str(run.get("url") or "")
+                return rid, url
+        time.sleep(GH_POLL_INTERVAL_SECS)
+    raise RuntimeError(
+        f"Nenhuma nova execução de `{DEFAULT_GH_WORKFLOW}` apareceu em {timeout_secs}s."
+    )
+
+
+def verify_sha256sums(sums_file: Path) -> list[Path]:
+    """Verifica todos os arquivos listados em `SHA256SUMS.txt` no mesmo diretório."""
+    base_dir = sums_file.parent.resolve()
+    verified: list[Path] = []
+    lines = [
+        ln.strip()
+        for ln in sums_file.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    if not lines:
+        raise RuntimeError(f"Arquivo de somas vazio: {sums_file}")
+    for line in lines:
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            raise RuntimeError(f"Linha inválida em {sums_file}: {line!r}")
+        expected_hex, raw_name = parts[0].lower(), parts[1].strip()
+        if raw_name.startswith("*"):
+            raw_name = raw_name[1:]
+        candidate = (base_dir / raw_name).resolve()
+        if not _is_within(candidate, base_dir) or candidate.parent != base_dir:
+            raise RuntimeError(f"Nome de arquivo inválido em {sums_file}: {raw_name!r}")
+        if not candidate.is_file():
+            raise RuntimeError(f"Arquivo ausente na verificação SHA-256: {candidate}")
+        actual_hex = _sha256_file(candidate).lower()
+        if actual_hex != expected_hex:
+            raise RuntimeError(
+                f"SHA-256 divergente para {raw_name}: esperado {expected_hex}, obtido {actual_hex}"
+            )
+        verified.append(candidate)
+    return verified
+
+
+def _safe_rel_member(raw_name: str, strip_top: str | None) -> Path | None:
+    norm = raw_name.replace("\\", "/")
+    raw_rel = Path(norm)
+    if norm.startswith("/") or raw_rel.is_absolute() or ".." in raw_rel.parts:
+        raise RuntimeError(f"Caminho inseguro no arquivo compactado: {raw_name!r}")
+    if strip_top and norm.startswith(strip_top):
+        norm = norm[len(strip_top) :]
+    norm = norm.lstrip("/")
+    if not norm:
+        return None
+    rel = Path(norm)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise RuntimeError(f"Caminho inseguro no arquivo compactado: {raw_name!r}")
+    return rel
+
+
+def _common_safe_top_prefix(names: list[str]) -> str | None:
+    if not names:
+        return None
+    first_seg = names[0].replace("\\", "/").split("/", 1)[0]
+    if not first_seg or first_seg in (".", "..") or ":" in first_seg:
+        return None
+    prefix = first_seg + "/"
+    if all(
+        n.replace("\\", "/") == first_seg or n.replace("\\", "/").startswith(prefix)
+        for n in names
+    ):
+        return prefix
+    return None
+
+
+def extract_portable_zip(zip_path: Path, dest_dir: Path) -> int:
+    """Extrai o ZIP portátil em `dest_dir` com proteção contra Zip Slip,
+    preservando arquivos de execução existentes (ex.: preferencias.json, logs/)."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest_dir.resolve()
+    count = 0
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        bad = zf.testzip()
+        if bad is not None:
+            raise RuntimeError(f"Entrada corrompida no ZIP {zip_path}: {bad}")
+        names = [n for n in zf.namelist() if n.strip()]
+        top_prefix = _common_safe_top_prefix(names)
+        for info in zf.infolist():
+            rel = _safe_rel_member(info.filename, top_prefix)
+            if rel is None:
+                continue
+            target = (dest_dir / rel).resolve()
+            if not _is_within(target, dest_resolved):
+                raise RuntimeError(f"Caminho fora do destino no ZIP: {info.filename!r}")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                count += 1
+    return count
+
+
+def extract_portable_tar_gz(tar_path: Path, dest_dir: Path) -> int:
+    """Extrai o tar.gz portátil do Linux em `dest_dir` validando cada entrada."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest_dir.resolve()
+    count = 0
+    with tarfile.open(tar_path, "r:gz") as tf:
+        members = tf.getmembers()
+        names = [m.name.lstrip("./") for m in members if m.name.lstrip("./")]
+        top_prefix = _common_safe_top_prefix(names)
+        for m in members:
+            if m.issym() or m.islnk():
+                raise RuntimeError(f"Link simbólico não permitido no pacote portátil: {m.name!r}")
+            cleaned = m.name.lstrip("./")
+            if top_prefix and cleaned == top_prefix.rstrip("/"):
+                continue
+            rel = _safe_rel_member(cleaned, top_prefix)
+            if rel is None:
+                continue
+            target = (dest_dir / rel).resolve()
+            if not _is_within(target, dest_resolved):
+                raise RuntimeError(f"Caminho fora do destino no tar.gz: {m.name!r}")
+            if m.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif m.isfile():
+                src = tf.extractfile(m)
+                if src is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                os.chmod(target, m.mode & 0o755)
+                count += 1
+    return count
+
+
+def build_via_github_actions(
+    repo_root: Path,
+    portable_out: Path | None,
+    installer_out: Path,
+    repo: str = DEFAULT_GH_REPO,
+) -> int:
+    """Dispara `build-packages.yml` via GitHub CLI (`gh`), aguarda concluir,
+    baixa os artefatos, verifica SHA-256 e atualiza `dist-installer/` e `dist/`."""
+    if shutil.which("gh") is None:
+        print(
+            "ERRO: GitHub CLI (`gh`) não encontrado no PATH; não foi possível acionar o fallback.",
+            file=sys.stderr,
+        )
+        return 1
+
+    cmd = build_gh_workflow_cmd(repo=repo)
+    print(f"Acionando fallback no GitHub Actions: {' '.join(cmd)}")
+    try:
+        before_runs = _list_workflow_run_ids(repo)
+        known_ids = {
+            r["databaseId"] for r in before_runs if isinstance(r.get("databaseId"), int)
+        }
+        subprocess.run(cmd, cwd=repo_root, check=True)
+        print("Aguardando início da execução no GitHub Actions...")
+        run_id, run_url = _wait_for_new_run(repo, known_ids)
+        print(f"Execução #{run_id} iniciada{f': {run_url}' if run_url else ''}")
+        subprocess.run(
+            ["gh", "run", "watch", str(run_id), "-R", repo, "--exit-status"],
+            cwd=repo_root,
+            check=True,
+        )
+        with tempfile.TemporaryDirectory(prefix="neoveg_gh_dl_") as tmp:
+            tmp_dir = Path(tmp)
+            print(f"Baixando artefatos da execução #{run_id}...")
+            subprocess.run(
+                ["gh", "run", "download", str(run_id), "-R", repo, "--dir", str(tmp_dir)],
+                cwd=repo_root,
+                check=True,
+            )
+            sums_files = sorted(tmp_dir.rglob("SHA256SUMS.txt"))
+            if not sums_files:
+                raise RuntimeError("Nenhum arquivo SHA256SUMS.txt encontrado nos artefatos baixados.")
+            installer_out.mkdir(parents=True, exist_ok=True)
+            copied_artifacts: list[Path] = []
+            for sf in sums_files:
+                verified = verify_sha256sums(sf)
+                for f in verified + [sf]:
+                    dst = installer_out / f.name
+                    shutil.copy2(f, dst)
+                    copied_artifacts.append(dst)
+                    print(f"Baixado e verificado (SHA-256 OK): {dst}")
+
+            if portable_out is not None:
+                zips = [p for p in copied_artifacts if p.name.endswith("-portable.zip")]
+                tars = [p for p in copied_artifacts if p.name.endswith(".tar.gz")]
+                if zips:
+                    n = extract_portable_zip(zips[0], portable_out)
+                    ensure_no_forbidden_files(portable_out)
+                    print(f"Pacote portátil atualizado em: {portable_out} ({n} arquivos)")
+                elif tars:
+                    n = extract_portable_tar_gz(tars[0], portable_out)
+                    ensure_no_forbidden_files(portable_out)
+                    print(f"Pacote portátil atualizado em: {portable_out} ({n} arquivos)")
+    except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError) as e:
+        print(f"ERRO no fallback do GitHub Actions: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Empacotador portátil do Neoveg")
     parser.add_argument(
@@ -317,6 +602,16 @@ def main() -> int:
         action="store_true",
         help="Não apaga a pasta de build do cargo depois de gerar o pacote",
     )
+    parser.add_argument(
+        "--no-gh-fallback",
+        action="store_true",
+        help="Não dispara o workflow do GitHub Actions caso a compilação local falhe",
+    )
+    parser.add_argument(
+        "--gh-repo",
+        default=DEFAULT_GH_REPO,
+        help=f"Repositório GitHub usado no fallback remoto (padrão: {DEFAULT_GH_REPO})",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
@@ -329,11 +624,18 @@ def main() -> int:
 
     try:
         target_dir = build_and_package(repo_root, out_path, args.no_build)
-    except subprocess.CalledProcessError as e:
-        print(f"ERRO: a compilação falhou ({e}); a pasta de build foi mantida.", file=sys.stderr)
-        return 1
-    except OSError as e:
-        print(f"ERRO: a cópia do pacote falhou ({e}); a pasta de build foi mantida.", file=sys.stderr)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(
+            f"ERRO: a compilação ou cópia local falhou ({e}); a pasta de build foi mantida.",
+            file=sys.stderr,
+        )
+        if should_use_gh_fallback(args.no_gh_fallback, args.no_build):
+            return build_via_github_actions(
+                repo_root,
+                portable_out=out_path,
+                installer_out=repo_root / "dist-installer",
+                repo=args.gh_repo,
+            )
         return 1
     if not args.keep_target:
         remove_target_dir(target_dir, repo_root, out_path)

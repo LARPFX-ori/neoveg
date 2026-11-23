@@ -22,6 +22,12 @@ Uso:
     python build_installer.py
     python build_installer.py --no-build
     python build_installer.py --keep-target
+    python build_installer.py --no-gh-fallback
+
+Se a compilação local falhar fora do GitHub Actions, o script tenta
+automaticamente disparar `gh workflow run build-packages.yml -R LARPFX-ori/neoveg`
+e baixar os pacotes prontos em `dist-installer/` e `dist/` (use
+`--no-gh-fallback` para desativar).
 """
 
 from __future__ import annotations
@@ -102,6 +108,19 @@ def main() -> int:
     parser.add_argument(
         "--keep-target", action="store_true", help="Não apaga a pasta de build do cargo"
     )
+    parser.add_argument(
+        "--no-gh-fallback",
+        action="store_true",
+        help="Não dispara o workflow do GitHub Actions caso a compilação local falhe",
+    )
+    parser.add_argument(
+        "--gh-repo",
+        default=build_portable.DEFAULT_GH_REPO,
+        help=(
+            "Repositório GitHub usado no fallback remoto "
+            f"(padrão: {build_portable.DEFAULT_GH_REPO})"
+        ),
+    )
     args = parser.parse_args()
     system = platform.system()
     if system not in ("Windows", "Linux"):
@@ -114,12 +133,29 @@ def main() -> int:
     out_dir = repo_root / "dist-installer"
     try:
         target_dir = build_portable.build_and_package(repo_root, dist, args.no_build)
-    except subprocess.CalledProcessError as e:
-        print(f"ERRO: a compilação falhou ({e}); a pasta de build foi mantida.", file=sys.stderr)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(
+            f"ERRO: a compilação local falhou ({e}); a pasta de build foi mantida.",
+            file=sys.stderr,
+        )
+        if build_portable.should_use_gh_fallback(args.no_gh_fallback, args.no_build):
+            return build_portable.build_via_github_actions(
+                repo_root,
+                portable_out=dist,
+                installer_out=out_dir,
+                repo=args.gh_repo,
+            )
         return 1
     setup_exe = target_dir / "release" / ("neoveg-setup.exe" if windows else "neoveg-setup")
     if not setup_exe.is_file():
         print(f"ERRO: {setup_exe} não encontrado; rode sem --no-build.", file=sys.stderr)
+        if build_portable.should_use_gh_fallback(args.no_gh_fallback, args.no_build):
+            return build_portable.build_via_github_actions(
+                repo_root,
+                portable_out=dist,
+                installer_out=out_dir,
+                repo=args.gh_repo,
+            )
         return 1
 
     version = workspace_version(repo_root)
