@@ -49,6 +49,18 @@ pub struct TrimmerAudioPlayback {
     /// Faixa de seleção em loop em amostras (in, out).
     pub loop_range: Option<(i64, i64)>,
     pub playing: bool,
+    /// Velocidade de reprodução/shuttle (`1.0` normal, negativos para reverso; `0.0` equivale a `1.0`).
+    pub speed: f64,
+}
+
+impl TrimmerAudioPlayback {
+    pub fn effective_speed(&self) -> f64 {
+        if self.speed.is_finite() && self.speed.abs() >= 0.05 {
+            self.speed.clamp(-8.0, 8.0)
+        } else {
+            1.0
+        }
+    }
 }
 
 impl Shared {
@@ -200,13 +212,17 @@ impl AudioOut {
             }
         } else if let Some(ref mut trim) = s.trimmer_audio {
             if trim.playing {
-                let adv = dt * self.sr as f64;
+                let spd = trim.effective_speed();
+                let adv = dt * self.sr as f64 * spd;
                 trim.pos = trim.pos.saturating_add(adv.trunc() as i64);
                 if let Some((a, b)) = trim.loop_range {
-                    if trim.pos >= b && b > a {
+                    if b > a && (trim.pos >= b || trim.pos < a) {
                         let span = b - a;
                         trim.pos = a + (trim.pos - a).rem_euclid(span);
                     }
+                } else if trim.pos < 0 {
+                    trim.pos = 0;
+                    trim.playing = false;
                 }
             }
         }
@@ -337,6 +353,7 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
         } else if let Some(mut trim) = s.trimmer_audio.clone().filter(|t| t.playing) {
             let sr = s.mixer.sr;
             if let Some(audio) = s.audio.get(&trim.media_id).cloned() {
+                let spd = trim.effective_speed();
                 let mut peak = [0.0_f32; 2];
                 for (i, frame) in buf
                     .as_chunks_mut::<2>()
@@ -345,7 +362,8 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                     .take(frames)
                     .enumerate()
                 {
-                    let cur_sample = trim.pos.saturating_add(i as i64);
+                    let offset = (i as f64 * spd).round() as i64;
+                    let cur_sample = trim.pos.saturating_add(offset);
                     let sample_in_range = if let Some((start_s, end_s)) = trim.loop_range {
                         if end_s > start_s {
                             let span = end_s - start_s;
@@ -356,6 +374,11 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                     } else {
                         cur_sample
                     };
+                    if sample_in_range < 0 {
+                        frame[0] = 0.0;
+                        frame[1] = 0.0;
+                        continue;
+                    }
                     let t = Ticks::from_samples(sample_in_range, sr);
                     let (l, r) = audio.sample(t);
                     frame[0] = l;
@@ -363,12 +386,22 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                     peak[0] = peak[0].max(l.abs());
                     peak[1] = peak[1].max(r.abs());
                 }
-                trim.pos = trim.pos.saturating_add(frames as i64);
-                if trim.loop_range.is_none() {
+                let delta = (frames as f64 * spd).round() as i64;
+                trim.pos = trim.pos.saturating_add(delta);
+                if let Some((start_s, end_s)) = trim.loop_range {
+                    if end_s > start_s && (trim.pos >= end_s || trim.pos < start_s) {
+                        let span = end_s - start_s;
+                        trim.pos = start_s + (trim.pos - start_s).rem_euclid(span);
+                    }
+                } else {
                     let audio_dur = (audio.data.len() / 2) as i64;
                     let dur_in_device_sr =
                         (audio_dur as f64 * sr as f64 / (audio.sample_rate.max(1) as f64)) as i64;
-                    if trim.pos >= dur_in_device_sr {
+                    if spd >= 0.0 && trim.pos >= dur_in_device_sr {
+                        trim.pos = dur_in_device_sr;
+                        trim.playing = false;
+                    } else if spd < 0.0 && trim.pos <= 0 {
+                        trim.pos = 0;
                         trim.playing = false;
                     }
                 }
@@ -1088,6 +1121,7 @@ mod tests {
                 pos: 0,
                 loop_range: Some((0, 2400)),
                 playing: true,
+                speed: 1.0,
             });
         }
 
@@ -1100,5 +1134,35 @@ mod tests {
         let s = crate::util::lock(&shared);
         assert!(s.meters.master[0] > 0.4);
         assert_eq!(s.trimmer_audio.as_ref().map(|t| t.pos), Some(256));
+        drop(s);
+
+        // Shuttle 2x avança 512 amostras em 256 quadros
+        {
+            let mut s = crate::util::lock(&shared);
+            if let Some(ref mut t) = s.trimmer_audio {
+                t.speed = 2.0;
+                t.loop_range = None;
+            }
+        }
+        mix_into(&mut buf, 256, &shared);
+        let s = crate::util::lock(&shared);
+        assert_eq!(s.trimmer_audio.as_ref().map(|t| t.pos), Some(768));
+        drop(s);
+
+        // Shuttle reverso -2x recua até parar em 0 sem loop
+        {
+            let mut s = crate::util::lock(&shared);
+            if let Some(ref mut t) = s.trimmer_audio {
+                t.pos = 200;
+                t.speed = -2.0;
+                t.playing = true;
+            }
+        }
+        mix_into(&mut buf, 256, &shared);
+        let s = crate::util::lock(&shared);
+        assert_eq!(
+            s.trimmer_audio.as_ref().map(|t| (t.pos, t.playing)),
+            Some((0, false))
+        );
     }
 }

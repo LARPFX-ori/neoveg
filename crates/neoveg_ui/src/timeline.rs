@@ -868,6 +868,13 @@ impl App {
         self.project.ensure_sequences();
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
+        // Clicar na timeline devolve o foco de teclado do Trimmer para a timeline (VEGAS Pro).
+        if ui.input(|i| {
+            (i.pointer.primary_pressed() || i.pointer.secondary_pressed())
+                && i.pointer.interact_pos().is_some_and(|p| full.contains(p))
+        }) {
+            self.trimmer.has_focus = false;
+        }
         let show_seq_tabs = full.height() > TOP_H + BOTTOM_BARS_H + SEQ_TAB_H + 40.0;
         let seq_bar_h = if show_seq_tabs { SEQ_TAB_H } else { 0.0 };
         if show_seq_tabs {
@@ -5291,6 +5298,36 @@ impl App {
                 }
                 self.checkpoint();
                 self.add_media_to_timeline(mid, t, track);
+            }
+            DndPayload::TrimmedMedia {
+                media_id,
+                offset,
+                length,
+                include_video,
+                include_audio,
+            } => {
+                if let Some(m) = self.project.media(media_id) {
+                    if let MediaSource::Sequence { id: seq_id } = m.source {
+                        if let Some(active_id) = self.project.active_sequence_id {
+                            if let Err(e) =
+                                self.project.validate_no_sequence_cycle(active_id, seq_id)
+                            {
+                                self.set_status(e);
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.checkpoint();
+                let _ = self.add_trimmed_media_to_timeline(
+                    media_id,
+                    t,
+                    offset,
+                    length,
+                    include_video,
+                    include_audio,
+                    track,
+                );
             }
             DndPayload::Generator(spec) => {
                 let imp = crate::media::import_generated(spec);
