@@ -1151,7 +1151,7 @@ impl App {
                             MediaSource::Generated(_) | MediaSource::Sequence { .. }
                         );
                     let card_resp = ui
-                        .vertical(|ui| {
+                        .scope(|ui| {
                             ui.set_min_width(card_w);
                             ui.set_max_width(card_w);
                             egui::Frame::new()
@@ -1380,36 +1380,38 @@ impl App {
             let selected = self.session.active_media_id == Some(m.id);
             let id = egui::Id::new(("pm_list_row", m.id));
             let row_resp = ui
-                .horizontal(|ui| {
-                    icons::paint_inline(
-                        ui,
-                        if matches!(
-                            m.source,
-                            MediaSource::Sequence { .. } | MediaSource::NestedProject { .. }
-                        ) {
-                            Icon::NestedTimeline
-                        } else if m.has_video {
-                            Icon::MediaItem
-                        } else {
-                            Icon::AudioTrack
-                        },
-                        14.0,
-                        &self.theme,
-                    );
-                    let dur = m
-                        .duration
-                        .map(|d| self.fmt_time(d))
-                        .unwrap_or_else(|| "estática".into());
-                    let mut text = egui::RichText::new(format!(
-                        "{}   [{}]   {}",
-                        m.name,
-                        media_kind_tag(m),
-                        dur
-                    ));
-                    if selected {
-                        text = text.strong().color(self.theme.accent);
-                    }
-                    ui.label(text);
+                .scope(|ui| {
+                    ui.horizontal(|ui| {
+                        icons::paint_inline(
+                            ui,
+                            if matches!(
+                                m.source,
+                                MediaSource::Sequence { .. } | MediaSource::NestedProject { .. }
+                            ) {
+                                Icon::NestedTimeline
+                            } else if m.has_video {
+                                Icon::MediaItem
+                            } else {
+                                Icon::AudioTrack
+                            },
+                            14.0,
+                            &self.theme,
+                        );
+                        let dur = m
+                            .duration
+                            .map(|d| self.fmt_time(d))
+                            .unwrap_or_else(|| "estática".into());
+                        let mut text = egui::RichText::new(format!(
+                            "{}   [{}]   {}",
+                            m.name,
+                            media_kind_tag(m),
+                            dur
+                        ));
+                        if selected {
+                            text = text.strong().color(self.theme.accent);
+                        }
+                        ui.label(text);
+                    });
                 })
                 .response;
             let resp = ui.interact(row_resp.rect, id, Sense::click_and_drag());
@@ -1454,32 +1456,34 @@ impl App {
                     let selected = self.session.active_media_id == Some(m.id);
                     let id = egui::Id::new(("pm_det_row", m.id));
                     let row_resp = ui
-                        .horizontal(|ui| {
-                            ui.set_max_width(220.0);
-                            icons::paint_inline(
-                                ui,
-                                if matches!(
-                                    m.source,
-                                    MediaSource::Sequence { .. }
-                                        | MediaSource::NestedProject { .. }
-                                ) {
-                                    Icon::NestedTimeline
-                                } else if m.has_video {
-                                    Icon::MediaItem
+                        .scope(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_max_width(220.0);
+                                icons::paint_inline(
+                                    ui,
+                                    if matches!(
+                                        m.source,
+                                        MediaSource::Sequence { .. }
+                                            | MediaSource::NestedProject { .. }
+                                    ) {
+                                        Icon::NestedTimeline
+                                    } else if m.has_video {
+                                        Icon::MediaItem
+                                    } else {
+                                        Icon::AudioTrack
+                                    },
+                                    13.0,
+                                    &self.theme,
+                                );
+                                let label = if selected {
+                                    egui::RichText::new(&m.name)
+                                        .strong()
+                                        .color(self.theme.accent)
                                 } else {
-                                    Icon::AudioTrack
-                                },
-                                13.0,
-                                &self.theme,
-                            );
-                            let label = if selected {
-                                egui::RichText::new(&m.name)
-                                    .strong()
-                                    .color(self.theme.accent)
-                            } else {
-                                egui::RichText::new(&m.name)
-                            };
-                            ui.add(egui::Label::new(label).truncate());
+                                    egui::RichText::new(&m.name)
+                                };
+                                ui.add(egui::Label::new(label).truncate());
+                            });
                         })
                         .response;
                     let resp = ui
