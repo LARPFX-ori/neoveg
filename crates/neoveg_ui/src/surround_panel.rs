@@ -6,7 +6,7 @@
 use super::App;
 use crate::model::{ChannelLayout, Id, SurroundPan, TrackKind};
 use eframe::egui;
-use egui::{pos2, vec2, Align2, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
+use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
 use neoveg_common::{tr, tr_args};
 
 /// Origem do sinal posicionada no pad.
@@ -15,15 +15,6 @@ pub(crate) enum SurroundTarget {
     Track(Id),
     Bus(Id),
 }
-
-/// Rótulo e ângulo (graus, 0 = frente, positivo à direita) de cada alto-falante.
-const SPEAKERS: [(&str, f32); 5] = [
-    ("L", -30.0),
-    ("C", 0.0),
-    ("R", 30.0),
-    ("Ls", -110.0),
-    ("Rs", 110.0),
-];
 
 const PAD_SIDE: f32 = 180.0;
 
@@ -46,11 +37,21 @@ pub(crate) fn pad_to_pan(p: Pos2, center: Pos2, radius: f32, base: SurroundPan) 
     SurroundPan { x, y, ..base }.sanitized()
 }
 
+/// Formata o ganho linear de um alto-falante em dB para exibição no pad (VEGAS Pro 21, p. 62).
+pub(crate) fn format_speaker_db(gain: f32) -> String {
+    if !gain.is_finite() || gain <= 1e-4 {
+        "-inf".to_string()
+    } else {
+        let db = (20.0 * gain.log10()).clamp(-60.0, 12.0);
+        format!("{db:.1}")
+    }
+}
+
 impl App {
     pub(crate) fn surround_panner_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         let layout = self.project.settings.channel_layout;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(tr(lang, "Modo do Master:"));
             let mut sel = layout;
             egui::ComboBox::from_id_salt("surround_layout")
@@ -112,7 +113,14 @@ impl App {
             .find(|(c, _)| *c == target)
             .map(|(_, n)| n.clone())
             .unwrap_or_default();
-        ui.horizontal(|ui| {
+        let Some(before) = self.surround_of(target) else {
+            return;
+        };
+        let mut pan = before;
+        let mut want_checkpoint = false;
+
+        // Barra superior estilo VEGAS Pro 21 (p. 62): origem, modo LFE e botão Centro
+        ui.horizontal_wrapped(|ui| {
             ui.label(tr(lang, "Origem:"));
             egui::ComboBox::from_id_salt("surround_target")
                 .selected_text(sel_name)
@@ -121,21 +129,36 @@ impl App {
                         ui.selectable_value(&mut target, *c, name);
                     }
                 });
+            let lfe_on = pan.lfe > 0.01;
+            if ui
+                .selectable_label(lfe_on, "LFE")
+                .on_hover_text(tr(lang, "Alternar envio para canal de subgraves (LFE)"))
+                .clicked()
+            {
+                want_checkpoint = true;
+                pan.lfe = if lfe_on { 0.0 } else { 0.5 };
+            }
+            if ui
+                .selectable_label(pan.use_center, "C")
+                .on_hover_text(tr(
+                    lang,
+                    "Sem o central, a frente vira uma imagem fantasma entre L e R",
+                ))
+                .clicked()
+            {
+                want_checkpoint = true;
+                pan.use_center = !pan.use_center;
+            }
         });
         ui.data_mut(|d| d.insert_temp(key, target));
 
-        let Some(before) = self.surround_of(target) else {
-            return;
-        };
-        let mut pan = before;
-        let mut want_checkpoint = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             let (resp, painter) =
                 ui.allocate_painter(vec2(PAD_SIDE, PAD_SIDE), Sense::click_and_drag());
             let rect = resp.rect;
             let center = rect.center();
-            let radius = PAD_SIDE * 0.5 - 14.0;
-            self.paint_surround_pad(&painter, rect, center, radius, pan);
+            let radius = PAD_SIDE * 0.5 - 16.0;
+            self.paint_surround_pad(&painter, rect, center, radius, pan, lang);
             if resp.drag_started() || resp.clicked() {
                 want_checkpoint = true;
             }
@@ -144,9 +167,14 @@ impl App {
                     pan = pad_to_pan(p, center, radius, pan);
                 }
             }
+            if resp.double_clicked() {
+                want_checkpoint = true;
+                pan.x = 0.0;
+                pan.y = 0.0;
+            }
             resp.on_hover_text(tr(
                 lang,
-                "Arraste para posicionar a origem na sala (frente no topo)",
+                "Arraste para posicionar a origem na sala (frente no topo; duplo clique centraliza)",
             ));
 
             ui.vertical(|ui| {
@@ -165,11 +193,29 @@ impl App {
                 if lfe.drag_started() || (lfe.changed() && !lfe.dragged()) {
                     want_checkpoint = true;
                 }
+                let gains = neoveg_engine::engine::surround::gains(pan);
                 ui.label(
-                    egui::RichText::new(format!("X {:+.2}   Y {:+.2}", pan.x, pan.y))
-                        .small()
-                        .monospace()
-                        .color(self.theme.text_muted),
+                    egui::RichText::new(format!(
+                        "L {}  C {}  R {}",
+                        format_speaker_db(gains[neoveg_engine::engine::surround::FL]),
+                        format_speaker_db(gains[neoveg_engine::engine::surround::C]),
+                        format_speaker_db(gains[neoveg_engine::engine::surround::FR]),
+                    ))
+                    .small()
+                    .monospace()
+                    .color(self.theme.text_muted),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Ls {}  Rs {}  X{:+.2} Y{:+.2}",
+                        format_speaker_db(gains[neoveg_engine::engine::surround::SL]),
+                        format_speaker_db(gains[neoveg_engine::engine::surround::SR]),
+                        pan.x,
+                        pan.y
+                    ))
+                    .small()
+                    .monospace()
+                    .color(self.theme.text_muted),
                 );
                 if ui.button(tr(lang, "Frente central")).clicked() {
                     want_checkpoint = true;
@@ -197,60 +243,141 @@ impl App {
         center: Pos2,
         radius: f32,
         pan: SurroundPan,
+        lang: neoveg_common::Language,
     ) {
         let th = &self.theme;
-        painter.rect_filled(rect, 4.0, th.extreme_bg);
+        let gains = neoveg_engine::engine::surround::gains(pan);
+        painter.rect_filled(rect, 2.0, th.extreme_bg);
         painter.rect_stroke(
             rect,
-            4.0,
+            2.0,
             Stroke::new(1.0_f32, th.border),
             StrokeKind::Inside,
         );
-        painter.circle_stroke(center, radius, Stroke::new(1.0_f32, th.border));
-        painter.line_segment(
-            [
-                pos2(center.x - radius, center.y),
-                pos2(center.x + radius, center.y),
-            ],
-            Stroke::new(1.0_f32, th.border.gamma_multiply(0.5)),
-        );
-        painter.line_segment(
-            [
-                pos2(center.x, center.y - radius),
-                pos2(center.x, center.y + radius),
-            ],
-            Stroke::new(1.0_f32, th.border.gamma_multiply(0.5)),
-        );
-        for (label, deg) in SPEAKERS {
-            if label == "C" && !pan.use_center {
-                continue;
-            }
-            let a = deg.to_radians();
-            let p = pos2(center.x + radius * a.sin(), center.y - radius * a.cos());
-            let r = Rect::from_center_size(p, vec2(16.0, 12.0));
-            painter.rect_filled(r, 2.0, th.selection_bg);
-            painter.rect_stroke(
-                r,
-                2.0,
-                Stroke::new(1.0_f32, th.text_muted),
-                StrokeKind::Inside,
+
+        // Grade 4×4 discreta da sala (VEGAS Pro 21, p. 62)
+        let grid_st = Stroke::new(1.0_f32, th.border.gamma_multiply(0.35));
+        for step in 1..4 {
+            let f = step as f32 * 0.25;
+            let gx = rect.left() + rect.width() * f;
+            let gy = rect.top() + rect.height() * f;
+            painter.line_segment(
+                [pos2(gx, rect.top() + 2.0), pos2(gx, rect.bottom() - 2.0)],
+                grid_st,
             );
-            painter.text(
-                p,
-                Align2::CENTER_CENTER,
-                label,
-                FontId::proportional(9.0),
-                th.text_primary,
+            painter.line_segment(
+                [pos2(rect.left() + 2.0, gy), pos2(rect.right() - 2.0, gy)],
+                grid_st,
             );
         }
+
+        // Arcos e leituras em dB dos 5 alto-falantes nos cantos/frente (p. 62)
+        let spk_nodes: [(&str, Pos2, usize, bool); 5] = [
+            (
+                "L",
+                pos2(rect.left() + 22.0, rect.top() + 18.0),
+                neoveg_engine::engine::surround::FL,
+                true,
+            ),
+            (
+                "C",
+                pos2(rect.center().x, rect.top() + 18.0),
+                neoveg_engine::engine::surround::C,
+                pan.use_center,
+            ),
+            (
+                "R",
+                pos2(rect.right() - 22.0, rect.top() + 18.0),
+                neoveg_engine::engine::surround::FR,
+                true,
+            ),
+            (
+                "Ls",
+                pos2(rect.left() + 22.0, rect.bottom() - 22.0),
+                neoveg_engine::engine::surround::SL,
+                true,
+            ),
+            (
+                "Rs",
+                pos2(rect.right() - 22.0, rect.bottom() - 22.0),
+                neoveg_engine::engine::surround::SR,
+                true,
+            ),
+        ];
+        for (lbl, pos, ch_idx, active) in spk_nodes {
+            let g = if active { gains[ch_idx] } else { 0.0 };
+            let fill = if !active {
+                th.panel_fill.gamma_multiply(0.4)
+            } else if th.high_contrast {
+                th.selection_bg
+            } else {
+                let alpha = (48.0 + g.clamp(0.0, 1.0) * 140.0) as u8;
+                Color32::from_rgba_unmultiplied(th.accent.r(), th.accent.g(), th.accent.b(), alpha)
+            };
+            let badge_r = Rect::from_center_size(pos, vec2(38.0, 22.0));
+            painter.rect_filled(badge_r, 4.0, fill);
+            painter.rect_stroke(
+                badge_r,
+                4.0,
+                Stroke::new(
+                    1.0_f32,
+                    if active {
+                        th.border
+                    } else {
+                        th.border.gamma_multiply(0.4)
+                    },
+                ),
+                StrokeKind::Inside,
+            );
+            let txt_col = if active {
+                th.text_primary
+            } else {
+                th.text_muted
+            };
+            painter.text(
+                pos2(pos.x, pos.y - 4.5),
+                Align2::CENTER_CENTER,
+                lbl,
+                FontId::proportional(8.5),
+                txt_col,
+            );
+            painter.text(
+                pos2(pos.x, pos.y + 5.0),
+                Align2::CENTER_CENTER,
+                format_speaker_db(g),
+                FontId::monospace(8.5),
+                txt_col,
+            );
+        }
+
+        // Legenda do modo de pan na base do pad (p. 62)
+        painter.text(
+            pos2(rect.center().x, rect.bottom() - 6.0),
+            Align2::CENTER_CENTER,
+            tr(lang, "0 dB centro"),
+            FontId::proportional(8.5),
+            th.text_muted,
+        );
+
+        // Marcador losango (puck) estilo VEGAS Pro 21 (p. 62)
         let p = pan.sanitized();
         let dot = pos2(center.x + radius * p.x, center.y + radius * p.y);
         painter.line_segment(
             [center, dot],
-            Stroke::new(1.0_f32, th.accent.gamma_multiply(0.5)),
+            Stroke::new(1.0_f32, th.accent.gamma_multiply(0.45)),
         );
-        painter.circle_filled(dot, 6.0, th.accent);
-        painter.circle_stroke(dot, 6.0, Stroke::new(1.0_f32, th.text_primary));
+        let d = 7.0_f32;
+        let diamond = vec![
+            pos2(dot.x, dot.y - d),
+            pos2(dot.x + d, dot.y),
+            pos2(dot.x, dot.y + d),
+            pos2(dot.x - d, dot.y),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            diamond,
+            th.accent,
+            Stroke::new(1.5_f32, th.text_primary),
+        ));
     }
 
     pub(crate) fn surround_of(&self, t: SurroundTarget) -> Option<SurroundPan> {
@@ -307,5 +434,14 @@ mod tests {
         assert_eq!(pad_to_pan(pos2(5.0, 5.0), c, 0.0, base), base);
         assert_eq!(pad_to_pan(pos2(f32::NAN, 5.0), c, 10.0, base), base);
         assert_eq!(pad_to_pan(pos2(5.0, 5.0), c, f32::NAN, base), base);
+    }
+
+    #[test]
+    fn format_speaker_db_formata_e_trata_valores_hostis() {
+        assert_eq!(format_speaker_db(1.0), "0.0");
+        assert_eq!(format_speaker_db(0.5), "-6.0");
+        assert_eq!(format_speaker_db(0.0), "-inf");
+        assert_eq!(format_speaker_db(-1.0), "-inf");
+        assert_eq!(format_speaker_db(f32::NAN), "-inf");
     }
 }

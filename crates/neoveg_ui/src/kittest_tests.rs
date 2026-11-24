@@ -3047,3 +3047,62 @@ fn kittest_paridade_geracoes_previa_e_barra_status() {
         assert_eq!(harness.state().prefs.edit_layout.layout_type, lt);
     }
 }
+
+/// Paridade do Console de Mixagem (barra lateral, filtros, seções, fase Ø),
+/// Master Bus (barramento Preview e trava L/R), Loudness (6 barras graduadas)
+/// e Surround Panner (pad 5.1 com ganhos em dB).
+#[test]
+fn kittest_paridade_console_master_loudness_e_surround() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // 1. Master Bus: alterna barramento Preview e verifica sincronia de ganho
+    assert!(!harness.state().master_show_preview_bus);
+    harness.get_by_label("Barramento Preview").click();
+    harness.run_steps(2);
+    assert!(harness.state().master_show_preview_bus);
+
+    // 2. Console de Mixagem: barra lateral, inversão de fase Ø e visibilidade de seções
+    let ctx = harness.ctx.clone();
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.mixer");
+    harness.run_steps(2);
+    assert!(harness.state().mixer_ui.sidebar_open);
+    assert!(
+        harness.query_by_label("Visibilidade").is_some(),
+        "Console de Mixagem deve exibir a barra lateral de visibilidade de canais"
+    );
+    assert!(
+        harness.query_by_label("Seções").is_some(),
+        "Console de Mixagem deve exibir os alternadores de seções"
+    );
+    harness.get_by_label("Ø").click();
+    harness.run_steps(2);
+    let audio_track = harness
+        .state()
+        .project
+        .tracks
+        .iter()
+        .find(|t| t.kind == crate::model::TrackKind::Audio)
+        .expect("trilha de áudio padrão");
+    assert!(
+        audio_track.invert_phase,
+        "clicar no botão Ø deve ativar inversão de fase na trilha de áudio"
+    );
+
+    // 3. Medidores de Loudness com barra LRA e LEDs
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.loudness");
+    harness.run_steps(2);
+    assert!(harness.query_by_label("LRA").is_some());
+
+    // 4. Surround Panner 5.1 com botões LFE e C
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.surround_panner");
+    harness.state_mut().project.settings.channel_layout = crate::model::ChannelLayout::Surround51;
+    harness.run_steps(2);
+    assert!(harness.query_by_label("LFE").is_some());
+}

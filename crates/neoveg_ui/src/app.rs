@@ -323,6 +323,14 @@ pub struct App {
     pub master_bus_detached: bool,
     pub master_dim: bool,
     pub master_mono: bool,
+    /// Exibe a faixa auxiliar Preview ao lado do Master Bus (manual VEGAS Pro 21, p. 50).
+    pub master_show_preview_bus: bool,
+    pub master_preview_vol_db: f32,
+    pub master_preview_mute: bool,
+    /// Trava os canais L/R do Master Bus (cadeado de canais, p. 50 / v23).
+    pub master_channels_locked: bool,
+    /// Estado visual do Console de Mixagem (barra lateral, filtros, seções e largura).
+    pub mixer_ui: crate::panels::MixerConsoleState,
     pub dock_visible: bool,
     pub dock_height: f32,
     pub preview_ratio: f32,
@@ -545,6 +553,11 @@ impl App {
             master_bus_detached: initial_layout.master_bus_detached,
             master_dim: false,
             master_mono: false,
+            master_show_preview_bus: false,
+            master_preview_vol_db: 0.0,
+            master_preview_mute: false,
+            master_channels_locked: true,
+            mixer_ui: crate::panels::MixerConsoleState::default(),
             dock_visible: initial_layout.dock_visible,
             dock_maximized: None,
             timeline_restore: None,

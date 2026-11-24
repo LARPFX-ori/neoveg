@@ -1488,6 +1488,12 @@ impl Mixer {
                 }
             }
 
+            if track.invert_phase {
+                for s in &mut track_buf[..n * 2] {
+                    *s = -*s;
+                }
+            }
+
             // Volume, envelope de volume e pan (em 5.1 o pan estéreo dá lugar
             // ao Surround Panner, aplicado na saída para o Master)
             let peak = apply_volume_pan_envelopes(
@@ -1579,6 +1585,11 @@ impl Mixer {
             }
             for fx in &bus.fx {
                 exec_fx(self, fx, &mut bbuf[..n * 2], t0);
+            }
+            if bus.invert_phase {
+                for s in &mut bbuf[..n * 2] {
+                    *s = -*s;
+                }
             }
             let bpeak = apply_volume_pan_envelopes(
                 &mut bbuf[..n * 2],
@@ -2259,5 +2270,57 @@ mod tests {
         assert!((out_evs[0].sample_offset - 100).abs() <= 1);
         assert!(!out_evs[1].is_note_on && out_evs[1].pitch == 69);
         assert!((out_evs[1].sample_offset - 300).abs() <= 1);
+    }
+
+    #[test]
+    fn inversao_de_fase_em_trilha_e_barramento_inverte_polaridade() {
+        let sr = 48_000;
+        let mut p = Project::new_default();
+        let m = MediaItem {
+            id: new_id(),
+            name: "tone.wav".into(),
+            source: MediaSource::File {
+                path: "tone.wav".into(),
+            },
+            duration: Some(Ticks::from_secs_i64(1)),
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let ev = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(1));
+        let mut audio_map = HashMap::new();
+        audio_map.insert(
+            m.id,
+            Arc::new(AudioData::from_stereo(sr, vec![0.25_f32; 512 * 2])),
+        );
+        let at_idx = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio padrão");
+        p.tracks[at_idx].events.push(ev);
+
+        let mut normal = vec![0.0_f32; 256 * 2];
+        Mixer::new(sr).process(&p, &audio_map, 0, &mut normal);
+        assert!(normal[16] > 0.2);
+
+        p.tracks[at_idx].invert_phase = true;
+        let mut inverted = vec![0.0_f32; 256 * 2];
+        Mixer::new(sr).process(&p, &audio_map, 0, &mut inverted);
+        assert!((inverted[16] + normal[16]).abs() < 1e-4);
+
+        // Barramento também com inversão cancela a inversão da trilha (dupla inversão = original)
+        let mut bus = AudioBus::new("Bus A");
+        bus.invert_phase = true;
+        let bid = bus.id;
+        p.audio_buses.push(bus);
+        p.tracks[at_idx].output_bus = Some(bid);
+        let mut double_inv = vec![0.0_f32; 256 * 2];
+        Mixer::new(sr).process(&p, &audio_map, 0, &mut double_inv);
+        assert!((double_inv[16] - normal[16]).abs() < 1e-4);
     }
 }
