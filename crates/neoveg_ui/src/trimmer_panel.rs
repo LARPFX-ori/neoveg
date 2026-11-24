@@ -1838,7 +1838,7 @@ impl App {
             let right_w = 5.0 * 26.0 + 115.0 + 26.0;
             egui::ComboBox::from_id_salt("trimmer_history")
                 .width((ui.available_width() - right_w).max(96.0))
-                .selected_text(selected)
+                .selected_text(selected.as_str())
                 .show_ui(ui, |ui| {
                     if entries.is_empty() {
                         ui.label(tr(lang, "(Nenhum)"));
@@ -1851,7 +1851,9 @@ impl App {
                             picked = Some(*id);
                         }
                     }
-                });
+                })
+                .response
+                .on_hover_text(selected.as_str());
             let th = &self.theme;
             if icons::icon_button_named(
                 ui,

@@ -3215,9 +3215,29 @@ fn kittest_paridade_color_grading_e_trimmer_historico() {
     }
     harness.state_mut().exec_cmd(Some(&ctx), "view.tab.trimmer");
     harness.run_steps(2);
+    let sort_rect = harness
+        .get_by_label("Ordenar o histórico por nome")
+        .raw_bounds()
+        .expect("botão Ordenar o histórico por nome no Trimmer");
+    let sort_cy = (sort_rect.y0 + sort_rect.y1) * 0.5;
+    harness
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .filter(|n| n.raw_bounds().is_some_and(|r| r.x1 <= sort_rect.x0 + 4.0))
+        .min_by(|a, b| {
+            let da = a
+                .raw_bounds()
+                .map_or(f64::MAX, |r| ((r.y0 + r.y1) * 0.5 - sort_cy).abs());
+            let db = b
+                .raw_bounds()
+                .map_or(f64::MAX, |r| ((r.y0 + r.y1) * 0.5 - sort_cy).abs());
+            da.total_cmp(&db)
+        })
+        .expect("ComboBox de histórico do Trimmer")
+        .click();
+    harness.run_steps(2);
     assert!(
         harness
-            .query_by_label_contains("take01.mp4 [/projetos/cena01]")
+            .query_by_label("take01.mp4 [/projetos/cena01]")
             .is_some(),
         "histórico do Trimmer deve exibir nome e diretório entre colchetes"
     );
