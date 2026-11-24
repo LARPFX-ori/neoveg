@@ -103,16 +103,16 @@ impl Default for SlideshowSpec {
 pub fn sort_slideshow_items(items: &mut [SlideshowItem], sort: SlideshowSort, seed: u64) {
     match sort {
         SlideshowSort::NameAsc => {
-            items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            items.sort_by_key(|a| a.name.to_lowercase());
         }
         SlideshowSort::NameDesc => {
-            items.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
+            items.sort_by_key(|a| std::cmp::Reverse(a.name.to_lowercase()));
         }
         SlideshowSort::NewestFirst => {
-            items.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs));
+            items.sort_by_key(|a| std::cmp::Reverse(a.modified_secs));
         }
         SlideshowSort::OldestFirst => {
-            items.sort_by(|a, b| a.modified_secs.cmp(&b.modified_secs));
+            items.sort_by_key(|a| a.modified_secs);
         }
         SlideshowSort::Shuffle => {
             // Fisher-Yates com LCG determinístico (zero dependência extra).
