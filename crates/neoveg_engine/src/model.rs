@@ -90,6 +90,113 @@ pub struct ProjectSettings {
     /// Rotação de saída do projeto (*Creating rotated projects*, sinalização digital / vertical).
     #[serde(default)]
     pub output_rotation: OutputRotation,
+    /// Modo de panorâmica (panning) estéreo padrão do projeto (VEGAS Pro Audio Panning Modes).
+    #[serde(default)]
+    pub pan_mode: AudioPanMode,
+}
+
+/// Modo de lei de panorâmica (panning) estéreo (paridade com *Audio Panning Modes* do VEGAS Pro).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AudioPanMode {
+    /// Soma os canais (L+R) mantendo volume total ao deslocar para um lado (0 dB centro, +6 dB nos extremos se mono).
+    AddChannels,
+    /// Balanço 0 dB (padrão clássico: atenua o canal oposto linearmente, 0 dB no centro).
+    #[default]
+    Balance0dB,
+    /// Balanço -3 dB no centro.
+    BalanceMinus3dB,
+    /// Balanço -6 dB no centro.
+    BalanceMinus6dB,
+    /// Potência constante (seno/cosseno, -3 dB no centro).
+    ConstantPower,
+    /// Modo Cinema/Filme (curva suave -4,5 dB no centro).
+    Film,
+}
+
+impl AudioPanMode {
+    pub const ALL: [Self; 6] = [
+        Self::AddChannels,
+        Self::Balance0dB,
+        Self::BalanceMinus3dB,
+        Self::BalanceMinus6dB,
+        Self::ConstantPower,
+        Self::Film,
+    ];
+
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
+            Self::AddChannels => "Somar canais (0 dB centro)",
+            Self::Balance0dB => "Balanço (0 dB centro)",
+            Self::BalanceMinus3dB => "Balanço (-3 dB centro)",
+            Self::BalanceMinus6dB => "Balanço (-6 dB centro)",
+            Self::ConstantPower => "Potência constante (-3 dB)",
+            Self::Film => "Filme (-4,5 dB centro)",
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
+    }
+
+    /// Aplica o modo de panorâmica estéreo a uma amostra `(l, r)` com `pan in [-1.0, 1.0]`.
+    #[inline]
+    pub fn apply_stereo(self, l: f32, r: f32, pan: f32) -> (f32, f32) {
+        let p = if pan.is_finite() {
+            pan.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        match self {
+            Self::AddChannels => {
+                // Em Add Channels, o canal oposto é parcialmente somado ao canal alvo
+                // para preservar conteúdo estéreo ao panoramizar.
+                if p < 0.0 {
+                    let a = -p;
+                    (l + r * a, r * (1.0 - a))
+                } else if p > 0.0 {
+                    let a = p;
+                    (l * (1.0 - a), r + l * a)
+                } else {
+                    (l, r)
+                }
+            }
+            Self::Balance0dB => {
+                let gl = (1.0 - p).min(1.0);
+                let gr = (1.0 + p).min(1.0);
+                (l * gl, r * gr)
+            }
+            Self::BalanceMinus3dB => {
+                // Centro = -3 dB (~0.7071), extremo = 0 dB (1.0)
+                const C3: f32 = std::f32::consts::FRAC_1_SQRT_2;
+                let (gl, gr) = if p < 0.0 {
+                    let a = -p;
+                    (C3 + (1.0 - C3) * a, C3 * (1.0 - a))
+                } else {
+                    let a = p;
+                    (C3 * (1.0 - a), C3 + (1.0 - C3) * a)
+                };
+                (l * gl, r * gr)
+            }
+            Self::BalanceMinus6dB => {
+                // Centro = -6 dB (0.5), extremo = 0 dB (1.0)
+                let gl = 0.5 * (1.0 - p);
+                let gr = 0.5 * (1.0 + p);
+                (l * gl, r * gr)
+            }
+            Self::ConstantPower => {
+                let angle = (p + 1.0) * 0.25 * std::f32::consts::PI;
+                (l * angle.cos(), r * angle.sin())
+            }
+            Self::Film => {
+                // -4.5 dB no centro (~0.5957), curva de potência 0.75
+                let u = (p + 1.0) * 0.5;
+                let gl = (1.0 - u).max(0.0).powf(0.75);
+                let gr = u.max(0.0).powf(0.75);
+                (l * gl, r * gr)
+            }
+        }
+    }
 }
 
 /// Rotação de saída aplicada ao quadro final do projeto (Propriedades do projeto → Vídeo).
@@ -502,6 +609,7 @@ impl Default for ProjectSettings {
             summary: ProjectSummary::default(),
             audio_cd: AudioCdInfo::default(),
             output_rotation: OutputRotation::Deg0,
+            pan_mode: AudioPanMode::Balance0dB,
         }
     }
 }
@@ -1896,6 +2004,10 @@ impl Project {
         {
             sanitize_fx(f);
         }
+        sanitize_envelopes(
+            &mut self.master.video_envelopes,
+            &[EnvKind::Opacity, EnvKind::FadeToColor, EnvKind::MotionBlur],
+        );
         self.master.volume_db = clampf(fin32(self.master.volume_db, 0.0), -120.0, 24.0);
         if self.audio_buses.len() > MAX_AUDIO_BUSES {
             self.audio_buses.truncate(MAX_AUDIO_BUSES);
@@ -2214,6 +2326,7 @@ fn sanitize_tracks_slice(
                     EnvKind::Pan,
                     EnvKind::Opacity,
                     EnvKind::FadeToColor,
+                    EnvKind::Velocity,
                 ],
             );
             e.stereo_3d = e.stereo_3d.sanitized();
@@ -2453,6 +2566,35 @@ fn sanitize_gen(g: &mut GenSpec) {
             *octaves = (*octaves).clamp(1, 8);
         }
         GenSpec::Ofx(r) => r.sanitize(),
+        GenSpec::CreditRoll(cr) => {
+            col(&mut cr.color);
+            col(&mut cr.header_color);
+            col(&mut cr.background);
+            let f = |v: f32, d: f32, lo: f32, hi: f32| {
+                if v.is_finite() {
+                    clampf(v, lo, hi)
+                } else {
+                    d
+                }
+            };
+            cr.font_size = f(cr.font_size, 5.5, 1.5, 30.0);
+            cr.scroll_duration = f(cr.scroll_duration, 10.0, 0.5, 3600.0);
+            cr.line_spacing = f(cr.line_spacing, 1.35, 0.8, 4.0);
+            if cr.title.len() > 512 {
+                let mut end = 512;
+                while !cr.title.is_char_boundary(end) {
+                    end -= 1;
+                }
+                cr.title.truncate(end);
+            }
+            if cr.lines.len() > 16384 {
+                let mut end = 16384;
+                while !cr.lines.is_char_boundary(end) {
+                    end -= 1;
+                }
+                cr.lines.truncate(end);
+            }
+        }
         GenSpec::Text(t) => {
             col(&mut t.color);
             col(&mut t.outline_color);
@@ -2874,8 +3016,48 @@ pub enum GenSpec {
         animated: bool,
     },
     Text(TextSpec),
+    /// Gerador de créditos rolantes (*Credit Roll*, VEGAS Pro).
+    CreditRoll(CreditRollSpec),
     /// Gerador de mídia OFX externo (`OfxImageEffectContextGenerator` / `General`).
     Ofx(OfxFxRef),
+}
+
+/// Especificação do gerador *Rolagem de Créditos* (*Credit Roll*).
+/// Linhas no formato `Função | Nome` são exibidas em duas colunas; linhas
+/// iniciadas por `# ` viram cabeçalhos em destaque.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CreditRollSpec {
+    pub title: String,
+    pub lines: String,
+    pub font_path: String,
+    /// Tamanho base da fonte em % da altura do quadro.
+    pub font_size: f32,
+    pub color: [f32; 4],
+    pub header_color: [f32; 4],
+    pub background: [f32; 4],
+    /// Duração total da rolagem em segundos.
+    pub scroll_duration: f32,
+    /// Quando `true`, desliza horizontalmente como letreiro (crawl).
+    pub crawl_horizontal: bool,
+    pub line_spacing: f32,
+}
+
+impl Default for CreditRollSpec {
+    fn default() -> Self {
+        Self {
+            title: "CRÉDITOS FINAIS".into(),
+            lines: "# Direção\nDiretor | Nome do Diretor\nProdução | Nome da Produção\n\n# Pós-Produção\nMontagem | Editor\nCor e Finalização | Colorista\nSom | Desenhista de Som".into(),
+            font_path: String::new(),
+            font_size: 5.5,
+            color: [0.96, 0.96, 0.96, 1.0],
+            header_color: [0.95, 0.78, 0.36, 1.0],
+            background: [0.0, 0.0, 0.0, 0.0],
+            scroll_duration: 10.0,
+            crawl_horizontal: false,
+            line_spacing: 1.35,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -3011,6 +3193,15 @@ impl GenSpec {
                     .collect::<String>();
                 tr_args(lang, "Texto: {first}", &[("first", &first)])
             }
+            GenSpec::CreditRoll(cr) => {
+                let title = cr.title.trim();
+                if title.is_empty() {
+                    tr(lang, "Rolagem de créditos").into()
+                } else {
+                    let short: String = title.chars().take(24).collect();
+                    tr_args(lang, "Créditos: {title}", &[("title", &short)])
+                }
+            }
             GenSpec::Ofx(r) => {
                 if !r.label.is_empty() {
                     r.label.clone()
@@ -3028,7 +3219,7 @@ impl GenSpec {
         match self {
             GenSpec::Noise { animated, .. } | GenSpec::NoiseTexture { animated, .. } => *animated,
             GenSpec::Text(t) => t.anim != TextAnim::None,
-            GenSpec::Ofx(_) => true,
+            GenSpec::CreditRoll(_) | GenSpec::Ofx(_) => true,
             _ => false,
         }
     }
@@ -3134,6 +3325,10 @@ pub enum EnvKind {
     Opacity,
     /// Fade para cor da trilha de vídeo (-1 = preto, 0 = nada, 1 = branco).
     FadeToColor,
+    /// Velocidade de reprodução de evento de vídeo (-1.0 = -100% reverso, 0.0 = congelar, 1.0 = 100%, 3.0 = 300%).
+    Velocity,
+    /// Quantidade de desfoque de movimento na trilha do barramento de vídeo (0..1).
+    MotionBlur,
 }
 
 impl EnvKind {
@@ -3143,6 +3338,8 @@ impl EnvKind {
             EnvKind::Pan => "Pan",
             EnvKind::Opacity => "Nível de composição",
             EnvKind::FadeToColor => "Fade para cor",
+            EnvKind::Velocity => "Velocidade",
+            EnvKind::MotionBlur => "Desfoque de movimento",
         };
         neoveg_common::tr(lang, pt)
     }
@@ -3156,12 +3353,13 @@ impl EnvKind {
             EnvKind::Pan => (-1.0, 1.0),
             EnvKind::Opacity => (0.0, 1.0),
             EnvKind::FadeToColor => (-1.0, 1.0),
+            EnvKind::Velocity => (-1.0, 3.0),
+            EnvKind::MotionBlur => (0.0, 1.0),
         }
     }
     pub fn default_value(self) -> f32 {
         match self {
-            EnvKind::Volume => 1.0,
-            EnvKind::Opacity => 1.0,
+            EnvKind::Volume | EnvKind::Opacity | EnvKind::Velocity => 1.0,
             _ => 0.0,
         }
     }
@@ -3225,6 +3423,8 @@ impl EnvKind {
                     format!("{:.0}% branco", v * 100.0)
                 }
             }
+            EnvKind::Velocity => format!("{:.0}%", v * 100.0),
+            EnvKind::MotionBlur => format!("{:.0}%", v * 100.0),
         }
     }
 }
@@ -3590,6 +3790,9 @@ pub struct Track {
     /// Áudio: pan -1..1 (modo estéreo).
     #[serde(default)]
     pub pan: f32,
+    /// Áudio: modo de panorâmica por trilha (`None` herda `ProjectSettings::pan_mode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan_mode: Option<AudioPanMode>,
     /// Áudio: posição no *Surround Panner* (modo 5.1; substitui `pan`).
     #[serde(default)]
     pub surround: SurroundPan,
@@ -3755,7 +3958,9 @@ pub struct AudioBus {
     pub volume_db: f32,
     #[serde(default)]
     pub pan: f32,
-    /// Posição no *Surround Panner* quando o barramento sai para o Master em 5.1.
+    /// Modo de panorâmica do barramento (`None` herda `ProjectSettings::pan_mode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan_mode: Option<AudioPanMode>,
     #[serde(default)]
     pub surround: SurroundPan,
     /// Saída do barramento (`None` = Master Bus, `Some(id)` = outro barramento acíclico).
@@ -3787,6 +3992,7 @@ impl AudioBus {
             solo: false,
             volume_db: 0.0,
             pan: 0.0,
+            pan_mode: None,
             surround: SurroundPan::default(),
             output_bus: None,
             fx: vec![],
@@ -3858,6 +4064,7 @@ impl Track {
             height: default_track_height(),
             volume_db: 0.0,
             pan: 0.0,
+            pan_mode: None,
             surround: SurroundPan::default(),
             opacity: 1.0,
             blend: BlendMode::SourceAlpha,
@@ -4082,10 +4289,15 @@ pub enum TransitionKind {
     FlashWhite,
     FlyIn,
     PagePeel,
+    Blinds3D,
+    Cascade3D,
+    Shuffle3D,
+    PageLoop,
+    PageRoll,
 }
 
 impl TransitionKind {
-    pub const ALL: [TransitionKind; 33] = [
+    pub const ALL: [TransitionKind; 38] = [
         TransitionKind::Dissolve,
         TransitionKind::FadeThroughBlack,
         TransitionKind::WipeLeft,
@@ -4119,6 +4331,11 @@ impl TransitionKind {
         TransitionKind::FlashWhite,
         TransitionKind::FlyIn,
         TransitionKind::PagePeel,
+        TransitionKind::Blinds3D,
+        TransitionKind::Cascade3D,
+        TransitionKind::Shuffle3D,
+        TransitionKind::PageLoop,
+        TransitionKind::PageRoll,
     ];
     pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
         let pt = match self {
@@ -4155,6 +4372,11 @@ impl TransitionKind {
             TransitionKind::FlashWhite => "Flash branco",
             TransitionKind::FlyIn => "Voo 3D (entrar e sair)",
             TransitionKind::PagePeel => "Virar página",
+            TransitionKind::Blinds3D => "Persianas 3D",
+            TransitionKind::Cascade3D => "Cascata 3D",
+            TransitionKind::Shuffle3D => "Embaralhar 3D",
+            TransitionKind::PageLoop => "Loop de página",
+            TransitionKind::PageRoll => "Rolo de página",
         };
         neoveg_common::tr(lang, pt)
     }
@@ -4265,9 +4487,14 @@ pub struct Event {
     /// 746) aplica compositores só a trilhas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<BlendMode>,
-    /// Envelopes de evento (ex.: Volume, Pan, Opacidade/Composite, FadeToColor).
+    /// Envelopes de evento (ex.: Volume, Pan, Opacidade/Composite, FadeToColor, Velocity).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub envelopes: Vec<Envelope>,
+    /// Quando `true`, este evento de vídeo atua como *Adjustment Event* (VEGAS Pro 20/2026):
+    /// aplica seus efeitos (`fx`) e opacidade/fades sobre a composição acumulada abaixo dele
+    /// durante `[start, end]`, sem precisar de mídia própria.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_adjustment: bool,
 }
 
 /// Um take de um evento: a mídia, onde ela começa e o nome do take.
@@ -4322,7 +4549,102 @@ impl Event {
             stereo_3d: Stereo3dClip::default(),
             blend: None,
             envelopes: vec![],
+            is_adjustment: false,
         }
+    }
+
+    /// Cria um *Evento de Ajuste* (*Adjustment Event*, VEGAS Pro 20/2026) que aplica
+    /// seus FX sobre todas as trilhas abaixo dele durante `[start, start + length]`.
+    pub fn new_adjustment(name: impl Into<String>, start: Ticks, length: Ticks) -> Self {
+        Event {
+            id: new_id(),
+            name: name.into(),
+            media_id: 0,
+            start,
+            length: length.max(Ticks::from_millis_i64(100)),
+            offset: Ticks::ZERO,
+            rate: Rate::NORMAL,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+            mute: false,
+            locked: false,
+            looped: false,
+            reverse: false,
+            gain_db: 0.0,
+            opacity: 1.0,
+            maintain_aspect: true,
+            pan_crop_stretch_to_fill: true,
+            pan_crop: Keyframes::default(),
+            pan_crop_mask_enabled: false,
+            pan_crop_mask: None,
+            fx: vec![],
+            group: None,
+            transition: None,
+            no_crossfade_in: false,
+            crossfade_out_curve: None,
+            crossfade_in_curve: None,
+            alt_takes: Vec::new(),
+            take_index: 0,
+            take_name: String::new(),
+            pitch_semitones: 0.0,
+            lock_pitch_to_stretch: false,
+            sync_link_master: None,
+            stereo_3d: Stereo3dClip::default(),
+            blend: None,
+            envelopes: vec![],
+            is_adjustment: true,
+        }
+    }
+
+    pub fn velocity_envelope(&self) -> Option<&Envelope> {
+        self.envelope(EnvKind::Velocity)
+    }
+
+    /// Integra o envelope de velocidade do evento (`EnvKind::Velocity`, em ticks locais `[0, local_t]`)
+    /// devolvendo o deslocamento de mídia acumulado em ticks (suporta velocidade variável, `0%` freeze
+    /// frame e valores negativos para reversão).
+    fn integrate_velocity(env: &Envelope, local_t: Ticks) -> Ticks {
+        if local_t <= Ticks::ZERO {
+            return Ticks::ZERO;
+        }
+        // Usa os pontos do envelope dentro de [0, local_t] como nós e subdivide cada segmento
+        // em subpassos uniformes para suportar curvas suaves/rápidas/lentas com precisão.
+        let mut knots: Vec<Ticks> = Vec::with_capacity(env.points.len() + 2);
+        knots.push(Ticks::ZERO);
+        for pt in &env.points {
+            if pt.t > Ticks::ZERO && pt.t < local_t {
+                knots.push(pt.t);
+            }
+        }
+        knots.push(local_t);
+        knots.sort();
+        knots.dedup();
+
+        const SUBSTEPS: usize = 16;
+        let mut acc_ticks: f64 = 0.0;
+        for w in knots.windows(2) {
+            let t0 = w[0].0;
+            let t1 = w[1].0;
+            let span = t1.saturating_sub(t0);
+            if span <= 0 {
+                continue;
+            }
+            let step = span as f64 / SUBSTEPS as f64;
+            for s in 0..SUBSTEPS {
+                let num = span as i128 * (2 * s as i128 + 1);
+                let tm = t0.saturating_add((num / (2 * SUBSTEPS as i128)) as i64);
+                let v = env.eval(Ticks::from_raw(tm)).clamp(-1.0, 3.0) as f64;
+                acc_ticks += v * step;
+            }
+        }
+        if !acc_ticks.is_finite() {
+            return Ticks::ZERO;
+        }
+        let clamped = acc_ticks.round().clamp(
+            -crate::time::MAX_TICKS as f64,
+            crate::time::MAX_TICKS as f64,
+        ) as i64;
+        Ticks::from_raw(clamped)
     }
 
     pub fn envelope(&self, kind: EnvKind) -> Option<&Envelope> {
@@ -4372,11 +4694,22 @@ impl Event {
     }
 
     /// Converte tempo da timeline em tempo da mídia (em ticks exatos),
-    /// considerando offset, velocidade racional, loop e reversão.
+    /// considerando offset, velocidade racional, envelope de velocidade, loop e reversão.
     pub fn media_time(&self, t: Ticks, media_dur: Option<Ticks>) -> Option<Ticks> {
-        let local = self.rate.scale_ticks(t - self.start);
+        let raw_local = t - self.start;
+        let local = if let Some(venv) = self.velocity_envelope() {
+            let integrated = Self::integrate_velocity(venv, raw_local);
+            self.rate.scale_ticks(integrated)
+        } else {
+            self.rate.scale_ticks(raw_local)
+        };
         let mut mt = if self.reverse {
-            let total = self.rate.scale_ticks(self.length);
+            let total = if let Some(venv) = self.velocity_envelope() {
+                self.rate
+                    .scale_ticks(Self::integrate_velocity(venv, self.length))
+            } else {
+                self.rate.scale_ticks(self.length)
+            };
             self.offset + (total - local)
         } else {
             self.offset + local
@@ -4581,6 +4914,18 @@ pub enum FxKind {
     BlackBarFill,
     PictureInPicture,
     CookieCutter,
+    ColorCorrectorSecondary,
+    LensCorrection,
+    BumpMap,
+    ConvolutionKernel,
+    Deform,
+    Denoise,
+    QuickBlur,
+    RadialPixelate,
+    MaskGenerator,
+    MotionBlur,
+    TinyPlanet,
+    AutoLooks,
     // áudio
     Gain,
     ParametricEq,
@@ -4979,25 +5324,37 @@ impl FxKind {
             | FxKind::SaturationAdjust
             | FxKind::ChannelBlend
             | FxKind::GradientMap
-            | FxKind::Threshold => Some(FxCategory::Color),
+            | FxKind::Threshold
+            | FxKind::ColorCorrectorSecondary
+            | FxKind::AutoLooks => Some(FxCategory::Color),
             FxKind::UnsharpMask
             | FxKind::LinearBlur
             | FxKind::RadialBlur
             | FxKind::Median
-            | FxKind::MinMax => Some(FxCategory::BlurSharpen),
+            | FxKind::MinMax
+            | FxKind::Denoise
+            | FxKind::QuickBlur
+            | FxKind::MotionBlur
+            | FxKind::ConvolutionKernel => Some(FxCategory::BlurSharpen),
             FxKind::Wave
             | FxKind::Swirl
             | FxKind::Spherize
             | FxKind::PinchPunch
-            | FxKind::OffsetWrap => Some(FxCategory::Distort),
-            FxKind::LensFlare | FxKind::LightRays => Some(FxCategory::Light),
-            FxKind::AddNoise | FxKind::TvSimulator | FxKind::FilmEffects | FxKind::Newsprint => {
-                Some(FxCategory::Stylize)
-            }
+            | FxKind::OffsetWrap
+            | FxKind::LensCorrection
+            | FxKind::Deform
+            | FxKind::TinyPlanet => Some(FxCategory::Distort),
+            FxKind::LensFlare | FxKind::LightRays | FxKind::BumpMap => Some(FxCategory::Light),
+            FxKind::AddNoise
+            | FxKind::TvSimulator
+            | FxKind::FilmEffects
+            | FxKind::Newsprint
+            | FxKind::RadialPixelate => Some(FxCategory::Stylize),
             FxKind::Border
             | FxKind::BlackBarFill
             | FxKind::PictureInPicture
             | FxKind::CookieCutter => Some(FxCategory::Composite),
+            FxKind::MaskGenerator => Some(FxCategory::Key),
             FxKind::Gain
             | FxKind::ParametricEq
             | FxKind::HighPass
@@ -5014,7 +5371,7 @@ impl FxKind {
         }
     }
 
-    pub const VIDEO: [FxKind; 46] = [
+    pub const VIDEO: [FxKind; 58] = [
         FxKind::BrightnessContrast,
         FxKind::HslAdjust,
         FxKind::ColorCorrector,
@@ -5061,9 +5418,21 @@ impl FxKind {
         FxKind::BlackBarFill,
         FxKind::PictureInPicture,
         FxKind::CookieCutter,
+        FxKind::ColorCorrectorSecondary,
+        FxKind::LensCorrection,
+        FxKind::BumpMap,
+        FxKind::ConvolutionKernel,
+        FxKind::Deform,
+        FxKind::Denoise,
+        FxKind::QuickBlur,
+        FxKind::RadialPixelate,
+        FxKind::MaskGenerator,
+        FxKind::MotionBlur,
+        FxKind::TinyPlanet,
+        FxKind::AutoLooks,
     ];
     /// Efeitos complementares implementados em `engine::vfx_extra`.
-    pub const VIDEO_EXTRA: [FxKind; 26] = [
+    pub const VIDEO_EXTRA: [FxKind; 38] = [
         FxKind::WhiteBalance,
         FxKind::ColorBalance,
         FxKind::SaturationAdjust,
@@ -5090,6 +5459,18 @@ impl FxKind {
         FxKind::BlackBarFill,
         FxKind::PictureInPicture,
         FxKind::CookieCutter,
+        FxKind::ColorCorrectorSecondary,
+        FxKind::LensCorrection,
+        FxKind::BumpMap,
+        FxKind::ConvolutionKernel,
+        FxKind::Deform,
+        FxKind::Denoise,
+        FxKind::QuickBlur,
+        FxKind::RadialPixelate,
+        FxKind::MaskGenerator,
+        FxKind::MotionBlur,
+        FxKind::TinyPlanet,
+        FxKind::AutoLooks,
     ];
     pub const AUDIO: [FxKind; 11] = [
         FxKind::Gain,
@@ -5157,6 +5538,18 @@ impl FxKind {
             FxKind::BlackBarFill => "BlackBarFill",
             FxKind::PictureInPicture => "PictureInPicture",
             FxKind::CookieCutter => "CookieCutter",
+            FxKind::ColorCorrectorSecondary => "ColorCorrectorSecondary",
+            FxKind::LensCorrection => "LensCorrection",
+            FxKind::BumpMap => "BumpMap",
+            FxKind::ConvolutionKernel => "ConvolutionKernel",
+            FxKind::Deform => "Deform",
+            FxKind::Denoise => "Denoise",
+            FxKind::QuickBlur => "QuickBlur",
+            FxKind::RadialPixelate => "RadialPixelate",
+            FxKind::MaskGenerator => "MaskGenerator",
+            FxKind::MotionBlur => "MotionBlur",
+            FxKind::TinyPlanet => "TinyPlanet",
+            FxKind::AutoLooks => "AutoLooks",
             FxKind::Gain => "Gain",
             FxKind::ParametricEq => "ParametricEq",
             FxKind::HighPass => "HighPass",
@@ -5229,6 +5622,18 @@ impl FxKind {
             FxKind::BlackBarFill => "Preencher Barras Pretas",
             FxKind::PictureInPicture => "Imagem na Imagem",
             FxKind::CookieCutter => "Recorte em Forma",
+            FxKind::ColorCorrectorSecondary => "Corretor de Cor Secundário",
+            FxKind::LensCorrection => "Correção de Lente",
+            FxKind::BumpMap => "Mapa de Relevo",
+            FxKind::ConvolutionKernel => "Núcleo de Convolução",
+            FxKind::Deform => "Deformar",
+            FxKind::Denoise => "Redução de Ruído",
+            FxKind::QuickBlur => "Desfoque Rápido",
+            FxKind::RadialPixelate => "Pixelização Radial",
+            FxKind::MaskGenerator => "Gerador de Máscara",
+            FxKind::MotionBlur => "Desfoque de Movimento",
+            FxKind::TinyPlanet => "Pequeno Planeta 360°",
+            FxKind::AutoLooks => "Looks Automáticos",
             FxKind::Gain => "Ganho",
             FxKind::ParametricEq => "EQ Paramétrico",
             FxKind::HighPass => "Passa-Altas",
@@ -5597,6 +6002,139 @@ impl FxKind {
                     ]
                 }
             }
+            FxKind::ColorCorrectorSecondary => {
+                const {
+                    &[
+                        p("Matiz alvo (graus)", 0.0, 360.0, 0.0),
+                        p("Largura do matiz", 5.0, 180.0, 45.0),
+                        p("Rotação de matiz", -180.0, 180.0, 0.0),
+                        p("Saturação", 0.0, 3.0, 1.0),
+                        p("Ganho", 0.0, 2.0, 1.0),
+                        tg("Inverter máscara", 0.0),
+                    ]
+                }
+            }
+            FxKind::LensCorrection => {
+                const {
+                    &[
+                        p("Distorção K1", -1.0, 1.0, 0.0),
+                        p("Distorção K2", -1.0, 1.0, 0.0),
+                        p("Zoom", 0.5, 2.0, 1.0),
+                        p("Centro X", 0.0, 1.0, 0.5),
+                        p("Centro Y", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::BumpMap => {
+                const {
+                    &[
+                        p("Altura do relevo", 0.0, 5.0, 1.5),
+                        p("Ângulo da luz (graus)", -180.0, 180.0, 45.0),
+                        p("Ambiente", 0.0, 1.0, 0.5),
+                        p("Mistura", 0.0, 1.0, 0.6),
+                    ]
+                }
+            }
+            FxKind::ConvolutionKernel => {
+                const {
+                    &[
+                        p(
+                            "Kernel (0:Nitidez, 1:Bordas, 2:Relevo, 3:Laplaciano, 4:Caixa)",
+                            0.0,
+                            4.0,
+                            0.0,
+                        ),
+                        p("Intensidade", 0.0, 2.0, 1.0),
+                        p("Mistura", 0.0, 1.0, 1.0),
+                    ]
+                }
+            }
+            FxKind::Deform => {
+                const {
+                    &[
+                        p("Curvatura X", -1.0, 1.0, 0.0),
+                        p("Curvatura Y", -1.0, 1.0, 0.0),
+                        p("Cisalhamento X", -1.0, 1.0, 0.0),
+                        p("Cisalhamento Y", -1.0, 1.0, 0.0),
+                        p("Comprimir X", -0.8, 0.8, 0.0),
+                        p("Comprimir Y", -0.8, 0.8, 0.0),
+                    ]
+                }
+            }
+            FxKind::Denoise => {
+                const {
+                    &[
+                        p("Intensidade", 0.0, 1.0, 0.4),
+                        p("Raio (px)", 1.0, 5.0, 2.0),
+                        p("Preservar bordas", 0.02, 0.5, 0.12),
+                    ]
+                }
+            }
+            FxKind::QuickBlur => {
+                const {
+                    &[
+                        p("Raio H (%)", 0.0, 10.0, 1.5),
+                        p("Raio V (%)", 0.0, 10.0, 1.5),
+                    ]
+                }
+            }
+            FxKind::RadialPixelate => {
+                const {
+                    &[
+                        p("Setores angulares", 4.0, 128.0, 24.0),
+                        p("Anéis radiais", 4.0, 128.0, 16.0),
+                        p("Centro X", 0.0, 1.0, 0.5),
+                        p("Centro Y", 0.0, 1.0, 0.5),
+                    ]
+                }
+            }
+            FxKind::MaskGenerator => {
+                const {
+                    &[
+                        p(
+                            "Canal (0:Luminância, 1:Vermelho, 2:Verde, 3:Azul)",
+                            0.0,
+                            3.0,
+                            0.0,
+                        ),
+                        p("Limiar mínimo", 0.0, 1.0, 0.2),
+                        p("Limiar máximo", 0.0, 1.0, 0.8),
+                        tg("Inverter", 0.0),
+                    ]
+                }
+            }
+            FxKind::MotionBlur => {
+                const {
+                    &[
+                        p("Ângulo (graus)", -180.0, 180.0, 0.0),
+                        p("Comprimento (%)", 0.0, 15.0, 2.5),
+                        p("Amostras", 3.0, 21.0, 9.0),
+                    ]
+                }
+            }
+            FxKind::TinyPlanet => {
+                const {
+                    &[
+                        p("Zoom", 0.2, 4.0, 1.0),
+                        p("Rotação (graus)", -180.0, 180.0, 0.0),
+                        p("Inclinação", -1.0, 1.0, 0.0),
+                        tg("Inverter polo", 0.0),
+                    ]
+                }
+            }
+            FxKind::AutoLooks => {
+                const {
+                    &[
+                        p(
+                            "Estilo (0:Cinema, 1:Teal/Orange, 2:Vintage, 3:Noir, 4:Bleach, 5:Pôr do Sol)",
+                            0.0,
+                            5.0,
+                            0.0,
+                        ),
+                        p("Intensidade", 0.0, 1.0, 0.75),
+                    ]
+                }
+            }
             FxKind::Gain => const { &[p("Ganho (dB)", -60.0, 24.0, 0.0)] },
             FxKind::ParametricEq => {
                 const {
@@ -5803,7 +6341,8 @@ impl AnimParam {
     }
 }
 
-/// Curvas RGB, bandas HSL e LUT (.cube ou predefinida) para Color Grading (pp. 769–781).
+/// Curvas RGB, bandas HSL, LUT (.cube ou predefinida), Rodas RL e Utilitários
+/// para Color Grading (VEGAS Pro 21/2026).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorGradeCurves {
@@ -5824,6 +6363,40 @@ pub struct ColorGradeCurves {
     /// 6 setores HSL (Vermelho, Amarelo, Verde, Ciano, Azul, Magenta): `[matiz (-0.5..0.5), sat (-1..1), lum (-1..1)]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hsl_bands: Vec<[f32; 3]>,
+    /// Rodas de Cor com Limite de Faixa (RL Color Wheels — VEGAS 2026): `[r, g, b, lum]` em `-1..1`.
+    #[serde(default)]
+    pub rl_shadows: [f32; 4],
+    #[serde(default)]
+    pub rl_midtones: [f32; 4],
+    #[serde(default)]
+    pub rl_highlights: [f32; 4],
+    #[serde(default)]
+    pub rl_offset: [f32; 4],
+    /// Limiar de sombras das Rodas RL (`0.05..=0.60`, padrão `0.33`).
+    #[serde(default = "default_rl_shadow_thresh")]
+    pub rl_shadow_thresh: f32,
+    /// Limiar de realces das Rodas RL (`0.40..=0.95`, padrão `0.67`).
+    #[serde(default = "default_rl_highlight_thresh")]
+    pub rl_highlight_thresh: f32,
+    /// Seção *Utilitários* do painel Color Grading 2026.
+    #[serde(default)]
+    pub exposure: f32,
+    #[serde(default)]
+    pub contrast: f32,
+    #[serde(default)]
+    pub saturation: f32,
+    #[serde(default)]
+    pub temperature: f32,
+    #[serde(default)]
+    pub tint: f32,
+}
+
+fn default_rl_shadow_thresh() -> f32 {
+    0.33
+}
+
+fn default_rl_highlight_thresh() -> f32 {
+    0.67
 }
 
 impl Default for ColorGradeCurves {
@@ -5836,6 +6409,17 @@ impl Default for ColorGradeCurves {
             green: Vec::new(),
             blue: Vec::new(),
             hsl_bands: Vec::new(),
+            rl_shadows: [0.0; 4],
+            rl_midtones: [0.0; 4],
+            rl_highlights: [0.0; 4],
+            rl_offset: [0.0; 4],
+            rl_shadow_thresh: default_rl_shadow_thresh(),
+            rl_highlight_thresh: default_rl_highlight_thresh(),
+            exposure: 0.0,
+            contrast: 0.0,
+            saturation: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
         }
     }
 }
@@ -5887,6 +6471,45 @@ impl ColorGradeCurves {
             b[1] = fin(b[1], 0.0).clamp(-1.0, 1.0);
             b[2] = fin(b[2], 0.0).clamp(-1.0, 1.0);
         }
+        for w in [
+            &mut self.rl_shadows,
+            &mut self.rl_midtones,
+            &mut self.rl_highlights,
+            &mut self.rl_offset,
+        ] {
+            for x in w.iter_mut() {
+                *x = fin(*x, 0.0).clamp(-1.0, 1.0);
+            }
+        }
+        self.rl_shadow_thresh = fin(self.rl_shadow_thresh, 0.33).clamp(0.05, 0.60);
+        self.rl_highlight_thresh = fin(self.rl_highlight_thresh, 0.67).clamp(0.40, 0.95);
+        if self.rl_highlight_thresh < self.rl_shadow_thresh + 0.05 {
+            self.rl_highlight_thresh = (self.rl_shadow_thresh + 0.05).min(0.95);
+        }
+        self.exposure = fin(self.exposure, 0.0).clamp(-3.0, 3.0);
+        self.contrast = fin(self.contrast, 0.0).clamp(-1.0, 1.0);
+        self.saturation = fin(self.saturation, 0.0).clamp(-1.0, 1.0);
+        self.temperature = fin(self.temperature, 0.0).clamp(-1.0, 1.0);
+        self.tint = fin(self.tint, 0.0).clamp(-1.0, 1.0);
+    }
+
+    pub fn has_rl_edits(&self) -> bool {
+        [
+            self.rl_shadows,
+            self.rl_midtones,
+            self.rl_highlights,
+            self.rl_offset,
+        ]
+        .iter()
+        .any(|w| w.iter().any(|v| v.abs() > 1e-4))
+    }
+
+    pub fn has_utility_edits(&self) -> bool {
+        self.exposure.abs() > 1e-4
+            || self.contrast.abs() > 1e-4
+            || self.saturation.abs() > 1e-4
+            || self.temperature.abs() > 1e-4
+            || self.tint.abs() > 1e-4
     }
 
     /// Avalia uma curva linear por partes em `x in [0..1]`; curva vazia devolve `x`.
@@ -5921,6 +6544,8 @@ impl ColorGradeCurves {
                 .hsl_bands
                 .iter()
                 .all(|b| b[0].abs() < 1e-4 && b[1].abs() < 1e-4 && b[2].abs() < 1e-4)
+            && !self.has_rl_edits()
+            && !self.has_utility_edits()
     }
 }
 
@@ -6058,6 +6683,22 @@ pub struct MasterBus {
     /// Efeitos de saída de vídeo (Video Output FX).
     #[serde(default)]
     pub video_fx: Vec<FxInstance>,
+    /// Envelopes da *Trilha do Barramento de Vídeo* (*Video Bus Track*, `Ctrl+Shift+B`):
+    /// `EnvKind::Opacity`, `EnvKind::FadeToColor` e `EnvKind::MotionBlur`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub video_envelopes: Vec<Envelope>,
+}
+
+impl MasterBus {
+    pub fn video_envelope(&self, kind: EnvKind) -> Option<&Envelope> {
+        self.video_envelopes.iter().find(|e| e.kind == kind)
+    }
+
+    pub fn video_env_value(&self, kind: EnvKind, t: Ticks) -> f32 {
+        self.video_envelope(kind)
+            .map(|e| e.eval(t))
+            .unwrap_or_else(|| kind.default_value())
+    }
 }
 
 /// Tipo de marcador na timeline (padrão, faixa/índice de CD ou comando, pp. 131, 495, 725).

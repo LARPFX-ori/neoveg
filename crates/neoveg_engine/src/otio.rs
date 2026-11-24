@@ -1037,6 +1037,10 @@ fn export_media_ref(item: Option<&MediaItem>, fps: FrameRate, sr: Option<u32>) -
                     ("TestPattern", serde_json::json!({ "pattern": pattern }))
                 }
                 GenSpec::NoiseTexture { .. } => ("NoiseTexture", serde_json::json!({})),
+                GenSpec::CreditRoll(cr) => (
+                    "CreditRoll",
+                    serde_json::json!({ "title": cr.title, "crawl": cr.crawl_horizontal }),
+                ),
                 GenSpec::Ofx(r) => (
                     "Ofx",
                     serde_json::json!({ "plugin_id": r.plugin_id, "label": r.label }),

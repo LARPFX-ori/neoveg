@@ -615,9 +615,479 @@ pub(crate) fn apply(kind: FxKind, v: &[f32], f: &mut Frame, t: Ticks) -> bool {
                 }
             });
         }
+        FxKind::ColorCorrectorSecondary => {
+            let target_h = g(v, 0, 0.0).rem_euclid(360.0) / 360.0;
+            let width_h = (g(v, 1, 45.0).clamp(5.0, 180.0)) / 360.0;
+            let shift_h = g(v, 2, 0.0).clamp(-180.0, 180.0) / 360.0;
+            let sat_m = g(v, 3, 1.0).clamp(0.0, 3.0);
+            let gain_m = g(v, 4, 1.0).clamp(0.0, 2.0);
+            let inv = g(v, 5, 0.0) > 0.5;
+            map_color(f, |c| {
+                let (h, s, l) = rgb_to_hsl_local(c);
+                let mut dist = (h - target_h).abs();
+                if dist > 0.5 {
+                    dist = 1.0 - dist;
+                }
+                let mut mask =
+                    (1.0 - smoothstep(width_h * 0.4, width_h, dist)) * smoothstep(0.04, 0.14, s);
+                if inv {
+                    mask = 1.0 - mask;
+                }
+                if mask <= 1e-4 {
+                    return c;
+                }
+                let nh = (h + shift_h).rem_euclid(1.0);
+                let ns = (s * sat_m).clamp(0.0, 1.0);
+                let nl = (l * gain_m).clamp(0.0, 1.0);
+                let out_c = hsl_to_rgb_local(nh, ns, nl);
+                mix3(c, out_c, mask)
+            });
+        }
+        FxKind::LensCorrection => {
+            let k1 = g(v, 0, 0.0).clamp(-1.0, 1.0);
+            let k2 = g(v, 1, 0.0).clamp(-1.0, 1.0);
+            let zoom = g(v, 2, 1.0).clamp(0.5, 2.0);
+            let cx = g(v, 3, 0.5) * wf;
+            let cy = g(v, 4, 0.5) * hf;
+            let norm = (wf.hypot(hf) * 0.5).max(1.0);
+            remap(f, |x, y| {
+                let dx = (x - cx) / (norm * zoom);
+                let dy = (y - cy) / (norm * zoom);
+                let r2 = dx * dx + dy * dy;
+                let factor = 1.0 + k1 * r2 + k2 * r2 * r2;
+                let sx = cx + dx * factor * norm;
+                let sy = cy + dy * factor * norm;
+                if sx >= 0.0 && sy >= 0.0 && sx < wf && sy < hf {
+                    Some((sx, sy))
+                } else {
+                    None
+                }
+            });
+        }
+        FxKind::BumpMap => {
+            let height = g(v, 0, 1.5).clamp(0.0, 5.0);
+            let ang = g(v, 1, 45.0).to_radians();
+            let ambient = g(v, 2, 0.5).clamp(0.0, 1.0);
+            let mix = g(v, 3, 0.6).clamp(0.0, 1.0);
+            let (lx, ly) = (ang.cos(), ang.sin());
+            let src = f.clone();
+            f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                for (x, p) in row.iter_mut().enumerate() {
+                    let a = p[3];
+                    if a <= 1e-6 {
+                        continue;
+                    }
+                    let lum_at = |dx: isize, dy: isize| {
+                        let q = src.get_clamped(x as isize + dx, y as isize + dy);
+                        let qa = q[3].max(1e-6);
+                        luma([q[0] / qa, q[1] / qa, q[2] / qa])
+                    };
+                    let gx = (lum_at(1, 0) - lum_at(-1, 0)) * height * 2.0;
+                    let gy = (lum_at(0, 1) - lum_at(0, -1)) * height * 2.0;
+                    let nz = 1.0_f32;
+                    let inv_len = 1.0 / (gx * gx + gy * gy + nz * nz).sqrt();
+                    let dot = ((-gx * lx - gy * ly + nz * 0.7) * inv_len).clamp(0.0, 1.5);
+                    let light = (ambient + (1.0 - ambient) * dot).clamp(0.0, 1.8);
+                    let inv = 1.0 / a;
+                    let base = [p[0] * inv, p[1] * inv, p[2] * inv];
+                    let lit = [
+                        (base[0] * light).clamp(0.0, 1.0),
+                        (base[1] * light).clamp(0.0, 1.0),
+                        (base[2] * light).clamp(0.0, 1.0),
+                    ];
+                    let out_c = mix3(base, lit, mix);
+                    p[0] = out_c[0].clamp(0.0, 1.0) * a;
+                    p[1] = out_c[1].clamp(0.0, 1.0) * a;
+                    p[2] = out_c[2].clamp(0.0, 1.0) * a;
+                }
+            });
+        }
+        FxKind::ConvolutionKernel => {
+            let preset = g(v, 0, 0.0).round() as i32;
+            let strength = g(v, 1, 1.0).clamp(0.0, 2.0);
+            let mix = g(v, 2, 1.0).clamp(0.0, 1.0);
+            let k: [f32; 9] = match preset {
+                1 => [-1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0], // Bordas
+                2 => [-2.0, -1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0, 2.0],      // Relevo
+                3 => [0.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0],     // Laplaciano
+                4 => [1.0 / 9.0; 9],                                        // Caixa
+                _ => [0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0],     // Nitidez
+            };
+            let src = f.clone();
+            f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                for (x, p) in row.iter_mut().enumerate() {
+                    let a = p[3];
+                    if a <= 1e-6 {
+                        continue;
+                    }
+                    let mut acc = [0.0_f32; 3];
+                    let mut ki = 0usize;
+                    for dy in -1..=1_isize {
+                        for dx in -1..=1_isize {
+                            let q = src.get_clamped(x as isize + dx, y as isize + dy);
+                            let qa = q[3].max(1e-6);
+                            let w_k = k[ki];
+                            acc[0] += (q[0] / qa) * w_k;
+                            acc[1] += (q[1] / qa) * w_k;
+                            acc[2] += (q[2] / qa) * w_k;
+                            ki += 1;
+                        }
+                    }
+                    let inv = 1.0 / a;
+                    let base = [p[0] * inv, p[1] * inv, p[2] * inv];
+                    let conv = [
+                        (base[0] + (acc[0] - base[0]) * strength).clamp(0.0, 1.0),
+                        (base[1] + (acc[1] - base[1]) * strength).clamp(0.0, 1.0),
+                        (base[2] + (acc[2] - base[2]) * strength).clamp(0.0, 1.0),
+                    ];
+                    let out_c = mix3(base, conv, mix);
+                    p[0] = out_c[0].clamp(0.0, 1.0) * a;
+                    p[1] = out_c[1].clamp(0.0, 1.0) * a;
+                    p[2] = out_c[2].clamp(0.0, 1.0) * a;
+                }
+            });
+        }
+        FxKind::Deform => {
+            let bend_x = g(v, 0, 0.0).clamp(-1.0, 1.0);
+            let bend_y = g(v, 1, 0.0).clamp(-1.0, 1.0);
+            let shear_x = g(v, 2, 0.0).clamp(-1.0, 1.0);
+            let shear_y = g(v, 3, 0.0).clamp(-1.0, 1.0);
+            let sq_x = g(v, 4, 0.0).clamp(-0.8, 0.8);
+            let sq_y = g(v, 5, 0.0).clamp(-0.8, 0.8);
+            remap(f, |x, y| {
+                let nx = (x / wf) * 2.0 - 1.0;
+                let ny = (y / hf) * 2.0 - 1.0;
+                let ux = nx + bend_x * (ny * ny - 0.5) * 0.6 + shear_x * ny * 0.5;
+                let uy = ny + bend_y * (nx * nx - 0.5) * 0.6 + shear_y * nx * 0.5;
+                let sx = ((ux / (1.0 - sq_x * 0.5).max(0.2)) * 0.5 + 0.5) * wf;
+                let sy = ((uy / (1.0 - sq_y * 0.5).max(0.2)) * 0.5 + 0.5) * hf;
+                if sx >= 0.0 && sy >= 0.0 && sx < wf && sy < hf {
+                    Some((sx, sy))
+                } else {
+                    None
+                }
+            });
+        }
+        FxKind::Denoise => {
+            let amount = g(v, 0, 0.4).clamp(0.0, 1.0);
+            let r = (g(v, 1, 2.0).round() as isize).clamp(1, 5);
+            let sigma_r = g(v, 2, 0.12).clamp(0.02, 0.5);
+            let inv_2sr2 = 1.0 / (2.0 * sigma_r * sigma_r);
+            if amount <= 1e-4 {
+                return true;
+            }
+            let src = f.clone();
+            f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                for (x, p) in row.iter_mut().enumerate() {
+                    let c0 = *p;
+                    let mut sum = [0.0_f32; 4];
+                    let mut wsum = 0.0_f32;
+                    for dy in -r..=r {
+                        for dx in -r..=r {
+                            let q = src.get_clamped(x as isize + dx, y as isize + dy);
+                            let dr = q[0] - c0[0];
+                            let dg = q[1] - c0[1];
+                            let db = q[2] - c0[2];
+                            let d2 = dr * dr + dg * dg + db * db;
+                            let wt = (-d2 * inv_2sr2).exp();
+                            for k in 0..4 {
+                                sum[k] += q[k] * wt;
+                            }
+                            wsum += wt;
+                        }
+                    }
+                    if wsum > 1e-6 {
+                        let inv = 1.0 / wsum;
+                        let out_a = (c0[3] + (sum[3] * inv - c0[3]) * amount).clamp(0.0, 1.0);
+                        p[3] = out_a;
+                        for k in 0..3 {
+                            let v_k = c0[k] + (sum[k] * inv - c0[k]) * amount;
+                            p[k] = v_k.clamp(0.0, out_a);
+                        }
+                    }
+                }
+            });
+        }
+        FxKind::QuickBlur => {
+            let rx = ((g(v, 0, 1.5).clamp(0.0, 10.0) / 100.0) * wf).round() as usize;
+            let ry = ((g(v, 1, 1.5).clamp(0.0, 10.0) / 100.0) * hf).round() as usize;
+            box_blur_frame(f, rx.min(48), ry.min(48));
+        }
+        FxKind::RadialPixelate => {
+            let sectors = g(v, 0, 24.0).clamp(4.0, 128.0);
+            let rings = g(v, 1, 16.0).clamp(4.0, 128.0);
+            let cx = g(v, 2, 0.5) * wf;
+            let cy = g(v, 3, 0.5) * hf;
+            let max_r = wf.hypot(hf) * 0.5;
+            remap(f, |x, y| {
+                let dx = x - cx;
+                let dy = y - cy;
+                let rad = dx.hypot(dy);
+                let ang = dy.atan2(dx);
+                let q_r = (((rad / max_r.max(1.0)) * rings).floor() + 0.5) / rings * max_r;
+                let step_a = std::f32::consts::TAU / sectors;
+                let q_a = ((ang / step_a).floor() + 0.5) * step_a;
+                let sx = (cx + q_r * q_a.cos()).clamp(0.5, (wf - 0.5).max(0.5));
+                let sy = (cy + q_r * q_a.sin()).clamp(0.5, (hf - 0.5).max(0.5));
+                Some((sx, sy))
+            });
+        }
+        FxKind::MaskGenerator => {
+            let ch = g(v, 0, 0.0).round() as i32;
+            let lo = g(v, 1, 0.2).clamp(0.0, 1.0);
+            let hi = g(v, 2, 0.8).clamp(0.0, 1.0);
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            let inv = g(v, 3, 0.0) > 0.5;
+            f.px.par_iter_mut().for_each(|p| {
+                let a = p[3];
+                if a <= 1e-6 {
+                    *p = [0.0; 4];
+                    return;
+                }
+                let inv_a = 1.0 / a;
+                let rgb = [p[0] * inv_a, p[1] * inv_a, p[2] * inv_a];
+                let val = match ch {
+                    1 => rgb[0],
+                    2 => rgb[1],
+                    3 => rgb[2],
+                    _ => luma(rgb),
+                };
+                let mut m = if (hi - lo).abs() < 1e-4 {
+                    if val >= lo {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    smoothstep(lo, hi, val)
+                };
+                if inv {
+                    m = 1.0 - m;
+                }
+                let na = (a * m).clamp(0.0, 1.0);
+                p[0] = (rgb[0] * na).clamp(0.0, na);
+                p[1] = (rgb[1] * na).clamp(0.0, na);
+                p[2] = (rgb[2] * na).clamp(0.0, na);
+                p[3] = na;
+            });
+        }
+        FxKind::MotionBlur => {
+            let ang = g(v, 0, 0.0).to_radians();
+            let len_px = (g(v, 1, 2.5).clamp(0.0, 15.0) / 100.0) * wf.max(hf);
+            let samples = (g(v, 2, 9.0).round() as usize).clamp(3, 21);
+            if len_px <= 0.25 {
+                return true;
+            }
+            let (dx, dy) = (ang.cos() * len_px, ang.sin() * len_px);
+            let src = f.clone();
+            let inv_s = 1.0 / samples as f32;
+            f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let fy = y as f32 + 0.5;
+                for (x, p) in row.iter_mut().enumerate() {
+                    let fx = x as f32 + 0.5;
+                    let mut acc = [0.0_f32; 4];
+                    for s in 0..samples {
+                        let u = (s as f32 / (samples - 1) as f32) - 0.5;
+                        let q = src.sample(fx + dx * u, fy + dy * u);
+                        for k in 0..4 {
+                            acc[k] += q[k];
+                        }
+                    }
+                    let a = (acc[3] * inv_s).clamp(0.0, 1.0);
+                    p[3] = a;
+                    for k in 0..3 {
+                        p[k] = (acc[k] * inv_s).clamp(0.0, a);
+                    }
+                }
+            });
+        }
+        FxKind::TinyPlanet => {
+            let zoom = g(v, 0, 1.0).clamp(0.2, 4.0);
+            let rot = g(v, 1, 0.0).to_radians();
+            let tilt = g(v, 2, 0.0).clamp(-1.0, 1.0);
+            let invert_pole = g(v, 3, 0.0) > 0.5;
+            let cx = wf * 0.5;
+            let cy = hf * 0.5;
+            let scale = (wf.min(hf) * 0.5 * zoom).max(1.0);
+            remap(f, |x, y| {
+                let nx = (x - cx) / scale;
+                let ny = (y - cy) / scale;
+                let r = nx.hypot(ny);
+                // Projeção estereográfica inversa -> coordenadas equiretangulares (lon, lat)
+                let mut lat = (2.0 * r.atan() - std::f32::consts::FRAC_PI_2) + tilt * 0.6;
+                if invert_pole {
+                    lat = -lat;
+                }
+                let lon = (ny.atan2(nx) + rot).rem_euclid(std::f32::consts::TAU);
+                let u = lon / std::f32::consts::TAU;
+                let v_coord = (lat / std::f32::consts::PI + 0.5).clamp(0.0, 1.0);
+                Some((
+                    (u * wf).clamp(0.5, (wf - 0.5).max(0.5)),
+                    (v_coord * hf).clamp(0.5, (hf - 0.5).max(0.5)),
+                ))
+            });
+        }
+        FxKind::AutoLooks => {
+            let style = g(v, 0, 0.0).round() as i32;
+            let amount = g(v, 1, 0.75).clamp(0.0, 1.0);
+            if amount <= 1e-4 {
+                return true;
+            }
+            map_color(f, |c| {
+                let y = luma(c);
+                let target = match style {
+                    1 => {
+                        // Teal & Orange
+                        let sh = 1.0 - smoothstep(0.15, 0.65, y);
+                        let hi = smoothstep(0.35, 0.85, y);
+                        [
+                            (c[0] + hi * 0.14 - sh * 0.08).clamp(0.0, 1.0),
+                            (c[1] + hi * 0.03 + sh * 0.04).clamp(0.0, 1.0),
+                            (c[2] - hi * 0.12 + sh * 0.16).clamp(0.0, 1.0),
+                        ]
+                    }
+                    2 => {
+                        // Vintage (pretos levantados + sépia suave)
+                        let s = saturate(c, 0.72);
+                        [
+                            (s[0] * 0.94 + 0.06).clamp(0.0, 1.0),
+                            (s[1] * 0.90 + 0.04).clamp(0.0, 1.0),
+                            (s[2] * 0.82 + 0.05).clamp(0.0, 1.0),
+                        ]
+                    }
+                    3 => {
+                        // Noir (P&B alto contraste)
+                        let g_v = ((y - 0.5) * 1.45 + 0.5).clamp(0.0, 1.0);
+                        [g_v, g_v, g_v]
+                    }
+                    4 => {
+                        // Bleach Bypass
+                        let desat = saturate(c, 0.45);
+                        [
+                            ((desat[0] - 0.5) * 1.35 + 0.5).clamp(0.0, 1.0),
+                            ((desat[1] - 0.5) * 1.35 + 0.5).clamp(0.0, 1.0),
+                            ((desat[2] - 0.5) * 1.35 + 0.5).clamp(0.0, 1.0),
+                        ]
+                    }
+                    5 => {
+                        // Pôr do Sol quente
+                        [
+                            (c[0] * 1.14 + 0.04).clamp(0.0, 1.0),
+                            (c[1] * 1.02).clamp(0.0, 1.0),
+                            (c[2] * 0.84).clamp(0.0, 1.0),
+                        ]
+                    }
+                    _ => {
+                        // Cinema (curva S suave + leve resfriamento nas sombras)
+                        let s_curve = |x: f32| {
+                            let x = x.clamp(0.0, 1.0);
+                            let sc = x * x * (3.0 - 2.0 * x);
+                            x * 0.55 + sc * 0.45
+                        };
+                        let sh = 1.0 - smoothstep(0.0, 0.5, y);
+                        [
+                            (s_curve(c[0]) * 1.03).clamp(0.0, 1.0),
+                            s_curve(c[1]),
+                            (s_curve(c[2]) + sh * 0.05).clamp(0.0, 1.0),
+                        ]
+                    }
+                };
+                mix3(c, target, amount)
+            });
+        }
         _ => return false,
     }
     true
+}
+
+fn rgb_to_hsl_local(c: [f32; 3]) -> (f32, f32, f32) {
+    let max = c[0].max(c[1]).max(c[2]);
+    let min = c[0].min(c[1]).min(c[2]);
+    let l = 0.5 * (max + min);
+    let d = max - min;
+    if d <= 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs()).max(1e-6);
+    let mut h = if (max - c[0]).abs() <= 1e-6 {
+        ((c[1] - c[2]) / d).rem_euclid(6.0)
+    } else if (max - c[1]).abs() <= 1e-6 {
+        (c[2] - c[0]) / d + 2.0
+    } else {
+        (c[0] - c[1]) / d + 4.0
+    };
+    h /= 6.0;
+    (h.rem_euclid(1.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+}
+
+fn hsl_to_rgb_local(h: f32, s: f32, l: f32) -> [f32; 3] {
+    if s <= 1e-6 {
+        return [l, l, l];
+    }
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h.rem_euclid(1.0) * 6.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hp.floor() as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - 0.5 * c;
+    [
+        (r1 + m).clamp(0.0, 1.0),
+        (g1 + m).clamp(0.0, 1.0),
+        (b1 + m).clamp(0.0, 1.0),
+    ]
+}
+
+fn box_blur_frame(f: &mut Frame, rx: usize, ry: usize) {
+    let (w, h) = (f.w, f.h);
+    if w == 0 || h == 0 || (rx == 0 && ry == 0) {
+        return;
+    }
+    if rx > 0 {
+        let src = f.clone();
+        let inv = 1.0 / (2 * rx + 1) as f32;
+        f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, p) in row.iter_mut().enumerate() {
+                let mut acc = [0.0_f32; 4];
+                for dx in -(rx as isize)..=(rx as isize) {
+                    let q = src.get_clamped(x as isize + dx, y as isize);
+                    for k in 0..4 {
+                        acc[k] += q[k];
+                    }
+                }
+                let a = (acc[3] * inv).clamp(0.0, 1.0);
+                p[3] = a;
+                for k in 0..3 {
+                    p[k] = (acc[k] * inv).clamp(0.0, a);
+                }
+            }
+        });
+    }
+    if ry > 0 {
+        let src = f.clone();
+        let inv = 1.0 / (2 * ry + 1) as f32;
+        f.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, p) in row.iter_mut().enumerate() {
+                let mut acc = [0.0_f32; 4];
+                for dy in -(ry as isize)..=(ry as isize) {
+                    let q = src.get_clamped(x as isize, y as isize + dy);
+                    for k in 0..4 {
+                        acc[k] += q[k];
+                    }
+                }
+                let a = (acc[3] * inv).clamp(0.0, 1.0);
+                p[3] = a;
+                for k in 0..3 {
+                    p[k] = (acc[k] * inv).clamp(0.0, a);
+                }
+            }
+        });
+    }
 }
 
 /// `true` para os efeitos tratados por este módulo.

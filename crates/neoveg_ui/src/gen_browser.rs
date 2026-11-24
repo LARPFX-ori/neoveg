@@ -10,7 +10,7 @@ use eframe::egui;
 use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::engine::fx_preview::{THUMB_H, THUMB_W};
 use neoveg_engine::media::generate;
-use neoveg_engine::model::{GenSpec, TextAlign, TextAnim, TextSpec};
+use neoveg_engine::model::{CreditRollSpec, GenSpec, TextAlign, TextAnim, TextSpec};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -47,6 +47,7 @@ impl GenCategory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GenKind {
     Text,
+    CreditRoll,
     SolidColor,
     Gradient,
     Checkerboard,
@@ -58,8 +59,9 @@ pub(crate) enum GenKind {
 }
 
 impl GenKind {
-    pub(crate) const ALL: [GenKind; 8] = [
+    pub(crate) const ALL: [GenKind; 9] = [
         GenKind::Text,
+        GenKind::CreditRoll,
         GenKind::SolidColor,
         GenKind::Gradient,
         GenKind::Checkerboard,
@@ -74,6 +76,7 @@ impl GenKind {
     pub(crate) fn of(spec: &GenSpec) -> Self {
         match spec {
             GenSpec::Text(_) => GenKind::Text,
+            GenSpec::CreditRoll(_) => GenKind::CreditRoll,
             GenSpec::SolidColor { .. } => GenKind::SolidColor,
             GenSpec::Gradient { .. } => GenKind::Gradient,
             GenSpec::Checkerboard { .. } => GenKind::Checkerboard,
@@ -88,6 +91,7 @@ impl GenKind {
     pub(crate) fn name_in(self, lang: Language) -> &'static str {
         let key = match self {
             GenKind::Text => "Texto",
+            GenKind::CreditRoll => "Rolagem de créditos",
             GenKind::SolidColor => "Cor sólida",
             GenKind::Gradient => "Gradiente",
             GenKind::Checkerboard => "Quadriculado",
@@ -106,7 +110,7 @@ impl GenKind {
 
     pub(crate) fn category(self) -> GenCategory {
         match self {
-            GenKind::Text => GenCategory::Text,
+            GenKind::Text | GenKind::CreditRoll => GenCategory::Text,
             GenKind::SolidColor | GenKind::Gradient | GenKind::NoiseTexture => {
                 GenCategory::Backgrounds
             }
@@ -128,6 +132,18 @@ impl GenKind {
 pub(crate) fn gen_presets() -> Vec<(&'static str, GenSpec)> {
     vec![
         ("Texto simples", GenSpec::Text(TextSpec::default())),
+        (
+            "Rolagem vertical de créditos",
+            GenSpec::CreditRoll(CreditRollSpec::default()),
+        ),
+        (
+            "Faixa horizontal de créditos",
+            GenSpec::CreditRoll(CreditRollSpec {
+                crawl_horizontal: true,
+                scroll_duration: 12.0,
+                ..CreditRollSpec::default()
+            }),
+        ),
         (
             "Título com contorno",
             GenSpec::Text(TextSpec {

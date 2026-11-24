@@ -473,6 +473,9 @@ pub enum UiAction {
     OpenSlideshowDialog,
     OpenParentTimeline,
     AddProjectNoteAtCursor,
+    AutoNormalizeSelected,
+    OpenAutoDuckingDialog,
+    OpenBeatDetectionDialog,
     OpenProjectProps,
     OpenEventProps,
     OpenPasteAttributesDialog,
@@ -2101,6 +2104,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "view.video_bus_track",
+        label: "Mostrar trilha do barramento de vídeo",
+        menu_path: "Exibir/Mostrar trilha do barramento de vídeo",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::B)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.show_video_bus_track = !s.opts.show_video_bus_track;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "view.tab.scopes",
         label: "Escopos",
         menu_path: "Exibir/Escopos",
@@ -2672,6 +2687,33 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "insert.adjustment_event",
+        label: "Evento de ajuste",
+        menu_path: "Inserir/Evento de ajuste",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.insert_adjustment_event();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "insert.gen_credit_roll",
+        label: "Rolagem de créditos...",
+        menu_path: "Inserir/Rolagem de créditos...",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            h.insert_generated(
+                s,
+                GenSpec::CreditRoll(crate::model::CreditRollSpec::default()),
+            )?;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.slideshow",
         label: "Apresentação de slides...",
         menu_path: "Inserir/Apresentação de slides...",
@@ -2950,6 +2992,93 @@ pub static COMMANDS: &[CommandDef] = &[
             s.freeze_frame();
             ok_mutated(s, h)
         },
+    },
+    CommandDef {
+        id: "event.toggle_velocity_envelope",
+        label: "Inserir/Remover envelope de velocidade",
+        menu_path: "Inserir/Envelopes de evento/Velocidade",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_events,
+        run: |s, h| {
+            s.toggle_velocity_envelope_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.repair_sync_move",
+        label: "Sincronizar áudio e vídeo movendo evento",
+        menu_path: "Editar/Sincronizar áudio e vídeo movendo evento",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_events,
+        run: |s, h| {
+            let ids: Vec<crate::model::Id> = s.sel_events.iter().copied().collect();
+            let mut repaired = 0usize;
+            for id in ids {
+                if crate::engine::audio_tools::repair_sync_move(s, id) {
+                    repaired += 1;
+                }
+            }
+            if repaired == 0 {
+                s.set_status(neoveg_common::tr(
+                    s.lang,
+                    "Nenhum evento agrupado dessincronizado na seleção.",
+                ));
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.repair_sync_slip",
+        label: "Sincronizar áudio e vídeo deslizando conteúdo (Slip)",
+        menu_path: "Editar/Sincronizar áudio e vídeo deslizando conteúdo (Slip)",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_events,
+        run: |s, h| {
+            let ids: Vec<crate::model::Id> = s.sel_events.iter().copied().collect();
+            let mut repaired = 0usize;
+            for id in ids {
+                if crate::engine::audio_tools::repair_sync_slip(s, id) {
+                    repaired += 1;
+                }
+            }
+            if repaired == 0 {
+                s.set_status(neoveg_common::tr(
+                    s.lang,
+                    "Nenhum evento agrupado dessincronizado na seleção.",
+                ));
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "tools.auto_normalize",
+        label: "Normalizar áudio automaticamente",
+        menu_path: "Ferramentas/Áudio/Normalizar áudio automaticamente",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: has_selected_events_ui,
+        run: |_s, h| ui_action(UiAction::AutoNormalizeSelected, h),
+    },
+    CommandDef {
+        id: "tools.auto_ducking",
+        label: "Auto Ducking (redução automática)...",
+        menu_path: "Ferramentas/Áudio/Auto Ducking (redução automática)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenAutoDuckingDialog, h),
+    },
+    CommandDef {
+        id: "tools.beat_detection",
+        label: "Detectar batidas e andamento (BPM)...",
+        menu_path: "Ferramentas/Áudio/Detectar batidas e andamento (BPM)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenBeatDetectionDialog, h),
     },
     CommandDef {
         id: "tools.build_proxy",

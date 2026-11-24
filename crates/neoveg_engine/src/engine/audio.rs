@@ -703,6 +703,7 @@ fn apply_volume_pan_envelopes(
     start: i64,
     base_vol_db: f32,
     base_pan: f32,
+    pan_mode: AudioPanMode,
     venv: Option<&Envelope>,
     penv: Option<&Envelope>,
 ) -> [f32; 2] {
@@ -712,10 +713,8 @@ fn apply_volume_pan_envelopes(
         let t = timeline_sample_time(start.saturating_add(i as i64), sr);
         let ve = venv.map(|e| e.eval(t)).unwrap_or(1.0);
         let pan = (base_pan + penv.map(|e| e.eval(t)).unwrap_or(0.0)).clamp(-1.0, 1.0);
-        let gl = vol * ve * (1.0 - pan).min(1.0);
-        let gr = vol * ve * (1.0 + pan).min(1.0);
-        let l = buf[i * 2] * gl;
-        let r = buf[i * 2 + 1] * gr;
+        let gain = vol * ve;
+        let (l, r) = pan_mode.apply_stereo(buf[i * 2] * gain, buf[i * 2 + 1] * gain, pan);
         buf[i * 2] = l;
         buf[i * 2 + 1] = r;
         peak[0] = peak[0].max(l.abs());
@@ -1483,6 +1482,11 @@ impl Mixer {
                 start,
                 track.volume_db,
                 if is_surround { 0.0 } else { track.pan },
+                if is_surround {
+                    AudioPanMode::Balance0dB
+                } else {
+                    track.pan_mode.unwrap_or(p.settings.pan_mode)
+                },
                 track.active_envelope(EnvKind::Volume),
                 if is_surround {
                     None
@@ -1578,6 +1582,11 @@ impl Mixer {
                 start,
                 bus.volume_db,
                 if is_surround { 0.0 } else { bus.pan },
+                if is_surround {
+                    AudioPanMode::Balance0dB
+                } else {
+                    bus.pan_mode.unwrap_or(p.settings.pan_mode)
+                },
                 bus.active_envelope(EnvKind::Volume),
                 if is_surround {
                     None

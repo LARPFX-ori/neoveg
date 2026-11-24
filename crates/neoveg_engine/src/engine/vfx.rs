@@ -136,6 +136,69 @@ fn apply_color_grade_curves(
     cg: &ColorGradeCurves,
     lut: Option<&crate::encoder::effects::CubeLut>,
 ) -> [f32; 3] {
+    // 1. Seção Utilitários (VEGAS Pro 2026): exposição, contraste, temperatura/tinta, saturação
+    if cg.has_utility_edits() {
+        let exp = if cg.exposure.is_finite() {
+            2.0_f32.powf(cg.exposure.clamp(-3.0, 3.0))
+        } else {
+            1.0
+        };
+        let con = if cg.contrast.is_finite() {
+            1.0 + cg.contrast.clamp(-1.0, 1.0)
+        } else {
+            1.0
+        };
+        let temp = if cg.temperature.is_finite() {
+            cg.temperature.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let tint = if cg.tint.is_finite() {
+            cg.tint.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let sat = if cg.saturation.is_finite() {
+            (1.0 + cg.saturation.clamp(-1.0, 1.0)).clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        for ch in &mut c {
+            *ch = ((*ch * exp - 0.5) * con + 0.5).clamp(0.0, 1.0);
+        }
+        c[0] = (c[0] * (1.0 + temp * 0.25 + tint * 0.1)).clamp(0.0, 1.0);
+        c[1] = (c[1] * (1.0 - tint * 0.2)).clamp(0.0, 1.0);
+        c[2] = (c[2] * (1.0 - temp * 0.25 + tint * 0.1)).clamp(0.0, 1.0);
+        if (sat - 1.0).abs() > 1e-4 {
+            c = saturate(c, sat);
+        }
+    }
+
+    // 2. Rodas de Cor com Limite de Faixa (RL Color Wheels — VEGAS Pro 2026)
+    if cg.has_rl_edits() {
+        let y = super::luma(c).clamp(0.0, 1.0);
+        let lo = if cg.rl_shadow_thresh.is_finite() {
+            cg.rl_shadow_thresh.clamp(0.05, 0.60)
+        } else {
+            0.33
+        };
+        let hi = if cg.rl_highlight_thresh.is_finite() {
+            cg.rl_highlight_thresh.clamp((lo + 0.05).min(0.95), 0.95)
+        } else {
+            0.67
+        };
+        let w_sh = 1.0 - super::smoothstep(lo * 0.4, lo, y);
+        let w_hi = super::smoothstep(hi, (hi + (1.0 - hi) * 0.6).min(1.0), y);
+        let w_mid = (1.0 - w_sh - w_hi).max(0.0);
+        for k in 0..3 {
+            let d_sh = (cg.rl_shadows[k] + cg.rl_shadows[3]) * 0.35 * w_sh;
+            let d_mid = (cg.rl_midtones[k] + cg.rl_midtones[3]) * 0.35 * w_mid;
+            let d_hi = (cg.rl_highlights[k] + cg.rl_highlights[3]) * 0.35 * w_hi;
+            let d_off = (cg.rl_offset[k] + cg.rl_offset[3]) * 0.35;
+            c[k] = (c[k] + d_sh + d_mid + d_hi + d_off).clamp(0.0, 1.0);
+        }
+    }
+
     if !cg.master.is_empty() {
         c[0] = ColorGradeCurves::eval_curve(&cg.master, c[0]);
         c[1] = ColorGradeCurves::eval_curve(&cg.master, c[1]);

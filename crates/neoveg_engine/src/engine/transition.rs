@@ -259,7 +259,12 @@ pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) 
         | TransitionKind::Swap
         | TransitionKind::FlashWhite
         | TransitionKind::FlyIn
-        | TransitionKind::PagePeel => geometric(kind, a, b, p, &mut out),
+        | TransitionKind::PagePeel
+        | TransitionKind::Blinds3D
+        | TransitionKind::Cascade3D
+        | TransitionKind::Shuffle3D
+        | TransitionKind::PageLoop
+        | TransitionKind::PageRoll => geometric(kind, a, b, p, &mut out),
         _ => {
             // transições por máscara: B aparece onde v(x,y) < progresso
             let s = softness.clamp(0.0, 0.5).max(0.002);
@@ -483,6 +488,117 @@ fn geometric(kind: TransitionKind, a: &Frame, b: &Frame, p: f32, out: &mut Frame
                         } else {
                             pb
                         }
+                    }
+                }
+                TransitionKind::Blinds3D => {
+                    // 8 lâminas verticais girando 180° em torno do eixo vertical central de cada lâmina
+                    let strips = 8.0_f32;
+                    let sw = (wf / strips).max(1.0);
+                    let idx = (fx / sw).floor();
+                    let local_u = (fx - idx * sw) / sw - 0.5; // -0.5..0.5
+                    let ang = p * PI;
+                    let cos_a = ang.cos();
+                    let abs_c = cos_a.abs();
+                    if abs_c < 0.03 {
+                        [0.0, 0.0, 0.0, 1.0]
+                    } else {
+                        let mapped_u = local_u / abs_c;
+                        if mapped_u.abs() > 0.5 {
+                            [0.0, 0.0, 0.0, 1.0]
+                        } else {
+                            let sx = (idx + mapped_u + 0.5) * sw;
+                            let shade = 0.65 + 0.35 * abs_c;
+                            let q = if cos_a >= 0.0 {
+                                sample_in(a, sx, fy)
+                            } else {
+                                sample_in(b, (idx + (0.5 - mapped_u)) * sw, fy)
+                            };
+                            [q[0] * shade, q[1] * shade, q[2] * shade, q[3]]
+                        }
+                    }
+                }
+                TransitionKind::Cascade3D => {
+                    // 4x3 ladrilhos giram em cascata diagonal com atraso progressivo
+                    let (cols, rows) = (4.0_f32, 3.0_f32);
+                    let tw = (wf / cols).max(1.0);
+                    let th = (hf / rows).max(1.0);
+                    let ci = (fx / tw).floor();
+                    let ri = (fy / th).floor();
+                    let delay = ((ci + ri) / (cols + rows - 2.0).max(1.0)) * 0.45;
+                    let lp = ((p - delay) / 0.55).clamp(0.0, 1.0);
+                    let ang = lp * PI;
+                    let cos_a = ang.cos();
+                    let abs_c = cos_a.abs();
+                    if abs_c < 0.03 {
+                        pb
+                    } else {
+                        let lu = (fx - ci * tw) / tw - 0.5;
+                        let mu = lu / abs_c;
+                        if mu.abs() > 0.5 {
+                            if lp < 0.5 {
+                                pa
+                            } else {
+                                pb
+                            }
+                        } else {
+                            let sx = (ci + mu + 0.5) * tw;
+                            let shade = 0.7 + 0.3 * abs_c;
+                            let q = if cos_a >= 0.0 {
+                                sample_in(a, sx, fy)
+                            } else {
+                                sample_in(b, (ci + (0.5 - mu)) * tw, fy)
+                            };
+                            [q[0] * shade, q[1] * shade, q[2] * shade, q[3]]
+                        }
+                    }
+                }
+                TransitionKind::Shuffle3D => {
+                    // A desliza e recua em profundidade enquanto B avança pelo lado oposto (baralho 3D)
+                    let swing = (p * PI).sin();
+                    let scale_a = (1.0 - 0.25 * p).max(0.2);
+                    let scale_b = (0.75 + 0.25 * p).max(0.2);
+                    let ax = cx + (fx - cx + swing * wf * 0.48) / scale_a;
+                    let ay = cy + (fy - cy) / scale_a;
+                    let bx = cx + (fx - cx - swing * wf * 0.48) / scale_b;
+                    let by = cy + (fy - cy) / scale_b;
+                    let sa = sample_in(a, ax, ay);
+                    let sb = sample_in(b, bx, by);
+                    if p < 0.5 {
+                        over(sa, sb)
+                    } else {
+                        over(sb, sa)
+                    }
+                }
+                TransitionKind::PageLoop => {
+                    // Curva cilíndrica horizontal enrolando A para a esquerda e revelando B
+                    let edge = (1.0 - p) * wf;
+                    let r = (wf * 0.14 * (p * PI).sin()).max(0.0);
+                    if fx < edge - r {
+                        pa
+                    } else if r > 1.0 && fx < edge + r {
+                        let u = (fx - (edge - r)) / (2.0 * r);
+                        let shade = 0.55 + 0.45 * (u * PI).sin();
+                        let sx = (edge - (1.0 - u) * r * 1.4).clamp(0.5, wf - 0.5);
+                        let q = a.sample(sx, fy);
+                        [q[0] * shade, q[1] * shade, q[2] * shade, q[3]]
+                    } else {
+                        pb
+                    }
+                }
+                TransitionKind::PageRoll => {
+                    // Rolo vertical subindo da borda inferior com sombreamento de cilindro
+                    let edge = (1.0 - p) * hf;
+                    let r = (hf * 0.14 * (p * PI).sin()).max(0.0);
+                    if fy < edge - r {
+                        pa
+                    } else if r > 1.0 && fy < edge + r {
+                        let u = (fy - (edge - r)) / (2.0 * r);
+                        let shade = 0.55 + 0.45 * (u * PI).sin();
+                        let sy = (edge - (1.0 - u) * r * 1.4).clamp(0.5, hf - 0.5);
+                        let q = a.sample(fx, sy);
+                        [q[0] * shade, q[1] * shade, q[2] * shade, q[3]]
+                    } else {
+                        pb
                     }
                 }
                 _ => pa,
