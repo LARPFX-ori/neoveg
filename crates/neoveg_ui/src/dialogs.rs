@@ -995,6 +995,9 @@ pub struct Dialogs {
     pub cmd_marker_arg: String,
     pub work_folders_open: bool,
     pub work_folders_draft: Option<neoveg_engine::model::WorkFolders>,
+    pub notes_ui: crate::project_notes::ProjectNotesUiState,
+    pub adv_save: crate::dlg_advanced_save::AdvancedSaveUiState,
+    pub slideshow: crate::dlg_slideshow::SlideshowUiState,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -1085,6 +1088,17 @@ fn project_video_tab(
                 for f in FieldOrder::ALL {
                     changed |= ui
                         .selectable_value(&mut s.field_order, f, f.name_in(lang))
+                        .changed();
+                }
+            });
+        ui.end_row();
+        ui.label(tr(lang, "Rotação de saída"));
+        egui::ComboBox::from_id_salt("pp_output_rotation")
+            .selected_text(s.output_rotation.name_in(lang))
+            .show_ui(ui, |ui| {
+                for rot in OutputRotation::ALL {
+                    changed |= ui
+                        .selectable_value(&mut s.output_rotation, rot, rot.name_in(lang))
                         .changed();
                 }
             });
@@ -1396,6 +1410,8 @@ impl App {
         self.customize_toolbar_window(ctx);
         self.command_marker_window(ctx);
         crate::dlg_work_folders::show_work_folders_window(self, ctx);
+        crate::dlg_advanced_save::show_advanced_save_windows(self, ctx);
+        crate::dlg_slideshow::show_slideshow_window(self, ctx);
         self.misc_windows(ctx);
     }
 
@@ -6869,6 +6885,15 @@ fn prefs_display_group(
                 display_color_row(ui, lang, &mut d.snap_color, rgb_of(theme.tl_playhead_edit));
             },
         );
+        prefs_row(ui, inner_lw, tr(lang, "Estilo dos ícones:"), |ui| {
+            egui::ComboBox::from_id_salt("prefs_display_icon_style")
+                .selected_text(d.icon_style.label_in(lang))
+                .show_ui(ui, |ui| {
+                    for st in neoveg_common::IconStyle::ALL {
+                        ui.selectable_value(&mut d.icon_style, st, st.label_in(lang));
+                    }
+                });
+        });
         prefs_row(
             ui,
             inner_lw,

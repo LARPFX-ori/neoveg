@@ -175,6 +175,205 @@ pub fn clear_recovery() {
     let _ = std::fs::remove_file(nested_recovery_path());
 }
 
+// ---------------------------------------------------------------------------
+// Salvamento Avançado — Live Save & Backups Automáticos (VEGAS Pro 21/2026)
+// ---------------------------------------------------------------------------
+
+/// Entrada de backup avançado listada no diálogo *Restaurar backup...*.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupEntry {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub project_tag: String,
+    pub kind: &'static str,
+    pub modified_secs: u64,
+    pub size_bytes: u64,
+}
+
+fn sanitize_backup_tag(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let trimmed = cleaned.trim_matches('_');
+    if trimmed.is_empty() {
+        "sem_titulo".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Tag normalizada usada nos nomes dos arquivos de backup do projeto.
+pub fn backup_project_tag(project_path: Option<&std::path::Path>) -> String {
+    let raw = project_path
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("sem_titulo");
+    sanitize_backup_tag(raw)
+}
+
+/// Resolve a pasta onde os backups avançados são gravados.
+pub fn advanced_backup_dir(
+    prefs: &neoveg_common::AdvancedSavePrefs,
+    project_path: Option<&std::path::Path>,
+) -> PathBuf {
+    match prefs.location {
+        neoveg_common::BackupLocation::TempFolder => util::base_dir().join("backups"),
+        neoveg_common::BackupLocation::ProjectFolder => project_path
+            .and_then(|p| p.parent())
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(|d| d.join("neoveg_backups"))
+            .unwrap_or_else(|| util::base_dir().join("backups")),
+        neoveg_common::BackupLocation::CustomFolder => {
+            let trimmed = prefs.custom_folder.trim();
+            if trimmed.is_empty() {
+                util::base_dir().join("backups")
+            } else {
+                PathBuf::from(trimmed)
+            }
+        }
+    }
+}
+
+/// Grava um backup avançado com carimbo de data/hora (`kind` = `"auto"`, `"daily"` ou `"realtime"`),
+/// podando cópias excedentes conforme `max_keep`.
+pub fn write_advanced_backup(
+    project: &Project,
+    dir: &std::path::Path,
+    project_path: Option<&std::path::Path>,
+    kind: &str,
+    max_keep: usize,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("Não foi possível criar pasta de backups: {e}"))?;
+    let tag = backup_project_tag(project_path);
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    let safe_kind = sanitize_backup_tag(kind);
+    let filename = format!("{tag}__{safe_kind}__{stamp}.neoveg.bak");
+    let dest = dir.join(&filename);
+    let tmp = dir.join(format!("{filename}.tmp"));
+    let json = serde_json::to_string(project).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &dest)
+        .or_else(|_| std::fs::copy(&tmp, &dest).and_then(|_| std::fs::remove_file(&tmp)))
+        .map_err(|e| e.to_string())?;
+
+    prune_advanced_backups(dir, &tag, &safe_kind, max_keep.clamp(1, 50));
+    Ok(dest)
+}
+
+fn prune_advanced_backups(dir: &std::path::Path, tag: &str, kind: &str, max_keep: usize) {
+    let prefix = format!("{tag}__{kind}__");
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut matching: Vec<(u64, PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_str()?;
+            if !name.starts_with(&prefix) || !name.ends_with(".neoveg.bak") {
+                return None;
+            }
+            let mtime = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Some((mtime, p))
+        })
+        .collect();
+    if matching.len() <= max_keep {
+        return;
+    }
+    // Mais recentes primeiro; remove o excedente ao final.
+    matching.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, old) in matching.into_iter().skip(max_keep) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Lista backups avançados existentes em `dir` (mais recentes primeiro).
+pub fn list_advanced_backups(
+    dir: &std::path::Path,
+    filter_project: Option<&std::path::Path>,
+) -> Vec<BackupEntry> {
+    let filter_tag = filter_project.map(|p| backup_project_tag(Some(p)));
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".neoveg.bak") {
+            continue;
+        }
+        let file_name = name.to_string();
+        let mut parts = file_name.split("__");
+        let project_tag = parts.next().unwrap_or("sem_titulo").to_string();
+        let raw_kind = parts.next().unwrap_or("auto");
+        if let Some(ref want) = filter_tag {
+            if &project_tag != want {
+                continue;
+            }
+        }
+        let kind = match raw_kind {
+            "daily" => "Diário",
+            "realtime" => "Tempo real",
+            _ => "Automático",
+        };
+        let meta = ent.metadata().ok();
+        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified_secs = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        out.push(BackupEntry {
+            path: p,
+            file_name,
+            project_tag,
+            kind,
+            modified_secs,
+            size_bytes,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.modified_secs
+            .cmp(&a.modified_secs)
+            .then_with(|| b.file_name.cmp(&a.file_name))
+    });
+    out.truncate(200);
+    out
+}
+
+/// Remove todos os arquivos `.neoveg.bak` da pasta `dir` (ou só os do projeto indicado).
+pub fn clear_advanced_backups(
+    dir: &std::path::Path,
+    only_project: Option<&std::path::Path>,
+) -> usize {
+    let list = list_advanced_backups(dir, only_project);
+    let mut removed = 0usize;
+    for b in list {
+        if std::fs::remove_file(&b.path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn save_snapshot_on_panic() -> Option<String> {
     let guard = LAST_SNAPSHOT.try_lock().ok()?;
     let p = guard.as_ref()?;
@@ -226,6 +425,27 @@ mod tests {
         // Arquivo corrompido nunca entra em pânico
         std::fs::write(&file, b"{corrompido!!!").unwrap();
         assert!(read_nested_recovery_from(&file).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_avancado_grava_lista_poda_e_limpa() {
+        let dir = std::env::temp_dir().join(format!(
+            "neoveg_adv_bak_{}_{}",
+            std::process::id(),
+            crate::model::new_id()
+        ));
+        let proj_path = dir.join("cena_01.neoveg");
+        let p = Project::new_default();
+        for _ in 0..4 {
+            let _ = write_advanced_backup(&p, &dir, Some(&proj_path), "auto", 2).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let list = list_advanced_backups(&dir, Some(&proj_path));
+        assert_eq!(list.len(), 2);
+        let removed = clear_advanced_backups(&dir, Some(&proj_path));
+        assert_eq!(removed, 2);
+        assert!(list_advanced_backups(&dir, Some(&proj_path)).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

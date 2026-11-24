@@ -1216,6 +1216,51 @@ fn render_frame_eye(
     out
 }
 
+/// Aplica a rotação de saída do projeto (`OutputRotation`) ao quadro renderizado.
+pub fn rotate_frame(src: &Frame, rot: OutputRotation) -> Frame {
+    let (sw, sh) = (src.w, src.h);
+    if sw == 0 || sh == 0 || rot == OutputRotation::Deg0 {
+        return src.clone();
+    }
+    match rot {
+        OutputRotation::Deg0 => src.clone(),
+        OutputRotation::Deg180 => {
+            let mut dst = Frame::new(sw, sh);
+            let total = sw.saturating_mul(sh);
+            for i in 0..total.min(src.px.len()) {
+                dst.px[total - 1 - i] = src.px[i];
+            }
+            dst
+        }
+        OutputRotation::Cw90 => {
+            // (x, y) em sw×sh -> (sh - 1 - y, x) em sh×sw
+            let (dw, dh) = (sh, sw);
+            let mut dst = Frame::new(dw, dh);
+            for y in 0..sh {
+                for x in 0..sw {
+                    let dx = sh - 1 - y;
+                    let dy = x;
+                    dst.px[dy * dw + dx] = src.px[y * sw + x];
+                }
+            }
+            dst
+        }
+        OutputRotation::Ccw90 => {
+            // (x, y) em sw×sh -> (y, sw - 1 - x) em sh×sw
+            let (dw, dh) = (sh, sw);
+            let mut dst = Frame::new(dw, dh);
+            for y in 0..sh {
+                for x in 0..sw {
+                    let dx = y;
+                    let dy = sw - 1 - x;
+                    dst.px[dy * dw + dx] = src.px[y * sw + x];
+                }
+            }
+            dst
+        }
+    }
+}
+
 /// Renderiza o quadro do projeto com controle explícito de proxies e bypass de efeitos.
 pub fn render_frame_with_opts(
     p: &Project,
@@ -1225,19 +1270,26 @@ pub fn render_frame_with_opts(
     h: usize,
     opts: VideoRenderOpts,
 ) -> Frame {
+    let rot = p.settings.output_rotation;
+    let (rw, rh) = if rot.swaps_axes() { (h, w) } else { (w, h) };
     let mode = p.settings.stereo_3d;
-    match mode {
-        Stereo3dMode::Off => render_frame_eye(p, media, t, w, h, opts, StereoEye::Center),
-        Stereo3dMode::LeftOnly => render_frame_eye(p, media, t, w, h, opts, StereoEye::Left),
-        Stereo3dMode::RightOnly => render_frame_eye(p, media, t, w, h, opts, StereoEye::Right),
+    let base = match mode {
+        Stereo3dMode::Off => render_frame_eye(p, media, t, rw, rh, opts, StereoEye::Center),
+        Stereo3dMode::LeftOnly => render_frame_eye(p, media, t, rw, rh, opts, StereoEye::Left),
+        Stereo3dMode::RightOnly => render_frame_eye(p, media, t, rw, rh, opts, StereoEye::Right),
         Stereo3dMode::AnaglyphRedCyan
         | Stereo3dMode::SideBySideHalf
         | Stereo3dMode::SideBySideFull
         | Stereo3dMode::TopBottomHalf => {
-            let left = render_frame_eye(p, media, t, w, h, opts, StereoEye::Left);
-            let right = render_frame_eye(p, media, t, w, h, opts, StereoEye::Right);
+            let left = render_frame_eye(p, media, t, rw, rh, opts, StereoEye::Left);
+            let right = render_frame_eye(p, media, t, rw, rh, opts, StereoEye::Right);
             compose_stereo_3d(&left, &right, mode)
         }
+    };
+    if rot == OutputRotation::Deg0 {
+        base
+    } else {
+        rotate_frame(&base, rot)
     }
 }
 
@@ -1829,5 +1881,25 @@ mod pan_crop_tests {
             px_cut[2] > 0.95 && px_cut[0] < 0.05,
             "corte seco deve mostrar só o evento de entrada: {px_cut:?}"
         );
+    }
+
+    #[test]
+    fn rotacao_de_saida_do_projeto_gira_pixels_corretamente() {
+        let mut f = Frame::new(2, 3);
+        // Pixel (0, 0) = vermelho, restante preto
+        f.px[0] = [1.0, 0.0, 0.0, 1.0];
+        let cw = rotate_frame(&f, OutputRotation::Cw90);
+        assert_eq!((cw.w, cw.h), (3, 2));
+        // (0, 0) em 2x3 -> (2, 0) em 3x2
+        assert!(cw.px[2][0] > 0.99);
+
+        let ccw = rotate_frame(&f, OutputRotation::Ccw90);
+        assert_eq!((ccw.w, ccw.h), (3, 2));
+        // (0, 0) em 2x3 -> (0, 1) em 3x2
+        assert!(ccw.px[3][0] > 0.99);
+
+        let r180 = rotate_frame(&f, OutputRotation::Deg180);
+        assert_eq!((r180.w, r180.h), (2, 3));
+        assert!(r180.px[5][0] > 0.99);
     }
 }

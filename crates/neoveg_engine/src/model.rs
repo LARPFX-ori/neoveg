@@ -87,6 +87,41 @@ pub struct ProjectSettings {
     /// Dados do CD de áudio (Propriedades do projeto → CD de áudio).
     #[serde(default)]
     pub audio_cd: AudioCdInfo,
+    /// Rotação de saída do projeto (*Creating rotated projects*, sinalização digital / vertical).
+    #[serde(default)]
+    pub output_rotation: OutputRotation,
+}
+
+/// Rotação de saída aplicada ao quadro final do projeto (Propriedades do projeto → Vídeo).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OutputRotation {
+    #[default]
+    Deg0,
+    Cw90,
+    Ccw90,
+    Deg180,
+}
+
+impl OutputRotation {
+    pub const ALL: [Self; 4] = [Self::Deg0, Self::Cw90, Self::Ccw90, Self::Deg180];
+
+    pub fn name_in(self, lang: neoveg_common::Language) -> &'static str {
+        let pt = match self {
+            Self::Deg0 => "0° (Original)",
+            Self::Cw90 => "90° sentido horário",
+            Self::Ccw90 => "90° sentido anti-horário",
+            Self::Deg180 => "180° (Invertido)",
+        };
+        neoveg_common::tr(lang, pt)
+    }
+
+    pub fn name(self) -> &'static str {
+        self.name_in(neoveg_common::Language::PtBr)
+    }
+
+    pub fn swaps_axes(self) -> bool {
+        matches!(self, Self::Cw90 | Self::Ccw90)
+    }
 }
 
 fn default_bpm() -> f64 {
@@ -466,6 +501,7 @@ impl Default for ProjectSettings {
             beat_note: default_beats(),
             summary: ProjectSummary::default(),
             audio_cd: AudioCdInfo::default(),
+            output_rotation: OutputRotation::Deg0,
         }
     }
 }
@@ -503,6 +539,9 @@ pub struct Project {
     pub audio_buses: Vec<AudioBus>,
     #[serde(default)]
     pub notes: String,
+    /// Notas estruturadas do projeto vinculadas a timecode (painel *Notas do Projeto* v21/2026).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_notes: Vec<ProjectNote>,
     #[serde(default)]
     pub loop_region: Option<(Ticks, Ticks)>,
     /// Pastas manuais (*bins*) da janela Mídia do Projeto.
@@ -547,6 +586,77 @@ fn default_format_version() -> u32 {
 
 fn is_default_format_version(v: &u32) -> bool {
     *v <= 1
+}
+
+/// Limite máximo de notas estruturadas por projeto (§0.4).
+pub const MAX_PROJECT_NOTES: usize = 512;
+
+/// Nota estruturada do projeto com etiqueta colorida, timecode e estado de resolução.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectNote {
+    pub id: Id,
+    pub label: String,
+    pub text: String,
+    pub timecode: Option<Ticks>,
+    pub color: [u8; 3],
+    pub resolved: bool,
+    pub created_at: String,
+}
+
+impl Default for ProjectNote {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            label: String::new(),
+            text: String::new(),
+            timecode: Some(Ticks::ZERO),
+            color: [74, 144, 210],
+            resolved: false,
+            created_at: String::new(),
+        }
+    }
+}
+
+impl ProjectNote {
+    pub fn new(
+        label: impl Into<String>,
+        text: impl Into<String>,
+        timecode: Option<Ticks>,
+        color: [u8; 3],
+    ) -> Self {
+        Self {
+            id: new_id(),
+            label: label.into(),
+            text: text.into(),
+            timecode,
+            color,
+            resolved: false,
+            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        }
+    }
+
+    pub fn sanitize(&mut self) {
+        self.label = self
+            .label
+            .chars()
+            .filter(|&c| c != '\0' && c != '\n' && c != '\r')
+            .take(128)
+            .collect();
+        self.text = self
+            .text
+            .chars()
+            .filter(|&c| c != '\0')
+            .take(4096)
+            .collect();
+        self.created_at = self
+            .created_at
+            .chars()
+            .filter(|&c| c != '\0' && c != '\n' && c != '\r')
+            .take(64)
+            .collect();
+        self.timecode = self.timecode.map(|t| t.clamp_safe(Ticks::ZERO, Ticks::MAX));
+    }
 }
 
 /// Sequência em aba na timeline (item 13 do backlog / estilo Premiere Pro).
@@ -1509,6 +1619,9 @@ impl Project {
         for x in &self.media {
             m = m.max(x.id);
         }
+        for n in &self.project_notes {
+            m = m.max(n.id);
+        }
         for t in &self.tracks {
             m = m.max(t.id);
             for f in &t.fx {
@@ -1972,6 +2085,18 @@ impl Project {
                     .filter(|d| *d > Ticks::ZERO)
                     .map(|d| d.min(Ticks::MAX));
             }
+        }
+
+        if self.project_notes.len() > MAX_PROJECT_NOTES {
+            self.project_notes.truncate(MAX_PROJECT_NOTES);
+            fixes.push(format!("notas do projeto limitadas a {MAX_PROJECT_NOTES}"));
+        }
+        let mut seen_notes = std::collections::HashSet::new();
+        for note in &mut self.project_notes {
+            if note.id == 0 || !seen_notes.insert(note.id) {
+                note.id = new_id();
+            }
+            note.sanitize();
         }
 
         self.work_folders.sanitize();

@@ -182,10 +182,10 @@ impl LayoutType {
 
     pub fn default_theme_id(self) -> &'static str {
         match self {
-            LayoutType::SonicFoundry => "vegas-claro",
-            LayoutType::Sony => "vegas-medio",
-            // o cinza neutro do VEGAS Escuro é o mais próximo da geração nova
-            LayoutType::Magix | LayoutType::Moderno => "vegas-escuro",
+            LayoutType::SonicFoundry => "vegas-classico",
+            LayoutType::Sony => "vegas-prata",
+            LayoutType::Magix => "vegas-escuro",
+            LayoutType::Moderno => "vegas-moderno",
         }
     }
 
@@ -358,6 +358,60 @@ pub const DISPLAY_ENVELOPES: [&str; 4] = ["Volume", "Pan", "Opacidade", "Fade pa
 /// Quantas cores tem a paleta de cores de trilha.
 pub const TRACK_PALETTE_LEN: usize = 8;
 
+/// Estilo visual dos ícones da interface (paridade entre gerações do VEGAS Pro).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IconStyle {
+    /// Acompanha a geração do layout: Clássico/Intermediário = cores vivas,
+    /// Recente = colorido balanceado, Moderno (23+) = neutro com acentos.
+    #[default]
+    Auto,
+    /// Paleta colorida balanceada.
+    Colored,
+    /// Visual moderno (23+): glifos principais neutros com acentos semânticos.
+    Modern,
+    /// Visual clássico (1–13): cores mais vivas e diferenciadas.
+    Classic,
+    /// Monocromático limpo (mantém destaque nos estados ativos e respeita Alto Contraste).
+    Monochrome,
+}
+
+impl IconStyle {
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Colored,
+        Self::Modern,
+        Self::Classic,
+        Self::Monochrome,
+    ];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
+            Self::Auto => "Automático (pela geração)",
+            Self::Colored => "Colorido",
+            Self::Modern => "Moderno (neutro com acentos)",
+            Self::Classic => "Clássico (cores vivas)",
+            Self::Monochrome => "Monocromático",
+        };
+        tr(lang, pt)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
+    }
+
+    /// Resolve `Auto` para o estilo concreto correspondente à geração `layout`.
+    pub fn resolve(self, layout: LayoutType) -> Self {
+        match self {
+            Self::Auto => match layout {
+                LayoutType::SonicFoundry | LayoutType::Sony => Self::Classic,
+                LayoutType::Magix => Self::Colored,
+                LayoutType::Moderno => Self::Modern,
+            },
+            other => other,
+        }
+    }
+}
+
 /// Opções da aba Exibição (manual do VEGAS Pro 21, pp. 1101–1103; ajuda do
 /// VEGAS Pro 2026, *Display Tab*). `None` usa a cor padrão (do tema ou da
 /// paleta de trilhas).
@@ -371,6 +425,8 @@ pub struct DisplayPrefs {
     pub envelope_colors: [Option<[u8; 3]>; 4],
     /// Cor do indicador de encaixe na timeline.
     pub snap_color: Option<[u8; 3]>,
+    /// Estilo dos ícones (automático por geração, colorido, moderno, clássico ou monocromático).
+    pub icon_style: IconStyle,
     /// Intensidade da cor dos ícones, em % (0 = cinza, 100 = normal, 200).
     pub icon_strength_pct: u16,
     /// Fundo dos botões ativos da barra de ferramentas.
@@ -388,11 +444,103 @@ impl Default for DisplayPrefs {
             track_colors: [None; TRACK_PALETTE_LEN],
             envelope_colors: [None; 4],
             snap_color: None,
+            icon_style: IconStyle::Auto,
             icon_strength_pct: 100,
             button_highlight: None,
             auto_hide_dock: false,
             reverse_event_bg: false,
         }
+    }
+}
+
+/// Local de armazenamento dos backups avançados (*Salvamento Avançado*).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BackupLocation {
+    /// Pasta de backups na área temporária / dados do Neoveg.
+    #[default]
+    TempFolder,
+    /// Mesma pasta do projeto `.neoveg` atual (com recuo para temporária se não salvo).
+    ProjectFolder,
+    /// Pasta personalizada escolhida pelo usuário.
+    CustomFolder,
+}
+
+impl BackupLocation {
+    pub const ALL: [Self; 3] = [Self::TempFolder, Self::ProjectFolder, Self::CustomFolder];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
+            Self::TempFolder => "Pasta de arquivos temporários",
+            Self::ProjectFolder => "Usar pasta do projeto atual",
+            Self::CustomFolder => "Selecionar pasta...",
+        };
+        tr(lang, pt)
+    }
+}
+
+/// Configurações de *Salvamento Avançado — Live Save & Backups Automáticos*.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdvancedSavePrefs {
+    /// Salva o projeto automaticamente em segundo plano após cada edição (quando já possui arquivo).
+    pub live_save: bool,
+    /// Habilita cópias de backup avançadas com carimbo de data/hora e diálogo de restauração.
+    pub use_advanced_backup: bool,
+    pub interval_mins_enabled: bool,
+    pub interval_mins: u32,
+    pub interval_hours_enabled: bool,
+    pub interval_hours: u32,
+    pub archive_daily_enabled: bool,
+    pub max_daily: usize,
+    pub archive_realtime_enabled: bool,
+    pub max_realtime: usize,
+    pub location: BackupLocation,
+    pub custom_folder: String,
+}
+
+impl Default for AdvancedSavePrefs {
+    fn default() -> Self {
+        Self {
+            live_save: false,
+            use_advanced_backup: true,
+            interval_mins_enabled: true,
+            interval_mins: 10,
+            interval_hours_enabled: false,
+            interval_hours: 1,
+            archive_daily_enabled: true,
+            max_daily: 10,
+            archive_realtime_enabled: false,
+            max_realtime: 10,
+            location: BackupLocation::TempFolder,
+            custom_folder: String::new(),
+        }
+    }
+}
+
+impl AdvancedSavePrefs {
+    pub fn sanitize(&mut self) {
+        self.interval_mins = self.interval_mins.clamp(1, 240);
+        self.interval_hours = self.interval_hours.clamp(1, 24);
+        self.max_daily = self.max_daily.clamp(1, 50);
+        self.max_realtime = self.max_realtime.clamp(1, 50);
+        self.custom_folder = clean_text_field(&self.custom_folder, 512);
+    }
+
+    /// Intervalo efetivo em segundos para gravar um novo backup agendado, ou `None`.
+    pub fn effective_interval_secs(&self) -> Option<u64> {
+        if !self.use_advanced_backup {
+            return None;
+        }
+        let mut best: Option<u64> = None;
+        if self.interval_mins_enabled {
+            let s = u64::from(self.interval_mins.clamp(1, 240)) * 60;
+            best = Some(best.map_or(s, |b| b.min(s)));
+        }
+        if self.interval_hours_enabled {
+            let s = u64::from(self.interval_hours.clamp(1, 24)) * 3600;
+            best = Some(best.map_or(s, |b| b.min(s)));
+        }
+        best
     }
 }
 
@@ -935,6 +1083,14 @@ pub struct Preferences {
     /// pastas padrão do sistema.
     #[serde(default)]
     pub plugin_folders: Vec<String>,
+    /// Configurações de Salvamento Avançado (*Live Save* e backups automáticos).
+    #[serde(default)]
+    pub advanced_save: AdvancedSavePrefs,
+    /// Quando `true`, a barra de espaço alterna *Reproduzir/Pausar* mantendo a
+    /// posição do cursor; quando `false` (clássico), alterna *Reproduzir/Parar*
+    /// retornando ao ponto inicial (*Spacebar button* da Prévia de Vídeo).
+    #[serde(default = "default_true")]
+    pub spacebar_play_pause: bool,
 }
 
 /// Guias extras das áreas seguras da Prévia de Vídeo: cruz central, grade dos
@@ -1530,6 +1686,8 @@ impl Default for Preferences {
             midi_sync: MidiSyncPrefs::default(),
             file_io: FileIoPrefs::default(),
             plugin_folders: Vec::new(),
+            advanced_save: AdvancedSavePrefs::default(),
+            spacebar_play_pause: true,
         }
     }
 }
@@ -1658,6 +1816,7 @@ impl Preferences {
         self.audio_device.sanitize();
         self.midi_sync.sanitize();
         self.file_io.sanitize();
+        self.advanced_save.sanitize();
         sanitize_string_list(
             &mut self.plugin_folders,
             MAX_PLUGIN_FOLDERS,
@@ -1944,7 +2103,25 @@ mod tests {
         r.timeline_at_bottom = false;
         r.apply_type(LayoutType::Moderno);
         assert!(r.timeline_at_bottom);
-        assert_eq!(LayoutType::Moderno.default_theme_id(), "vegas-escuro");
+        assert_eq!(
+            LayoutType::SonicFoundry.default_theme_id(),
+            "vegas-classico"
+        );
+        assert_eq!(LayoutType::Sony.default_theme_id(), "vegas-prata");
+        assert_eq!(LayoutType::Magix.default_theme_id(), "vegas-escuro");
+        assert_eq!(LayoutType::Moderno.default_theme_id(), "vegas-moderno");
+        assert_eq!(
+            IconStyle::Auto.resolve(LayoutType::Moderno),
+            IconStyle::Modern
+        );
+        assert_eq!(
+            IconStyle::Auto.resolve(LayoutType::Sony),
+            IconStyle::Classic
+        );
+        assert_eq!(
+            IconStyle::Auto.resolve(LayoutType::Magix),
+            IconStyle::Colored
+        );
         let back: LayoutType =
             serde_json::from_str(&serde_json::to_string(&LayoutType::Moderno).unwrap()).unwrap();
         assert_eq!(back, LayoutType::Moderno);

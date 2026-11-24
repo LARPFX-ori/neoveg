@@ -338,7 +338,7 @@ fn ui_smoke() {
         app.prefs.edit_layout.master_bus_placement,
         neoveg_common::prefs::MasterBusPlacement::WithPreview
     );
-    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasClaro);
+    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasClassico);
     frame(&mut app, vec![], Modifiers::NONE);
 
     app.exec_cmd(Some(&ctx), "edit.properties.layout.sony");
@@ -352,7 +352,7 @@ fn ui_smoke() {
         app.prefs.edit_layout.master_bus_placement,
         neoveg_common::prefs::MasterBusPlacement::Center
     );
-    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasMedio);
+    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasPrata);
     frame(&mut app, vec![], Modifiers::NONE);
 
     // Alto Contraste AAA deve ser preservado ao alternar o tipo de layout
@@ -368,6 +368,15 @@ fn ui_smoke() {
     assert!(app.prefs.edit_layout.transport_at_bottom);
     assert!(app.prefs.edit_layout.master_bus_docked);
     assert_eq!(app.theme_id, crate::theme::ThemeId::VegasEscuro);
+    frame(&mut app, vec![], Modifiers::NONE);
+
+    app.exec_cmd(Some(&ctx), "edit.properties.layout.moderno");
+    assert_eq!(
+        app.prefs.edit_layout.layout_type,
+        crate::LayoutType::Moderno
+    );
+    assert!(app.prefs.edit_layout.timeline_at_bottom);
+    assert_eq!(app.theme_id, crate::theme::ThemeId::VegasModerno);
     frame(&mut app, vec![], Modifiers::NONE);
 
     for preset in crate::layout::builtin_presets() {

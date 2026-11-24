@@ -25,8 +25,8 @@ pub use curve::{bump_ids, new_id, peek_next_id, Curve, Fade, Id, Keyframe, Keyfr
 pub use error::{NeovegError, Result};
 pub use i18n::{active_language, set_active_language, tr, tr_args, tr_menu_path, Language};
 pub use prefs::{
-    recommended_worker_threads, CutToOverlapAlign, EditLayoutPrefs, LayoutType, Preferences,
-    PreviewQuality, WorkflowMode,
+    recommended_worker_threads, AdvancedSavePrefs, BackupLocation, CutToOverlapAlign,
+    EditLayoutPrefs, IconStyle, LayoutType, Preferences, PreviewQuality, WorkflowMode,
 };
 pub use time::{
     format_ticks, parse_time, FrameRate, Rate, Ticks, TimeFormat, TICKS_PER_MS, TICKS_PER_SEC,
