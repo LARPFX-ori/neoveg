@@ -1246,6 +1246,30 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.cut_to_overlap",
+        label: "Converter corte em crossfade",
+        menu_path: "Editar/Converter corte em crossfade",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.can_convert_cut_to_overlap(),
+        run: |s, h| {
+            s.convert_cut_to_overlap();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.crossfade_to_cut",
+        label: "Converter crossfade em corte seco",
+        menu_path: "Editar/Converter crossfade em corte seco",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.has_target_crossfade(),
+        run: |s, h| {
+            s.convert_target_crossfades_to_cuts();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "edit.detect_scenes",
         label: "Detectar cenas e cortes...",
         menu_path: "Editar/Detectar cenas e cortes...",
@@ -3443,6 +3467,24 @@ pub static COMMANDS: &[CommandDef] = &[
         enabled: always_enabled,
         run: |s, h| {
             s.opts.snapping = !s.opts.snapping;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.auto_crossfades",
+        label: "Crossfades automáticos",
+        menu_path: "Opções/Crossfades automáticos",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::X)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.auto_crossfades = !s.opts.auto_crossfades;
+            let msg = if s.opts.auto_crossfades {
+                tr(s.lang, "Crossfades automáticos ativados.")
+            } else {
+                tr(s.lang, "Crossfades automáticos desativados.")
+            };
+            s.set_status(msg);
             ok_mutated(s, h)
         },
     },

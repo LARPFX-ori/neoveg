@@ -747,7 +747,7 @@ fn render_track_eye(
     if active.is_empty() {
         return None;
     }
-    active.sort_by_key(|e| e.start);
+    active.sort_by_key(|e| (e.start, e.end(), e.id));
     let n = active.len();
     // camadas mais antigas por baixo (sem transição)
     let mut base: Option<Frame> = None;
@@ -763,25 +763,46 @@ fn render_track_eye(
     let layer = if n >= 2 {
         let a = active[n - 2];
         let b = active[n - 1];
-        let overlap = (a.end() - b.start).max(Ticks::from_raw(1));
-        let prog = t.fraction_in(b.start, overlap);
-        let fa = event_layer_eye(p, media, a, t, w, h, opts, eye).map(|mut f| {
-            f.scale_alpha(event_alpha(a, t, false, true));
-            f
-        });
-        let fb = event_layer_eye(p, media, b, t, w, h, opts, eye).map(|mut f| {
-            f.scale_alpha(event_alpha(b, t, true, false));
-            f
-        });
-        let fa = fa.unwrap_or_else(|| Frame::new(w, h));
-        let fb = fb.unwrap_or_else(|| Frame::new(w, h));
-        let tr = b.transition.clone().unwrap_or(TransitionSpec {
-            kind: TransitionKind::Dissolve,
-            softness: 0.0,
-        });
-        // curva da transição segue a curva do fade de entrada de B
-        let shaped = b.fade_in.curve.shape(prog);
-        Some(transition::apply(tr.kind, tr.softness, &fa, &fb, shaped))
+        if let Some(xf) = crate::crossfade::find_active_crossfade_pair(track, a.id, b.id) {
+            let overlap = xf.len().max(Ticks::from_raw(1));
+            let prog = t.fraction_in(xf.start, overlap);
+            let fa = event_layer_eye(p, media, a, t, w, h, opts, eye).map(|mut f| {
+                f.scale_alpha(event_alpha(a, t, false, true));
+                f
+            });
+            let fb = event_layer_eye(p, media, b, t, w, h, opts, eye).map(|mut f| {
+                f.scale_alpha(event_alpha(b, t, true, false));
+                f
+            });
+            let fa = fa.unwrap_or_else(|| Frame::new(w, h));
+            let fb = fb.unwrap_or_else(|| Frame::new(w, h));
+            match &b.transition {
+                Some(tr) if tr.kind != TransitionKind::Dissolve => {
+                    let shaped = xf.in_curve.shape(prog);
+                    Some(transition::apply(tr.kind, tr.softness, &fa, &fb, shaped))
+                }
+                _ => {
+                    let wa = xf.out_curve.shape(1.0 - prog);
+                    let wb = xf.in_curve.shape(prog);
+                    Some(transition::dissolve_curves(&fa, &fb, wa, wb))
+                }
+            }
+        } else {
+            // Sobreposição sem crossfade ativo (corte seco ou evento contido):
+            // `b` sobrepõe `a` respeitando apenas os fades/opacidade próprios.
+            let mut out = event_layer_eye(p, media, a, t, w, h, opts, eye).map(|mut f| {
+                f.scale_alpha(event_alpha(a, t, false, false));
+                f
+            });
+            if let Some(mut fb) = event_layer_eye(p, media, b, t, w, h, opts, eye) {
+                fb.scale_alpha(event_alpha(b, t, false, false));
+                match &mut out {
+                    Some(fa) => fa.over(&fb),
+                    None => out = Some(fb),
+                }
+            }
+            out
+        }
     } else {
         let e = active[0];
         let local = t - e.start;
@@ -1742,5 +1763,71 @@ mod pan_crop_tests {
         let small = Frame::filled(8, 8, [0.5, 0.2, 0.8, 1.0]);
         let out_small = apply_motion(&small, &hostile);
         assert_eq!(out_small.px.len(), 64);
+    }
+
+    #[test]
+    fn crossfade_de_video_aplica_curvas_independentes_e_corte_seco_quando_desativado() {
+        let mut p = Project::new_default();
+        p.tracks.clear();
+        let imp_r = crate::media::import_generated(GenSpec::SolidColor {
+            color: [1.0, 0.0, 0.0, 1.0],
+        });
+        let imp_b = crate::media::import_generated(GenSpec::SolidColor {
+            color: [0.0, 0.0, 1.0, 1.0],
+        });
+        let media = MediaCache::default();
+        media.insert(imp_r.item.id, imp_r.entry);
+        media.insert(imp_b.item.id, imp_b.entry);
+        p.media.push(imp_r.item.clone());
+        p.media.push(imp_b.item.clone());
+
+        let mut tr = Track::new(TrackKind::Video, "V1");
+        tr.events.push(Event::new(
+            &imp_r.item,
+            Ticks::ZERO,
+            Ticks::from_secs_i64(2),
+        ));
+        tr.events.push(Event::new(
+            &imp_b.item,
+            Ticks::from_secs_i64(1),
+            Ticks::from_secs_i64(2),
+        ));
+        p.tracks.push(tr);
+
+        let mid = Ticks::from_millis_i64(1500);
+
+        // Padrão de vídeo (Linear / Linear): 50% vermelho + 50% azul no meio
+        let f_lin = render_frame(&p, &media, mid, 8, 8);
+        let px_lin = f_lin.px[4 * 8 + 4];
+        assert!((px_lin[0] - 0.5).abs() < 0.05 && (px_lin[2] - 0.5).abs() < 0.05);
+
+        // Curvas Slow / Slow mergulham a opacidade no meio (0.125 + 0.125 = 0.25)
+        p.tracks[0].events[0].crossfade_out_curve = Some(Curve::Slow);
+        p.tracks[0].events[1].crossfade_in_curve = Some(Curve::Slow);
+        let f_dip = render_frame(&p, &media, mid, 8, 8);
+        let px_dip = f_dip.px[4 * 8 + 4];
+        assert!(
+            px_dip[0] < 0.20 && px_dip[2] < 0.20,
+            "Slow/Slow deve mergulhar no meio: {px_dip:?}"
+        );
+
+        // Curvas Fast / Slow mantêm o evento de saída dominante (0.875 vs 0.125)
+        p.tracks[0].events[0].crossfade_out_curve = Some(Curve::Fast);
+        p.tracks[0].events[1].crossfade_in_curve = Some(Curve::Slow);
+        let f_asym = render_frame(&p, &media, mid, 8, 8);
+        let px_asym = f_asym.px[4 * 8 + 4];
+        assert!(
+            px_asym[0] > 0.75 && px_asym[2] < 0.20,
+            "Fast/Slow deve manter saída dominante: {px_asym:?}"
+        );
+
+        // Crossfade desativado (`no_crossfade_in = true`): corte seco (100% azul, 0% vermelho)
+        p.tracks[0].events[1].no_crossfade_in = true;
+        let f_cut = render_frame(&p, &media, mid, 8, 8);
+        let px_cut = f_cut.px[4 * 8 + 4];
+        assert!(
+            px_cut[2] > 0.95 && px_cut[0] < 0.05,
+            "corte seco deve mostrar só o evento de entrada: {px_cut:?}"
+        );
     }
 }

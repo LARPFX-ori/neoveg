@@ -2945,7 +2945,10 @@ impl App {
                             e.fade_in.len = fi.clamp_safe(Ticks::ZERO, e.length - e.fade_out.len);
                             changed = true;
                         }
-                        changed |= curve_combo(ui, &mut e.fade_in.curve, ("fic", id), lang);
+                        if curve_combo(ui, &mut e.fade_in.curve, ("fic", id), lang) {
+                            e.crossfade_in_curve = Some(e.fade_in.curve);
+                            changed = true;
+                        }
                     });
                     ui.end_row();
                     ui.label(tr(lang, "Fade de saída"));
@@ -2955,7 +2958,10 @@ impl App {
                             e.fade_out.len = fo.clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
                             changed = true;
                         }
-                        changed |= curve_combo(ui, &mut e.fade_out.curve, ("foc", id), lang);
+                        if curve_combo(ui, &mut e.fade_out.curve, ("foc", id), lang) {
+                            e.crossfade_out_curve = Some(e.fade_out.curve);
+                            changed = true;
+                        }
                     });
                     ui.end_row();
                     ui.label(tr(lang, "Opções"));
@@ -5650,6 +5656,15 @@ impl App {
         if draft.default_snapping != prev.default_snapping {
             opts.snapping = draft.default_snapping;
         }
+        if draft.default_auto_crossfades != prev.default_auto_crossfades {
+            opts.auto_crossfades = draft.default_auto_crossfades;
+        }
+        opts.cut_to_overlap_ticks =
+            Ticks::from_secs_f64_clamped(f64::from(draft.cut_to_overlap_secs.clamp(0.05, 30.0)));
+        opts.cut_to_overlap_align = draft.cut_to_overlap_align;
+        opts.auto_overlap_multiple_media = draft.auto_overlap_multiple_media;
+        opts.default_audio_crossfade_curve = draft.default_audio_crossfade_curve;
+        opts.default_video_crossfade_curve = draft.default_video_crossfade_curve;
         if draft.default_quantize != prev.default_quantize {
             opts.quantize = draft.default_quantize;
         }
@@ -6948,6 +6963,13 @@ fn prefs_editing(
                     tr(lang, "Ativar encaixe magnético (Snapping) por padrão"),
                 );
                 ui.checkbox(
+                    &mut draft.default_auto_crossfades,
+                    tr(
+                        lang,
+                        "Ativar crossfades automáticos por padrão (Ctrl+Shift+X)",
+                    ),
+                );
+                ui.checkbox(
                     &mut draft.default_quantize,
                     tr(lang, "Quantizar edições nos limites exatos de quadros"),
                 );
@@ -6981,6 +7003,87 @@ fn prefs_editing(
                 {
                     *act.apply_defaults_to_session = true;
                 }
+            });
+        },
+    );
+
+    prefs_group_box(
+        ui,
+        cx.theme,
+        tr(lang, "Crossfades e Conversão Corte → Sobreposição"),
+        |ui| {
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(lang, "Duração da sobreposição:"),
+                |ui| {
+                    ui.add_sized(
+                        [74.0, 20.0],
+                        egui::DragValue::new(&mut draft.cut_to_overlap_secs)
+                            .range(0.05..=30.0)
+                            .speed(0.05)
+                            .max_decimals(2),
+                    );
+                    ui.label(tr(lang, "segundos"));
+                },
+            );
+            prefs_row(ui, inner_lw, tr(lang, "Alinhamento do corte:"), |ui| {
+                egui::ComboBox::from_id_salt("prefs_cut_to_overlap_align")
+                    .selected_text(draft.cut_to_overlap_align.label_in(lang))
+                    .show_ui(ui, |ui| {
+                        for al in neoveg_common::CutToOverlapAlign::ALL {
+                            ui.selectable_value(
+                                &mut draft.cut_to_overlap_align,
+                                al,
+                                al.label_in(lang),
+                            );
+                        }
+                    });
+            });
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(lang, "Curva padrão de crossfade (Áudio):"),
+                |ui| {
+                    egui::ComboBox::from_id_salt("prefs_def_audio_xfade_curve")
+                        .selected_text(draft.default_audio_crossfade_curve.name_in(lang))
+                        .show_ui(ui, |ui| {
+                            for c in neoveg_engine::crossfade::CROSSFADE_CURVES {
+                                ui.selectable_value(
+                                    &mut draft.default_audio_crossfade_curve,
+                                    c,
+                                    c.name_in(lang),
+                                );
+                            }
+                        });
+                },
+            );
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(lang, "Curva padrão de crossfade (Vídeo):"),
+                |ui| {
+                    egui::ComboBox::from_id_salt("prefs_def_video_xfade_curve")
+                        .selected_text(draft.default_video_crossfade_curve.name_in(lang))
+                        .show_ui(ui, |ui| {
+                            for c in neoveg_engine::crossfade::CROSSFADE_CURVES {
+                                ui.selectable_value(
+                                    &mut draft.default_video_crossfade_curve,
+                                    c,
+                                    c.name_in(lang),
+                                );
+                            }
+                        });
+                },
+            );
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.auto_overlap_multiple_media,
+                    tr(
+                        lang,
+                        "Sobrepor automaticamente múltiplas mídias ao adicionar",
+                    ),
+                );
             });
         },
     );

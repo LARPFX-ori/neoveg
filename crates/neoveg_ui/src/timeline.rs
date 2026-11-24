@@ -162,6 +162,13 @@ enum Drag {
         partners: Vec<(Id, Ticks)>,
         sync_followers: Vec<(Id, Ticks)>,
     },
+    /// Desliza a janela de crossfade (`Ctrl+Alt+Arrastar` sobre a sobreposição),
+    /// mantendo a duração do crossfade e a sincronia da mídia.
+    SlideCrossfade {
+        origin_t: Ticks,
+        anchor_start: Ticks,
+        pairs: Vec<neoveg_engine::crossfade::SlideCrossfadePair>,
+    },
     Stretch {
         left: bool,
         origin_t: Ticks,
@@ -220,6 +227,12 @@ enum CtxTarget {
     None,
     Event(Id),
     EventFade(Id, bool),
+    Crossfade {
+        track_idx: usize,
+        left_id: Id,
+        right_id: Id,
+        active: bool,
+    },
     EnvPoint(EnvOwner, EnvKind, usize),
     EnvLine(EnvOwner, EnvKind, Ticks),
     Lane(usize, Ticks),
@@ -280,6 +293,9 @@ pub struct TimelineState {
     latch_hold: Option<(usize, EnvKind, f32)>,
     /// Altura de cada trilha antes de Minimizar/Maximizar (p. 388).
     pub(crate) height_restore: HashMap<Id, f32>,
+    /// Pares sobrepostos existentes antes do início de um arraste (para distinguir
+    /// sobreposições novas das antigas quando `auto_crossfades` varia).
+    drag_prev_overlaps: HashSet<(Id, Id)>,
 }
 
 impl Default for TimelineState {
@@ -308,6 +324,7 @@ impl Default for TimelineState {
             header_auto_fit: true,
             latch_hold: None,
             height_restore: HashMap::new(),
+            drag_prev_overlaps: HashSet::new(),
         }
     }
 }
@@ -721,6 +738,32 @@ impl App {
             None
         };
         (fx, pc, more)
+    }
+
+    fn hit_crossfade(
+        &self,
+        pos: Pos2,
+        left: f32,
+        layout: &[(f32, f32)],
+    ) -> Option<(usize, neoveg_engine::crossfade::CrossfadeRegion)> {
+        let ti = self.track_at(pos.y, layout)?;
+        let (y0, h) = layout[ti];
+        let track = self.project.tracks.get(ti)?;
+        for xf in neoveg_engine::crossfade::track_crossfades(track, true)
+            .into_iter()
+            .rev()
+        {
+            let x0 = self.tl.t2x(xf.start, left);
+            let x1 = self.tl.t2x(xf.end, left);
+            if x1 - x0 < 2.0 {
+                continue;
+            }
+            let xr = Rect::from_min_max(pos2(x0, y0 + 1.0), pos2(x1, y0 + h - 1.0));
+            if xr.contains(pos) {
+                return Some((ti, xf));
+            }
+        }
+        None
     }
 
     fn hit_event(
@@ -4314,9 +4357,13 @@ impl App {
                 let any_release = ui.input(|i| i.pointer.any_released());
                 if any_release {
                     if let Some(payload) = egui::DragAndDrop::take_payload::<DndPayload>(ui.ctx()) {
-                        let hit = self.hit_event(p, left, layout);
-                        let target_event =
-                            hit.map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id);
+                        let target_event = self
+                            .hit_crossfade(p, left, layout)
+                            .map(|(_, xf)| xf.right_id)
+                            .or_else(|| {
+                                self.hit_event(p, left, layout)
+                                    .map(|(ti, ei, _)| self.project.tracks[ti].events[ei].id)
+                            });
                         if right_release {
                             if let DndPayload::Media(mid) = *payload {
                                 self.tl.drop_context_menu = Some(DropContextMenuState {
@@ -4417,9 +4464,13 @@ impl App {
                                         } else if mode == EditMode::Slide
                                             || (mods.command && mods.alt)
                                         {
-                                            self.set_cursor_shape(
-                                                crate::cursors::NeovegCursor::Slide,
-                                            );
+                                            let on_xf =
+                                                self.hit_crossfade(p, left, layout).is_some();
+                                            self.set_cursor_shape(if on_xf {
+                                                crate::cursors::NeovegCursor::SlipCrossfade
+                                            } else {
+                                                crate::cursors::NeovegCursor::Slide
+                                            });
                                         } else if mods.alt || mode == EditMode::Slip {
                                             let pt = self.tl.x2t(p.x, left);
                                             let in_xfade =
@@ -4477,6 +4528,9 @@ impl App {
             }
             Drag::Slide { .. } => {
                 self.set_cursor_shape(crate::cursors::NeovegCursor::Slide);
+            }
+            Drag::SlideCrossfade { .. } => {
+                self.set_cursor_shape(crate::cursors::NeovegCursor::SlipCrossfade);
             }
             Drag::Gain { .. } | Drag::Opacity { .. } | Drag::EnvPoint { .. } => {
                 self.set_cursor_shape(crate::cursors::NeovegCursor::EnvelopeHand);
@@ -4566,11 +4620,13 @@ impl App {
                     | Drag::Trim { .. }
                     | Drag::Shuffle { .. }
                     | Drag::Slide { .. }
+                    | Drag::SlideCrossfade { .. }
                     | Drag::Stretch { .. }
                     | Drag::Roll { .. }
             ) {
                 self.project.sort_events();
             }
+            self.tl.drag_prev_overlaps.clear();
             if !matches!(self.tl.drag, Drag::Pan { .. }) {
                 self.tl.drag = Drag::None;
             }
@@ -4674,15 +4730,48 @@ impl App {
                     }
                 } else if let Some((ti, ei, zone)) = self.hit_event(p, left, layout) {
                     let id = self.project.tracks[ti].events[ei].id;
-                    if !self.sel_events.contains(&id) {
-                        self.sel_events.clear();
-                        self.sel_events.insert(id);
-                    }
-                    self.sel_track = Some(ti);
-                    if matches!(zone, Zone::FadeIn | Zone::FadeOut) {
-                        CtxTarget::EventFade(id, zone == Zone::FadeIn)
+                    let on_ctrl = matches!(
+                        zone,
+                        Zone::FxButton
+                            | Zone::PanCropButton
+                            | Zone::MoreButton
+                            | Zone::FadeIn
+                            | Zone::FadeOut
+                    );
+                    if !on_ctrl {
+                        if let Some((xti, xf)) = self.hit_crossfade(p, left, layout) {
+                            if !self.sel_events.contains(&xf.left_id)
+                                && !self.sel_events.contains(&xf.right_id)
+                            {
+                                self.sel_events.clear();
+                                self.sel_events.insert(xf.right_id);
+                            }
+                            self.sel_track = Some(xti);
+                            CtxTarget::Crossfade {
+                                track_idx: xti,
+                                left_id: xf.left_id,
+                                right_id: xf.right_id,
+                                active: xf.active,
+                            }
+                        } else {
+                            if !self.sel_events.contains(&id) {
+                                self.sel_events.clear();
+                                self.sel_events.insert(id);
+                            }
+                            self.sel_track = Some(ti);
+                            CtxTarget::Event(id)
+                        }
                     } else {
-                        CtxTarget::Event(id)
+                        if !self.sel_events.contains(&id) {
+                            self.sel_events.clear();
+                            self.sel_events.insert(id);
+                        }
+                        self.sel_track = Some(ti);
+                        if matches!(zone, Zone::FadeIn | Zone::FadeOut) {
+                            CtxTarget::EventFade(id, zone == Zone::FadeIn)
+                        } else {
+                            CtxTarget::Event(id)
+                        }
                     }
                 } else if let Some(ti) = self.track_at(p.y, layout) {
                     self.sel_track = Some(ti);
@@ -4886,6 +4975,8 @@ impl App {
                     };
                 }
                 Zone::LeftEdge | Zone::RightEdge => {
+                    self.tl.drag_prev_overlaps =
+                        neoveg_engine::crossfade::overlap_pairs(&self.project.tracks);
                     self.checkpoint();
                     if !self.sel_events.contains(&id) {
                         self.sel_events.clear();
@@ -4979,6 +5070,8 @@ impl App {
                         };
                         return;
                     }
+                    self.tl.drag_prev_overlaps =
+                        neoveg_engine::crossfade::overlap_pairs(&self.project.tracks);
                     self.checkpoint();
                     if !self.sel_events.contains(&id) {
                         if !mods.command && !mods.shift {
@@ -4987,8 +5080,25 @@ impl App {
                         self.sel_events.insert(id);
                     }
                     let ids = self.expand_groups(&self.sel_events.clone());
-                    // Ctrl+Alt+arrastar ou modo Slide deslizam mantendo vizinhos contíguos.
+                    // Ctrl+Alt+arrastar ou modo Slide sobre um crossfade desliza a janela de crossfade.
                     if (mods.command && mods.alt) || mode == EditMode::Slide {
+                        if let Some((xti, xf)) = self.hit_crossfade(origin, left, layout) {
+                            let pairs = neoveg_engine::crossfade::capture_slide_crossfade(
+                                &self.project,
+                                xti,
+                                xf.left_id,
+                                xf.right_id,
+                                self.opts.ignore_grouping,
+                            );
+                            if !pairs.is_empty() {
+                                self.tl.drag = Drag::SlideCrossfade {
+                                    origin_t: ot,
+                                    anchor_start: xf.start,
+                                    pairs,
+                                };
+                                return;
+                            }
+                        }
                         let snap = self.capture_track_snapshot(ti);
                         let anchor_orig_start = self.project.tracks[ti].events[ei].start;
                         let partners = ids
@@ -5373,6 +5483,9 @@ impl App {
                         e.fade_out.len = e.fade_out.len.min(e.length - e.fade_in.len);
                     }
                 }
+                let all_tracks: Vec<usize> = (0..self.project.tracks.len()).collect();
+                let prev = self.tl.drag_prev_overlaps.clone();
+                self.session.sync_overlap_crossfades(&all_tracks, &prev);
                 self.changed();
             }
             Drag::Move {
@@ -5459,6 +5572,9 @@ impl App {
                         snap.apply(tr, env_dt);
                     }
                 }
+                let all_tracks: Vec<usize> = (0..self.project.tracks.len()).collect();
+                let prev = self.tl.drag_prev_overlaps.clone();
+                self.session.sync_overlap_crossfades(&all_tracks, &prev);
                 self.changed();
             }
             Drag::Shuffle {
@@ -5525,6 +5641,29 @@ impl App {
                             fe.start = (f_orig + actual_dt).max(Ticks::ZERO);
                         }
                     }
+                    self.changed();
+                }
+            }
+            Drag::SlideCrossfade {
+                origin_t,
+                anchor_start,
+                pairs,
+            } => {
+                let mut exclude: HashSet<Id> = HashSet::new();
+                for p in &pairs {
+                    exclude.insert(p.left_id);
+                    exclude.insert(p.right_id);
+                }
+                let raw = anchor_start + (t - origin_t);
+                let snapped = self.snap(raw, &exclude, mods.shift);
+                let dt = snapped - anchor_start;
+                let fd = self.project.settings.frame_dur();
+                if neoveg_engine::crossfade::apply_slide_crossfade(
+                    &mut self.project,
+                    &pairs,
+                    dt,
+                    fd,
+                ) {
                     self.changed();
                 }
             }
@@ -5720,8 +5859,11 @@ impl App {
                         }
                     }
                 }
+                let prev = neoveg_engine::crossfade::overlap_pairs(&self.project.tracks);
                 self.checkpoint();
                 self.add_media_to_timeline(mid, t, track);
+                let all_tracks: Vec<usize> = (0..self.project.tracks.len()).collect();
+                self.session.sync_overlap_crossfades(&all_tracks, &prev);
             }
             DndPayload::TrimmedMedia {
                 media_id,
@@ -5742,6 +5884,7 @@ impl App {
                         }
                     }
                 }
+                let prev = neoveg_engine::crossfade::overlap_pairs(&self.project.tracks);
                 self.checkpoint();
                 let _ = self.add_trimmed_media_to_timeline(
                     media_id,
@@ -5752,14 +5895,19 @@ impl App {
                     include_audio,
                     track,
                 );
+                let all_tracks: Vec<usize> = (0..self.project.tracks.len()).collect();
+                self.session.sync_overlap_crossfades(&all_tracks, &prev);
             }
             DndPayload::Generator(spec) => {
                 let imp = crate::media::import_generated(spec);
                 let id = imp.item.id;
                 self.media.insert(id, imp.entry);
+                let prev = neoveg_engine::crossfade::overlap_pairs(&self.project.tracks);
                 self.checkpoint();
                 self.project.media.push(imp.item);
                 self.add_media_to_timeline(id, t, track);
+                let all_tracks: Vec<usize> = (0..self.project.tracks.len()).collect();
+                self.session.sync_overlap_crossfades(&all_tracks, &prev);
             }
             DndPayload::Fx(kind) => {
                 self.drop_fx_instance(FxInstance::new(kind), event, track);
@@ -5813,6 +5961,10 @@ impl App {
             self.set_status(tr(lang, "Transições se aplicam a eventos de vídeo"));
             return;
         }
+        let has_overlap =
+            neoveg_engine::crossfade::track_crossfades(&self.project.tracks[ti], true)
+                .iter()
+                .any(|xf| xf.right_id == eid);
         self.checkpoint();
         let Some(e) = self.project.event_mut(eid) else {
             return;
@@ -5822,7 +5974,8 @@ impl App {
             kind,
             softness: soft,
         });
-        if e.fade_in.len <= Ticks::ZERO {
+        e.no_crossfade_in = false;
+        if !has_overlap && e.fade_in.len <= Ticks::ZERO {
             e.fade_in.len = Ticks::from_secs_i64(1).min(e.length.div_i64(2));
         }
         self.set_status(tr_args(
@@ -5870,6 +6023,14 @@ impl App {
                 }
                 ui.separator();
                 self.event_context_menu(ui, id);
+            }
+            CtxTarget::Crossfade {
+                track_idx,
+                left_id,
+                right_id,
+                active,
+            } => {
+                self.crossfade_context_menu(ui, track_idx, left_id, right_id, active);
             }
             CtxTarget::Keyframe {
                 track,
@@ -6195,6 +6356,229 @@ impl App {
         );
     }
 
+    fn crossfade_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        track_idx: usize,
+        left_id: Id,
+        right_id: Id,
+        active: bool,
+    ) {
+        let lang = self.lang();
+        let Some(track) = self.project.tracks.get(track_idx) else {
+            ui.close_menu();
+            return;
+        };
+        let is_video = track.kind == TrackKind::Video;
+        let Some(xf) = neoveg_engine::crossfade::track_crossfades(track, true)
+            .into_iter()
+            .find(|x| x.left_id == left_id && x.right_id == right_id)
+        else {
+            self.event_context_menu(ui, right_id);
+            return;
+        };
+        let dur_str = self.fmt_time(xf.len());
+        let header = if active {
+            tr_args(lang, "Crossfade ({dur})", &[("dur", &dur_str)])
+        } else {
+            tr_args(
+                lang,
+                "Sobreposição sem crossfade ({dur})",
+                &[("dur", &dur_str)],
+            )
+        };
+        ui.label(egui::RichText::new(header).strong());
+        ui.separator();
+
+        if active {
+            let th = self.theme.clone();
+            ui.menu_button(tr(lang, "Tipo de fade (Crossfade)"), |ui| {
+                let presets: [(&str, Curve, Curve); 5] = [
+                    (
+                        "Potência constante (Rápida / Rápida)",
+                        Curve::Fast,
+                        Curve::Fast,
+                    ),
+                    ("Linear (Linear / Linear)", Curve::Linear, Curve::Linear),
+                    ("Suave (Suave / Suave)", Curve::Smooth, Curve::Smooth),
+                    ("Abrupta (Abrupta / Abrupta)", Curve::Sharp, Curve::Sharp),
+                    ("Mergulho (Lenta / Lenta)", Curve::Slow, Curve::Slow),
+                ];
+                for (lbl, oc, ic) in presets {
+                    let sel = xf.out_curve == oc && xf.in_curve == ic;
+                    if crossfade_curve_menu_item(ui, oc, ic, sel, tr(lang, lbl), &th).clicked() {
+                        self.session.set_crossfade_curves(left_id, right_id, oc, ic);
+                        self.sync_after_session();
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(tr(lang, "Matriz 5×5 (Saída × Entrada)"))
+                        .small()
+                        .color(th.text_muted),
+                );
+                let curves = neoveg_engine::crossfade::CROSSFADE_CURVES;
+                egui::Grid::new("xfade_matrix_5x5")
+                    .spacing(vec2(3.0, 3.0))
+                    .show(ui, |ui| {
+                        ui.label("");
+                        for ic in curves {
+                            ui.label(
+                                egui::RichText::new(ic.name_in(lang))
+                                    .small()
+                                    .color(th.text_muted),
+                            );
+                        }
+                        ui.end_row();
+                        for oc in curves {
+                            ui.label(
+                                egui::RichText::new(oc.name_in(lang))
+                                    .small()
+                                    .color(th.text_muted),
+                            );
+                            for ic in curves {
+                                let sel = xf.out_curve == oc && xf.in_curve == ic;
+                                let (cell_r, resp) =
+                                    ui.allocate_exact_size(vec2(32.0, 20.0), Sense::click());
+                                let out_lbl = oc.name_in(lang);
+                                let in_lbl = ic.name_in(lang);
+                                let tip = tr_args(
+                                    lang,
+                                    "Saída: {out} / Entrada: {inc}",
+                                    &[("out", &out_lbl), ("inc", &in_lbl)],
+                                );
+                                resp.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        tip.clone(),
+                                    )
+                                });
+                                paint_crossfade_curve_icon(
+                                    &ui.painter_at(cell_r),
+                                    cell_r,
+                                    oc,
+                                    ic,
+                                    sel,
+                                    resp.hovered(),
+                                    &th,
+                                );
+                                if resp.on_hover_text(tip).clicked() {
+                                    self.session.set_crossfade_curves(left_id, right_id, oc, ic);
+                                    self.sync_after_session();
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+
+            if is_video {
+                let cur_tr = self
+                    .project
+                    .event(right_id)
+                    .and_then(|e| e.transition.clone());
+                ui.menu_button(tr(lang, "Transição"), |ui| {
+                    if ui
+                        .selectable_label(cur_tr.is_none(), tr(lang, "Dissolver (crossfade)"))
+                        .clicked()
+                    {
+                        self.checkpoint();
+                        if let Some(ev) = self.project.event_mut(right_id) {
+                            ev.transition = None;
+                        }
+                        self.changed();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    for k in TransitionKind::ALL {
+                        let sel = cur_tr.as_ref().is_some_and(|t| t.kind == k);
+                        if ui.selectable_label(sel, k.name_in(lang)).clicked() {
+                            self.apply_transition(right_id, k);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+
+            if ui
+                .button(tr(lang, "Desativar crossfade (Corte seco)"))
+                .clicked()
+            {
+                self.session.set_crossfade_enabled(right_id, false);
+                self.sync_after_session();
+                ui.close_menu();
+            }
+        } else if ui.button(tr(lang, "Ativar crossfade")).clicked() {
+            self.session.set_crossfade_enabled(right_id, true);
+            self.sync_after_session();
+            ui.close_menu();
+        }
+
+        ui.menu_button(
+            tr(lang, "Converter em corte (Remover sobreposição)"),
+            |ui| {
+                for (align, lbl) in [
+                    (
+                        neoveg_common::CutToOverlapAlign::Center,
+                        "Centralizado no corte",
+                    ),
+                    (
+                        neoveg_common::CutToOverlapAlign::BeforeCut,
+                        "No início da sobreposição",
+                    ),
+                    (
+                        neoveg_common::CutToOverlapAlign::AfterCut,
+                        "No fim da sobreposição",
+                    ),
+                ] {
+                    if ui.button(tr(lang, lbl)).clicked() {
+                        self.session
+                            .convert_crossfade_to_cut(left_id, right_id, align);
+                        self.sync_after_session();
+                        ui.close_menu();
+                    }
+                }
+            },
+        );
+
+        ui.separator();
+        let left_name = self
+            .project
+            .event(left_id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let right_name = self
+            .project
+            .event(right_id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        if ui
+            .button(tr_args(
+                lang,
+                "Propriedades: {name}",
+                &[("name", &left_name)],
+            ))
+            .clicked()
+        {
+            self.dlg.event_props = Some(left_id);
+            ui.close_menu();
+        }
+        if ui
+            .button(tr_args(
+                lang,
+                "Propriedades: {name}",
+                &[("name", &right_name)],
+            ))
+            .clicked()
+        {
+            self.dlg.event_props = Some(right_id);
+            ui.close_menu();
+        }
+    }
+
     fn event_context_menu(&mut self, ui: &mut egui::Ui, id: Id) {
         let lang = self.lang();
         let Some((ti, ei)) = self.project.find_event(id) else {
@@ -6294,6 +6678,14 @@ impl App {
             && ui.button(tr(lang, "Juntar eventos (Heal)")).clicked()
         {
             self.exec_cmd(Some(ui.ctx()), "edit.heal_events");
+            ui.close_menu();
+        }
+        if self.session.can_convert_cut_to_overlap()
+            && ui
+                .button(tr(lang, "Converter corte em crossfade"))
+                .clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), "edit.cut_to_overlap");
             ui.close_menu();
         }
         if ui.button(tr(lang, "Copiar")).clicked() {
@@ -6634,32 +7026,16 @@ impl App {
             );
             let track = self.project.tracks[ti].clone();
             let muted = track.mute;
-            // sobreposições (crossfades)
-            for (i, a) in track.events.iter().enumerate() {
-                for b in track.events.iter().skip(i + 1) {
-                    let (s, e) = (a.start.max(b.start), a.end().min(b.end()));
-                    if e > s {
-                        let r = Rect::from_min_max(
-                            pos2(self.tl.t2x(s, left), y0 + 1.0),
-                            pos2(self.tl.t2x(e, left), y0 + h - 1.0),
-                        );
-                        painter.rect_filled(r, 0.0, self.theme.text_primary.gamma_multiply(0.08));
-                        painter.line_segment(
-                            [r.left_top(), r.right_bottom()],
-                            Stroke::new(1.0_f32, self.theme.border),
-                        );
-                        painter.line_segment(
-                            [r.left_bottom(), r.right_top()],
-                            Stroke::new(1.0_f32, self.theme.border),
-                        );
-                    }
-                }
-            }
+            let xfades = neoveg_engine::crossfade::track_crossfades(&track, true);
             for e in &track.events {
                 let r = self.event_rect(e, left, y0, h);
                 if r.right() < lanes.left() || r.left() > lanes.right() {
                     continue;
                 }
+                let xf_in = xfades.iter().find(|xf| xf.active && xf.right_id == e.id);
+                let xf_out = xfades.iter().find(|xf| xf.active && xf.left_id == e.id);
+                let (eff_fi, eff_fo) =
+                    neoveg_engine::crossfade::effective_event_fades_from_regions(e, &xfades);
                 let sel = self.sel_events.contains(&e.id);
                 let k = if sel { 1.0 } else { 0.62 };
                 let tc = self.track_rgb(track.color);
@@ -6673,7 +7049,6 @@ impl App {
                     shade(tc, k * 0.55)
                 };
                 let hdr_h = 14.0f32.min(r.height() * 0.3);
-                painter.rect_filled(r, 2.0, body);
                 let hdr_col = if e.mute || muted {
                     if self.theme.dark_mode {
                         Color32::from_gray(80)
@@ -6684,7 +7059,35 @@ impl App {
                     shade(tc, k * 0.9)
                 };
                 let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
-                painter.rect_filled(hdr, 2.0, hdr_col);
+                if let Some(xf) = xf_in {
+                    // Na região de crossfade, o fundo do evento que entra fica translúcido
+                    // para deixar a forma de onda/miniatura do evento anterior aparecer junto.
+                    let split_x = self
+                        .tl
+                        .t2x(xf.end, left)
+                        .clamp(r.left(), r.right().max(r.left()));
+                    let ov_r = Rect::from_min_max(r.min, pos2(split_x, r.bottom()));
+                    let rem_r = Rect::from_min_max(pos2(split_x, r.top()), r.max);
+                    let ov_alpha = if track.kind == TrackKind::Audio {
+                        0.42
+                    } else {
+                        0.55
+                    };
+                    if ov_r.width() > 0.5 {
+                        painter.rect_filled(ov_r, 0.0, body.gamma_multiply(ov_alpha));
+                    }
+                    if rem_r.width() > 0.5 {
+                        painter.rect_filled(rem_r, 2.0, body);
+                        let rem_hdr = Rect::from_min_max(
+                            pos2(split_x, hdr.top()),
+                            pos2(r.right(), hdr.bottom()),
+                        );
+                        painter.rect_filled(rem_hdr, 2.0, hdr_col);
+                    }
+                } else {
+                    painter.rect_filled(r, 2.0, body);
+                    painter.rect_filled(hdr, 2.0, hdr_col);
+                }
                 let body_light = crate::theme::relative_luminance(body) > 0.35;
                 let hdr_fg = crate::theme::contrast_on(hdr_col);
                 let mut ev_icon_theme = self.theme.clone();
@@ -6805,7 +7208,22 @@ impl App {
                             let mut x = x_first;
                             while x < vis.right() {
                                 let t0 = self.tl.x2t(x, left);
-                                let fg = e.fade_gain(t0);
+                                let fg = {
+                                    let local = t0 - e.start;
+                                    let mut g = 1.0_f32;
+                                    if eff_fi.len > Ticks::ZERO && local < eff_fi.len {
+                                        g *= eff_fi
+                                            .curve
+                                            .shape(local.fraction_in(Ticks::ZERO, eff_fi.len));
+                                    }
+                                    let rem = e.end() - t0;
+                                    if eff_fo.len > Ticks::ZERO && rem < eff_fo.len {
+                                        g *= eff_fo
+                                            .curve
+                                            .shape(rem.fraction_in(Ticks::ZERO, eff_fo.len));
+                                    }
+                                    g
+                                };
                                 if sample_mode {
                                     let tc = self.tl.x2t(x + 0.5, left).min(last_t);
                                     if let Some(m) = e.media_time(tc, dur) {
@@ -7034,14 +7452,25 @@ impl App {
                     }
                     painter.add(Shape::line(pts, fade_col));
                 };
-                draw_fade(e.fade_in.len, e.fade_in.curve, true);
-                draw_fade(e.fade_out.len, e.fade_out.curve, false);
-                // alças de fade
+                if xf_in.is_none() {
+                    draw_fade(e.fade_in.len, e.fade_in.curve, true);
+                }
+                if xf_out.is_none() {
+                    draw_fade(e.fade_out.len, e.fade_out.curve, false);
+                }
+                // alças de fade (ocultas na borda já governada por crossfade ativo)
                 let fi_x = r.left() + e.fade_in.len.as_secs_f64() as f32 * pps;
                 let fo_x = r.right() - e.fade_out.len.as_secs_f64() as f32 * pps;
-                for x in [fi_x, fo_x] {
+                if xf_in.is_none() {
                     painter.rect_filled(
-                        Rect::from_center_size(pos2(x, r.top() + 3.0), vec2(6.0, 6.0)),
+                        Rect::from_center_size(pos2(fi_x, r.top() + 3.0), vec2(6.0, 6.0)),
+                        1.0,
+                        self.theme.tl_fade,
+                    );
+                }
+                if xf_out.is_none() {
+                    painter.rect_filled(
+                        Rect::from_center_size(pos2(fo_x, r.top() + 3.0), vec2(6.0, 6.0)),
                         1.0,
                         self.theme.tl_fade,
                     );
@@ -7259,6 +7688,218 @@ impl App {
                         &ev_icon_theme,
                         true,
                     );
+                }
+            }
+            // Crossfades desenhados ACIMA dos eventos (curvas X reais + hachura VEGAS)
+            let hover_pos = ui.ctx().pointer_hover_pos();
+            for xf in &xfades {
+                let x0 = self.tl.t2x(xf.start, left);
+                let x1 = self.tl.t2x(xf.end, left);
+                if x1 <= lanes.left() || x0 >= lanes.right() || x1 - x0 < 1.0 {
+                    continue;
+                }
+                let xr = Rect::from_min_max(pos2(x0, y0 + 1.0), pos2(x1, y0 + h - 1.0));
+                let vis_xr = xr.intersect(lanes);
+                if vis_xr.width() <= 0.5 || vis_xr.height() <= 2.0 {
+                    continue;
+                }
+                let xp = painter.with_clip_rect(vis_xr);
+                if !xf.active {
+                    // Sobreposição sem crossfade (corte seco): apenas divisor vertical nítido.
+                    xp.line_segment(
+                        [pos2(xr.left(), xr.top()), pos2(xr.left(), xr.bottom())],
+                        Stroke::new(1.5_f32, self.theme.tl_event_border),
+                    );
+                    continue;
+                }
+                let sliding_this = matches!(
+                    &self.tl.drag,
+                    Drag::SlideCrossfade { pairs, .. }
+                        if pairs.iter().any(|p| p.left_id == xf.left_id && p.right_id == xf.right_id)
+                );
+                let hovering_this = hover_pos.is_some_and(|hp| vis_xr.contains(hp))
+                    && matches!(self.tl.drag, Drag::None);
+                let is_hot = sliding_this || hovering_this;
+
+                // Fundo e textura sutil de crossfade (VEGAS Pro)
+                let veil = if self.theme.high_contrast {
+                    self.theme.tl_crossfade.gamma_multiply(0.14)
+                } else if self.theme.dark_mode {
+                    Color32::from_rgba_unmultiplied(185, 210, 245, if is_hot { 34 } else { 22 })
+                } else {
+                    Color32::from_rgba_unmultiplied(35, 65, 125, if is_hot { 34 } else { 22 })
+                };
+                xp.rect_filled(vis_xr, 0.0, veil);
+
+                // Hachura diagonal sutil na região de sobreposição (limitada a 160 traços, §0.5)
+                if !self.theme.high_contrast && vis_xr.width() >= 6.0 {
+                    let hatch_col = if self.theme.dark_mode {
+                        Color32::from_rgba_unmultiplied(230, 240, 255, 22)
+                    } else {
+                        Color32::from_rgba_unmultiplied(40, 50, 75, 26)
+                    };
+                    let hatch_stroke = Stroke::new(1.0_f32, hatch_col);
+                    let diag_span = vis_xr.width() + vis_xr.height();
+                    let step = (diag_span / 160.0).max(6.0);
+                    let mut d = 0.0_f32;
+                    let mut segs = 0usize;
+                    while d < diag_span && segs < 160 {
+                        let p0 = pos2(vis_xr.left() + d, vis_xr.top());
+                        let p1 = pos2(vis_xr.left() + d - vis_xr.height(), vis_xr.bottom());
+                        xp.line_segment([p0, p1], hatch_stroke);
+                        d += step;
+                        segs += 1;
+                    }
+                }
+
+                // Bordas verticais de início e fim do crossfade
+                let edge_col = if self.theme.high_contrast {
+                    self.theme.tl_crossfade
+                } else if self.theme.dark_mode {
+                    Color32::from_rgba_unmultiplied(210, 225, 245, 150)
+                } else {
+                    Color32::from_rgba_unmultiplied(45, 55, 78, 175)
+                };
+                xp.line_segment(
+                    [
+                        pos2(xr.left() + 0.5, xr.top()),
+                        pos2(xr.left() + 0.5, xr.bottom()),
+                    ],
+                    Stroke::new(1.0_f32, edge_col),
+                );
+                xp.line_segment(
+                    [
+                        pos2(xr.right() - 0.5, xr.top()),
+                        pos2(xr.right() - 0.5, xr.bottom()),
+                    ],
+                    Stroke::new(1.0_f32, edge_col),
+                );
+
+                // Pequeno triângulo de sobreposição na base esquerda (estilo VEGAS Pro)
+                if xr.width() >= 10.0 && xr.height() >= 18.0 {
+                    let tri_fill = if self.theme.dark_mode {
+                        Color32::from_rgb(236, 240, 246)
+                    } else {
+                        Color32::from_rgb(245, 247, 250)
+                    };
+                    let tri_stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 24, 32));
+                    xp.add(Shape::convex_polygon(
+                        vec![
+                            pos2(xr.left() + 0.5, xr.bottom() - 6.5),
+                            pos2(xr.left() + 6.5, xr.bottom() - 0.5),
+                            pos2(xr.left() + 0.5, xr.bottom() - 0.5),
+                        ],
+                        tri_fill,
+                        tri_stroke,
+                    ));
+                }
+
+                // As duas curvas cruzadas reais: saída (A) descendo + entrada (B) subindo
+                let steps = (xr.width() / 3.0).clamp(4.0, 64.0) as usize;
+                let mut pts_out = Vec::with_capacity(steps + 1);
+                let mut pts_in = Vec::with_capacity(steps + 1);
+                let usable_h = (xr.height() - 3.0).max(1.0);
+                for s in 0..=steps {
+                    let frac = s as f32 / steps as f32;
+                    let px = xr.left() + frac * xr.width();
+                    let g_out = xf.out_curve.shape(1.0 - frac).clamp(0.0, 1.0);
+                    let g_in = xf.in_curve.shape(frac).clamp(0.0, 1.0);
+                    pts_out.push(pos2(px, xr.bottom() - 1.5 - g_out * usable_h));
+                    pts_in.push(pos2(px, xr.bottom() - 1.5 - g_in * usable_h));
+                }
+                let backing_col = if self.theme.dark_mode {
+                    Color32::from_rgba_unmultiplied(8, 10, 14, 175)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 185)
+                };
+                let backing_w = if is_hot { 4.0_f32 } else { 3.0_f32 };
+                let curve_w = if is_hot { 2.25_f32 } else { 1.75_f32 };
+                let curve_col = self.theme.tl_crossfade;
+                xp.add(Shape::line(
+                    pts_out.clone(),
+                    Stroke::new(backing_w, backing_col),
+                ));
+                xp.add(Shape::line(
+                    pts_in.clone(),
+                    Stroke::new(backing_w, backing_col),
+                ));
+                xp.add(Shape::line(pts_out, Stroke::new(curve_w, curve_col)));
+                xp.add(Shape::line(pts_in, Stroke::new(curve_w, curve_col)));
+
+                // Selo de transição quando há transição de vídeo diferente de Dissolver
+                let tr_name = track
+                    .events
+                    .get(xf.right_idx)
+                    .and_then(|ev| ev.transition.as_ref())
+                    .filter(|t| t.kind != TransitionKind::Dissolve)
+                    .map(|t| t.kind.name_in(self.lang()));
+                if let Some(tname) = tr_name {
+                    if vis_xr.width() >= 44.0 {
+                        let g = painter.layout_no_wrap(
+                            tname.to_string(),
+                            FontId::proportional(9.5),
+                            Color32::WHITE,
+                        );
+                        let pw = (g.size().x + 8.0).min(vis_xr.width() - 4.0);
+                        if pw > 12.0 {
+                            let pill = Rect::from_center_size(
+                                pos2(vis_xr.center().x, vis_xr.top() + 8.5),
+                                vec2(pw, 13.0),
+                            );
+                            xp.rect_filled(
+                                pill,
+                                2.0,
+                                Color32::from_rgba_unmultiplied(16, 22, 36, 210),
+                            );
+                            xp.rect_stroke(
+                                pill,
+                                2.0,
+                                Stroke::new(1.0_f32, curve_col),
+                                StrokeKind::Inside,
+                            );
+                            xp.galley(pos2(pill.left() + 4.0, pill.top() + 1.0), g, Color32::WHITE);
+                        }
+                    }
+                }
+
+                // Etiqueta ao passar o mouse ou deslizar o crossfade
+                if is_hot {
+                    let lang = self.lang();
+                    let dur_s = self.fmt_time(xf.len());
+                    let info = if let Some(tname) = tr_name {
+                        format!(
+                            "{tname}  •  {dur_s}  •  {} / {}",
+                            xf.out_curve.name_in(lang),
+                            xf.in_curve.name_in(lang)
+                        )
+                    } else {
+                        format!(
+                            "Crossfade  {dur_s}  •  {} / {}",
+                            xf.out_curve.name_in(lang),
+                            xf.in_curve.name_in(lang)
+                        )
+                    };
+                    let g = painter.layout_no_wrap(
+                        info,
+                        FontId::monospace(10.0),
+                        self.theme.text_primary,
+                    );
+                    let bw = g.size().x + 8.0;
+                    let bh = g.size().y + 4.0;
+                    let bx = (vis_xr.center().x - bw * 0.5).clamp(
+                        lanes.left() + 2.0,
+                        (lanes.right() - bw - 2.0).max(lanes.left() + 2.0),
+                    );
+                    let by = (xr.top() - bh - 2.0).max(lanes.top() + 2.0);
+                    let badge = Rect::from_min_size(pos2(bx, by), vec2(bw, bh));
+                    painter.rect_filled(badge, 2.0, self.theme.extreme_bg);
+                    painter.rect_stroke(
+                        badge,
+                        2.0,
+                        Stroke::new(1.0_f32, curve_col),
+                        StrokeKind::Inside,
+                    );
+                    painter.galley(badge.min + vec2(4.0, 2.0), g, self.theme.text_primary);
                 }
             }
             // envelopes
@@ -7589,8 +8230,12 @@ mod zoom_tests {
         let fast_mid = fade_curve_points(r, Curve::Fast, true)[8].y;
         let slow_mid = fade_curve_points(r, Curve::Slow, true)[8].y;
         assert!(fast_mid < slow_mid);
+        // No fade-out, Fast também arqueia para cima (y menor que Slow no meio)
+        let fast_out_mid = fade_curve_points(r, Curve::Fast, false)[8].y;
+        let slow_out_mid = fade_curve_points(r, Curve::Slow, false)[8].y;
+        assert!(fast_out_mid < slow_out_mid);
 
-        // Renderiza o item de menu em todos os 7 temas sem pânico
+        // Renderiza os itens de menu de fade e crossfade em todos os 7 temas sem pânico
         let ctx = egui::Context::default();
         for tid in crate::theme::ThemeId::ALL {
             let th = crate::theme::palette(tid);
@@ -7604,6 +8249,18 @@ mod zoom_tests {
                                 fade_in,
                                 *cur == Curve::Smooth,
                                 cur.name(),
+                                &th,
+                            );
+                        }
+                    }
+                    for &oc in &neoveg_engine::crossfade::CROSSFADE_CURVES {
+                        for &ic in &neoveg_engine::crossfade::CROSSFADE_CURVES {
+                            let _ = crossfade_curve_menu_item(
+                                ui,
+                                oc,
+                                ic,
+                                oc == Curve::Fast && ic == Curve::Fast,
+                                "Crossfade",
                                 &th,
                             );
                         }
@@ -7624,7 +8281,7 @@ fn fade_curve_points(rect: Rect, curve: Curve, fade_in: bool) -> Vec<Pos2> {
         let v = if fade_in {
             curve.shape(frac)
         } else {
-            1.0 - curve.shape(frac)
+            curve.shape(1.0 - frac)
         };
         let x = rect.left() + frac * rect.width();
         let y = rect.bottom() - v.clamp(0.0, 1.0) * rect.height();
@@ -7701,6 +8358,114 @@ fn fade_curve_menu_item(
         vec2(28.0, 14.0),
     );
     paint_fade_curve_icon(&p, icon_r, curve, fade_in, selected, theme);
+    let fg = if selected {
+        crate::theme::contrast_on(theme.selection_bg)
+    } else {
+        theme.text_primary
+    };
+    p.text(
+        pos2(icon_r.right() + 7.0, row_r.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        fg,
+    );
+    if selected {
+        p.text(
+            pos2(row_r.right() - 6.0, row_r.center().y),
+            Align2::RIGHT_CENTER,
+            "✓",
+            FontId::proportional(11.0),
+            fg,
+        );
+    }
+    resp
+}
+
+/// Desenha miniatura vetorial das duas curvas cruzadas de um crossfade
+/// (`out_curve` descendo + `in_curve` subindo), para o submenu *Fade Type* 5×5.
+fn paint_crossfade_curve_icon(
+    painter: &egui::Painter,
+    rect: Rect,
+    out_curve: Curve,
+    in_curve: Curve,
+    selected: bool,
+    hovered: bool,
+    theme: &crate::theme::ThemeColors,
+) {
+    let bg = if selected {
+        theme
+            .selection_bg
+            .gamma_multiply(if theme.high_contrast { 1.0 } else { 0.45 })
+    } else if hovered {
+        theme.widget_hover_bg
+    } else {
+        theme.extreme_bg
+    };
+    painter.rect_filled(rect, 1.5, bg);
+    let inner = rect.shrink2(vec2(2.0, 2.0));
+    if inner.width() > 2.0 && inner.height() > 2.0 {
+        let out_pts = fade_curve_points(inner, out_curve, false);
+        let in_pts = fade_curve_points(inner, in_curve, true);
+        let out_col = if selected || theme.high_contrast {
+            theme.accent
+        } else {
+            theme.tl_crossfade
+        };
+        let in_col = if selected || theme.high_contrast {
+            theme.tl_fade
+        } else {
+            theme.tl_crossfade
+        };
+        painter.add(Shape::line(out_pts, Stroke::new(1.4_f32, out_col)));
+        painter.add(Shape::line(in_pts, Stroke::new(1.4_f32, in_col)));
+    }
+    painter.rect_stroke(
+        rect,
+        1.5,
+        Stroke::new(
+            1.0_f32,
+            if selected || hovered {
+                theme.accent
+            } else {
+                theme.border
+            },
+        ),
+        StrokeKind::Inside,
+    );
+}
+
+/// Item de menu com miniatura das duas curvas cruzadas do crossfade ao lado do nome.
+fn crossfade_curve_menu_item(
+    ui: &mut egui::Ui,
+    out_curve: Curve,
+    in_curve: Curve,
+    selected: bool,
+    label: &str,
+    theme: &crate::theme::ThemeColors,
+) -> egui::Response {
+    let desired_w = ui.available_width().max(220.0);
+    let (row_r, resp) = ui.allocate_exact_size(vec2(desired_w, 22.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let p = ui.painter_at(row_r);
+    if selected {
+        p.rect_filled(row_r, 2.0, theme.selection_bg);
+    } else if resp.hovered() {
+        p.rect_filled(row_r, 2.0, theme.widget_hover_bg);
+    }
+    let icon_r = Rect::from_min_size(
+        pos2(row_r.left() + 4.0, row_r.center().y - 7.0),
+        vec2(28.0, 14.0),
+    );
+    paint_crossfade_curve_icon(
+        &p,
+        icon_r,
+        out_curve,
+        in_curve,
+        selected,
+        resp.hovered(),
+        theme,
+    );
     let fg = if selected {
         crate::theme::contrast_on(theme.selection_bg)
     } else {
