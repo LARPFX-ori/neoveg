@@ -447,7 +447,7 @@ pub fn show_slideshow_window(app: &mut crate::App, ctx: &egui::Context) {
         });
 
     if add_from_media {
-        for m in &app.project.media {
+        for m in &app.session.project.media {
             if !m.has_video {
                 continue;
             }
