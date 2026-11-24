@@ -2276,26 +2276,14 @@ mod tests {
     fn inversao_de_fase_em_trilha_e_barramento_inverte_polaridade() {
         let sr = 48_000;
         let mut p = Project::new_default();
-        let m = MediaItem {
-            id: new_id(),
-            name: "tone.wav".into(),
-            source: MediaSource::File {
-                path: "tone.wav".into(),
-            },
-            duration: Some(Ticks::from_secs_i64(1)),
-            has_video: false,
-            has_audio: true,
-            width: 0,
-            height: 0,
-            fps: None,
-            info: String::new(),
-            proxy_path: None,
-        };
+        let mid = new_id();
+        let m = test_audio_item(mid, 2);
         let ev = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(1));
+        p.media.push(m);
         let mut audio_map = HashMap::new();
         audio_map.insert(
-            m.id,
-            Arc::new(AudioData::from_stereo(sr, vec![0.25_f32; 512 * 2])),
+            mid,
+            Arc::new(AudioData::from_stereo(sr, vec![0.4_f32; 48_000 * 2])),
         );
         let at_idx = p
             .tracks
@@ -2306,21 +2294,25 @@ mod tests {
 
         let mut normal = vec![0.0_f32; 256 * 2];
         Mixer::new(sr).process(&p, &audio_map, 0, &mut normal);
-        assert!(normal[16] > 0.2);
+        assert!(
+            normal[256] > 0.2,
+            "sinal normal esperado > 0.2, obtido {}",
+            normal[256]
+        );
 
         p.tracks[at_idx].invert_phase = true;
         let mut inverted = vec![0.0_f32; 256 * 2];
         Mixer::new(sr).process(&p, &audio_map, 0, &mut inverted);
-        assert!((inverted[16] + normal[16]).abs() < 1e-4);
+        assert!((inverted[256] + normal[256]).abs() < 1e-4);
 
         // Barramento também com inversão cancela a inversão da trilha (dupla inversão = original)
-        let mut bus = AudioBus::new("Bus A");
-        bus.invert_phase = true;
-        let bid = bus.id;
-        p.audio_buses.push(bus);
+        let bid = p.add_audio_bus(Some("Bus A")).expect("bus A");
+        if let Some(bus) = p.audio_bus_mut(bid) {
+            bus.invert_phase = true;
+        }
         p.tracks[at_idx].output_bus = Some(bid);
         let mut double_inv = vec![0.0_f32; 256 * 2];
         Mixer::new(sr).process(&p, &audio_map, 0, &mut double_inv);
-        assert!((double_inv[16] - normal[16]).abs() < 1e-4);
+        assert!((double_inv[256] - normal[256]).abs() < 1e-4);
     }
 }
