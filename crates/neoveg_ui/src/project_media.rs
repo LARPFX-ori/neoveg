@@ -632,6 +632,22 @@ impl App {
             {
                 self.remove_unused_media();
             }
+            let active_mid = self.session.active_media_id;
+            if icons::icon_button(
+                ui,
+                Icon::TrimmerBlade,
+                None,
+                false,
+                active_mid.is_some(),
+                &self.theme,
+            )
+            .on_hover_text(tr(lang, "Abrir mídia selecionada no Trimmer"))
+            .clicked()
+            {
+                if let Some(mid) = active_mid {
+                    self.open_in_trimmer(mid);
+                }
+            }
             ui.separator();
             for mode in MediaViewMode::ALL {
                 let active = self.project_media.view_mode == mode;
@@ -754,6 +770,40 @@ impl App {
         });
 
         ui.separator();
+        let used = self.project.used_media_ids();
+        // Mídia por Tipo recolhível (VEGAS Pro 21, p. 52: Media By Type -> Video/Audio/Stills/Generated/Unused)
+        egui::CollapsingHeader::new(
+            egui::RichText::new(tr(lang, "Mídia por Tipo"))
+                .strong()
+                .small(),
+        )
+        .id_salt("pm_media_by_type_hdr")
+        .default_open(true)
+        .show(ui, |ui| {
+            for rule in BUILTIN_SMART_BINS {
+                let count = self
+                    .project
+                    .media
+                    .iter()
+                    .filter(|m| rule.matches("", m, &used))
+                    .count();
+                let sel = self.project_media.filter_target == MediaFilterTarget::BuiltinSmart(rule);
+                ui.horizontal(|ui| {
+                    icons::paint_inline(ui, Icon::SmartFolder, 12.0, &self.theme);
+                    if ui
+                        .selectable_label(sel, format!("{} ({count})", tr(lang, rule.label())))
+                        .clicked()
+                    {
+                        self.project_media.filter_target = MediaFilterTarget::BuiltinSmart(rule);
+                        if self.project_media.view_mode == MediaViewMode::Storyboard {
+                            self.project_media.view_mode = MediaViewMode::Thumbnails;
+                        }
+                    }
+                });
+            }
+        });
+
+        ui.separator();
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(tr(lang, "Pastas (Bins)"))
@@ -828,7 +878,11 @@ impl App {
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Pastas Inteligentes").strong().small());
+            ui.label(
+                egui::RichText::new(tr(lang, "Pastas Inteligentes"))
+                    .strong()
+                    .small(),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r =
                     icons::small_icon_button(ui, Icon::SmartFolder, Some("+"), false, &self.theme);
@@ -850,29 +904,6 @@ impl App {
                 }
             });
         });
-
-        let used = self.project.used_media_ids();
-        for rule in BUILTIN_SMART_BINS {
-            let count = self
-                .project
-                .media
-                .iter()
-                .filter(|m| rule.matches("", m, &used))
-                .count();
-            let sel = self.project_media.filter_target == MediaFilterTarget::BuiltinSmart(rule);
-            ui.horizontal(|ui| {
-                icons::paint_inline(ui, Icon::SmartFolder, 12.0, &self.theme);
-                if ui
-                    .selectable_label(sel, format!("{} ({count})", tr(lang, rule.label())))
-                    .clicked()
-                {
-                    self.project_media.filter_target = MediaFilterTarget::BuiltinSmart(rule);
-                    if self.project_media.view_mode == MediaViewMode::Storyboard {
-                        self.project_media.view_mode = MediaViewMode::Thumbnails;
-                    }
-                }
-            });
-        }
 
         let custom_bins = self.project.smart_bins.clone();
         let mut del_smart = None;
@@ -1165,11 +1196,18 @@ impl App {
                                     let thumb_size = vec2(card_w - 8.0, thumb_h);
                                     let (thumb_rect, thumb_sense) =
                                         ui.allocate_exact_size(thumb_size, Sense::hover());
-                                    ui.painter().rect_filled(
-                                        thumb_rect,
-                                        1.0,
-                                        self.theme.extreme_bg,
-                                    );
+                                    if !self.theme.high_contrast
+                                        && (matches!(m.source, MediaSource::Generated(_))
+                                            || (m.has_video && m.duration.is_none()))
+                                    {
+                                        paint_alpha_checkerboard(ui.painter(), thumb_rect);
+                                    } else {
+                                        ui.painter().rect_filled(
+                                            thumb_rect,
+                                            1.0,
+                                            self.theme.extreme_bg,
+                                        );
+                                    }
                                     let pointer_hover = thumb_sense
                                         .hovered()
                                         .then(|| ui.input(|i| i.pointer.hover_pos()))
@@ -2007,4 +2045,29 @@ pub(crate) fn paint_media_drag_ghost(
     );
     painter.galley(rect.min + pad, galley, fg);
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+}
+
+/// Fundo quadriculado de transparência (alfa) para miniaturas de imagens
+/// estáticas e geradores na Mídia do Projeto (manual VEGAS Pro 21, pp. 52 e 56).
+fn paint_alpha_checkerboard(painter: &egui::Painter, rect: Rect) {
+    if !rect.is_finite() || rect.width() < 4.0 || rect.height() < 4.0 {
+        return;
+    }
+    let light = Color32::from_rgb(138, 140, 146);
+    let dark = Color32::from_rgb(94, 96, 102);
+    painter.rect_filled(rect, 1.0, dark);
+    let cell = 8.0_f32;
+    let cols = ((rect.width() / cell).ceil() as usize).min(64);
+    let rows = ((rect.height() / cell).ceil() as usize).min(64);
+    for r in 0..rows {
+        let y0 = rect.top() + r as f32 * cell;
+        let y1 = (y0 + cell).min(rect.bottom());
+        for c in 0..cols {
+            if (r + c) % 2 == 0 {
+                let x0 = rect.left() + c as f32 * cell;
+                let x1 = (x0 + cell).min(rect.right());
+                painter.rect_filled(Rect::from_min_max(pos2(x0, y0), pos2(x1, y1)), 0.0, light);
+            }
+        }
+    }
 }

@@ -805,13 +805,56 @@ impl App {
         let filter_key = egui::Id::new("plugin_manager_filter");
         let sel_key = egui::Id::new("plugin_manager_selected");
         let sel_ofx_key = egui::Id::new("plugin_manager_selected_ofx");
+        let scope_key = egui::Id::new("plugin_manager_scope");
         let mut filter: String = ui.data(|d| d.get_temp(filter_key)).unwrap_or_default();
         let mut selected: Option<PluginEntry> = ui.data(|d| d.get_temp(sel_key));
         let mut selected_ofx: Option<(PathBuf, OfxPluginInfo)> =
             ui.data(|d| d.get_temp(sel_ofx_key));
-        ui.horizontal(|ui| {
+        // 0 = Todos, 1 = Vídeo, 2 = Áudio (barra de caminho/filtro, manual VEGAS Pro 21 p. 60)
+        let mut scope: u8 = ui.data(|d| d.get_temp(scope_key)).unwrap_or(0);
+
+        // Barra superior: caminho em migalhas + filtro rápido + pesquisa (p. 60)
+        ui.horizontal_wrapped(|ui| {
+            let crumb = if let Some((_, ref info)) = selected_ofx {
+                format!("Plug-Ins > OFX > {}", info.identifier)
+            } else if let Some(e) = selected {
+                let domain = if e.category() == PluginCategory::AudioFx {
+                    tr(lang, "Áudio")
+                } else {
+                    tr(lang, "Vídeo")
+                };
+                format!(
+                    "Plug-Ins > {} > {} > {}",
+                    domain,
+                    e.category().name_in(lang),
+                    e.name_in(lang)
+                )
+            } else {
+                match scope {
+                    1 => format!("Plug-Ins > {}", tr(lang, "Vídeo")),
+                    2 => format!("Plug-Ins > {}", tr(lang, "Áudio")),
+                    _ => "Plug-Ins".to_string(),
+                }
+            };
+            ui.label(
+                egui::RichText::new(crumb)
+                    .small()
+                    .monospace()
+                    .color(self.theme.text_muted),
+            );
+            ui.separator();
+            for (idx, lbl) in [
+                (0u8, tr(lang, "Todos")),
+                (1u8, tr(lang, "Vídeo")),
+                (2u8, tr(lang, "Áudio")),
+            ] {
+                if ui.selectable_label(scope == idx, lbl).clicked() {
+                    scope = idx;
+                }
+            }
+            ui.separator();
             ui.label(tr(lang, "Pesquisar:"));
-            ui.add(egui::TextEdit::singleline(&mut filter).desired_width(160.0));
+            ui.add(egui::TextEdit::singleline(&mut filter).desired_width(140.0));
             if !filter.is_empty() && ui.small_button("×").clicked() {
                 filter.clear();
             }
@@ -822,22 +865,66 @@ impl App {
                 .id_salt("plugin_tree")
                 .auto_shrink([false, false])
                 .show(&mut cols[0], |ui| {
-                    for cat in PluginCategory::ALL {
-                        let items = plugin_catalog_in(cat, &filter, lang);
-                        let header = format!("{} ({})", cat.name_in(lang), items.len());
-                        egui::CollapsingHeader::new(header)
-                            .id_salt(("plugin_cat", cat))
-                            .default_open(!filter.is_empty() || cat == PluginCategory::VideoFx)
-                            .show(ui, |ui| {
-                                for e in items {
-                                    let is_sel = selected == Some(e);
-                                    let label = e.name_in(lang);
-                                    if ui.selectable_label(is_sel, label).clicked() {
-                                        selected = Some(e);
-                                        selected_ofx = None;
+                    // Árvore hierárquica fiel ao VEGAS Pro 21 (p. 60): Vídeo -> FX/Transições/Compositores, Áudio -> FX, Externos
+                    if scope == 0 || scope == 1 {
+                        egui::CollapsingHeader::new(
+                            egui::RichText::new(tr(lang, "Vídeo")).strong(),
+                        )
+                        .id_salt("plugin_root_video")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for cat in [
+                                PluginCategory::VideoFx,
+                                PluginCategory::Transition,
+                                PluginCategory::Compositor,
+                            ] {
+                                let items = plugin_catalog_in(cat, &filter, lang);
+                                let header = format!("{} ({})", cat.name_in(lang), items.len());
+                                egui::CollapsingHeader::new(header)
+                                    .id_salt(("plugin_cat", cat))
+                                    .default_open(
+                                        !filter.is_empty() || cat == PluginCategory::VideoFx,
+                                    )
+                                    .show(ui, |ui| {
+                                        for e in items {
+                                            let is_sel = selected == Some(e);
+                                            let label = e.name_in(lang);
+                                            if ui.selectable_label(is_sel, label).clicked() {
+                                                selected = Some(e);
+                                                selected_ofx = None;
+                                            }
+                                        }
+                                    });
+                            }
+                        });
+                    }
+                    if scope == 0 || scope == 2 {
+                        egui::CollapsingHeader::new(
+                            egui::RichText::new(tr(lang, "Áudio")).strong(),
+                        )
+                        .id_salt("plugin_root_audio")
+                        .default_open(scope == 2 || !filter.is_empty())
+                        .show(ui, |ui| {
+                            let items = plugin_catalog_in(PluginCategory::AudioFx, &filter, lang);
+                            let header = format!(
+                                "{} ({})",
+                                PluginCategory::AudioFx.name_in(lang),
+                                items.len()
+                            );
+                            egui::CollapsingHeader::new(header)
+                                .id_salt(("plugin_cat", PluginCategory::AudioFx))
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    for e in items {
+                                        let is_sel = selected == Some(e);
+                                        let label = e.name_in(lang);
+                                        if ui.selectable_label(is_sel, label).clicked() {
+                                            selected = Some(e);
+                                            selected_ofx = None;
+                                        }
                                     }
-                                }
-                            });
+                                });
+                        });
                     }
                     egui::CollapsingHeader::new(tr(lang, "Plug-ins externos (VST3 / OFX)"))
                         .id_salt("plugin_cat_external")
@@ -873,6 +960,7 @@ impl App {
         });
         ui.data_mut(|d| {
             d.insert_temp(filter_key, filter);
+            d.insert_temp(scope_key, scope);
             match selected {
                 Some(s) => d.insert_temp(sel_key, s),
                 None => d.remove::<PluginEntry>(sel_key),

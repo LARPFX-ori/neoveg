@@ -298,6 +298,8 @@ pub struct App {
     pub(crate) preview_ms: f64,
     pub(crate) scopes_tex: Option<[TextureHandle; 4]>,
     pub(crate) scopes_config: neoveg_engine::scopes::ScopeConfig,
+    /// Modo de exibição dos Escopos de Vídeo (Todos 2×2 ou escopo individual, p. 61).
+    pub(crate) scopes_layout: crate::panels::ScopeViewLayout,
     pub tl: TimelineState,
     pub dock_tab: DockTab,
     pub detached_tabs: HashSet<DockTab>,
@@ -352,6 +354,8 @@ pub struct App {
     pub loading: usize,
     pub explorer_dir: PathBuf,
     pub explorer_filter: String,
+    /// Estado de navegação do Explorer (histórico voltar/avançar, favoritos, modo lista/detalhes, p. 45).
+    pub explorer_ui: crate::panels::ExplorerState,
     pub render_job: Option<RenderJob>,
     pub(crate) script_job: Option<ScriptJob>,
     /// Janela Efeitos de Vídeo (categorias, busca e miniaturas).
@@ -579,6 +583,7 @@ impl App {
             preview_ms: 0.0,
             scopes_tex: None,
             scopes_config: neoveg_engine::scopes::ScopeConfig::default(),
+            scopes_layout: crate::panels::ScopeViewLayout::default(),
             tl: TimelineState::default(),
             dock_tab: initial_layout.active_panel(),
             dlg: Dialogs::default(),
@@ -589,6 +594,7 @@ impl App {
             loading: 0,
             explorer_dir,
             explorer_filter: String::new(),
+            explorer_ui: crate::panels::ExplorerState::default(),
             render_job: None,
             script_job: None,
             fx_browser: Default::default(),

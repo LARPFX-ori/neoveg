@@ -99,6 +99,151 @@ impl MixerConsoleState {
     }
 }
 
+const MAX_EXPLORER_HISTORY: usize = 64;
+const MAX_EXPLORER_FAVORITES: usize = 64;
+
+/// Coluna de ordenação no painel Explorer (manual VEGAS Pro 21, p. 45).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ExplorerSortCol {
+    #[default]
+    Name,
+    Kind,
+    Size,
+}
+
+/// Estado de navegação do Explorer: histórico voltar/avançar, favoritos, modo
+/// Lista/Detalhes e painel lateral de pastas (manual VEGAS Pro 21, p. 45).
+pub struct ExplorerState {
+    pub back_stack: Vec<PathBuf>,
+    pub forward_stack: Vec<PathBuf>,
+    pub favorites: Vec<PathBuf>,
+    pub show_tree: bool,
+    pub details_view: bool,
+    pub editing_path: bool,
+    pub path_buf: String,
+    pub sort_col: ExplorerSortCol,
+    pub sort_asc: bool,
+    pub selected: Option<PathBuf>,
+}
+
+impl Default for ExplorerState {
+    fn default() -> Self {
+        Self {
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
+            favorites: Vec::new(),
+            show_tree: true,
+            details_view: true,
+            editing_path: false,
+            path_buf: String::new(),
+            sort_col: ExplorerSortCol::Name,
+            sort_asc: true,
+            selected: None,
+        }
+    }
+}
+
+impl ExplorerState {
+    pub fn navigate(&mut self, current: &mut PathBuf, next: PathBuf) {
+        if *current == next {
+            return;
+        }
+        if self.back_stack.len() >= MAX_EXPLORER_HISTORY {
+            self.back_stack.remove(0);
+        }
+        self.back_stack.push(current.clone());
+        self.forward_stack.clear();
+        *current = next;
+        self.editing_path = false;
+    }
+
+    pub fn go_back(&mut self, current: &mut PathBuf) -> bool {
+        let Some(prev) = self.back_stack.pop() else {
+            return false;
+        };
+        if self.forward_stack.len() >= MAX_EXPLORER_HISTORY {
+            self.forward_stack.remove(0);
+        }
+        self.forward_stack.push(current.clone());
+        *current = prev;
+        self.editing_path = false;
+        true
+    }
+
+    pub fn go_forward(&mut self, current: &mut PathBuf) -> bool {
+        let Some(next) = self.forward_stack.pop() else {
+            return false;
+        };
+        if self.back_stack.len() >= MAX_EXPLORER_HISTORY {
+            self.back_stack.remove(0);
+        }
+        self.back_stack.push(current.clone());
+        *current = next;
+        self.editing_path = false;
+        true
+    }
+
+    pub fn toggle_favorite(&mut self, dir: &std::path::Path) -> bool {
+        if let Some(pos) = self.favorites.iter().position(|p| p == dir) {
+            self.favorites.remove(pos);
+            false
+        } else if self.favorites.len() < MAX_EXPLORER_FAVORITES {
+            self.favorites.push(dir.to_path_buf());
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Modo de disposição dos Escopos de Vídeo (manual VEGAS Pro 21, p. 61).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ScopeViewLayout {
+    #[default]
+    All,
+    Vectorscope,
+    Waveform,
+    Histogram,
+    RgbParade,
+}
+
+impl ScopeViewLayout {
+    pub const ALL: [Self; 5] = [
+        Self::All,
+        Self::Vectorscope,
+        Self::Waveform,
+        Self::Histogram,
+        Self::RgbParade,
+    ];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            Self::All => "Todos (2×2)",
+            Self::Vectorscope => "Vectorscope",
+            Self::Waveform => "Forma de onda",
+            Self::Histogram => "Histograma",
+            Self::RgbParade => "RGB Parade",
+        };
+        tr(lang, key)
+    }
+}
+
+/// Formata um tamanho em bytes de forma legível para o Explorer.
+pub(crate) fn format_file_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 struct FloatingViewportSpec<'a> {
     title: &'a str,
     inner_size: [f32; 2],
@@ -2095,106 +2240,518 @@ impl App {
     }
 
     // -----------------------------------------------------------------
-    // Explorer
+    // Explorer (manual VEGAS Pro 21, p. 45)
     // -----------------------------------------------------------------
 
     fn explorer_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        ui.horizontal(|ui| {
-            if icons::icon_button(ui, Icon::FolderUp, None, false, true, &self.theme)
+        let mut pending_nav: Option<PathBuf> = None;
+        let mut pending_import_at_cursor: Vec<PathBuf> = Vec::new();
+        let mut pending_import_only: Vec<PathBuf> = Vec::new();
+        let mut pending_open_proj: Option<PathBuf> = None;
+
+        // Barra superior: Voltar, Avançar, Acima, Favorito ★, Árvore, Lista/Detalhes e Filtro (p. 45)
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            if ui
+                .add_enabled(
+                    !self.explorer_ui.back_stack.is_empty(),
+                    egui::Button::new("◀").small(),
+                )
+                .on_hover_text(tr(lang, "Voltar pasta anterior"))
+                .clicked()
+            {
+                let mut cur = self.explorer_dir.clone();
+                if self.explorer_ui.go_back(&mut cur) {
+                    self.explorer_dir = cur;
+                }
+            }
+            if ui
+                .add_enabled(
+                    !self.explorer_ui.forward_stack.is_empty(),
+                    egui::Button::new("▶").small(),
+                )
+                .on_hover_text(tr(lang, "Avançar pasta"))
+                .clicked()
+            {
+                let mut cur = self.explorer_dir.clone();
+                if self.explorer_ui.go_forward(&mut cur) {
+                    self.explorer_dir = cur;
+                }
+            }
+            if icons::small_icon_button(ui, Icon::FolderUp, None, false, &self.theme)
                 .on_hover_text(tr(lang, "Pasta acima"))
                 .clicked()
             {
                 if let Some(p) = self.explorer_dir.parent() {
-                    self.explorer_dir = p.to_path_buf();
+                    pending_nav = Some(p.to_path_buf());
                 }
             }
-            let mut s = self.explorer_dir.to_string_lossy().to_string();
+            let is_fav = self
+                .explorer_ui
+                .favorites
+                .iter()
+                .any(|p| p == &self.explorer_dir);
             if ui
-                .add(egui::TextEdit::singleline(&mut s).desired_width(320.0))
-                .lost_focus()
+                .selectable_label(is_fav, if is_fav { "★" } else { "☆" })
+                .on_hover_text(tr(lang, "Adicionar ou remover pasta atual dos favoritos"))
+                .clicked()
             {
-                let p = PathBuf::from(&s);
-                if p.is_dir() {
-                    self.explorer_dir = p;
-                }
+                let cur = self.explorer_dir.clone();
+                self.explorer_ui.toggle_favorite(&cur);
             }
+            if ui
+                .selectable_label(self.explorer_ui.show_tree, tr(lang, "Árvore"))
+                .on_hover_text(tr(lang, "Mostrar/ocultar árvore de pastas e favoritos"))
+                .clicked()
+            {
+                self.explorer_ui.show_tree = !self.explorer_ui.show_tree;
+            }
+            if ui
+                .selectable_label(
+                    self.explorer_ui.details_view,
+                    if self.explorer_ui.details_view {
+                        tr(lang, "Detalhes")
+                    } else {
+                        tr(lang, "Lista")
+                    },
+                )
+                .on_hover_text(tr(lang, "Alternar visualização entre Lista e Detalhes"))
+                .clicked()
+            {
+                self.explorer_ui.details_view = !self.explorer_ui.details_view;
+            }
+            ui.separator();
             ui.label(tr(lang, "Filtro:"));
-            ui.add(egui::TextEdit::singleline(&mut self.explorer_filter).desired_width(90.0));
+            ui.add(egui::TextEdit::singleline(&mut self.explorer_filter).desired_width(96.0));
+            if !self.explorer_filter.is_empty() && ui.small_button("×").clicked() {
+                self.explorer_filter.clear();
+            }
         });
-        #[cfg(windows)]
-        ui.horizontal(|ui| {
-            for c in b'C'..=b'Z' {
-                let d = format!("{}:\\", c as char);
-                if std::path::Path::new(&d).exists() && ui.small_button(&d).clicked() {
-                    self.explorer_dir = PathBuf::from(&d);
+
+        // Barra de endereço clicável em migalhas (breadcrumbs) ou edição direta (p. 45)
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if self.explorer_ui.editing_path {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.explorer_ui.path_buf)
+                        .desired_width((ui.available_width() - 56.0).max(120.0)),
+                );
+                let commit = ui.small_button("OK").clicked()
+                    || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                if commit {
+                    let p = PathBuf::from(self.explorer_ui.path_buf.trim());
+                    if p.is_dir() {
+                        pending_nav = Some(p);
+                    }
+                    self.explorer_ui.editing_path = false;
+                }
+                if ui.small_button("×").clicked() {
+                    self.explorer_ui.editing_path = false;
+                }
+            } else {
+                let mut accum = PathBuf::new();
+                let comps: Vec<PathBuf> = self
+                    .explorer_dir
+                    .components()
+                    .map(|c| {
+                        accum.push(c.as_os_str());
+                        accum.clone()
+                    })
+                    .collect();
+                for (i, path_step) in comps.iter().enumerate() {
+                    if i > 0 {
+                        ui.label(
+                            egui::RichText::new("›")
+                                .small()
+                                .color(self.theme.text_muted),
+                        );
+                    }
+                    let label = path_step
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path_step.to_string_lossy().to_string());
+                    let is_last = i + 1 == comps.len();
+                    let btn = ui.selectable_label(is_last, egui::RichText::new(label).small());
+                    if btn.clicked() && !is_last {
+                        pending_nav = Some(path_step.clone());
+                    }
+                }
+                if ui
+                    .small_button(tr(lang, "Editar"))
+                    .on_hover_text(tr(lang, "Digitar caminho completo da pasta"))
+                    .clicked()
+                {
+                    self.explorer_ui.path_buf = self.explorer_dir.to_string_lossy().to_string();
+                    self.explorer_ui.editing_path = true;
                 }
             }
         });
         ui.separator();
-        let mut entries: Vec<(bool, PathBuf)> = std::fs::read_dir(&self.explorer_dir)
+
+        // Leitura segura do diretório atual
+        let mut entries: Vec<(bool, PathBuf, String, u64)> = std::fs::read_dir(&self.explorer_dir)
             .map(|rd| {
                 rd.flatten()
-                    .map(|e| (e.path().is_dir(), e.path()))
+                    .filter_map(|e| {
+                        let p = e.path();
+                        let name = p.file_name()?.to_string_lossy().to_string();
+                        if name.starts_with('.') {
+                            return None;
+                        }
+                        let meta = e.metadata().ok();
+                        let is_dir = meta
+                            .as_ref()
+                            .map(|m| m.is_dir())
+                            .unwrap_or_else(|| p.is_dir());
+                        let size = if is_dir {
+                            0
+                        } else {
+                            meta.map(|m| m.len()).unwrap_or(0)
+                        };
+                        Some((is_dir, p, name, size))
+                    })
                     .collect()
             })
             .unwrap_or_default();
+
+        let subdirs: Vec<(PathBuf, String)> = entries
+            .iter()
+            .filter(|(is_dir, _, _, _)| *is_dir)
+            .map(|(_, p, n, _)| (p.clone(), n.clone()))
+            .take(64)
+            .collect();
+
+        let sort_col = self.explorer_ui.sort_col;
+        let sort_asc = self.explorer_ui.sort_asc;
         entries.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.file_name().cmp(&b.1.file_name()))
-        });
-        let filter = self.explorer_filter.to_lowercase();
-        let mut go = None;
-        let mut import = vec![];
-        for (is_dir, p) in entries {
-            let name = p
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if name.starts_with('.') {
-                continue;
+            let dir_ord = b.0.cmp(&a.0);
+            if dir_ord != std::cmp::Ordering::Equal {
+                return dir_ord;
             }
-            let is_proj = crate::model::is_project_file(&p);
-            if !is_dir && !crate::media::is_supported(&p) && !is_proj {
-                continue;
-            }
-            if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-                continue;
-            }
-            let r = ui
-                .horizontal(|ui| {
-                    icons::paint_inline(
-                        ui,
-                        if is_dir {
-                            Icon::FolderItem
-                        } else {
-                            Icon::MediaItem
-                        },
-                        14.0,
-                        &self.theme,
-                    );
-                    ui.selectable_label(false, name)
-                })
-                .inner;
-            if r.double_clicked() {
-                if is_dir {
-                    go = Some(p.clone());
-                } else if is_proj {
-                    self.open_project_path(p.clone());
-                } else {
-                    import.push(p.clone());
+            let ord = match sort_col {
+                ExplorerSortCol::Name => a.2.to_lowercase().cmp(&b.2.to_lowercase()),
+                ExplorerSortCol::Kind => {
+                    let ea =
+                        a.1.extension()
+                            .map(|s| s.to_string_lossy().to_lowercase())
+                            .unwrap_or_default();
+                    let eb =
+                        b.1.extension()
+                            .map(|s| s.to_string_lossy().to_lowercase())
+                            .unwrap_or_default();
+                    ea.cmp(&eb)
+                        .then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase()))
                 }
+                ExplorerSortCol::Size => a.3.cmp(&b.3),
+            };
+            if sort_asc {
+                ord
+            } else {
+                ord.reverse()
             }
-            if !is_dir {
-                r.on_hover_text(tr(lang, "Duplo clique: importar e adicionar no cursor"));
+        });
+
+        let filter = self.explorer_filter.to_lowercase();
+        let show_tree = self.explorer_ui.show_tree && ui.available_width() >= 420.0;
+        let details_view = self.explorer_ui.details_view;
+
+        ui.horizontal_top(|ui| {
+            if show_tree {
+                ui.vertical(|ui| {
+                    ui.set_width(156.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("explorer_tree_rail")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if !self.explorer_ui.favorites.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "Favoritos"))
+                                        .strong()
+                                        .small(),
+                                );
+                                let favs = self.explorer_ui.favorites.clone();
+                                let mut rm_fav: Option<PathBuf> = None;
+                                for fav in favs {
+                                    let lbl = fav
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| fav.to_string_lossy().to_string());
+                                    let r = ui.selectable_label(fav == self.explorer_dir, lbl);
+                                    if r.clicked() {
+                                        pending_nav = Some(fav.clone());
+                                    }
+                                    r.context_menu(|ui| {
+                                        if ui.button(tr(lang, "Remover dos favoritos")).clicked() {
+                                            rm_fav = Some(fav.clone());
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                if let Some(rf) = rm_fav {
+                                    self.explorer_ui.favorites.retain(|p| p != &rf);
+                                }
+                                ui.separator();
+                            }
+                            ui.label(egui::RichText::new(tr(lang, "Locais")).strong().small());
+                            #[cfg(windows)]
+                            {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    for c in b'C'..=b'Z' {
+                                        let d = format!("{}:\\", c as char);
+                                        if std::path::Path::new(&d).exists()
+                                            && ui.small_button(&d).clicked()
+                                        {
+                                            pending_nav = Some(PathBuf::from(&d));
+                                        }
+                                    }
+                                });
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                if ui.small_button("/").clicked() {
+                                    pending_nav = Some(PathBuf::from("/"));
+                                }
+                                if let Ok(home) = std::env::var("HOME") {
+                                    if ui.small_button("~").clicked() {
+                                        pending_nav = Some(PathBuf::from(home));
+                                    }
+                                }
+                            }
+                            if !subdirs.is_empty() {
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "Subpastas"))
+                                        .strong()
+                                        .small(),
+                                );
+                                for (sp, sname) in &subdirs {
+                                    ui.horizontal(|ui| {
+                                        icons::paint_inline(ui, Icon::FolderItem, 12.0, &self.theme);
+                                        if ui.selectable_label(false, sname).clicked() {
+                                            pending_nav = Some(sp.clone());
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                });
+                ui.separator();
             }
+
+            ui.vertical(|ui| {
+                egui::ScrollArea::both()
+                    .id_salt("explorer_files_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let visible: Vec<(bool, PathBuf, String, u64, bool)> = entries
+                            .into_iter()
+                            .filter_map(|(is_dir, p, name, size)| {
+                                let is_proj = crate::model::is_project_file(&p);
+                                if !is_dir && !crate::media::is_supported(&p) && !is_proj {
+                                    return None;
+                                }
+                                if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                                    return None;
+                                }
+                                Some((is_dir, p, name, size, is_proj))
+                            })
+                            .collect();
+
+                        if details_view {
+                            let mut next_sort: Option<ExplorerSortCol> = None;
+                            egui::Grid::new("explorer_details_grid")
+                                .num_columns(3)
+                                .striped(true)
+                                .spacing([12.0, 3.0])
+                                .show(ui, |ui| {
+                                    let hdr = |ui: &mut egui::Ui,
+                                               lbl: &str,
+                                               col: ExplorerSortCol,
+                                               out: &mut Option<ExplorerSortCol>| {
+                                        let mark = if sort_col == col {
+                                            if sort_asc { " ^" } else { " v" }
+                                        } else {
+                                            ""
+                                        };
+                                        if ui
+                                            .button(egui::RichText::new(format!("{lbl}{mark}")).strong().small())
+                                            .clicked()
+                                        {
+                                            *out = Some(col);
+                                        }
+                                    };
+                                    hdr(ui, tr(lang, "Nome"), ExplorerSortCol::Name, &mut next_sort);
+                                    hdr(ui, tr(lang, "Tipo"), ExplorerSortCol::Kind, &mut next_sort);
+                                    hdr(
+                                        ui,
+                                        tr(lang, "Tamanho"),
+                                        ExplorerSortCol::Size,
+                                        &mut next_sort,
+                                    );
+                                    ui.end_row();
+
+                                    for (is_dir, p, name, size, is_proj) in visible {
+                                        let sel = self.explorer_ui.selected.as_ref() == Some(&p);
+                                        let r = ui
+                                            .horizontal(|ui| {
+                                                icons::paint_inline(
+                                                    ui,
+                                                    if is_dir {
+                                                        Icon::FolderItem
+                                                    } else {
+                                                        Icon::MediaItem
+                                                    },
+                                                    13.0,
+                                                    &self.theme,
+                                                );
+                                                ui.selectable_label(sel, &name)
+                                            })
+                                            .inner;
+                                        if r.clicked() {
+                                            self.explorer_ui.selected = Some(p.clone());
+                                        }
+                                        if r.double_clicked() {
+                                            if is_dir {
+                                                pending_nav = Some(p.clone());
+                                            } else if is_proj {
+                                                pending_open_proj = Some(p.clone());
+                                            } else {
+                                                pending_import_at_cursor.push(p.clone());
+                                            }
+                                        }
+                                        r.context_menu(|ui| {
+                                            if is_dir {
+                                                if ui.button(tr(lang, "Abrir pasta")).clicked() {
+                                                    pending_nav = Some(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .button(tr(lang, "Adicionar aos favoritos"))
+                                                    .clicked()
+                                                {
+                                                    self.explorer_ui.toggle_favorite(&p);
+                                                    ui.close_menu();
+                                                }
+                                            } else if is_proj {
+                                                if ui.button(tr(lang, "Abrir projeto")).clicked() {
+                                                    pending_open_proj = Some(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                            } else {
+                                                if ui
+                                                    .button(tr(
+                                                        lang,
+                                                        "Importar e adicionar no cursor",
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    pending_import_at_cursor.push(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .button(tr(
+                                                        lang,
+                                                        "Adicionar à Mídia do Projeto",
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    pending_import_only.push(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                        let kind_txt = if is_dir {
+                                            tr(lang, "Pasta").to_string()
+                                        } else {
+                                            p.extension()
+                                                .map(|e| e.to_string_lossy().to_uppercase())
+                                                .unwrap_or_else(|| "-".into())
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(kind_txt)
+                                                .small()
+                                                .color(self.theme.text_muted),
+                                        );
+                                        let sz_txt = if is_dir {
+                                            String::new()
+                                        } else {
+                                            format_file_size(size)
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(sz_txt)
+                                                .small()
+                                                .monospace()
+                                                .color(self.theme.text_muted),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                            if let Some(col) = next_sort {
+                                if self.explorer_ui.sort_col == col {
+                                    self.explorer_ui.sort_asc = !self.explorer_ui.sort_asc;
+                                } else {
+                                    self.explorer_ui.sort_col = col;
+                                    self.explorer_ui.sort_asc = true;
+                                }
+                            }
+                        } else {
+                            for (is_dir, p, name, _, is_proj) in visible {
+                                let sel = self.explorer_ui.selected.as_ref() == Some(&p);
+                                let r = ui
+                                    .horizontal(|ui| {
+                                        icons::paint_inline(
+                                            ui,
+                                            if is_dir {
+                                                Icon::FolderItem
+                                            } else {
+                                                Icon::MediaItem
+                                            },
+                                            14.0,
+                                            &self.theme,
+                                        );
+                                        ui.selectable_label(sel, name)
+                                    })
+                                    .inner;
+                                if r.clicked() {
+                                    self.explorer_ui.selected = Some(p.clone());
+                                }
+                                if r.double_clicked() {
+                                    if is_dir {
+                                        pending_nav = Some(p.clone());
+                                    } else if is_proj {
+                                        pending_open_proj = Some(p.clone());
+                                    } else {
+                                        pending_import_at_cursor.push(p.clone());
+                                    }
+                                }
+                                if !is_dir {
+                                    r.on_hover_text(tr(
+                                        lang,
+                                        "Duplo clique: importar e adicionar no cursor",
+                                    ));
+                                }
+                            }
+                        }
+                    });
+            });
+        });
+
+        if let Some(p) = pending_nav {
+            let mut cur = self.explorer_dir.clone();
+            self.explorer_ui.navigate(&mut cur, p);
+            self.explorer_dir = cur;
         }
-        if let Some(p) = go {
-            self.explorer_dir = p;
+        if let Some(p) = pending_open_proj {
+            self.open_project_path(p);
         }
-        if !import.is_empty() {
+        if !pending_import_at_cursor.is_empty() {
             let t = self.cursor;
-            self.import_paths(import, Some(t));
+            self.import_paths(pending_import_at_cursor, Some(t));
+        }
+        if !pending_import_only.is_empty() {
+            self.import_paths(pending_import_only, None);
         }
     }
 
@@ -3757,165 +4314,233 @@ impl App {
     }
 
     // -----------------------------------------------------------------
-    // Escopos
+    // Escopos de Vídeo (manual VEGAS Pro 21, p. 61)
     // -----------------------------------------------------------------
 
     fn scopes_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        let changed = ui
-            .horizontal_wrapped(|ui| {
-                let mut changed = false;
-                ui.label(tr(lang, "Escala:"));
-                egui::ComboBox::from_id_salt("sc_scale")
-                    .selected_text(self.scopes_config.waveform_scale.label())
-                    .show_ui(ui, |ui| {
-                        for s in neoveg_engine::scopes::WaveformScale::ALL {
-                            if ui
-                                .selectable_value(
-                                    &mut self.scopes_config.waveform_scale,
-                                    s,
-                                    s.label(),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    });
+        let mut changed = false;
+        // Barra superior compacta estilo VEGAS Pro 21 (p. 61): Layout ("Todos" ou individual), Escala e Matriz
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("sc_layout_mode")
+                .selected_text(self.scopes_layout.label_in(lang))
+                .show_ui(ui, |ui| {
+                    for ly in ScopeViewLayout::ALL {
+                        ui.selectable_value(&mut self.scopes_layout, ly, ly.label_in(lang));
+                    }
+                });
 
-                ui.separator();
-                ui.label(tr(lang, "Waveform:"));
-                egui::ComboBox::from_id_salt("sc_mode")
-                    .selected_text(self.scopes_config.waveform_mode.label())
-                    .show_ui(ui, |ui| {
-                        for m in neoveg_engine::scopes::WaveformMode::ALL {
-                            if ui
-                                .selectable_value(
-                                    &mut self.scopes_config.waveform_mode,
-                                    m,
-                                    m.label(),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    });
-
-                ui.separator();
-                ui.label(tr(lang, "Alvos:"));
-                egui::ComboBox::from_id_salt("sc_vec_targets")
-                    .selected_text(self.scopes_config.vectorscope_targets.label())
-                    .show_ui(ui, |ui| {
+            ui.separator();
+            ui.label(tr(lang, "Escala:"));
+            egui::ComboBox::from_id_salt("sc_scale")
+                .selected_text(self.scopes_config.waveform_scale.label())
+                .show_ui(ui, |ui| {
+                    for s in neoveg_engine::scopes::WaveformScale::ALL {
                         if ui
-                            .selectable_value(
-                                &mut self.scopes_config.vectorscope_targets,
-                                neoveg_engine::scopes::VectorscopeTarget::Percent75,
-                                "75%",
-                            )
+                            .selectable_value(&mut self.scopes_config.waveform_scale, s, s.label())
                             .changed()
                         {
                             changed = true;
                         }
+                    }
+                });
+
+            ui.separator();
+            ui.label(tr(lang, "Matriz:"));
+            egui::ComboBox::from_id_salt("sc_matrix")
+                .selected_text(self.scopes_config.matrix.label())
+                .show_ui(ui, |ui| {
+                    for m in neoveg_engine::scopes::ScopeColorMatrix::ALL {
                         if ui
-                            .selectable_value(
-                                &mut self.scopes_config.vectorscope_targets,
-                                neoveg_engine::scopes::VectorscopeTarget::Percent100,
-                                "100%",
-                            )
+                            .selectable_value(&mut self.scopes_config.matrix, m, m.label())
                             .changed()
                         {
                             changed = true;
                         }
-                    });
+                    }
+                });
+        });
 
-                if ui
-                    .checkbox(
-                        &mut self.scopes_config.vectorscope_skin_line,
-                        tr(lang, "Tom de pele (I)"),
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-
-                ui.separator();
-                ui.label(tr(lang, "Parade:"));
-                egui::ComboBox::from_id_salt("sc_parade")
-                    .selected_text(self.scopes_config.parade_mode.label())
-                    .show_ui(ui, |ui| {
-                        for p in neoveg_engine::scopes::ParadeMode::ALL {
-                            if ui
-                                .selectable_value(&mut self.scopes_config.parade_mode, p, p.label())
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    });
-
-                ui.separator();
-                ui.label(tr(lang, "Matriz:"));
-                egui::ComboBox::from_id_salt("sc_matrix")
-                    .selected_text(self.scopes_config.matrix.label())
-                    .show_ui(ui, |ui| {
-                        for m in neoveg_engine::scopes::ScopeColorMatrix::ALL {
-                            if ui
-                                .selectable_value(&mut self.scopes_config.matrix, m, m.label())
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    });
-                changed
-            })
-            .inner;
-
-        if changed {
-            self.last_req = crate::app::PreviewReqKey::default();
-        }
         ui.separator();
 
-        let Some(t) = &self.scopes_tex else {
+        let Some(t) = self.scopes_tex.clone() else {
             ui.label(tr(
                 lang,
                 "Os escopos são calculados a partir do quadro da prévia...",
             ));
+            if changed {
+                self.last_req = crate::app::PreviewReqKey::default();
+            }
             return;
         };
-        let names = [
-            tr(lang, "Histograma (RGB + luma)"),
-            match self.scopes_config.waveform_mode {
-                neoveg_engine::scopes::WaveformMode::RgbOverlay => {
-                    tr(lang, "Forma de onda (RGB Overlay)")
-                }
-                neoveg_engine::scopes::WaveformMode::YC => tr(lang, "Forma de onda (YC Envelope)"),
-                _ => tr(lang, "Forma de onda (Luma)"),
-            },
-            tr(lang, "Vectorscope"),
-            match self.scopes_config.parade_mode {
-                neoveg_engine::scopes::ParadeMode::Yuv => tr(lang, "YUV Parade"),
-                neoveg_engine::scopes::ParadeMode::RgbWhite => tr(lang, "RGB + Branco Parade"),
-                _ => tr(lang, "RGB Parade"),
-            },
-        ];
-        let avail = ui.available_width();
-        let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
-        egui::Grid::new("scopes").num_columns(2).show(ui, |ui| {
-            for i in 0..4 {
-                ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(names[i]).small());
-                    let s = t[i].size_vec2();
-                    let h = if i == 2 { w.min(260.0) } else { w * s.y / s.x };
-                    let ww = if i == 2 { h } else { w };
-                    ui.image((t[i].id(), vec2(ww, h)));
+
+        // Ordem dos 4 quadrantes fiel ao VEGAS Pro 21 (p. 61):
+        // [0] Vectorscope (tex 2) | [1] Waveform (tex 1)
+        // [2] Histograma  (tex 0) | [3] RGB Parade (tex 3)
+        let draw_scope_tile = |ui: &mut egui::Ui,
+                               cfg: &mut neoveg_engine::scopes::ScopeConfig,
+                               changed: &mut bool,
+                               kind: ScopeViewLayout,
+                               tile_w: f32| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| match kind {
+                    ScopeViewLayout::Vectorscope => {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Vectorscope"))
+                                .small()
+                                .strong(),
+                        );
+                        egui::ComboBox::from_id_salt("sc_vec_targets")
+                            .width(58.0)
+                            .selected_text(cfg.vectorscope_targets.label())
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_value(
+                                        &mut cfg.vectorscope_targets,
+                                        neoveg_engine::scopes::VectorscopeTarget::Percent75,
+                                        "75%",
+                                    )
+                                    .changed()
+                                {
+                                    *changed = true;
+                                }
+                                if ui
+                                    .selectable_value(
+                                        &mut cfg.vectorscope_targets,
+                                        neoveg_engine::scopes::VectorscopeTarget::Percent100,
+                                        "100%",
+                                    )
+                                    .changed()
+                                {
+                                    *changed = true;
+                                }
+                            });
+                        if ui
+                            .checkbox(&mut cfg.vectorscope_skin_line, tr(lang, "Tom de pele (I)"))
+                            .changed()
+                        {
+                            *changed = true;
+                        }
+                    }
+                    ScopeViewLayout::Waveform => {
+                        let lbl = match cfg.waveform_mode {
+                            neoveg_engine::scopes::WaveformMode::RgbOverlay => {
+                                tr(lang, "Forma de onda (RGB Overlay)")
+                            }
+                            neoveg_engine::scopes::WaveformMode::YC => {
+                                tr(lang, "Forma de onda (YC Envelope)")
+                            }
+                            _ => tr(lang, "Forma de onda (Luma)"),
+                        };
+                        ui.label(egui::RichText::new(lbl).small().strong());
+                        egui::ComboBox::from_id_salt("sc_mode")
+                            .width(92.0)
+                            .selected_text(cfg.waveform_mode.label())
+                            .show_ui(ui, |ui| {
+                                for m in neoveg_engine::scopes::WaveformMode::ALL {
+                                    if ui
+                                        .selectable_value(&mut cfg.waveform_mode, m, m.label())
+                                        .changed()
+                                    {
+                                        *changed = true;
+                                    }
+                                }
+                            });
+                    }
+                    ScopeViewLayout::Histogram => {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Histograma (RGB + luma)"))
+                                .small()
+                                .strong(),
+                        );
+                    }
+                    ScopeViewLayout::RgbParade => {
+                        let lbl = match cfg.parade_mode {
+                            neoveg_engine::scopes::ParadeMode::Yuv => tr(lang, "YUV Parade"),
+                            neoveg_engine::scopes::ParadeMode::RgbWhite => {
+                                tr(lang, "RGB + Branco Parade")
+                            }
+                            _ => tr(lang, "RGB Parade"),
+                        };
+                        ui.label(egui::RichText::new(lbl).small().strong());
+                        egui::ComboBox::from_id_salt("sc_parade")
+                            .width(92.0)
+                            .selected_text(cfg.parade_mode.label())
+                            .show_ui(ui, |ui| {
+                                for p in neoveg_engine::scopes::ParadeMode::ALL {
+                                    if ui
+                                        .selectable_value(&mut cfg.parade_mode, p, p.label())
+                                        .changed()
+                                    {
+                                        *changed = true;
+                                    }
+                                }
+                            });
+                    }
+                    ScopeViewLayout::All => {}
                 });
-                if i % 2 == 1 {
-                    ui.end_row();
-                }
-            }
-        });
+                let tex_idx = match kind {
+                    ScopeViewLayout::Histogram => 0,
+                    ScopeViewLayout::Waveform => 1,
+                    ScopeViewLayout::Vectorscope => 2,
+                    ScopeViewLayout::RgbParade | ScopeViewLayout::All => 3,
+                };
+                let s = t[tex_idx].size_vec2();
+                let is_vec = kind == ScopeViewLayout::Vectorscope;
+                let h = if is_vec {
+                    tile_w.min(300.0)
+                } else {
+                    (tile_w * s.y / s.x.max(1.0)).min(300.0)
+                };
+                let ww = if is_vec { h } else { tile_w };
+                ui.image((t[tex_idx].id(), vec2(ww, h)));
+            });
+        };
+
+        let avail = ui.available_width();
+        if self.scopes_layout == ScopeViewLayout::All {
+            let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
+            egui::Grid::new("scopes").num_columns(2).show(ui, |ui| {
+                draw_scope_tile(
+                    ui,
+                    &mut self.scopes_config,
+                    &mut changed,
+                    ScopeViewLayout::Vectorscope,
+                    w,
+                );
+                draw_scope_tile(
+                    ui,
+                    &mut self.scopes_config,
+                    &mut changed,
+                    ScopeViewLayout::Waveform,
+                    w,
+                );
+                ui.end_row();
+                draw_scope_tile(
+                    ui,
+                    &mut self.scopes_config,
+                    &mut changed,
+                    ScopeViewLayout::Histogram,
+                    w,
+                );
+                draw_scope_tile(
+                    ui,
+                    &mut self.scopes_config,
+                    &mut changed,
+                    ScopeViewLayout::RgbParade,
+                    w,
+                );
+                ui.end_row();
+            });
+        } else {
+            let w = (avail - 16.0).clamp(200.0, 720.0);
+            let chosen = self.scopes_layout;
+            draw_scope_tile(ui, &mut self.scopes_config, &mut changed, chosen, w);
+        }
+
+        if changed {
+            self.last_req = crate::app::PreviewReqKey::default();
+        }
     }
 }
 
@@ -3988,6 +4613,26 @@ mod safe_guide_tests {
         assert!(st.hidden_tracks.is_empty() && st.hidden_buses.is_empty());
         assert!(!st.hide_master);
         assert_eq!(st.channel_filter, MixerChannelFilter::All);
+    }
+
+    #[test]
+    fn explorer_state_historico_favoritos_e_formatacao_tamanho() {
+        let mut ex = ExplorerState::default();
+        let mut cur = PathBuf::from("a");
+        ex.navigate(&mut cur, PathBuf::from("b"));
+        ex.navigate(&mut cur, PathBuf::from("c"));
+        assert_eq!(cur, PathBuf::from("c"));
+        assert!(ex.go_back(&mut cur));
+        assert_eq!(cur, PathBuf::from("b"));
+        assert!(ex.go_forward(&mut cur));
+        assert_eq!(cur, PathBuf::from("c"));
+        assert!(ex.toggle_favorite(&cur));
+        assert_eq!(ex.favorites.len(), 1);
+        assert!(!ex.toggle_favorite(&cur));
+        assert!(ex.favorites.is_empty());
+        assert_eq!(format_file_size(512), "512 B");
+        assert_eq!(format_file_size(4096), "4 KB");
+        assert_eq!(format_file_size(2 * 1024 * 1024), "2.0 MB");
     }
 
     #[test]
