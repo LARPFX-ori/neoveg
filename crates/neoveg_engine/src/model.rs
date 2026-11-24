@@ -3025,7 +3025,7 @@ pub enum GenSpec {
 /// Especificação do gerador *Rolagem de Créditos* (*Credit Roll*).
 /// Linhas no formato `Função | Nome` são exibidas em duas colunas; linhas
 /// iniciadas por `# ` viram cabeçalhos em destaque.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CreditRollSpec {
     pub title: String,

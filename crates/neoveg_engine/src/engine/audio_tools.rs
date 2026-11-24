@@ -76,23 +76,22 @@ pub fn auto_normalize_selected(
     audio_map: &HashMap<Id, Arc<AudioData>>,
     target_dbfs: f32,
 ) -> usize {
-    let targets: Vec<(usize, usize, f32)> = session
-        .project
-        .tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, tr)| tr.kind == TrackKind::Audio && !tr.locked)
-        .flat_map(|(ti, tr)| {
-            tr.events.iter().enumerate().filter_map(move |(ei, ev)| {
-                if !session.sel_events.contains(&ev.id) || ev.locked {
-                    return None;
+    let mut targets: Vec<(usize, usize, f32)> = Vec::new();
+    for (ti, track) in session.project.tracks.iter().enumerate() {
+        if track.kind != TrackKind::Audio || track.locked {
+            continue;
+        }
+        for (ei, ev) in track.events.iter().enumerate() {
+            if !session.sel_events.contains(&ev.id) || ev.locked {
+                continue;
+            }
+            if let Some(data) = audio_map.get(&ev.media_id) {
+                if let Some(gain) = compute_normalize_gain_db(ev, data, target_dbfs) {
+                    targets.push((ti, ei, gain));
                 }
-                let data = audio_map.get(&ev.media_id)?;
-                let gain = compute_normalize_gain_db(ev, data, target_dbfs)?;
-                Some((ti, ei, gain))
-            })
-        })
-        .collect();
+            }
+        }
+    }
 
     if targets.is_empty() {
         return 0;
