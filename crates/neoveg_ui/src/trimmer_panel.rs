@@ -1820,13 +1820,17 @@ impl App {
                 .trimmer
                 .media_id
                 .and_then(|id| self.project.media(id))
-                .map(|m| m.name.clone())
+                .map(format_trimmer_history_entry)
                 .unwrap_or_else(|| tr(lang, "(Nenhum)").to_string());
             let mut entries: Vec<(Id, String)> = self
                 .trimmer
                 .history
                 .iter()
-                .filter_map(|id| self.project.media(*id).map(|m| (*id, m.name.clone())))
+                .filter_map(|id| {
+                    self.project
+                        .media(*id)
+                        .map(|m| (*id, format_trimmer_history_entry(m)))
+                })
                 .collect();
             if self.trimmer.sort_alpha {
                 entries.sort_by_key(|e| e.1.to_lowercase());
@@ -1834,7 +1838,7 @@ impl App {
             let right_w = 5.0 * 26.0 + 115.0 + 26.0;
             egui::ComboBox::from_id_salt("trimmer_history")
                 .width((ui.available_width() - right_w).max(96.0))
-                .selected_text(selected)
+                .selected_text(selected.as_str())
                 .show_ui(ui, |ui| {
                     if entries.is_empty() {
                         ui.label(tr(lang, "(Nenhum)"));
@@ -1847,7 +1851,9 @@ impl App {
                             picked = Some(*id);
                         }
                     }
-                });
+                })
+                .response
+                .on_hover_text(selected.as_str());
             let th = &self.theme;
             if icons::icon_button_named(
                 ui,
@@ -3646,6 +3652,47 @@ impl App {
     }
 }
 
+fn parent_dir_display(path: &str) -> Option<&str> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    let sep = trimmed.rfind(['/', '\\'])?;
+    if sep == 0 {
+        return trimmed.get(..1);
+    }
+    let parent = trimmed.get(..sep)?;
+    if parent.is_empty() {
+        None
+    } else {
+        Some(parent)
+    }
+}
+
+fn compact_history_dir(dir: &str) -> String {
+    const MAX_CHARS: usize = 56;
+    let total = dir.chars().count();
+    if total <= MAX_CHARS {
+        return dir.to_string();
+    }
+    let skip = total.saturating_sub(MAX_CHARS.saturating_sub(3));
+    let tail: String = dir.chars().skip(skip).collect();
+    format!("...{tail}")
+}
+
+/// Formata uma entrada do histórico do Trimmer no padrão `Arquivo [Diretório]`
+/// do VEGAS Pro quando a mídia provém de arquivo ou sequência em disco.
+pub(crate) fn format_trimmer_history_entry(item: &MediaItem) -> String {
+    let raw_path = match &item.source {
+        MediaSource::File { path } | MediaSource::NestedProject { path } => Some(path.as_str()),
+        MediaSource::ImageSequence { paths, .. } => paths.first().map(String::as_str),
+        MediaSource::Generated(_) | MediaSource::Sequence { .. } => None,
+    };
+    if let Some(path) = raw_path {
+        if let Some(dir) = parent_dir_display(path) {
+            return format!("{} [{}]", item.name, compact_history_dir(dir));
+        }
+    }
+    item.name.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3922,5 +3969,69 @@ mod tests {
             .collect();
         assert_eq!(labels.len(), 4);
         assert!(labels.iter().all(|l| !l.is_empty()));
+    }
+
+    #[test]
+    fn historico_trimmer_formata_arquivo_com_diretorio() {
+        let make_item = |name: &str, source: MediaSource| MediaItem {
+            id: 1,
+            name: name.into(),
+            source,
+            duration: Some(s(5)),
+            has_video: true,
+            has_audio: true,
+            width: 1280,
+            height: 720,
+            fps: Some(FrameRate::FPS_25),
+            info: String::new(),
+            proxy_path: None,
+        };
+
+        let file_unix = make_item(
+            "cena01.mp4",
+            MediaSource::File {
+                path: "/projetos/filme/cena01.mp4".into(),
+            },
+        );
+        assert_eq!(
+            format_trimmer_history_entry(&file_unix),
+            "cena01.mp4 [/projetos/filme]"
+        );
+
+        let file_win = make_item(
+            "cena02.avi",
+            MediaSource::File {
+                path: r"C:\Videos\Sessao\cena02.avi".into(),
+            },
+        );
+        assert_eq!(
+            format_trimmer_history_entry(&file_win),
+            r"cena02.avi [C:\Videos\Sessao]"
+        );
+
+        let bare = make_item(
+            "solto.wav",
+            MediaSource::File {
+                path: "solto.wav".into(),
+            },
+        );
+        assert_eq!(format_trimmer_history_entry(&bare), "solto.wav");
+
+        let long_dir = "/muito/longo/caminho/com/acentuação/árvore/produção/2026/tomadas/final";
+        let long_item = make_item(
+            "take.mov",
+            MediaSource::File {
+                path: format!("{long_dir}/take.mov"),
+            },
+        );
+        let formatted = format_trimmer_history_entry(&long_item);
+        assert!(formatted.starts_with("take.mov [..."));
+        assert!(formatted.ends_with(']'));
+
+        let generated = make_item("Barras", MediaSource::Generated(GenSpec::ColorBars));
+        assert_eq!(format_trimmer_history_entry(&generated), "Barras");
+
+        let seq = make_item("Sequência 02", MediaSource::Sequence { id: 7 });
+        assert_eq!(format_trimmer_history_entry(&seq), "Sequência 02");
     }
 }

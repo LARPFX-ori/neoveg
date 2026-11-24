@@ -7,8 +7,51 @@ use crate::icons::{self, Icon};
 use crate::model::{ColorGradeCurves, FxInstance, FxKind, Ticks, TrackKind};
 use crate::theme::ThemeColors;
 use eframe::egui;
-use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
+use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind};
 use neoveg_common::{tr, tr_args, Language};
+
+/// Seções de trabalho do painel Color Grading (paridade com a barra lateral do VEGAS Pro 21/23).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ColorGradingSection {
+    #[default]
+    All,
+    Wheels,
+    Luts,
+    Curves,
+    Hsl,
+}
+
+impl ColorGradingSection {
+    pub(crate) const ALL: [Self; 5] =
+        [Self::All, Self::Wheels, Self::Luts, Self::Curves, Self::Hsl];
+
+    pub(crate) fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            Self::All => "Tudo",
+            Self::Wheels => "Rodas de Cor",
+            Self::Luts => "LUTs",
+            Self::Curves => "Curvas",
+            Self::Hsl => "HSL",
+        };
+        tr(lang, key)
+    }
+
+    pub(crate) fn show_wheels(self) -> bool {
+        matches!(self, Self::All | Self::Wheels)
+    }
+
+    pub(crate) fn show_luts(self) -> bool {
+        matches!(self, Self::All | Self::Luts)
+    }
+
+    pub(crate) fn show_curves(self) -> bool {
+        matches!(self, Self::All | Self::Curves)
+    }
+
+    pub(crate) fn show_hsl(self) -> bool {
+        matches!(self, Self::All | Self::Hsl)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct GradingPreset {
@@ -242,136 +285,240 @@ impl App {
             }
         }
 
+        let sec_id = egui::Id::new("cg_active_section");
+        let mut section = ui.ctx().data_mut(|d| {
+            d.get_temp::<ColorGradingSection>(sec_id)
+                .unwrap_or_default()
+        });
+
+        let wheels_active = specs.iter().enumerate().any(|(i, spec)| {
+            vals.get(i)
+                .is_some_and(|v| v.is_finite() && (*v - spec.default).abs() > 1e-4)
+        });
+        let lut_active = fx_work
+            .color_grade
+            .as_ref()
+            .is_some_and(|c| c.lut_path.is_some());
+        let curves_active = fx_work.color_grade.as_ref().is_some_and(|c| {
+            !c.master.is_empty() || !c.red.is_empty() || !c.green.is_empty() || !c.blue.is_empty()
+        });
+        let hsl_active = fx_work.color_grade.as_ref().is_some_and(|c| {
+            c.hsl_bands
+                .iter()
+                .any(|b| b[0].abs() > 1e-4 || b[1].abs() > 1e-4 || b[2].abs() > 1e-4)
+        });
+
         ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    // 3 rodas/dials tonais + pad cromático 2D (100% vetoriais em egui::Painter)
-                    let wheel_d = 96.0_f32;
-                    if let Some(spec) = specs.first() {
-                        modified |= draw_tone_wheel(
-                            ui,
-                            "tone_lift",
-                            tr(lang, "Lift (Sombras)"),
-                            &mut vals[0],
-                            spec.min,
-                            spec.max,
-                            spec.default,
-                            Color32::from_rgb(90, 145, 225),
-                            wheel_d,
-                            &self.theme,
-                        );
-                    }
-                    if let Some(spec) = specs.get(1) {
-                        modified |= draw_tone_wheel(
-                            ui,
-                            "tone_gamma",
-                            tr(lang, "Gamma (Médios)"),
-                            &mut vals[1],
-                            spec.min,
-                            spec.max,
-                            spec.default,
-                            Color32::from_rgb(95, 200, 145),
-                            wheel_d,
-                            &self.theme,
-                        );
-                    }
-                    if let Some(spec) = specs.get(2) {
-                        modified |= draw_tone_wheel(
-                            ui,
-                            "tone_gain",
-                            tr(lang, "Gain (Realces)"),
-                            &mut vals[2],
-                            spec.min,
-                            spec.max,
-                            spec.default,
-                            Color32::from_rgb(235, 175, 80),
-                            wheel_d,
-                            &self.theme,
-                        );
-                    }
-                    let mut temp = vals[3];
-                    let mut tint = vals[4];
-                    if draw_balance_pad(ui, lang, &mut temp, &mut tint, wheel_d, &self.theme) {
-                        vals[3] = temp;
-                        vals[4] = tint;
-                        modified = true;
+        let mut render_content = |ui: &mut egui::Ui, active_sec: ColorGradingSection| {
+            egui::ScrollArea::vertical()
+                .id_salt("cg_content_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if active_sec.show_wheels() {
+                        ui.horizontal_wrapped(|ui| {
+                            // 3 rodas tonais com anel cromático e barra vertical + pad cromático 2D
+                            let wheel_d = 92.0_f32;
+                            if let Some(spec) = specs.first() {
+                                modified |= draw_tone_wheel(
+                                    ui,
+                                    lang,
+                                    "tone_lift",
+                                    tr(lang, "Lift (Sombras)"),
+                                    &mut vals[0],
+                                    spec.min,
+                                    spec.max,
+                                    spec.default,
+                                    Color32::from_rgb(90, 145, 225),
+                                    wheel_d,
+                                    &self.theme,
+                                );
+                            }
+                            if let Some(spec) = specs.get(1) {
+                                modified |= draw_tone_wheel(
+                                    ui,
+                                    lang,
+                                    "tone_gamma",
+                                    tr(lang, "Gamma (Médios)"),
+                                    &mut vals[1],
+                                    spec.min,
+                                    spec.max,
+                                    spec.default,
+                                    Color32::from_rgb(95, 200, 145),
+                                    wheel_d,
+                                    &self.theme,
+                                );
+                            }
+                            if let Some(spec) = specs.get(2) {
+                                modified |= draw_tone_wheel(
+                                    ui,
+                                    lang,
+                                    "tone_gain",
+                                    tr(lang, "Gain (Realces)"),
+                                    &mut vals[2],
+                                    spec.min,
+                                    spec.max,
+                                    spec.default,
+                                    Color32::from_rgb(235, 175, 80),
+                                    wheel_d,
+                                    &self.theme,
+                                );
+                            }
+                            let mut temp = vals[3];
+                            let mut tint = vals[4];
+                            if draw_balance_pad(
+                                ui,
+                                lang,
+                                &mut temp,
+                                &mut tint,
+                                wheel_d,
+                                &self.theme,
+                            ) {
+                                vals[3] = temp;
+                                vals[4] = tint;
+                                modified = true;
+                            }
+
+                            if let Some(sc_tex) = &self.scopes_tex {
+                                ui.group(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(tr(lang, "Histograma"))
+                                                .small()
+                                                .weak(),
+                                        );
+                                        let s = sc_tex[0].size_vec2();
+                                        let w = 132.0_f32;
+                                        let h = (w * s.y / s.x.max(1.0)).clamp(60.0, 96.0);
+                                        ui.image((sc_tex[0].id(), vec2(w, h)));
+                                    });
+                                });
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        egui::Grid::new("cg_sliders")
+                            .num_columns(3)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                for (i, spec) in specs.iter().enumerate() {
+                                    let Some(val) = vals.get_mut(i) else {
+                                        continue;
+                                    };
+                                    ui.label(spec.name_in(lang));
+                                    let mut cur = *val;
+                                    let r = ui.add(
+                                        egui::Slider::new(&mut cur, spec.min..=spec.max)
+                                            .fixed_decimals(2),
+                                    );
+                                    if r.changed() && cur.is_finite() {
+                                        *val = cur.clamp(spec.min, spec.max);
+                                        modified = true;
+                                    }
+                                    let def_str = format!("{:.2}", spec.default);
+                                    if ui
+                                        .small_button(tr(lang, "Padrão"))
+                                        .on_hover_text(tr_args(
+                                            lang,
+                                            "Restaurar para {val}",
+                                            &[("val", &def_str)],
+                                        ))
+                                        .clicked()
+                                    {
+                                        *val = spec.default;
+                                        checkpoint_op = true;
+                                        modified = true;
+                                    }
+                                    ui.end_row();
+                                }
+                            });
                     }
 
-                    if let Some(sc_tex) = &self.scopes_tex {
-                        ui.group(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new(tr(lang, "Histograma")).small().weak(),
-                                );
-                                let s = sc_tex[0].size_vec2();
-                                let w = 132.0_f32;
-                                let h = (w * s.y / s.x.max(1.0)).clamp(60.0, 96.0);
-                                ui.image((sc_tex[0].id(), vec2(w, h)));
-                            });
-                        });
+                    if active_sec.show_luts() || active_sec.show_curves() || active_sec.show_hsl() {
+                        if active_sec.show_wheels() {
+                            ui.add_space(6.0);
+                            ui.separator();
+                        }
+                        let mut cg = fx_work.color_grade.take().unwrap_or_default();
+                        let (cg_changed, cg_ckpt) =
+                            draw_lut_curves_hsl_section(ui, lang, active_sec, &mut cg, &self.theme);
+                        if cg_changed {
+                            cg.sanitize();
+                            modified = true;
+                            if cg_ckpt {
+                                checkpoint_op = true;
+                            }
+                        }
+                        let cg_empty = cg.lut_path.is_none()
+                            && cg.master.is_empty()
+                            && cg.red.is_empty()
+                            && cg.green.is_empty()
+                            && cg.blue.is_empty()
+                            && cg
+                                .hsl_bands
+                                .iter()
+                                .all(|b| b[0] == 0.0 && b[1] == 0.0 && b[2] == 0.0);
+                        fx_work.color_grade = (!cg_empty).then_some(cg);
                     }
                 });
+        };
 
-                ui.add_space(6.0);
-                egui::Grid::new("cg_sliders")
-                    .num_columns(3)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        for (i, spec) in specs.iter().enumerate() {
-                            let Some(val) = vals.get_mut(i) else {
-                                continue;
+        if ui.available_width() >= 420.0 {
+            ui.horizontal_top(|ui| {
+                let h = ui.available_height().max(120.0);
+                ui.allocate_ui_with_layout(
+                    vec2(124.0, h),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        for sec in ColorGradingSection::ALL {
+                            let has_edit = match sec {
+                                ColorGradingSection::All => {
+                                    wheels_active || lut_active || curves_active || hsl_active
+                                }
+                                ColorGradingSection::Wheels => wheels_active,
+                                ColorGradingSection::Luts => lut_active,
+                                ColorGradingSection::Curves => curves_active,
+                                ColorGradingSection::Hsl => hsl_active,
                             };
-                            ui.label(spec.name_in(lang));
-                            let mut cur = *val;
-                            let r = ui.add(
-                                egui::Slider::new(&mut cur, spec.min..=spec.max).fixed_decimals(2),
-                            );
-                            if r.changed() && cur.is_finite() {
-                                *val = cur.clamp(spec.min, spec.max);
-                                modified = true;
-                            }
-                            let def_str = format!("{:.2}", spec.default);
-                            if ui
-                                .small_button(tr(lang, "Padrão"))
-                                .on_hover_text(tr_args(
-                                    lang,
-                                    "Restaurar para {val}",
-                                    &[("val", &def_str)],
-                                ))
-                                .clicked()
-                            {
-                                *val = spec.default;
-                                checkpoint_op = true;
-                                modified = true;
-                            }
-                            ui.end_row();
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(section == sec, sec.label_in(lang))
+                                    .clicked()
+                                {
+                                    section = sec;
+                                }
+                                if has_edit {
+                                    let (dot_r, _) =
+                                        ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
+                                    ui.painter().circle_filled(
+                                        dot_r.center(),
+                                        2.5_f32,
+                                        self.theme.accent,
+                                    );
+                                }
+                            });
                         }
-                    });
-
-                ui.add_space(6.0);
+                    },
+                );
                 ui.separator();
-                let mut cg = fx_work.color_grade.take().unwrap_or_default();
-                let (cg_changed, cg_ckpt) = draw_lut_curves_hsl_section(ui, &mut cg, &self.theme);
-                if cg_changed {
-                    cg.sanitize();
-                    modified = true;
-                    if cg_ckpt {
-                        checkpoint_op = true;
+                ui.vertical(|ui| {
+                    render_content(ui, section);
+                });
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                for sec in ColorGradingSection::ALL {
+                    if ui
+                        .selectable_label(section == sec, sec.label_in(lang))
+                        .clicked()
+                    {
+                        section = sec;
                     }
                 }
-                let cg_empty = cg.lut_path.is_none()
-                    && cg.master.is_empty()
-                    && cg.red.is_empty()
-                    && cg.green.is_empty()
-                    && cg.blue.is_empty()
-                    && cg
-                        .hsl_bands
-                        .iter()
-                        .all(|b| b[0] == 0.0 && b[1] == 0.0 && b[2] == 0.0);
-                fx_work.color_grade = (!cg_empty).then_some(cg);
             });
+            ui.separator();
+            render_content(ui, section);
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(sec_id, section));
 
         if modified {
             if checkpoint_op {
@@ -472,11 +619,48 @@ impl App {
     }
 }
 
-/// Roda vetorial original para parâmetros tonais (`Lift`, `Gamma`, `Gain`).
+fn hue_to_rgb(h: f32) -> Color32 {
+    let h = if h.is_finite() {
+        h.rem_euclid(1.0)
+    } else {
+        0.0
+    };
+    let sector = (h * 6.0).floor() as i32;
+    let f = h * 6.0 - sector as f32;
+    let (r, g, b) = match sector.rem_euclid(6) {
+        0 => (1.0, f, 0.0),
+        1 => (1.0 - f, 1.0, 0.0),
+        2 => (0.0, 1.0, f),
+        3 => (0.0, 1.0 - f, 1.0),
+        4 => (f, 0.0, 1.0),
+        _ => (1.0, 0.0, 1.0 - f),
+    };
+    Color32::from_rgb(
+        (r * 235.0).round() as u8,
+        (g * 235.0).round() as u8,
+        (b * 235.0).round() as u8,
+    )
+}
+
+fn paint_chromatic_ring(painter: &egui::Painter, center: Pos2, radius: f32, thickness: f32) {
+    const SEGS: usize = 36;
+    for i in 0..SEGS {
+        let a0 = (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32 / SEGS as f32) * std::f32::consts::TAU;
+        let p0 = center + vec2(a0.cos(), a0.sin()) * radius;
+        let p1 = center + vec2(a1.cos(), a1.sin()) * radius;
+        let col = hue_to_rgb((i as f32 + 0.5) / SEGS as f32);
+        painter.line_segment([p0, p1], Stroke::new(thickness, col));
+    }
+}
+
+/// Roda vetorial original para parâmetros tonais (`Lift`, `Gamma`, `Gain`),
+/// com anel cromático, barra vertical de ajuste fino e redefinição individual.
 /// Arraste vertical ou horizontal ajusta o valor; duplo clique restaura `default`.
 #[allow(clippy::too_many_arguments)]
 fn draw_tone_wheel(
     ui: &mut egui::Ui,
+    lang: Language,
     id_salt: &str,
     title: &str,
     value: &mut f32,
@@ -493,42 +677,95 @@ fn draw_tone_wheel(
     } else {
         88.0
     };
-    let (lo, hi) = if min_v <= max_v && min_v.is_finite() && max_v.is_finite() {
+    let (lo, hi) = if min_v < max_v && min_v.is_finite() && max_v.is_finite() {
         (min_v, max_v)
     } else {
         (0.0, 1.0)
+    };
+    let def = if default_v.is_finite() {
+        default_v.clamp(lo, hi)
+    } else {
+        (lo + hi) * 0.5
     };
     let span = (hi - lo).max(1e-4);
     let cur = if value.is_finite() {
         (*value).clamp(lo, hi)
     } else {
-        default_v.clamp(lo, hi)
+        def
     };
 
     ui.group(|ui| {
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new(title).small().strong());
-            let (rect, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click_and_drag());
-            let id = ui.id().with(id_salt);
-            let _ = id;
-            if resp.dragged() {
-                let delta = resp.drag_delta();
-                let step = (delta.x - delta.y) * (span / 140.0);
-                let next = (cur + step).clamp(lo, hi);
-                if (next - *value).abs() > 1e-5 {
-                    *value = next;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(title).small().strong());
+                let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", &title)]);
+                let is_modified = (cur - def).abs() > 1e-4;
+                if icons::icon_button_named(
+                    ui,
+                    Icon::ResetSpin,
+                    &reset_lbl,
+                    false,
+                    is_modified,
+                    theme,
+                )
+                .clicked()
+                {
+                    *value = def;
                     changed = true;
                 }
-            }
-            if resp.double_clicked() {
-                *value = default_v.clamp(lo, hi);
-                changed = true;
-            }
-            if ui.is_rect_visible(rect) {
-                paint_tone_wheel_art(ui.painter(), rect, *value, lo, hi, default_v, accent, theme);
-            }
+            });
+            ui.horizontal(|ui| {
+                let (rect, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click_and_drag());
+                let _ = ui.id().with(id_salt);
+                if resp.dragged() {
+                    let delta = resp.drag_delta();
+                    let step = (delta.x - delta.y) * (span / 140.0);
+                    let next = (cur + step).clamp(lo, hi);
+                    if (next - *value).abs() > 1e-5 {
+                        *value = next;
+                        changed = true;
+                    }
+                }
+                if resp.double_clicked() {
+                    *value = def;
+                    changed = true;
+                }
+                if ui.is_rect_visible(rect) {
+                    paint_tone_wheel_art(ui.painter(), rect, *value, lo, hi, def, accent, theme);
+                }
+                resp.on_hover_text(tr(
+                    lang,
+                    "Arraste para ajustar; duplo clique restaura o padrão",
+                ));
+                ui.scope(|ui| {
+                    ui.spacing_mut().slider_width = (d - 8.0).max(40.0);
+                    let mut sv = if value.is_finite() {
+                        (*value).clamp(lo, hi)
+                    } else {
+                        def
+                    };
+                    let sr = ui.add(
+                        egui::Slider::new(&mut sv, lo..=hi)
+                            .vertical()
+                            .show_value(false),
+                    );
+                    if sr.changed() && sv.is_finite() {
+                        *value = sv.clamp(lo, hi);
+                        changed = true;
+                    }
+                    if sr.double_clicked() {
+                        *value = def;
+                        changed = true;
+                    }
+                });
+            });
+            let disp = if value.is_finite() {
+                (*value).clamp(lo, hi)
+            } else {
+                def
+            };
             ui.label(
-                egui::RichText::new(format!("{:.2}", *value))
+                egui::RichText::new(format!("{disp:.2}"))
                     .small()
                     .monospace(),
             );
@@ -561,12 +798,33 @@ fn paint_tone_wheel_art(
     let face_col = if theme.high_contrast {
         theme.extreme_bg
     } else {
-        theme.panel_fill
+        theme.extreme_bg.gamma_multiply(0.9)
     };
     painter.circle_filled(center, r, face_col);
-    painter.circle_stroke(center, r, Stroke::new(1.5_f32, theme.border));
+    if theme.high_contrast {
+        painter.circle_stroke(center, r, Stroke::new(1.5_f32, theme.border));
+    } else {
+        paint_chromatic_ring(painter, center, r, 2.2_f32);
+    }
 
-    // Marca de referência padrão no topo (12h) e arco proporcional ao valor atual
+    // Mira central discreta
+    let cross_col = theme.border.gamma_multiply(0.5);
+    painter.line_segment(
+        [
+            pos2(center.x - r * 0.56, center.y),
+            pos2(center.x + r * 0.56, center.y),
+        ],
+        Stroke::new(0.8_f32, cross_col),
+    );
+    painter.line_segment(
+        [
+            pos2(center.x, center.y - r * 0.56),
+            pos2(center.x, center.y + r * 0.56),
+        ],
+        Stroke::new(0.8_f32, cross_col),
+    );
+
+    // Marca de referência padrão e arco proporcional ao valor atual
     let t = if value.is_finite() {
         ((value - lo) / (hi - lo).max(1e-4)).clamp(0.0, 1.0)
     } else {
@@ -583,11 +841,11 @@ fn paint_tone_wheel_art(
     let mut track_pts = Vec::with_capacity(segments + 1);
     for i in 0..=segments {
         let a = ang_min + (i as f32 / segments as f32) * ang_span;
-        track_pts.push(center + vec2(a.cos(), a.sin()) * (r * 0.78));
+        track_pts.push(center + vec2(a.cos(), a.sin()) * (r * 0.76));
     }
     painter.add(egui::Shape::line(
         track_pts,
-        Stroke::new(2.2_f32, theme.border.gamma_multiply(0.7)),
+        Stroke::new(2.0_f32, theme.border.gamma_multiply(0.7)),
     ));
 
     let fill_segs = ((t * segments as f32).round() as usize).max(1);
@@ -595,23 +853,23 @@ fn paint_tone_wheel_art(
     for i in 0..=fill_segs {
         let f = (i as f32 / segments as f32).min(t);
         let a = ang_min + f * ang_span;
-        fill_pts.push(center + vec2(a.cos(), a.sin()) * (r * 0.78));
+        fill_pts.push(center + vec2(a.cos(), a.sin()) * (r * 0.76));
     }
     if fill_pts.len() >= 2 {
-        painter.add(egui::Shape::line(fill_pts, Stroke::new(3.0_f32, ring_col)));
+        painter.add(egui::Shape::line(fill_pts, Stroke::new(2.8_f32, ring_col)));
     }
 
     let def_dir = vec2(def_ang.cos(), def_ang.sin());
     painter.line_segment(
-        [center + def_dir * (r * 0.64), center + def_dir * (r * 0.92)],
+        [center + def_dir * (r * 0.62), center + def_dir * (r * 0.88)],
         Stroke::new(1.2_f32, theme.text_muted),
     );
 
-    let knob = center + vec2(cur_ang.cos(), cur_ang.sin()) * (r * 0.78);
+    let knob = center + vec2(cur_ang.cos(), cur_ang.sin()) * (r * 0.76);
     painter.line_segment([center, knob], Stroke::new(1.8_f32, theme.text_primary));
     painter.circle_filled(knob, 4.0_f32, ring_col);
     painter.circle_stroke(knob, 4.0_f32, Stroke::new(1.0_f32, theme.text_primary));
-    painter.circle_filled(center, 3.0_f32, theme.text_primary);
+    painter.circle_filled(center, 2.8_f32, theme.text_primary);
 }
 
 /// Pad bidimensional vetorial original para Temperatura (X) × Tonalidade (Y).
@@ -629,13 +887,38 @@ fn draw_balance_pad(
     } else {
         88.0
     };
+    let cur_t = if temp.is_finite() {
+        (*temp).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let cur_n = if tint.is_finite() {
+        (*tint).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
     ui.group(|ui| {
         ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new(tr(lang, "Temp × Tinta"))
-                    .small()
-                    .strong(),
-            );
+            let title = tr(lang, "Temp × Tinta");
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(title).small().strong());
+                let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", &title)]);
+                let is_modified = cur_t.abs() > 1e-4 || cur_n.abs() > 1e-4;
+                if icons::icon_button_named(
+                    ui,
+                    Icon::ResetSpin,
+                    &reset_lbl,
+                    false,
+                    is_modified,
+                    theme,
+                )
+                .clicked()
+                {
+                    *temp = 0.0;
+                    *tint = 0.0;
+                    changed = true;
+                }
+            });
             let (rect, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click_and_drag());
             let center = rect.center();
             let radius = (rect.width().min(rect.height()) * 0.44).max(6.0);
@@ -658,8 +941,22 @@ fn draw_balance_pad(
             if ui.is_rect_visible(rect) {
                 paint_balance_pad_art(ui.painter(), rect, *temp, *tint, theme);
             }
+            resp.on_hover_text(tr(
+                lang,
+                "Arraste para ajustar; duplo clique restaura o padrão",
+            ));
+            let dt = if temp.is_finite() {
+                (*temp).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            let dn = if tint.is_finite() {
+                (*tint).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
             ui.label(
-                egui::RichText::new(format!("{:+.2} / {:+.2}", *temp, *tint))
+                egui::RichText::new(format!("{dt:+.2} / {dn:+.2}"))
                     .small()
                     .monospace(),
             );
@@ -683,40 +980,48 @@ fn paint_balance_pad_art(
     let bg = if theme.high_contrast {
         theme.extreme_bg
     } else {
-        theme.panel_fill
+        theme.extreme_bg.gamma_multiply(0.9)
     };
     painter.circle_filled(center, r, bg);
-    if !theme.high_contrast {
+    if theme.high_contrast {
+        painter.circle_stroke(center, r, Stroke::new(1.5_f32, theme.border));
+    } else {
         // Pontos de referência de cor nos 4 polos (Frio, Quente, Verde, Magenta)
         painter.circle_filled(
-            pos2(center.x - r * 0.68, center.y),
-            r * 0.16,
-            Color32::from_rgb(70, 145, 240).gamma_multiply(0.55),
+            pos2(center.x - r * 0.64, center.y),
+            r * 0.15,
+            Color32::from_rgb(70, 145, 240).gamma_multiply(0.50),
         );
         painter.circle_filled(
-            pos2(center.x + r * 0.68, center.y),
-            r * 0.16,
-            Color32::from_rgb(245, 160, 65).gamma_multiply(0.55),
+            pos2(center.x + r * 0.64, center.y),
+            r * 0.15,
+            Color32::from_rgb(245, 160, 65).gamma_multiply(0.50),
         );
         painter.circle_filled(
-            pos2(center.x, center.y - r * 0.68),
-            r * 0.16,
-            Color32::from_rgb(80, 210, 120).gamma_multiply(0.55),
+            pos2(center.x, center.y - r * 0.64),
+            r * 0.15,
+            Color32::from_rgb(80, 210, 120).gamma_multiply(0.50),
         );
         painter.circle_filled(
-            pos2(center.x, center.y + r * 0.68),
-            r * 0.16,
-            Color32::from_rgb(220, 95, 195).gamma_multiply(0.55),
+            pos2(center.x, center.y + r * 0.64),
+            r * 0.15,
+            Color32::from_rgb(220, 95, 195).gamma_multiply(0.50),
         );
+        paint_chromatic_ring(painter, center, r, 2.2_f32);
     }
-    painter.circle_stroke(center, r, Stroke::new(1.5_f32, theme.border));
     painter.line_segment(
-        [pos2(center.x - r, center.y), pos2(center.x + r, center.y)],
-        Stroke::new(1.0_f32, theme.border.gamma_multiply(0.65)),
+        [
+            pos2(center.x - r * 0.92, center.y),
+            pos2(center.x + r * 0.92, center.y),
+        ],
+        Stroke::new(0.9_f32, theme.border.gamma_multiply(0.6)),
     );
     painter.line_segment(
-        [pos2(center.x, center.y - r), pos2(center.x, center.y + r)],
-        Stroke::new(1.0_f32, theme.border.gamma_multiply(0.65)),
+        [
+            pos2(center.x, center.y - r * 0.92),
+            pos2(center.x, center.y + r * 0.92),
+        ],
+        Stroke::new(0.9_f32, theme.border.gamma_multiply(0.6)),
     );
 
     let tx = if temp.is_finite() {
@@ -729,27 +1034,21 @@ fn paint_balance_pad_art(
     } else {
         0.0
     };
-    let pos = pos2(center.x + tx * r * 0.86, center.y - ty * r * 0.86);
+    let pos = pos2(center.x + tx * r * 0.84, center.y - ty * r * 0.84);
     painter.line_segment([center, pos], Stroke::new(1.5_f32, theme.accent));
     painter.circle_filled(pos, 4.5_f32, theme.accent);
     painter.circle_stroke(pos, 4.5_f32, Stroke::new(1.2_f32, theme.text_primary));
-    let _ = (
-        Align2::CENTER_CENTER,
-        FontId::proportional(10.0),
-        StrokeKind::Inside,
-        Pos2::ZERO,
-    );
 }
 
-fn lut_display_name(lut_path: Option<&str>) -> String {
+fn lut_display_name(lut_path: Option<&str>, lang: Language) -> String {
     let Some(p) = lut_path.filter(|s| !s.trim().is_empty()) else {
-        return "Nenhuma".to_string();
+        return tr(lang, "Nenhuma").to_string();
     };
     if let Some((_, label)) = ColorGradeCurves::BUILTIN_LUTS
         .iter()
         .find(|(id, _)| *id == p)
     {
-        return (*label).to_string();
+        return tr(lang, label).to_string();
     }
     std::path::Path::new(p)
         .file_name()
@@ -760,187 +1059,208 @@ fn lut_display_name(lut_path: Option<&str>) -> String {
 /// Seção de LUT (.cube ou integrada), Curvas RGB e 6 bandas HSL no painel Color Grading.
 fn draw_lut_curves_hsl_section(
     ui: &mut egui::Ui,
+    lang: Language,
+    section: ColorGradingSection,
     cg: &mut ColorGradeCurves,
     theme: &ThemeColors,
 ) -> (bool, bool) {
     let mut changed = false;
     let mut ckpt = false;
+    let mut drew_prev = false;
 
-    ui.strong("LUT de Câmera / Look (.cube)");
-    ui.horizontal_wrapped(|ui| {
-        let cur_label = lut_display_name(cg.lut_path.as_deref());
-        egui::ComboBox::from_id_salt("cg_lut_combo")
-            .selected_text(cur_label)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(cg.lut_path.is_none(), "Nenhuma")
-                    .clicked()
-                {
-                    cg.lut_path = None;
-                    changed = true;
-                    ckpt = true;
-                }
-                for (id, name) in ColorGradeCurves::BUILTIN_LUTS {
-                    let active = cg.lut_path.as_deref() == Some(id);
-                    if ui.selectable_label(active, name).clicked() {
-                        cg.lut_path = Some(id.to_string());
+    if section.show_luts() {
+        ui.strong(tr(lang, "LUT de Câmera / Look (.cube)"));
+        ui.horizontal_wrapped(|ui| {
+            let cur_label = lut_display_name(cg.lut_path.as_deref(), lang);
+            egui::ComboBox::from_id_salt("cg_lut_combo")
+                .selected_text(cur_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(cg.lut_path.is_none(), tr(lang, "Nenhuma"))
+                        .clicked()
+                    {
+                        cg.lut_path = None;
                         changed = true;
                         ckpt = true;
                     }
-                }
-            });
-        if ui
-            .button("Carregar .cube...")
-            .on_hover_text("Selecionar arquivo de LUT 1D/3D no formato .cube")
-            .clicked()
-        {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("LUT Cube", &["cube", "CUBE"])
-                .pick_file()
+                    for (id, name) in ColorGradeCurves::BUILTIN_LUTS {
+                        let active = cg.lut_path.as_deref() == Some(id);
+                        if ui.selectable_label(active, tr(lang, name)).clicked() {
+                            cg.lut_path = Some(id.to_string());
+                            changed = true;
+                            ckpt = true;
+                        }
+                    }
+                });
+            if ui
+                .button(tr(lang, "Carregar .cube..."))
+                .on_hover_text(tr(lang, "Selecionar arquivo de LUT 1D/3D no formato .cube"))
+                .clicked()
             {
-                cg.lut_path = Some(path.display().to_string());
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("LUT Cube", &["cube", "CUBE"])
+                    .pick_file()
+                {
+                    cg.lut_path = Some(path.display().to_string());
+                    changed = true;
+                    ckpt = true;
+                }
+            }
+            if ui
+                .add_enabled(cg.lut_path.is_some(), egui::Button::new(tr(lang, "Limpar")))
+                .clicked()
+            {
+                cg.lut_path = None;
                 changed = true;
                 ckpt = true;
             }
-        }
-        if ui
-            .add_enabled(cg.lut_path.is_some(), egui::Button::new("Limpar"))
-            .clicked()
-        {
-            cg.lut_path = None;
-            changed = true;
-            ckpt = true;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("Intensidade da LUT");
-        if ui
-            .add(egui::Slider::new(&mut cg.lut_strength, 0.0..=1.0).fixed_decimals(2))
-            .changed()
-        {
-            changed = true;
-        }
-    });
-
-    ui.add_space(4.0);
-    ui.separator();
-    ui.strong("Curvas RGB");
-    let ch_id = egui::Id::new("cg_curve_channel_state");
-    let mut active_ch = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<usize>(ch_id).unwrap_or(0));
-    let channels = [
-        (0usize, "Master", theme.text_primary),
-        (1, "Vermelho", Color32::from_rgb(235, 95, 95)),
-        (2, "Verde", Color32::from_rgb(95, 220, 120)),
-        (3, "Azul", Color32::from_rgb(95, 165, 240)),
-    ];
-    ui.horizontal_wrapped(|ui| {
-        for &(ci, name, col) in &channels {
-            let text =
-                egui::RichText::new(name).color(if active_ch == ci { theme.accent } else { col });
-            if ui.selectable_label(active_ch == ci, text).clicked() {
-                active_ch = ci;
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr(lang, "Intensidade da LUT"));
+            if ui
+                .add(egui::Slider::new(&mut cg.lut_strength, 0.0..=1.0).fixed_decimals(2))
+                .changed()
+            {
+                changed = true;
             }
-        }
-        if ui.small_button("Redefinir curva").clicked() {
-            match active_ch {
-                1 => cg.red.clear(),
-                2 => cg.green.clear(),
-                3 => cg.blue.clear(),
-                _ => cg.master.clear(),
-            }
-            changed = true;
-            ckpt = true;
-        }
-        if ui.small_button("Zerar curvas").clicked() {
-            cg.master.clear();
-            cg.red.clear();
-            cg.green.clear();
-            cg.blue.clear();
-            changed = true;
-            ckpt = true;
-        }
-    });
-    ui.ctx().data_mut(|d| d.insert_temp(ch_id, active_ch));
-
-    let line_col = channels
-        .get(active_ch)
-        .map(|c| c.2)
-        .unwrap_or(theme.text_primary);
-    let curve_pts = match active_ch {
-        1 => &mut cg.red,
-        2 => &mut cg.green,
-        3 => &mut cg.blue,
-        _ => &mut cg.master,
-    };
-    if draw_rgb_curve_editor(ui, curve_pts, line_col, theme) {
-        changed = true;
+        });
+        drew_prev = true;
     }
 
-    ui.add_space(4.0);
-    ui.separator();
-    ui.strong("Curvas HSL (6 setores)");
-    let band_id = egui::Id::new("cg_hsl_band_state");
-    let mut active_band = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<usize>(band_id).unwrap_or(0))
-        .min(5);
-    let band_colors = [
-        Color32::from_rgb(235, 80, 80),
-        Color32::from_rgb(235, 210, 75),
-        Color32::from_rgb(80, 210, 110),
-        Color32::from_rgb(75, 210, 225),
-        Color32::from_rgb(85, 135, 235),
-        Color32::from_rgb(220, 85, 200),
-    ];
-    ui.horizontal_wrapped(|ui| {
-        for (bi, &name) in ColorGradeCurves::HSL_BAND_NAMES.iter().enumerate() {
-            let lbl = egui::RichText::new(name).color(if active_band == bi {
-                theme.accent
-            } else {
-                band_colors[bi]
-            });
-            if ui.selectable_label(active_band == bi, lbl).clicked() {
-                active_band = bi;
+    if section.show_curves() {
+        if drew_prev {
+            ui.add_space(4.0);
+            ui.separator();
+        }
+        ui.strong(tr(lang, "Curvas RGB"));
+        let ch_id = egui::Id::new("cg_curve_channel_state");
+        let mut active_ch = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<usize>(ch_id).unwrap_or(0));
+        let channels = [
+            (0usize, tr(lang, "Master"), theme.text_primary),
+            (1, tr(lang, "Vermelho"), Color32::from_rgb(235, 95, 95)),
+            (2, tr(lang, "Verde"), Color32::from_rgb(95, 220, 120)),
+            (3, tr(lang, "Azul"), Color32::from_rgb(95, 165, 240)),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            for &(ci, name, col) in &channels {
+                let text = egui::RichText::new(name).color(if active_ch == ci {
+                    theme.accent
+                } else {
+                    col
+                });
+                if ui.selectable_label(active_ch == ci, text).clicked() {
+                    active_ch = ci;
+                }
             }
-        }
-        if ui.small_button("Zerar HSL").clicked() {
-            cg.hsl_bands.clear();
-            changed = true;
-            ckpt = true;
-        }
-    });
-    ui.ctx().data_mut(|d| d.insert_temp(band_id, active_band));
-
-    let mut band = cg.hsl_bands.get(active_band).copied().unwrap_or([0.0; 3]);
-    let mut band_changed = false;
-    egui::Grid::new("cg_hsl_sliders")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("Matiz");
-            band_changed |= ui
-                .add(egui::Slider::new(&mut band[0], -0.5..=0.5).fixed_decimals(2))
-                .changed();
-            ui.end_row();
-            ui.label("Saturação");
-            band_changed |= ui
-                .add(egui::Slider::new(&mut band[1], -1.0..=1.0).fixed_decimals(2))
-                .changed();
-            ui.end_row();
-            ui.label("Luminância");
-            band_changed |= ui
-                .add(egui::Slider::new(&mut band[2], -1.0..=1.0).fixed_decimals(2))
-                .changed();
-            ui.end_row();
+            if ui.small_button(tr(lang, "Redefinir curva")).clicked() {
+                match active_ch {
+                    1 => cg.red.clear(),
+                    2 => cg.green.clear(),
+                    3 => cg.blue.clear(),
+                    _ => cg.master.clear(),
+                }
+                changed = true;
+                ckpt = true;
+            }
+            if ui.small_button(tr(lang, "Zerar curvas")).clicked() {
+                cg.master.clear();
+                cg.red.clear();
+                cg.green.clear();
+                cg.blue.clear();
+                changed = true;
+                ckpt = true;
+            }
         });
-    if band_changed {
-        if cg.hsl_bands.len() < 6 {
-            cg.hsl_bands.resize(6, [0.0, 0.0, 0.0]);
+        ui.ctx().data_mut(|d| d.insert_temp(ch_id, active_ch));
+
+        let line_col = channels
+            .get(active_ch)
+            .map(|c| c.2)
+            .unwrap_or(theme.text_primary);
+        let curve_pts = match active_ch {
+            1 => &mut cg.red,
+            2 => &mut cg.green,
+            3 => &mut cg.blue,
+            _ => &mut cg.master,
+        };
+        if draw_rgb_curve_editor(ui, lang, curve_pts, line_col, theme) {
+            changed = true;
         }
-        cg.hsl_bands[active_band] = band;
-        changed = true;
+        drew_prev = true;
+    }
+
+    if section.show_hsl() {
+        if drew_prev {
+            ui.add_space(4.0);
+            ui.separator();
+        }
+        ui.strong(tr(lang, "Curvas HSL (6 setores)"));
+        let band_id = egui::Id::new("cg_hsl_band_state");
+        let mut active_band = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<usize>(band_id).unwrap_or(0))
+            .min(5);
+        let band_colors = [
+            Color32::from_rgb(235, 80, 80),
+            Color32::from_rgb(235, 210, 75),
+            Color32::from_rgb(80, 210, 110),
+            Color32::from_rgb(75, 210, 225),
+            Color32::from_rgb(85, 135, 235),
+            Color32::from_rgb(220, 85, 200),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            for (bi, &name) in ColorGradeCurves::HSL_BAND_NAMES.iter().enumerate() {
+                let bcol = band_colors.get(bi).copied().unwrap_or(theme.text_primary);
+                let lbl = egui::RichText::new(tr(lang, name)).color(if active_band == bi {
+                    theme.accent
+                } else {
+                    bcol
+                });
+                if ui.selectable_label(active_band == bi, lbl).clicked() {
+                    active_band = bi;
+                }
+            }
+            if ui.small_button(tr(lang, "Zerar HSL")).clicked() {
+                cg.hsl_bands.clear();
+                changed = true;
+                ckpt = true;
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(band_id, active_band));
+
+        let mut band = cg.hsl_bands.get(active_band).copied().unwrap_or([0.0; 3]);
+        let mut band_changed = false;
+        egui::Grid::new("cg_hsl_sliders")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(tr(lang, "Matiz"));
+                band_changed |= ui
+                    .add(egui::Slider::new(&mut band[0], -0.5..=0.5).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Saturação"));
+                band_changed |= ui
+                    .add(egui::Slider::new(&mut band[1], -1.0..=1.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Luminância"));
+                band_changed |= ui
+                    .add(egui::Slider::new(&mut band[2], -1.0..=1.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+            });
+        if band_changed {
+            if cg.hsl_bands.len() < 6 {
+                cg.hsl_bands.resize(6, [0.0, 0.0, 0.0]);
+            }
+            if let Some(slot) = cg.hsl_bands.get_mut(active_band) {
+                *slot = band;
+            }
+            changed = true;
+        }
     }
 
     (changed, ckpt)
@@ -948,6 +1268,7 @@ fn draw_lut_curves_hsl_section(
 
 fn draw_rgb_curve_editor(
     ui: &mut egui::Ui,
+    lang: Language,
     pts: &mut Vec<[f32; 2]>,
     line_col: Color32,
     theme: &ThemeColors,
@@ -1072,9 +1393,10 @@ fn draw_rgb_curve_editor(
         painter.circle_filled(c, 4.0, line_col);
         painter.circle_stroke(c, 4.0, Stroke::new(1.0_f32, theme.text_primary));
     }
-    resp.on_hover_text(
+    resp.on_hover_text(tr(
+        lang,
         "Arraste pontos para ajustar (clique em área vazia para adicionar; botão direito remove)",
-    );
+    ));
     changed
 }
 
@@ -1093,6 +1415,7 @@ mod tests {
                     let mut v = f32::NAN;
                     let _ = draw_tone_wheel(
                         ui,
+                        Language::PtBr,
                         "test_wheel",
                         "Lift",
                         &mut v,
@@ -1123,9 +1446,44 @@ mod tests {
                         master: vec![[f32::NAN, f32::INFINITY], [0.5, 0.7]],
                         ..Default::default()
                     };
-                    let _ = draw_lut_curves_hsl_section(ui, &mut cg, &th);
+                    let _ = draw_lut_curves_hsl_section(
+                        ui,
+                        Language::PtBr,
+                        ColorGradingSection::All,
+                        &mut cg,
+                        &th,
+                    );
                 }
             });
         });
+    }
+
+    #[test]
+    fn secoes_color_grading_e_anel_cromatico_resistem_a_entradas_hostis() {
+        assert_eq!(ColorGradingSection::ALL.len(), 5);
+        assert!(ColorGradingSection::All.show_wheels());
+        assert!(ColorGradingSection::All.show_luts());
+        assert!(ColorGradingSection::All.show_curves());
+        assert!(ColorGradingSection::All.show_hsl());
+
+        assert!(ColorGradingSection::Luts.show_luts());
+        assert!(!ColorGradingSection::Luts.show_curves());
+        assert!(!ColorGradingSection::Curves.show_wheels());
+        assert!(ColorGradingSection::Hsl.show_hsl());
+
+        for sec in ColorGradingSection::ALL {
+            assert!(!sec.label_in(Language::PtBr).is_empty());
+            assert!(!sec.label_in(Language::En).is_empty());
+        }
+
+        // Entradas hostis para hue_to_rgb e lut_display_name não entram em pânico
+        let _ = hue_to_rgb(f32::NAN);
+        let _ = hue_to_rgb(f32::INFINITY);
+        let _ = hue_to_rgb(-3.75);
+        assert_eq!(lut_display_name(None, Language::En), "None");
+        assert_eq!(
+            lut_display_name(Some("builtin:rec709"), Language::En),
+            "Camera: Log -> Rec.709"
+        );
     }
 }
