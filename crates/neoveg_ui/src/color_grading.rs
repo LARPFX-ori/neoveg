@@ -698,7 +698,7 @@ fn draw_tone_wheel(
         ui.vertical_centered(|ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(title).small().strong());
-                let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", title)]);
+                let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", &title)]);
                 let is_modified = (cur - def).abs() > 1e-4;
                 if icons::icon_button_named(
                     ui,
@@ -902,7 +902,7 @@ fn draw_balance_pad(
             let title = tr(lang, "Temp × Tinta");
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(title).small().strong());
-                let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", title)]);
+                let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", &title)]);
                 let is_modified = cur_t.abs() > 1e-4 || cur_n.abs() > 1e-4;
                 if icons::icon_button_named(
                     ui,
