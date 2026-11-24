@@ -365,7 +365,7 @@ def _list_workflow_run_ids(repo: str) -> list[dict[str, object]]:
         check=True,
     )
     data = json.loads(res.stdout or "[]")
-    return data if isinstance(data, list) else []
+    return data if isinstance(data, list) else [] #type: ignore
 
 
 def _wait_for_new_run(
@@ -537,7 +537,7 @@ def build_via_github_actions(
         }
         subprocess.run(cmd, cwd=repo_root, check=True)
         print("Aguardando início da execução no GitHub Actions...")
-        run_id, run_url = _wait_for_new_run(repo, known_ids)
+        run_id, run_url = _wait_for_new_run(repo, known_ids) #type: ignore
         print(f"Execução #{run_id} iniciada{f': {run_url}' if run_url else ''}")
         subprocess.run(
             ["gh", "run", "watch", str(run_id), "-R", repo, "--exit-status"],
