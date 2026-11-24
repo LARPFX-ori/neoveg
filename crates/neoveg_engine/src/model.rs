@@ -3538,6 +3538,9 @@ pub struct Track {
     /// Modo de automação dos envelopes da faixa (Desligado / Ler / Touch / Latch, p. 1008).
     #[serde(default)]
     pub automation_mode: AutomationMode,
+    /// Áudio: inverte a polaridade (fase 180°) do sinal da trilha (Console de Mixagem, p. 63).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert_phase: bool,
 }
 
 fn default_glow_keyframes() -> Keyframes<ShadowGlowKey> {
@@ -3639,6 +3642,9 @@ pub struct AudioBus {
     pub envelopes: Vec<Envelope>,
     #[serde(default)]
     pub automation_mode: AutomationMode,
+    /// Inverte a polaridade (fase 180°) do sinal do barramento (Console de Mixagem, p. 63).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert_phase: bool,
 }
 
 impl AudioBus {
@@ -3657,6 +3663,7 @@ impl AudioBus {
             default_env_smoothness: 0.0,
             envelopes: vec![],
             automation_mode: AutomationMode::Read,
+            invert_phase: false,
         }
     }
 
@@ -3747,6 +3754,7 @@ impl Track {
             glow_2d: default_glow_keyframes(),
             multicam: false,
             automation_mode: AutomationMode::Read,
+            invert_phase: false,
         }
     }
 

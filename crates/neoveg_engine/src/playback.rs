@@ -34,6 +34,8 @@ pub struct Shared {
     pub mono_downmix: bool,
     /// Silencia apenas a monitoração de áudio da prévia sem afetar as trilhas/render.
     pub preview_muted: bool,
+    /// Ganho linear do barramento Preview (audição no Trimmer/Explorer, Master Bus p. 50).
+    pub preview_bus_gain: f32,
     /// Erro ocorrido na thread de áudio, exibido pela interface.
     pub error: Option<String>,
     /// Áudio sendo reproduzido no painel Trimmer (se ativo).
@@ -144,6 +146,7 @@ impl AudioOut {
             dim: false,
             mono_downmix: false,
             preview_muted: false,
+            preview_bus_gain: 1.0,
             error: None,
             trimmer_audio: None,
         }));
@@ -354,6 +357,11 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
             let sr = s.mixer.sr;
             if let Some(audio) = s.audio.get(&trim.media_id).cloned() {
                 let spd = trim.effective_speed();
+                let preview_gain = if s.preview_bus_gain.is_finite() {
+                    s.preview_bus_gain.clamp(0.0, 4.0)
+                } else {
+                    1.0
+                };
                 let mut peak = [0.0_f32; 2];
                 for (i, frame) in buf
                     .as_chunks_mut::<2>()
@@ -381,6 +389,7 @@ fn mix_into(buf: &mut [f32], frames: usize, shared: &Arc<Mutex<Shared>>) {
                     }
                     let t = Ticks::from_samples(sample_in_range, sr);
                     let (l, r) = audio.sample(t);
+                    let (l, r) = (l * preview_gain, r * preview_gain);
                     frame[0] = l;
                     frame[1] = r;
                     peak[0] = peak[0].max(l.abs());
@@ -1102,6 +1111,7 @@ mod tests {
             dim: false,
             mono_downmix: false,
             preview_muted: false,
+            preview_bus_gain: 1.0,
             error: None,
             trimmer_audio: None,
         }));

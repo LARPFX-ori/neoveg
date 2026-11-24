@@ -12,9 +12,92 @@ use neoveg_engine::engine::loudness::{
     analyze_project_loudness, format_db, format_lufs, LoudnessSnapshot, LoudnessTarget,
 };
 use neoveg_engine::util;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Filtro de categoria de canais na barra lateral do Console de Mixagem (manual VEGAS Pro 21, p. 63).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MixerChannelFilter {
+    #[default]
+    All,
+    AudioTracks,
+    AudioBuses,
+    MasterOnly,
+}
+
+impl MixerChannelFilter {
+    pub const ALL: [Self; 4] = [
+        Self::All,
+        Self::AudioTracks,
+        Self::AudioBuses,
+        Self::MasterOnly,
+    ];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            Self::All => "Todas",
+            Self::AudioTracks => "Trilhas",
+            Self::AudioBuses => "Barramentos",
+            Self::MasterOnly => "Master",
+        };
+        tr(lang, key)
+    }
+}
+
+/// Estado persistente da interface do Console de Mixagem (barra lateral, visibilidade
+/// individual de faixas/barramentos, seções de tira e largura dos canais, p. 63).
+pub struct MixerConsoleState {
+    pub sidebar_open: bool,
+    pub channel_filter: MixerChannelFilter,
+    pub hidden_tracks: HashSet<Id>,
+    pub hidden_buses: HashSet<Id>,
+    pub hide_master: bool,
+    pub show_io: bool,
+    pub show_sends: bool,
+    pub show_automation: bool,
+    pub show_pan: bool,
+    pub show_meters: bool,
+    pub show_faders: bool,
+    pub strip_width: f32,
+}
+
+impl Default for MixerConsoleState {
+    fn default() -> Self {
+        Self {
+            sidebar_open: true,
+            channel_filter: MixerChannelFilter::All,
+            hidden_tracks: HashSet::new(),
+            hidden_buses: HashSet::new(),
+            hide_master: false,
+            show_io: true,
+            show_sends: true,
+            show_automation: true,
+            show_pan: true,
+            show_meters: true,
+            show_faders: true,
+            strip_width: 112.0,
+        }
+    }
+}
+
+impl MixerConsoleState {
+    pub fn show_all_channels(&mut self) {
+        self.hidden_tracks.clear();
+        self.hidden_buses.clear();
+        self.hide_master = false;
+        self.channel_filter = MixerChannelFilter::All;
+    }
+
+    pub fn clamped_strip_width(&self) -> f32 {
+        if self.strip_width.is_finite() {
+            self.strip_width.clamp(84.0, 156.0)
+        } else {
+            112.0
+        }
+    }
+}
 
 struct FloatingViewportSpec<'a> {
     title: &'a str,
@@ -1132,6 +1215,11 @@ impl App {
             s.dim = self.master_dim;
             s.mono_downmix = self.master_mono;
             s.preview_muted = self.opts.preview_mute_audio;
+            s.preview_bus_gain = if self.master_preview_mute {
+                0.0
+            } else {
+                db_to_lin(self.master_preview_vol_db.clamp(-60.0, 12.0))
+            };
         }
         self.audio
             .set_bypass_audio_fx(self.opts.bypass_all_audio_fx);
@@ -1798,33 +1886,122 @@ impl App {
                 self.project.master.mute = !self.project.master.mute;
                 changed = true;
             }
+            if tall_dock {
+                let pv_btn = icons::small_icon_button(
+                    ui,
+                    Icon::BusTrack,
+                    None,
+                    self.master_show_preview_bus,
+                    &self.theme,
+                );
+                pv_btn.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        tr(lang, "Barramento Preview"),
+                    )
+                });
+                if pv_btn
+                    .on_hover_text(tr(
+                        lang,
+                        "Mostrar/ocultar barramento Preview ao lado do Master",
+                    ))
+                    .clicked()
+                {
+                    self.master_show_preview_bus = !self.master_show_preview_bus;
+                }
+            }
         });
         if monitor_changed {
             self.sync_master_monitor_audio();
         }
-        let pk = lin_to_db(self.master_hold[0].max(self.master_hold[1]));
-        let peak_str = if pk < -100.0 {
-            "-inf".to_string()
-        } else {
-            format!("{pk:+.1}")
+        // Leituras individuais de pico L / R clicáveis para zerar retenção (VEGAS Pro 21, p. 50 / v23)
+        let pk_l = lin_to_db(self.master_hold[0]);
+        let pk_r = lin_to_db(self.master_hold[1]);
+        let fmt_pk = |v: f32| {
+            if !v.is_finite() || v < -100.0 {
+                "-inf".to_string()
+            } else {
+                format!("{v:+.1}")
+            }
         };
-        ui.label(
-            egui::RichText::new(tr_args(lang, "pico: {val} dB", &[("val", &peak_str)]))
-                .monospace()
-                .small()
-                .color(if pk > -0.1 {
-                    self.theme.offline_fg
-                } else {
-                    self.theme.text_muted
-                }),
-        );
+        let peak_resp = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(egui::RichText::new(fmt_pk(pk_l)).monospace().small().color(
+                    if pk_l > -0.1 {
+                        self.theme.offline_fg
+                    } else {
+                        self.theme.text_muted
+                    },
+                ));
+                ui.label(egui::RichText::new(fmt_pk(pk_r)).monospace().small().color(
+                    if pk_r > -0.1 {
+                        self.theme.offline_fg
+                    } else {
+                        self.theme.text_muted
+                    },
+                ));
+            })
+            .response
+            .interact(Sense::click())
+            .on_hover_text(tr(lang, "Clique para zerar os picos retidos"));
+        if peak_resp.clicked() {
+            self.master_hold = [0.0; 2];
+        }
+
         let meter_h = if tall_dock {
-            (ui.available_height() - 24.0).clamp(36.0, 240.0)
+            (ui.available_height() - 44.0).clamp(36.0, 240.0)
         } else {
             110.0
         };
-        ui.horizontal(|ui| {
+        let show_preview_strip =
+            tall_dock && self.master_show_preview_bus && ui.available_width() >= 118.0;
+        ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+            if show_preview_strip {
+                ui.vertical(|ui| {
+                    ui.set_width(34.0);
+                    ui.label(
+                        egui::RichText::new(tr(lang, "Prévia"))
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                    if ui
+                        .selectable_label(self.master_preview_mute, "M")
+                        .on_hover_text(tr(lang, "Silenciar barramento Preview"))
+                        .clicked()
+                    {
+                        self.master_preview_mute = !self.master_preview_mute;
+                        monitor_changed = true;
+                    }
+                    let pv_s = ui
+                        .add_sized(
+                            [20.0, (meter_h - 34.0).max(28.0)],
+                            egui::Slider::new(&mut self.master_preview_vol_db, -60.0..=12.0)
+                                .vertical()
+                                .show_value(false),
+                        )
+                        .on_hover_text(tr(
+                            lang,
+                            "Volume do barramento Preview (duplo clique para 0,0 dB)",
+                        ));
+                    if pv_s.double_clicked() {
+                        self.master_preview_vol_db = 0.0;
+                        monitor_changed = true;
+                    } else if pv_s.changed() {
+                        monitor_changed = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("{:+.0}", self.master_preview_vol_db))
+                            .monospace()
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                });
+                ui.separator();
+            }
+
             let slider = ui.add_sized(
                 [22.0, meter_h],
                 egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
@@ -1845,10 +2022,10 @@ impl App {
             if tall_dock && meter_h >= 78.0 {
                 let (ml, _) = ui.allocate_exact_size(vec2(8.0, meter_h), Sense::hover());
                 crate::timeline::draw_meter_channel(ui.painter(), ml, self.master_hold[0]);
-                let (sr, _) = ui.allocate_exact_size(vec2(20.0, meter_h), Sense::hover());
+                let (sr, _) = ui.allocate_exact_size(vec2(22.0, meter_h), Sense::hover());
                 let sp = ui.painter_at(sr);
-                let font = egui::FontId::monospace(8.5);
-                for db in [0, -6, -12, -18, -24, -48] {
+                let font = egui::FontId::monospace(8.0);
+                for db in [0, -3, -6, -12, -18, -24, -36, -48, -57] {
                     let n = ((db as f32 + 60.0) / 66.0).clamp(0.0, 1.0);
                     let y = sr.bottom() - n * sr.height();
                     sp.text(
@@ -1866,11 +2043,34 @@ impl App {
                 draw_meter(ui.painter(), mr, self.master_hold);
             }
         });
-        ui.label(
-            egui::RichText::new(format!("{:+.1} dB", self.project.master.volume_db))
-                .monospace()
-                .small(),
-        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let lock_tip = if self.master_channels_locked {
+                tr(lang, "Travar canais L/R juntos")
+            } else {
+                tr(lang, "Destravar canais L/R")
+            };
+            if icons::small_icon_button(
+                ui,
+                Icon::LockClosed,
+                None,
+                self.master_channels_locked,
+                &self.theme,
+            )
+            .on_hover_text(lock_tip)
+            .clicked()
+            {
+                self.master_channels_locked = !self.master_channels_locked;
+            }
+            ui.label(
+                egui::RichText::new(format!("{:+.1} dB", self.project.master.volume_db))
+                    .monospace()
+                    .small(),
+            );
+        });
+        if monitor_changed {
+            self.sync_master_monitor_audio();
+        }
         if changed {
             self.changed();
         }
@@ -2190,7 +2390,36 @@ impl App {
 
     fn mixer_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        ui.horizontal(|ui| {
+        let sr_s = self.project.settings.sample_rate.to_string();
+        let bits_s = self.project.settings.audio_bit_depth.to_string();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                egui::RichText::new(tr_args(
+                    lang,
+                    "{sr} Hz; {bits} bits",
+                    &[("sr", &sr_s), ("bits", &bits_s)],
+                ))
+                .small()
+                .monospace()
+                .color(self.theme.text_muted),
+            );
+            ui.separator();
+            if ui
+                .selectable_label(self.mixer_ui.sidebar_open, tr(lang, "Canais"))
+                .on_hover_text(tr(lang, "Mostrar/ocultar barra lateral de canais e seções"))
+                .clicked()
+            {
+                self.mixer_ui.sidebar_open = !self.mixer_ui.sidebar_open;
+            }
+            if ui
+                .button(tr(lang, "＋ Áudio"))
+                .on_hover_text(tr(lang, "Inserir trilha de áudio"))
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                self.exec_cmd(Some(&ctx), "insert.track_audio");
+            }
             let can_add = self.project.audio_buses.len() < crate::model::MAX_AUDIO_BUSES;
             if ui
                 .add_enabled(can_add, egui::Button::new(tr(lang, "＋ Barramento")))
@@ -2215,7 +2444,10 @@ impl App {
             let mut bypass = self.opts.bypass_all_audio_fx;
             if ui
                 .toggle_value(&mut bypass, "Bypass FX")
-                .on_hover_text("Ignorar todos os plug-ins de efeito de áudio (Opções > Ignorar todos os FX de áudio)")
+                .on_hover_text(tr(
+                    lang,
+                    "Ignorar todos os plug-ins de efeito de áudio (Opções > Ignorar todos os FX de áudio)",
+                ))
                 .changed()
             {
                 let ctx = ui.ctx().clone();
@@ -2223,6 +2455,16 @@ impl App {
             }
         });
         ui.separator();
+
+        // Remove IDs obsoletos de canais ocultos
+        let live_track_ids: HashSet<Id> = self.project.tracks.iter().map(|t| t.id).collect();
+        self.mixer_ui
+            .hidden_tracks
+            .retain(|id| live_track_ids.contains(id));
+        let live_bus_ids: HashSet<Id> = self.project.audio_buses.iter().map(|b| b.id).collect();
+        self.mixer_ui
+            .hidden_buses
+            .retain(|id| live_bus_ids.contains(id));
 
         let bus_choices: Vec<(Id, String)> = self
             .project
@@ -2232,418 +2474,809 @@ impl App {
             .collect();
         let mut remove_bus: Option<Id> = None;
 
-        egui::ScrollArea::horizontal()
-            .id_salt("mixer_channels_scroll")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let n = self.project.tracks.len();
-                    for ti in 0..n {
-                        if self.project.tracks[ti].kind != TrackKind::Audio {
-                            continue;
+        let show_sidebar = self.mixer_ui.sidebar_open && ui.available_width() >= 440.0;
+
+        ui.horizontal_top(|ui| {
+            if show_sidebar {
+                ui.vertical(|ui| {
+                    ui.set_width(168.0);
+                    ui.label(
+                        egui::RichText::new(tr(lang, "Visibilidade"))
+                            .small()
+                            .strong(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for f in MixerChannelFilter::ALL {
+                            if ui
+                                .selectable_label(
+                                    self.mixer_ui.channel_filter == f,
+                                    egui::RichText::new(f.label_in(lang)).small(),
+                                )
+                                .clicked()
+                            {
+                                self.mixer_ui.channel_filter = f;
+                            }
                         }
-                        let tid = self.project.tracks[ti].id;
-                        let lv = self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]);
-                        let mut changed = false;
-                        let mut checkpoint_needed = false;
-                        let mut pending_toggle_mute = false;
-                        let mut pending_toggle_solo = false;
-                        let mut pending_output = self.project.tracks[ti].output_bus;
-                        let mut vol_reset = false;
-                        let mut pan_reset = false;
-                        let mut toggle_send_bus: Option<Id> = None;
-                        ui.group(|ui| {
-                            ui.set_width(108.0);
-                            ui.vertical(|ui| {
-                                let t_name = self.project.tracks[ti].name.clone();
-                                let t_mute = self.project.tracks[ti].mute;
-                                let t_solo = self.project.tracks[ti].solo;
-                                let send_count = self.project.tracks[ti].sends.len();
-                                ui.label(egui::RichText::new(&t_name).strong().small());
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(t_mute, "M").clicked() {
-                                        checkpoint_needed = true;
-                                        pending_toggle_mute = true;
-                                    }
-                                    if ui.selectable_label(t_solo, "S").clicked() {
-                                        checkpoint_needed = true;
-                                        pending_toggle_solo = true;
-                                    }
-                                    if ui.small_button("FX").clicked() {
-                                        self.open_fx_target(FxTarget::Track(tid));
-                                    }
-                                });
-                                if !bus_choices.is_empty() {
-                                    let sel_lbl = pending_output
-                                        .and_then(|bid| {
-                                            bus_choices
-                                                .iter()
-                                                .find(|(id, _)| *id == bid)
-                                                .map(|(_, nm)| nm.as_str())
-                                        })
-                                        .unwrap_or_else(|| tr(lang, "Master"));
-                                    let before = pending_output;
-                                    egui::ComboBox::from_id_salt(("mix_trk_bus", tid))
-                                        .width(98.0)
-                                        .selected_text(sel_lbl)
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut pending_output,
-                                                None,
-                                                tr(lang, "Master"),
-                                            );
-                                            for (bid, bname) in &bus_choices {
-                                                ui.selectable_value(
-                                                    &mut pending_output,
-                                                    Some(*bid),
-                                                    bname,
-                                                );
-                                            }
-                                        });
-                                    if pending_output != before {
-                                        checkpoint_needed = true;
-                                        changed = true;
-                                    }
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("mixer_sidebar_list")
+                        .max_height(110.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            let mut audio_idx = 0usize;
+                            for t in &self.session.project.tracks {
+                                if t.kind != TrackKind::Audio {
+                                    continue;
                                 }
-                                let mut vol = self.project.tracks[ti].volume_db;
-                                let mut vol_new: Option<f32> = None;
+                                audio_idx += 1;
+                                let mut vis = !self.mixer_ui.hidden_tracks.contains(&t.id);
                                 ui.horizontal(|ui| {
-                                    let r = ui.add(
-                                        egui::Slider::new(&mut vol, -60.0..=12.0)
-                                            .vertical()
-                                            .show_value(false),
+                                    let badge_col =
+                                        Color32::from_rgb(t.color[0], t.color[1], t.color[2]);
+                                    let (br, _) =
+                                        ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                                    ui.painter().rect_filled(br, 2.0, badge_col);
+                                    ui.painter().text(
+                                        br.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        format!("{audio_idx}"),
+                                        egui::FontId::proportional(9.0),
+                                        crate::theme::contrast_on(badge_col),
                                     );
-                                    if r.drag_started() {
-                                        checkpoint_needed = true;
-                                    }
-                                    if r.double_clicked() {
-                                        checkpoint_needed = true;
-                                        vol = 0.0;
-                                        vol_reset = true;
-                                    } else if r.changed() {
-                                        vol_new = Some(vol);
-                                    }
-                                    let (mr, _) =
-                                        ui.allocate_exact_size(vec2(12.0, 96.0), Sense::hover());
-                                    draw_meter(ui.painter(), mr, lv);
-                                });
-                                ui.label(egui::RichText::new(format!("{vol:+.1} dB")).small());
-                                let mut pan = self.project.tracks[ti].pan;
-                                let mut pan_new: Option<f32> = None;
-                                let pan_r = ui
-                                    .add(egui::Slider::new(&mut pan, -1.0..=1.0).show_value(false));
-                                if pan_r.drag_started() {
-                                    checkpoint_needed = true;
-                                }
-                                if pan_r.double_clicked() {
-                                    checkpoint_needed = true;
-                                    pan = 0.0;
-                                    pan_reset = true;
-                                } else if pan_r.changed() {
-                                    pan_new = Some(pan);
-                                }
-                                ui.label(egui::RichText::new(EnvKind::Pan.format(pan)).small());
-                                if !bus_choices.is_empty() {
-                                    let send_lbl = if send_count > 0 {
-                                        let sc_s = send_count.to_string();
-                                        tr_args(lang, "Send ({n})", &[("n", &sc_s)])
-                                    } else {
-                                        tr(lang, "Send").into()
-                                    };
-                                    ui.menu_button(send_lbl, |ui| {
-                                        for (bid, bname) in &bus_choices {
-                                            let active = self.session.project.tracks[ti]
-                                                .sends
-                                                .iter()
-                                                .any(|s| s.bus_id == *bid);
-                                            if ui.selectable_label(active, bname).clicked() {
-                                                toggle_send_bus = Some(*bid);
-                                            }
+                                    if ui.checkbox(&mut vis, &t.name).changed() {
+                                        if vis {
+                                            self.mixer_ui.hidden_tracks.remove(&t.id);
+                                        } else {
+                                            self.mixer_ui.hidden_tracks.insert(t.id);
                                         }
-                                        let sc = self.session.project.tracks[ti].sends.len();
-                                        for si in 0..sc {
-                                            ui.separator();
-                                            let bid =
-                                                self.session.project.tracks[ti].sends[si].bus_id;
-                                            let bn = bus_choices
-                                                .iter()
-                                                .find(|(id, _)| *id == bid)
-                                                .map(|(_, nm)| nm.as_str())
-                                                .unwrap_or_else(|| tr(lang, "Bus"));
-                                            let mut pre =
-                                                self.session.project.tracks[ti].sends[si].pre_fader;
-                                            let mut sdb =
-                                                self.session.project.tracks[ti].sends[si].level_db;
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new(bn).small());
-                                                if ui
-                                                    .toggle_value(&mut pre, tr(lang, "Pré"))
-                                                    .changed()
-                                                {
-                                                    self.checkpoint();
-                                                    self.session.project.tracks[ti].sends[si]
-                                                        .pre_fader = pre;
-                                                    changed = true;
-                                                }
-                                            });
-                                            let sr = ui.add(
-                                                egui::Slider::new(&mut sdb, -60.0..=12.0)
-                                                    .suffix(" dB")
-                                                    .fixed_decimals(1),
-                                            );
-                                            if sr.drag_started() {
-                                                self.checkpoint();
-                                            }
-                                            if sr.changed() {
-                                                self.session.project.tracks[ti].sends[si]
-                                                    .level_db = sdb;
+                                    }
+                                });
+                            }
+                            for b in &self.session.project.audio_buses {
+                                let mut vis = !self.mixer_ui.hidden_buses.contains(&b.id);
+                                if ui.checkbox(&mut vis, &b.name).changed() {
+                                    if vis {
+                                        self.mixer_ui.hidden_buses.remove(&b.id);
+                                    } else {
+                                        self.mixer_ui.hidden_buses.insert(b.id);
+                                    }
+                                }
+                            }
+                            let mut m_vis = !self.mixer_ui.hide_master;
+                            if ui.checkbox(&mut m_vis, tr(lang, "Master")).changed() {
+                                self.mixer_ui.hide_master = !m_vis;
+                            }
+                        });
+                    if (!self.mixer_ui.hidden_tracks.is_empty()
+                        || !self.mixer_ui.hidden_buses.is_empty()
+                        || self.mixer_ui.hide_master
+                        || self.mixer_ui.channel_filter != MixerChannelFilter::All)
+                        && ui.small_button(tr(lang, "Mostrar todos")).clicked()
+                    {
+                        self.mixer_ui.show_all_channels();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new(tr(lang, "Seções")).small().strong());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        ui.toggle_value(&mut self.mixer_ui.show_io, "I/O");
+                        ui.toggle_value(&mut self.mixer_ui.show_sends, tr(lang, "Envios"));
+                        ui.toggle_value(&mut self.mixer_ui.show_automation, tr(lang, "Automação"));
+                        ui.toggle_value(&mut self.mixer_ui.show_pan, "Pan");
+                        ui.toggle_value(&mut self.mixer_ui.show_meters, tr(lang, "Medidores"));
+                        ui.toggle_value(&mut self.mixer_ui.show_faders, tr(lang, "Faders"));
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(tr(lang, "Largura:")).small().weak());
+                        if ui.small_button("-").clicked() {
+                            self.mixer_ui.strip_width =
+                                (self.mixer_ui.strip_width - 12.0).clamp(84.0, 156.0);
+                        }
+                        ui.add_sized(
+                            [68.0, 16.0],
+                            egui::Slider::new(&mut self.mixer_ui.strip_width, 84.0..=156.0)
+                                .show_value(false),
+                        );
+                        if ui.small_button("+").clicked() {
+                            self.mixer_ui.strip_width =
+                                (self.mixer_ui.strip_width + 12.0).clamp(84.0, 156.0);
+                        }
+                    });
+                });
+                ui.separator();
+            }
+
+            let strip_w = self.mixer_ui.clamped_strip_width();
+            let show_io = self.mixer_ui.show_io;
+            let show_sends = self.mixer_ui.show_sends;
+            let show_automation = self.mixer_ui.show_automation;
+            let show_pan = self.mixer_ui.show_pan;
+            let show_meters = self.mixer_ui.show_meters;
+            let show_faders = self.mixer_ui.show_faders;
+            let filter = self.mixer_ui.channel_filter;
+
+            egui::ScrollArea::horizontal()
+                .id_salt("mixer_channels_scroll")
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        let show_tracks = matches!(
+                            filter,
+                            MixerChannelFilter::All | MixerChannelFilter::AudioTracks
+                        );
+                        let show_buses = matches!(
+                            filter,
+                            MixerChannelFilter::All | MixerChannelFilter::AudioBuses
+                        );
+                        let show_master = !self.mixer_ui.hide_master
+                            && matches!(
+                                filter,
+                                MixerChannelFilter::All | MixerChannelFilter::MasterOnly
+                            );
+
+                        if show_tracks {
+                            let n = self.project.tracks.len();
+                            let mut audio_num = 0usize;
+                            for ti in 0..n {
+                                if self.project.tracks[ti].kind != TrackKind::Audio {
+                                    continue;
+                                }
+                                audio_num += 1;
+                                let tid = self.project.tracks[ti].id;
+                                if self.mixer_ui.hidden_tracks.contains(&tid) {
+                                    continue;
+                                }
+                                let lv = self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]);
+                                let pk_db = lin_to_db(lv[0].max(lv[1]));
+                                let mut changed = false;
+                                let mut checkpoint_needed = false;
+                                let mut pending_toggle_mute = false;
+                                let mut pending_toggle_solo = false;
+                                let mut pending_toggle_phase = false;
+                                let mut pending_toggle_rec = false;
+                                let mut pending_output = self.project.tracks[ti].output_bus;
+                                let mut pending_auto = self.project.tracks[ti].automation_mode;
+                                let mut vol_reset = false;
+                                let mut pan_reset = false;
+                                let mut toggle_send_bus: Option<Id> = None;
+                                ui.group(|ui| {
+                                    ui.set_width(strip_w);
+                                    ui.vertical(|ui| {
+                                        let t_name = self.project.tracks[ti].name.clone();
+                                        let t_col = self.project.tracks[ti].color;
+                                        let t_mute = self.project.tracks[ti].mute;
+                                        let t_solo = self.project.tracks[ti].solo;
+                                        let t_phase = self.project.tracks[ti].invert_phase;
+                                        let t_rec = self.project.tracks[ti].record_armed;
+                                        let send_count = self.project.tracks[ti].sends.len();
+                                        // Cabeçalho colorido numerado estilo VEGAS Pro (p. 63)
+                                        let hdr_col = if self.theme.high_contrast {
+                                            self.theme.selection_bg
+                                        } else {
+                                            Color32::from_rgb(t_col[0], t_col[1], t_col[2])
+                                        };
+                                        let hdr_fg = crate::theme::contrast_on(hdr_col);
+                                        let (hdr_r, _) = ui.allocate_exact_size(
+                                            vec2((strip_w - 6.0).max(60.0), 18.0),
+                                            Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(hdr_r, 2.0, hdr_col);
+                                        ui.painter().text(
+                                            pos2(hdr_r.left() + 4.0, hdr_r.center().y),
+                                            egui::Align2::LEFT_CENTER,
+                                            format!("{audio_num}  {t_name}"),
+                                            egui::FontId::proportional(10.5),
+                                            hdr_fg,
+                                        );
+
+                                        if show_io && !bus_choices.is_empty() {
+                                            let sel_lbl = pending_output
+                                                .and_then(|bid| {
+                                                    bus_choices
+                                                        .iter()
+                                                        .find(|(id, _)| *id == bid)
+                                                        .map(|(_, nm)| nm.as_str())
+                                                })
+                                                .unwrap_or_else(|| tr(lang, "Master"));
+                                            let before = pending_output;
+                                            egui::ComboBox::from_id_salt(("mix_trk_bus", tid))
+                                                .width((strip_w - 10.0).max(64.0))
+                                                .selected_text(sel_lbl)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut pending_output,
+                                                        None,
+                                                        tr(lang, "Master"),
+                                                    );
+                                                    for (bid, bname) in &bus_choices {
+                                                        ui.selectable_value(
+                                                            &mut pending_output,
+                                                            Some(*bid),
+                                                            bname,
+                                                        );
+                                                    }
+                                                });
+                                            if pending_output != before {
+                                                checkpoint_needed = true;
                                                 changed = true;
                                             }
                                         }
-                                    });
-                                }
-                                if let Some(v) = vol_new {
-                                    if !checkpoint_needed {
-                                        self.checkpoint();
-                                    }
-                                    self.session.project.tracks[ti].volume_db = v;
-                                    changed = true;
-                                }
-                                if let Some(p) = pan_new {
-                                    if !checkpoint_needed {
-                                        self.checkpoint();
-                                    }
-                                    self.session.project.tracks[ti].pan = p;
-                                    changed = true;
-                                }
-                            });
-                        });
-                        if checkpoint_needed {
-                            self.checkpoint();
-                        }
-                        if pending_toggle_mute {
-                            self.session.project.tracks[ti].mute =
-                                !self.session.project.tracks[ti].mute;
-                            changed = true;
-                        }
-                        if pending_toggle_solo {
-                            self.session.project.tracks[ti].solo =
-                                !self.session.project.tracks[ti].solo;
-                            changed = true;
-                        }
-                        if self.session.project.tracks[ti].output_bus != pending_output {
-                            self.session.project.tracks[ti].output_bus = pending_output;
-                            changed = true;
-                        }
-                        if vol_reset {
-                            self.session.project.tracks[ti].volume_db = 0.0;
-                            changed = true;
-                        }
-                        if pan_reset {
-                            self.session.project.tracks[ti].pan = 0.0;
-                            changed = true;
-                        }
-                        if let Some(bid) = toggle_send_bus {
-                            self.checkpoint();
-                            let sends = &mut self.session.project.tracks[ti].sends;
-                            if sends.iter().any(|s| s.bus_id == bid) {
-                                sends.retain(|s| s.bus_id != bid);
-                            } else {
-                                sends.push(crate::model::AudioSend {
-                                    bus_id: bid,
-                                    level_db: -6.0,
-                                    pre_fader: false,
-                                    mute: false,
-                                });
-                            }
-                            changed = true;
-                        }
-                        if changed {
-                            self.changed();
-                        }
-                    }
 
-                    // Barramentos auxiliares (Bus A .. Bus Z)
-                    let nb = self.project.audio_buses.len();
-                    for bi in 0..nb {
-                        let bid = self.project.audio_buses[bi].id;
-                        let lv = self.meters_hold.get(&bid).cloned().unwrap_or([0.0; 2]);
-                        let valid_targets: Vec<(Id, String)> = bus_choices
-                            .iter()
-                            .filter(|(cand, _)| {
-                                *cand != bid
-                                    && self.session.project.validate_bus_route(bid, Some(*cand))
-                            })
-                            .cloned()
-                            .collect();
-                        let mut changed = false;
-                        let mut checkpoint_needed = false;
-                        let mut toggle_mute = false;
-                        let mut toggle_solo = false;
-                        let mut pending_out = self.session.project.audio_buses[bi].output_bus;
-                        let mut vol_reset = false;
-                        let mut pan_reset = false;
-                        let mut commit_name: Option<String> = None;
-                        ui.group(|ui| {
-                            ui.set_width(108.0);
-                            ui.vertical(|ui| {
-                                let cur_name = self.session.project.audio_buses[bi].name.clone();
-                                let buf_id = egui::Id::new(("mix_bus_name", bid));
-                                let mut draft = ui.data_mut(|d| {
-                                    d.get_temp::<String>(buf_id)
-                                        .unwrap_or_else(|| cur_name.clone())
-                                });
-                                ui.horizontal(|ui| {
-                                    let nr = ui.add(
-                                        egui::TextEdit::singleline(&mut draft)
-                                            .desired_width(76.0)
-                                            .font(egui::TextStyle::Small),
-                                    );
-                                    if nr.has_focus() {
-                                        ui.data_mut(|d| d.insert_temp(buf_id, draft.clone()));
-                                    } else if nr.lost_focus() {
-                                        commit_name = Some(draft.clone());
-                                        ui.data_mut(|d| d.remove::<String>(buf_id));
-                                    } else if draft != cur_name {
-                                        ui.data_mut(|d| d.remove::<String>(buf_id));
-                                    }
-                                    if ui
-                                        .small_button("×")
-                                        .on_hover_text(tr(lang, "Remover barramento"))
-                                        .clicked()
-                                    {
-                                        remove_bus = Some(bid);
-                                    }
-                                });
-                                let b_mute = self.session.project.audio_buses[bi].mute;
-                                let b_solo = self.session.project.audio_buses[bi].solo;
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(b_mute, "M").clicked() {
-                                        checkpoint_needed = true;
-                                        toggle_mute = true;
-                                    }
-                                    if ui.selectable_label(b_solo, "S").clicked() {
-                                        checkpoint_needed = true;
-                                        toggle_solo = true;
-                                    }
-                                    if ui.small_button("FX").clicked() {
-                                        self.open_fx_target(FxTarget::AudioBus(bid));
-                                    }
-                                });
-                                let sel_lbl = pending_out
-                                    .and_then(|out_id| {
-                                        bus_choices
-                                            .iter()
-                                            .find(|(id, _)| *id == out_id)
-                                            .map(|(_, nm)| nm.as_str())
-                                    })
-                                    .unwrap_or_else(|| tr(lang, "Master"));
-                                let before = pending_out;
-                                egui::ComboBox::from_id_salt(("mix_bus_out", bid))
-                                    .width(98.0)
-                                    .selected_text(sel_lbl)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut pending_out,
-                                            None,
-                                            tr(lang, "Master"),
-                                        );
-                                        for (cand, cname) in &valid_targets {
-                                            ui.selectable_value(
-                                                &mut pending_out,
-                                                Some(*cand),
-                                                cname,
+                                        if show_automation {
+                                            let before_a = pending_auto;
+                                            egui::ComboBox::from_id_salt(("mix_trk_auto", tid))
+                                                .width((strip_w - 10.0).max(64.0))
+                                                .selected_text(pending_auto.short_label())
+                                                .show_ui(ui, |ui| {
+                                                    for am in AutomationMode::ALL {
+                                                        ui.selectable_value(
+                                                            &mut pending_auto,
+                                                            am,
+                                                            am.label(),
+                                                        );
+                                                    }
+                                                });
+                                            if pending_auto != before_a {
+                                                checkpoint_needed = true;
+                                                changed = true;
+                                            }
+                                        }
+
+                                        if show_pan {
+                                            let mut pan = self.project.tracks[ti].pan;
+                                            let pan_r = ui.add_sized(
+                                                [(strip_w - 10.0).max(60.0), 16.0],
+                                                egui::Slider::new(&mut pan, -1.0..=1.0)
+                                                    .show_value(false),
+                                            );
+                                            if pan_r.drag_started() {
+                                                checkpoint_needed = true;
+                                            }
+                                            if pan_r.double_clicked() {
+                                                checkpoint_needed = true;
+                                                pan = 0.0;
+                                                pan_reset = true;
+                                            } else if pan_r.changed() {
+                                                self.session.project.tracks[ti].pan = pan;
+                                                changed = true;
+                                            }
+                                            ui.label(
+                                                egui::RichText::new(EnvKind::Pan.format(pan))
+                                                    .small()
+                                                    .monospace()
+                                                    .color(self.theme.text_muted),
                                             );
                                         }
-                                    });
-                                if pending_out != before {
-                                    checkpoint_needed = true;
-                                    changed = true;
-                                }
-                                let mut vol = self.session.project.audio_buses[bi].volume_db;
-                                ui.horizontal(|ui| {
-                                    let r = ui.add(
-                                        egui::Slider::new(&mut vol, -60.0..=12.0)
-                                            .vertical()
-                                            .show_value(false),
-                                    );
-                                    if r.drag_started() {
-                                        checkpoint_needed = true;
-                                    }
-                                    if r.double_clicked() {
-                                        checkpoint_needed = true;
-                                        vol = 0.0;
-                                        vol_reset = true;
-                                    }
-                                    if r.changed() {
-                                        self.session.project.audio_buses[bi].volume_db = vol;
-                                        changed = true;
-                                    }
-                                    let (mr, _) =
-                                        ui.allocate_exact_size(vec2(12.0, 96.0), Sense::hover());
-                                    draw_meter(ui.painter(), mr, lv);
-                                });
-                                ui.label(egui::RichText::new(format!("{vol:+.1} dB")).small());
-                                let mut pan = self.session.project.audio_buses[bi].pan;
-                                let pan_r = ui
-                                    .add(egui::Slider::new(&mut pan, -1.0..=1.0).show_value(false));
-                                if pan_r.drag_started() {
-                                    checkpoint_needed = true;
-                                }
-                                if pan_r.double_clicked() {
-                                    checkpoint_needed = true;
-                                    pan = 0.0;
-                                    pan_reset = true;
-                                }
-                                if pan_r.changed() {
-                                    self.session.project.audio_buses[bi].pan = pan;
-                                    changed = true;
-                                }
-                                ui.label(egui::RichText::new(EnvKind::Pan.format(pan)).small());
-                            });
-                        });
-                        if let Some(new_name) = commit_name {
-                            self.session.rename_audio_bus(bid, new_name);
-                        }
-                        if checkpoint_needed {
-                            self.checkpoint();
-                        }
-                        if toggle_mute {
-                            self.session.project.audio_buses[bi].mute =
-                                !self.session.project.audio_buses[bi].mute;
-                            changed = true;
-                        }
-                        if toggle_solo {
-                            self.session.project.audio_buses[bi].solo =
-                                !self.session.project.audio_buses[bi].solo;
-                            changed = true;
-                        }
-                        if self.session.project.audio_buses[bi].output_bus != pending_out {
-                            self.session.project.audio_buses[bi].output_bus = pending_out;
-                            changed = true;
-                        }
-                        if vol_reset {
-                            self.session.project.audio_buses[bi].volume_db = 0.0;
-                            changed = true;
-                        }
-                        if pan_reset {
-                            self.session.project.audio_buses[bi].pan = 0.0;
-                            changed = true;
-                        }
-                        if changed {
-                            self.changed();
-                        }
-                    }
 
-                    // master
-                    ui.group(|ui| {
-                        ui.set_width(114.0);
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Master").strong());
-                            self.master_bus_controls(ui, false);
-                        });
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            if ui.selectable_label(t_mute, "M").clicked() {
+                                                checkpoint_needed = true;
+                                                pending_toggle_mute = true;
+                                            }
+                                            if ui.selectable_label(t_solo, "S").clicked() {
+                                                checkpoint_needed = true;
+                                                pending_toggle_solo = true;
+                                            }
+                                            if ui.small_button("FX").clicked() {
+                                                self.open_fx_target(FxTarget::Track(tid));
+                                            }
+                                            if ui
+                                                .selectable_label(t_phase, "Ø")
+                                                .on_hover_text(tr(lang, "Inverter fase (180°)"))
+                                                .clicked()
+                                            {
+                                                checkpoint_needed = true;
+                                                pending_toggle_phase = true;
+                                            }
+                                            if ui
+                                                .selectable_label(t_rec, "Rec")
+                                                .on_hover_text(tr(
+                                                    lang,
+                                                    "Armar trilha para gravação (Rec)",
+                                                ))
+                                                .clicked()
+                                            {
+                                                checkpoint_needed = true;
+                                                pending_toggle_rec = true;
+                                            }
+                                        });
+
+                                        if show_meters {
+                                            let pk_txt = if !pk_db.is_finite() || pk_db < -100.0 {
+                                                "-inf".to_string()
+                                            } else {
+                                                format!("{pk_db:+.1}")
+                                            };
+                                            let pk_resp = ui
+                                                .label(
+                                                    egui::RichText::new(pk_txt)
+                                                        .monospace()
+                                                        .small()
+                                                        .color(if pk_db > -0.1 {
+                                                            self.theme.offline_fg
+                                                        } else {
+                                                            self.theme.text_muted
+                                                        }),
+                                                )
+                                                .interact(Sense::click())
+                                                .on_hover_text(tr(
+                                                    lang,
+                                                    "Clique para zerar os picos retidos",
+                                                ));
+                                            if pk_resp.clicked() {
+                                                self.meters_hold.insert(tid, [0.0; 2]);
+                                            }
+                                        }
+
+                                        let mut vol = self.project.tracks[ti].volume_db;
+                                        let mut vol_new: Option<f32> = None;
+                                        if show_faders || show_meters {
+                                            ui.horizontal(|ui| {
+                                                if show_faders {
+                                                    let r = ui.add_sized(
+                                                        [22.0, 102.0],
+                                                        egui::Slider::new(&mut vol, -60.0..=12.0)
+                                                            .vertical()
+                                                            .show_value(false),
+                                                    );
+                                                    if r.drag_started() {
+                                                        checkpoint_needed = true;
+                                                    }
+                                                    if r.double_clicked() {
+                                                        checkpoint_needed = true;
+                                                        vol = 0.0;
+                                                        vol_reset = true;
+                                                    } else if r.changed() {
+                                                        vol_new = Some(vol);
+                                                    }
+                                                }
+                                                if show_meters {
+                                                    let (mr, _) = ui.allocate_exact_size(
+                                                        vec2(14.0, 102.0),
+                                                        Sense::hover(),
+                                                    );
+                                                    draw_meter(ui.painter(), mr, lv);
+                                                }
+                                            });
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!("{vol:+.1} dB"))
+                                                .small()
+                                                .monospace(),
+                                        );
+
+                                        if show_sends && !bus_choices.is_empty() {
+                                            let send_lbl = if send_count > 0 {
+                                                let sc_s = send_count.to_string();
+                                                tr_args(lang, "Send ({n})", &[("n", &sc_s)])
+                                            } else {
+                                                tr(lang, "Send").into()
+                                            };
+                                            ui.menu_button(send_lbl, |ui| {
+                                                for (bid, bname) in &bus_choices {
+                                                    let active = self.session.project.tracks[ti]
+                                                        .sends
+                                                        .iter()
+                                                        .any(|s| s.bus_id == *bid);
+                                                    if ui.selectable_label(active, bname).clicked()
+                                                    {
+                                                        toggle_send_bus = Some(*bid);
+                                                    }
+                                                }
+                                                let sc =
+                                                    self.session.project.tracks[ti].sends.len();
+                                                for si in 0..sc {
+                                                    ui.separator();
+                                                    let bid = self.session.project.tracks[ti].sends
+                                                        [si]
+                                                        .bus_id;
+                                                    let bn = bus_choices
+                                                        .iter()
+                                                        .find(|(id, _)| *id == bid)
+                                                        .map(|(_, nm)| nm.as_str())
+                                                        .unwrap_or_else(|| tr(lang, "Bus"));
+                                                    let mut pre = self.session.project.tracks[ti]
+                                                        .sends[si]
+                                                        .pre_fader;
+                                                    let mut sdb = self.session.project.tracks[ti]
+                                                        .sends[si]
+                                                        .level_db;
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new(bn).small());
+                                                        if ui
+                                                            .toggle_value(&mut pre, tr(lang, "Pré"))
+                                                            .changed()
+                                                        {
+                                                            self.checkpoint();
+                                                            self.session.project.tracks[ti].sends
+                                                                [si]
+                                                                .pre_fader = pre;
+                                                            changed = true;
+                                                        }
+                                                    });
+                                                    let sr = ui.add(
+                                                        egui::Slider::new(&mut sdb, -60.0..=12.0)
+                                                            .suffix(" dB")
+                                                            .fixed_decimals(1),
+                                                    );
+                                                    if sr.drag_started() {
+                                                        self.checkpoint();
+                                                    }
+                                                    if sr.changed() {
+                                                        self.session.project.tracks[ti].sends[si]
+                                                            .level_db = sdb;
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        if let Some(v) = vol_new {
+                                            if !checkpoint_needed {
+                                                self.checkpoint();
+                                            }
+                                            self.session.project.tracks[ti].volume_db = v;
+                                            changed = true;
+                                        }
+                                    });
+                                });
+                                if checkpoint_needed {
+                                    self.checkpoint();
+                                }
+                                if pending_toggle_mute {
+                                    self.session.project.tracks[ti].mute =
+                                        !self.session.project.tracks[ti].mute;
+                                    changed = true;
+                                }
+                                if pending_toggle_solo {
+                                    self.session.project.tracks[ti].solo =
+                                        !self.session.project.tracks[ti].solo;
+                                    changed = true;
+                                }
+                                if pending_toggle_phase {
+                                    self.session.project.tracks[ti].invert_phase =
+                                        !self.session.project.tracks[ti].invert_phase;
+                                    changed = true;
+                                }
+                                if pending_toggle_rec {
+                                    self.session.project.tracks[ti].record_armed =
+                                        !self.session.project.tracks[ti].record_armed;
+                                    changed = true;
+                                }
+                                if self.session.project.tracks[ti].output_bus != pending_output {
+                                    self.session.project.tracks[ti].output_bus = pending_output;
+                                    changed = true;
+                                }
+                                if self.session.project.tracks[ti].automation_mode != pending_auto {
+                                    self.session.project.tracks[ti].automation_mode = pending_auto;
+                                    changed = true;
+                                }
+                                if vol_reset {
+                                    self.session.project.tracks[ti].volume_db = 0.0;
+                                    changed = true;
+                                }
+                                if pan_reset {
+                                    self.session.project.tracks[ti].pan = 0.0;
+                                    changed = true;
+                                }
+                                if let Some(bid) = toggle_send_bus {
+                                    self.checkpoint();
+                                    let sends = &mut self.session.project.tracks[ti].sends;
+                                    if sends.iter().any(|s| s.bus_id == bid) {
+                                        sends.retain(|s| s.bus_id != bid);
+                                    } else {
+                                        sends.push(crate::model::AudioSend {
+                                            bus_id: bid,
+                                            level_db: -6.0,
+                                            pre_fader: false,
+                                            mute: false,
+                                        });
+                                    }
+                                    changed = true;
+                                }
+                                if changed {
+                                    self.changed();
+                                }
+                            }
+                        }
+
+                        // Barramentos auxiliares (Bus A .. Bus Z)
+                        if show_buses {
+                            let nb = self.project.audio_buses.len();
+                            for bi in 0..nb {
+                                let bid = self.project.audio_buses[bi].id;
+                                if self.mixer_ui.hidden_buses.contains(&bid) {
+                                    continue;
+                                }
+                                let lv = self.meters_hold.get(&bid).cloned().unwrap_or([0.0; 2]);
+                                let pk_db = lin_to_db(lv[0].max(lv[1]));
+                                let valid_targets: Vec<(Id, String)> = bus_choices
+                                    .iter()
+                                    .filter(|(cand, _)| {
+                                        *cand != bid
+                                            && self
+                                                .session
+                                                .project
+                                                .validate_bus_route(bid, Some(*cand))
+                                    })
+                                    .cloned()
+                                    .collect();
+                                let mut changed = false;
+                                let mut checkpoint_needed = false;
+                                let mut toggle_mute = false;
+                                let mut toggle_solo = false;
+                                let mut toggle_phase = false;
+                                let mut pending_out =
+                                    self.session.project.audio_buses[bi].output_bus;
+                                let mut pending_auto =
+                                    self.session.project.audio_buses[bi].automation_mode;
+                                let mut vol_reset = false;
+                                let mut pan_reset = false;
+                                let mut commit_name: Option<String> = None;
+                                ui.group(|ui| {
+                                    ui.set_width(strip_w);
+                                    ui.vertical(|ui| {
+                                        let cur_name =
+                                            self.session.project.audio_buses[bi].name.clone();
+                                        let buf_id = egui::Id::new(("mix_bus_name", bid));
+                                        let mut draft = ui.data_mut(|d| {
+                                            d.get_temp::<String>(buf_id)
+                                                .unwrap_or_else(|| cur_name.clone())
+                                        });
+                                        ui.horizontal(|ui| {
+                                            let nr = ui.add(
+                                                egui::TextEdit::singleline(&mut draft)
+                                                    .desired_width((strip_w - 34.0).max(52.0))
+                                                    .font(egui::TextStyle::Small),
+                                            );
+                                            if nr.has_focus() {
+                                                ui.data_mut(|d| {
+                                                    d.insert_temp(buf_id, draft.clone())
+                                                });
+                                            } else if nr.lost_focus() {
+                                                commit_name = Some(draft.clone());
+                                                ui.data_mut(|d| d.remove::<String>(buf_id));
+                                            } else if draft != cur_name {
+                                                ui.data_mut(|d| d.remove::<String>(buf_id));
+                                            }
+                                            if ui
+                                                .small_button("×")
+                                                .on_hover_text(tr(lang, "Remover barramento"))
+                                                .clicked()
+                                            {
+                                                remove_bus = Some(bid);
+                                            }
+                                        });
+                                        if show_io {
+                                            let sel_lbl = pending_out
+                                                .and_then(|out_id| {
+                                                    bus_choices
+                                                        .iter()
+                                                        .find(|(id, _)| *id == out_id)
+                                                        .map(|(_, nm)| nm.as_str())
+                                                })
+                                                .unwrap_or_else(|| tr(lang, "Master"));
+                                            let before = pending_out;
+                                            egui::ComboBox::from_id_salt(("mix_bus_out", bid))
+                                                .width((strip_w - 10.0).max(64.0))
+                                                .selected_text(sel_lbl)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut pending_out,
+                                                        None,
+                                                        tr(lang, "Master"),
+                                                    );
+                                                    for (cand, cname) in &valid_targets {
+                                                        ui.selectable_value(
+                                                            &mut pending_out,
+                                                            Some(*cand),
+                                                            cname,
+                                                        );
+                                                    }
+                                                });
+                                            if pending_out != before {
+                                                checkpoint_needed = true;
+                                                changed = true;
+                                            }
+                                        }
+                                        if show_automation {
+                                            let before_a = pending_auto;
+                                            egui::ComboBox::from_id_salt(("mix_bus_auto", bid))
+                                                .width((strip_w - 10.0).max(64.0))
+                                                .selected_text(pending_auto.short_label())
+                                                .show_ui(ui, |ui| {
+                                                    for am in AutomationMode::ALL {
+                                                        ui.selectable_value(
+                                                            &mut pending_auto,
+                                                            am,
+                                                            am.label(),
+                                                        );
+                                                    }
+                                                });
+                                            if pending_auto != before_a {
+                                                checkpoint_needed = true;
+                                                changed = true;
+                                            }
+                                        }
+                                        if show_pan {
+                                            let mut pan = self.session.project.audio_buses[bi].pan;
+                                            let pan_r = ui.add_sized(
+                                                [(strip_w - 10.0).max(60.0), 16.0],
+                                                egui::Slider::new(&mut pan, -1.0..=1.0)
+                                                    .show_value(false),
+                                            );
+                                            if pan_r.drag_started() {
+                                                checkpoint_needed = true;
+                                            }
+                                            if pan_r.double_clicked() {
+                                                checkpoint_needed = true;
+                                                pan = 0.0;
+                                                pan_reset = true;
+                                            }
+                                            if pan_r.changed() {
+                                                self.session.project.audio_buses[bi].pan = pan;
+                                                changed = true;
+                                            }
+                                            ui.label(
+                                                egui::RichText::new(EnvKind::Pan.format(pan))
+                                                    .small()
+                                                    .monospace()
+                                                    .color(self.theme.text_muted),
+                                            );
+                                        }
+                                        let b_mute = self.session.project.audio_buses[bi].mute;
+                                        let b_solo = self.session.project.audio_buses[bi].solo;
+                                        let b_phase =
+                                            self.session.project.audio_buses[bi].invert_phase;
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            if ui.selectable_label(b_mute, "M").clicked() {
+                                                checkpoint_needed = true;
+                                                toggle_mute = true;
+                                            }
+                                            if ui.selectable_label(b_solo, "S").clicked() {
+                                                checkpoint_needed = true;
+                                                toggle_solo = true;
+                                            }
+                                            if ui.small_button("FX").clicked() {
+                                                self.open_fx_target(FxTarget::AudioBus(bid));
+                                            }
+                                            if ui
+                                                .selectable_label(b_phase, "Ø")
+                                                .on_hover_text(tr(lang, "Inverter fase (180°)"))
+                                                .clicked()
+                                            {
+                                                checkpoint_needed = true;
+                                                toggle_phase = true;
+                                            }
+                                        });
+                                        if show_meters {
+                                            let pk_txt = if !pk_db.is_finite() || pk_db < -100.0 {
+                                                "-inf".to_string()
+                                            } else {
+                                                format!("{pk_db:+.1}")
+                                            };
+                                            let pk_resp = ui
+                                                .label(
+                                                    egui::RichText::new(pk_txt)
+                                                        .monospace()
+                                                        .small()
+                                                        .color(if pk_db > -0.1 {
+                                                            self.theme.offline_fg
+                                                        } else {
+                                                            self.theme.text_muted
+                                                        }),
+                                                )
+                                                .interact(Sense::click())
+                                                .on_hover_text(tr(
+                                                    lang,
+                                                    "Clique para zerar os picos retidos",
+                                                ));
+                                            if pk_resp.clicked() {
+                                                self.meters_hold.insert(bid, [0.0; 2]);
+                                            }
+                                        }
+                                        let mut vol =
+                                            self.session.project.audio_buses[bi].volume_db;
+                                        if show_faders || show_meters {
+                                            ui.horizontal(|ui| {
+                                                if show_faders {
+                                                    let r = ui.add_sized(
+                                                        [22.0, 102.0],
+                                                        egui::Slider::new(&mut vol, -60.0..=12.0)
+                                                            .vertical()
+                                                            .show_value(false),
+                                                    );
+                                                    if r.drag_started() {
+                                                        checkpoint_needed = true;
+                                                    }
+                                                    if r.double_clicked() {
+                                                        checkpoint_needed = true;
+                                                        vol = 0.0;
+                                                        vol_reset = true;
+                                                    }
+                                                    if r.changed() {
+                                                        self.session.project.audio_buses[bi]
+                                                            .volume_db = vol;
+                                                        changed = true;
+                                                    }
+                                                }
+                                                if show_meters {
+                                                    let (mr, _) = ui.allocate_exact_size(
+                                                        vec2(14.0, 102.0),
+                                                        Sense::hover(),
+                                                    );
+                                                    draw_meter(ui.painter(), mr, lv);
+                                                }
+                                            });
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!("{vol:+.1} dB"))
+                                                .small()
+                                                .monospace(),
+                                        );
+                                    });
+                                });
+                                if let Some(new_name) = commit_name {
+                                    self.session.rename_audio_bus(bid, new_name);
+                                }
+                                if checkpoint_needed {
+                                    self.checkpoint();
+                                }
+                                if toggle_mute {
+                                    self.session.project.audio_buses[bi].mute =
+                                        !self.session.project.audio_buses[bi].mute;
+                                    changed = true;
+                                }
+                                if toggle_solo {
+                                    self.session.project.audio_buses[bi].solo =
+                                        !self.session.project.audio_buses[bi].solo;
+                                    changed = true;
+                                }
+                                if toggle_phase {
+                                    self.session.project.audio_buses[bi].invert_phase =
+                                        !self.session.project.audio_buses[bi].invert_phase;
+                                    changed = true;
+                                }
+                                if self.session.project.audio_buses[bi].output_bus != pending_out {
+                                    self.session.project.audio_buses[bi].output_bus = pending_out;
+                                    changed = true;
+                                }
+                                if self.session.project.audio_buses[bi].automation_mode
+                                    != pending_auto
+                                {
+                                    self.session.project.audio_buses[bi].automation_mode =
+                                        pending_auto;
+                                    changed = true;
+                                }
+                                if vol_reset {
+                                    self.session.project.audio_buses[bi].volume_db = 0.0;
+                                    changed = true;
+                                }
+                                if pan_reset {
+                                    self.session.project.audio_buses[bi].pan = 0.0;
+                                    changed = true;
+                                }
+                                if changed {
+                                    self.changed();
+                                }
+                            }
+                        }
+
+                        // Master Bus no Console
+                        if show_master {
+                            ui.group(|ui| {
+                                ui.set_width(strip_w.max(114.0));
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(tr(lang, "Master")).strong());
+                                    self.master_bus_controls(ui, false);
+                                });
+                            });
+                        }
                     });
                 });
-            });
+        });
 
         if let Some(bid) = remove_bus {
             self.session.remove_audio_bus(bid);
@@ -2780,54 +3413,111 @@ impl App {
             }
         };
 
-        let draw_vert_bar =
-            |ui: &mut egui::Ui, label: &str, val: f64, min_db: f64, max_db: f64, ref_db: f64| {
-                ui.vertical(|ui| {
-                    ui.set_width(38.0);
-                    let (rect, _) = ui.allocate_exact_size(vec2(26.0, 108.0), Sense::hover());
-                    let p = ui.painter_at(rect);
-                    p.rect_filled(rect, 2.0, self.theme.extreme_bg);
-                    p.rect_stroke(
-                        rect,
-                        2.0,
-                        Stroke::new(1.0_f32, self.theme.border),
-                        StrokeKind::Inside,
-                    );
-                    let norm = |v: f64| -> f32 {
-                        if !v.is_finite() {
-                            0.0
-                        } else {
-                            ((v - min_db) / (max_db - min_db).max(1.0)).clamp(0.0, 1.0) as f32
-                        }
-                    };
-                    let fill_n = norm(val);
-                    if fill_n > 0.0 {
-                        let fill_h = (rect.height() - 2.0) * fill_n;
-                        let fr = Rect::from_min_max(
-                            pos2(rect.left() + 2.0, rect.bottom() - 1.0 - fill_h),
-                            pos2(rect.right() - 2.0, rect.bottom() - 1.0),
-                        );
-                        p.rect_filled(fr, 1.0, meter_col(val, ref_db));
+        let draw_vert_bar = |ui: &mut egui::Ui,
+                             label: &str,
+                             val: f64,
+                             min_db: f64,
+                             max_db: f64,
+                             ref_db: f64,
+                             ticks: &[i32],
+                             is_tp: bool| {
+            ui.vertical(|ui| {
+                ui.set_width(40.0);
+                let top_txt = if !val.is_finite() {
+                    "-inf".to_string()
+                } else {
+                    format!("{val:.1}")
+                };
+                ui.label(
+                    egui::RichText::new(top_txt)
+                        .monospace()
+                        .small()
+                        .color(meter_col(val, ref_db)),
+                );
+                let (rect, _) = ui.allocate_exact_size(vec2(30.0, 128.0), Sense::hover());
+                let p = ui.painter_at(rect);
+                p.rect_filled(rect, 2.0, self.theme.extreme_bg);
+                p.rect_stroke(
+                    rect,
+                    2.0,
+                    Stroke::new(1.0_f32, self.theme.border),
+                    StrokeKind::Inside,
+                );
+                let norm = |v: f64| -> f32 {
+                    if !v.is_finite() {
+                        0.0
+                    } else {
+                        ((v - min_db) / (max_db - min_db).max(1.0)).clamp(0.0, 1.0) as f32
                     }
-                    let ref_y = rect.bottom() - 1.0 - (rect.height() - 2.0) * norm(ref_db);
-                    p.line_segment(
-                        [pos2(rect.left(), ref_y), pos2(rect.right(), ref_y)],
-                        Stroke::new(1.5_f32, self.theme.text_primary),
+                };
+                let fill_n = norm(val);
+                if fill_n > 0.0 {
+                    let fill_h = (rect.height() - 2.0) * fill_n;
+                    let fr = Rect::from_min_max(
+                        pos2(rect.left() + 2.0, rect.bottom() - 1.0 - fill_h),
+                        pos2(rect.right() - 2.0, rect.bottom() - 1.0),
                     );
-                    ui.label(egui::RichText::new(label).strong().small());
-                });
+                    let bar_col = if self.theme.high_contrast {
+                        meter_col(val, ref_db)
+                    } else if is_tp {
+                        if val > ref_db {
+                            self.theme.offline_fg
+                        } else if val > ref_db - 3.0 {
+                            Color32::from_rgb(235, 210, 45)
+                        } else {
+                            Color32::from_rgb(45, 210, 75)
+                        }
+                    } else if val > ref_db + 0.5 {
+                        Color32::from_rgb(205, 90, 240)
+                    } else {
+                        Color32::from_rgb(45, 215, 235)
+                    };
+                    p.rect_filled(fr, 1.0, bar_col);
+                }
+                let ref_y = rect.bottom() - 1.0 - (rect.height() - 2.0) * norm(ref_db);
+                p.line_segment(
+                    [pos2(rect.left(), ref_y), pos2(rect.right(), ref_y)],
+                    Stroke::new(1.5_f32, self.theme.text_primary),
+                );
+                let tick_font = egui::FontId::monospace(8.0);
+                let tick_col = if self.theme.high_contrast {
+                    self.theme.text_primary
+                } else {
+                    Color32::from_white_alpha(200)
+                };
+                for &tk in ticks {
+                    let y = rect.bottom() - 1.0 - (rect.height() - 2.0) * norm(f64::from(tk));
+                    if y >= rect.top() + 5.0 && y <= rect.bottom() - 5.0 {
+                        p.text(
+                            pos2(rect.right() - 3.0, y),
+                            egui::Align2::RIGHT_CENTER,
+                            format!("{tk}"),
+                            tick_font.clone(),
+                            tick_col,
+                        );
+                    }
+                }
+                ui.label(egui::RichText::new(label).strong().small());
+            });
+        };
+
+        let draw_led = |ui: &mut egui::Ui, over: bool, active: bool| {
+            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            let col = if over {
+                self.theme.offline_fg
+            } else if active {
+                Color32::from_rgb(65, 200, 95)
+            } else {
+                self.theme.border
             };
+            ui.painter().circle_filled(r.center(), 4.5, col);
+        };
 
         egui::ScrollArea::vertical()
             .id_salt("loudness_tab_scroll")
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    draw_vert_bar(ui, "M", snap.momentary_lufs, -50.0, 0.0, target_lufs);
-                    draw_vert_bar(ui, "S", snap.short_term_lufs, -50.0, 0.0, target_lufs);
-                    draw_vert_bar(ui, "I", snap.integrated_lufs, -50.0, 0.0, target_lufs);
-                    draw_vert_bar(ui, "TP L", snap.true_peak_dbtp[0], -50.0, 3.0, max_tp);
-                    draw_vert_bar(ui, "TP R", snap.true_peak_dbtp[1], -50.0, 3.0, max_tp);
-                    ui.add_space(8.0);
+                    // Coluna esquerda numérica + LEDs de conformidade (VEGAS Pro 21, p. 64)
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new(tr(lang, "Tempo real (Master)"))
@@ -2835,20 +3525,22 @@ impl App {
                                 .small(),
                         );
                         egui::Grid::new("loudness_live_grid")
-                            .num_columns(2)
-                            .spacing([12.0, 4.0])
+                            .num_columns(3)
+                            .spacing([8.0, 4.0])
                             .show(ui, |ui| {
                                 ui.label(tr(lang, "Momentâneo (M):"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(snap.momentary_lufs))
                                         .monospace(),
                                 );
+                                ui.label("");
                                 ui.end_row();
                                 ui.label(tr(lang, "Curto prazo (S):"));
                                 ui.label(
                                     egui::RichText::new(format_lufs(snap.short_term_lufs))
                                         .monospace(),
                                 );
+                                ui.label("");
                                 ui.end_row();
                                 ui.label(tr(lang, "Integrado (I):"));
                                 let int_col = meter_col(snap.integrated_lufs, target_lufs);
@@ -2857,6 +3549,12 @@ impl App {
                                         .monospace()
                                         .strong()
                                         .color(int_col),
+                                );
+                                draw_led(
+                                    ui,
+                                    snap.integrated_lufs.is_finite()
+                                        && snap.integrated_lufs > target_lufs + 0.5,
+                                    snap.integrated_lufs.is_finite(),
                                 );
                                 ui.end_row();
                                 ui.label(tr(lang, "LRA:"));
@@ -2867,6 +3565,7 @@ impl App {
                                     ))
                                     .monospace(),
                                 );
+                                ui.label("");
                                 ui.end_row();
                                 ui.label(tr(lang, "True Peak (L / R):"));
                                 let tp_max = snap.true_peak_dbtp[0].max(snap.true_peak_dbtp[1]);
@@ -2879,6 +3578,11 @@ impl App {
                                     .monospace()
                                     .color(meter_col(tp_max, max_tp)),
                                 );
+                                draw_led(
+                                    ui,
+                                    tp_max.is_finite() && tp_max > max_tp,
+                                    tp_max.is_finite(),
+                                );
                                 ui.end_row();
                                 ui.label(tr(lang, "RMS (L / R):"));
                                 ui.label(
@@ -2889,6 +3593,7 @@ impl App {
                                     ))
                                     .monospace(),
                                 );
+                                ui.label("");
                                 ui.end_row();
                                 if snap.integrated_lufs.is_finite() {
                                     let delta = snap.integrated_lufs - target_lufs;
@@ -2898,10 +3603,76 @@ impl App {
                                             .monospace()
                                             .color(meter_col(snap.integrated_lufs, target_lufs)),
                                     );
+                                    ui.label("");
                                     ui.end_row();
                                 }
                             });
                     });
+                    ui.add_space(10.0);
+                    // Banco de 6 barras verticais graduadas (M, S, I, LRA, TP L, TP R — p. 64)
+                    let lu_ticks = [-42, -36, -30, -23, -18, -12, -6];
+                    let lra_ticks = [0, 5, 10, 15, 20];
+                    let tp_ticks = [-48, -36, -24, -12, -6, -3, 0];
+                    draw_vert_bar(
+                        ui,
+                        "M",
+                        snap.momentary_lufs,
+                        -50.0,
+                        0.0,
+                        target_lufs,
+                        &lu_ticks,
+                        false,
+                    );
+                    draw_vert_bar(
+                        ui,
+                        "S",
+                        snap.short_term_lufs,
+                        -50.0,
+                        0.0,
+                        target_lufs,
+                        &lu_ticks,
+                        false,
+                    );
+                    draw_vert_bar(
+                        ui,
+                        "I",
+                        snap.integrated_lufs,
+                        -50.0,
+                        0.0,
+                        target_lufs,
+                        &lu_ticks,
+                        false,
+                    );
+                    draw_vert_bar(
+                        ui,
+                        "LRA",
+                        snap.loudness_range_lu,
+                        0.0,
+                        25.0,
+                        12.0,
+                        &lra_ticks,
+                        false,
+                    );
+                    draw_vert_bar(
+                        ui,
+                        "TP L",
+                        snap.true_peak_dbtp[0],
+                        -57.0,
+                        3.0,
+                        max_tp,
+                        &tp_ticks,
+                        true,
+                    );
+                    draw_vert_bar(
+                        ui,
+                        "TP R",
+                        snap.true_peak_dbtp[1],
+                        -57.0,
+                        3.0,
+                        max_tp,
+                        &tp_ticks,
+                        true,
+                    );
                 });
 
                 if let Some(rep) = &self.loudness_report {
@@ -3198,6 +3969,25 @@ mod safe_guide_tests {
             preview_footer_scaled_flags((1920, 1080), (960, 540), (640, 360)),
             (true, true)
         );
+    }
+
+    #[test]
+    fn mixer_console_state_saneia_largura_e_restaura_canais() {
+        let mut st = MixerConsoleState {
+            strip_width: f32::NAN,
+            hide_master: true,
+            channel_filter: MixerChannelFilter::AudioBuses,
+            ..Default::default()
+        };
+        st.hidden_tracks.insert(42);
+        st.hidden_buses.insert(99);
+        assert_eq!(st.clamped_strip_width(), 112.0);
+        st.strip_width = 999.0;
+        assert_eq!(st.clamped_strip_width(), 156.0);
+        st.show_all_channels();
+        assert!(st.hidden_tracks.is_empty() && st.hidden_buses.is_empty());
+        assert!(!st.hide_master);
+        assert_eq!(st.channel_filter, MixerChannelFilter::All);
     }
 
     #[test]
