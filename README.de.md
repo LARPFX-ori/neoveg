@@ -6,7 +6,9 @@ Nichtlinearer Videoeditor (NLE) in **reinem Rust**, mit nativer mehrsprachiger B
 
 ## Neoveg ausprobiert? Erzählen Sie, wie es lief
 
-Wenn Sie Neoveg installiert oder verwendet haben, füllen Sie bitte das **[Feedback-Formular für Neoveg-Tester](https://docs.google.com/forms/d/e/1FAIpQLSfal0jWd9rdw7ph_Zm9_ZsTrZiThVsuzjlGMjL9v37Bdq9asQ/viewform)** aus. Die Antworten helfen bei der Entscheidung, was zuerst behoben und weiterentwickelt wird. Fehlerberichte mit Schritten zur Reproduktion können ebenfalls in den *Issues* des Repositorys eingereicht werden.
+Wenn Sie Neoveg installiert oder verwendet haben, füllen Sie bitte das **[Feedback-Formular für Neoveg-Tester](https://docs.google.com/forms/d/e/1FAIpQLSf3El0zy7Tc-5EKrlebeuC3KN6BATtO9KnJyTr6F5PzwAn_BQ/viewform)** aus. Die Antworten helfen bei der Entscheidung, was zuerst behoben und weiterentwickelt wird. Fehlerberichte mit Schritten zur Reproduktion können ebenfalls in den *Issues* des Repositorys eingereicht werden.
+
+Weitere Sprachen: [Português (BR)](https://docs.google.com/forms/d/e/1FAIpQLScyRCZRUxQ48eokch70fh8RRVbK2zXDYoDH9zeRM06bm7OyjA/viewform) | [English](https://docs.google.com/forms/d/e/1FAIpQLScsDpUJgDH_hfs2KsD5iO-TcgOLnCiZQvpi2jMNGabmddLCUA/viewform) | [Español](https://docs.google.com/forms/d/e/1FAIpQLSdpY1-si_e8qwGT9Q3eOkcn9LvvqxQaY1S_HsXk5wJewJi6bw/viewform) | [Français](https://docs.google.com/forms/d/e/1FAIpQLSdXkSbZPAGymZRSHzz1gRUAaw-kc9IjmlFVU7pFQCYtLvv-7w/viewform) | [日本語](https://docs.google.com/forms/d/e/1FAIpQLSdW8rLZc9LrAnchxxNdaXQgfW57kqqrI00fQ0grnuRtRfrdDA/viewform)
 
 ## Screenshots
 

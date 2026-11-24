@@ -6,7 +6,9 @@
 
 ## Neoveg を試しましたか？感想をお聞かせください
 
-Neoveg をインストールまたは使用された方は、ぜひ **[Neoveg テスター向けフィードバックフォーム](https://docs.google.com/forms/d/e/1FAIpQLSfal0jWd9rdw7ph_Zm9_ZsTrZiThVsuzjlGMjL9v37Bdq9asQ/viewform)** にご回答ください。いただいたご意見は、今後の修正や優先開発項目の決定に役立てられます。再現手順を添えた不具合報告は、リポジトリの *Issues* でも受け付けています。
+Neoveg をインストールまたは使用された方は、ぜひ **[Neoveg テスター向けフィードバックフォーム](https://docs.google.com/forms/d/e/1FAIpQLSdW8rLZc9LrAnchxxNdaXQgfW57kqqrI00fQ0grnuRtRfrdDA/viewform)** にご回答ください。いただいたご意見は、今後の修正や優先開発項目の決定に役立てられます。再現手順を添えた不具合報告は、リポジトリの *Issues* でも受け付けています。
+
+他の言語: [Português (BR)](https://docs.google.com/forms/d/e/1FAIpQLScyRCZRUxQ48eokch70fh8RRVbK2zXDYoDH9zeRM06bm7OyjA/viewform) | [English](https://docs.google.com/forms/d/e/1FAIpQLScsDpUJgDH_hfs2KsD5iO-TcgOLnCiZQvpi2jMNGabmddLCUA/viewform) | [Español](https://docs.google.com/forms/d/e/1FAIpQLSdpY1-si_e8qwGT9Q3eOkcn9LvvqxQaY1S_HsXk5wJewJi6bw/viewform) | [Français](https://docs.google.com/forms/d/e/1FAIpQLSdXkSbZPAGymZRSHzz1gRUAaw-kc9IjmlFVU7pFQCYtLvv-7w/viewform) | [Deutsch](https://docs.google.com/forms/d/e/1FAIpQLSf3El0zy7Tc-5EKrlebeuC3KN6BATtO9KnJyTr6F5PzwAn_BQ/viewform)
 
 ## スクリーンショット
 

@@ -6,7 +6,9 @@ Logiciel de montage vidéo non linéaire (NLE) écrit en **Rust pur**, doté d'u
 
 ## Vous avez testé Neoveg ? Racontez-nous votre expérience
 
-Si vous avez installé ou utilisé Neoveg, remplissez le **[formulaire de retour pour les testeurs de Neoveg](https://docs.google.com/forms/d/e/1FAIpQLSfal0jWd9rdw7ph_Zm9_ZsTrZiThVsuzjlGMjL9v37Bdq9asQ/viewform)**. Vos réponses aident à décider quoi corriger et prioriser en premier. Les bugs accompagnés d'étapes de reproduction peuvent également être signalés dans les *Issues* du dépôt.
+Si vous avez installé ou utilisé Neoveg, remplissez le **[formulaire de retour pour les testeurs de Neoveg](https://docs.google.com/forms/d/e/1FAIpQLSdXkSbZPAGymZRSHzz1gRUAaw-kc9IjmlFVU7pFQCYtLvv-7w/viewform)**. Vos réponses aident à décider quoi corriger et prioriser en premier. Les bugs accompagnés d'étapes de reproduction peuvent également être signalés dans les *Issues* du dépôt.
+
+Autres langues : [Português (BR)](https://docs.google.com/forms/d/e/1FAIpQLScyRCZRUxQ48eokch70fh8RRVbK2zXDYoDH9zeRM06bm7OyjA/viewform) | [English](https://docs.google.com/forms/d/e/1FAIpQLScsDpUJgDH_hfs2KsD5iO-TcgOLnCiZQvpi2jMNGabmddLCUA/viewform) | [Español](https://docs.google.com/forms/d/e/1FAIpQLSdpY1-si_e8qwGT9Q3eOkcn9LvvqxQaY1S_HsXk5wJewJi6bw/viewform) | [Deutsch](https://docs.google.com/forms/d/e/1FAIpQLSf3El0zy7Tc-5EKrlebeuC3KN6BATtO9KnJyTr6F5PzwAn_BQ/viewform) | [日本語](https://docs.google.com/forms/d/e/1FAIpQLSdW8rLZc9LrAnchxxNdaXQgfW57kqqrI00fQ0grnuRtRfrdDA/viewform)
 
 ## Captures d'écran
 
