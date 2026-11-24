@@ -75,9 +75,9 @@ Este documento acompanha os marcos técnicos do **Neoveg**, editor de vídeo nã
     - **OFX:** renderização por tiles (`OfxImageEffectPropSupportsTiles = 1`, `compute_render_tiles`), contexto *General* com múltiplas entradas auxiliares conectadas (`aux_srcs`, passando a composição das trilhas abaixo como entrada `Background`), e **geradores de mídia OFX** (`OfxImageEffectContextGenerator`, `GenSpec::Ofx`, categoria *Terceiros* em *Geradores de Mídia* com arrastar/inserir e edição de parâmetros);
     - **VST3:** **automação de parâmetros em tempo real com precisão de amostra** (`Vst3ParamValue.keys`, `Vst3ParamPoint`, filas multi-ponto `IParameterChanges`/`IParamValueQueue` amostradas por bloco no mixer + keyframes na UI), **editor gráfico nativo do plug-in (`IPlugView`/`IPlugFrame`)** em janela Win32 isolada (`--plugin-host edit-vst3`, sincronizando parâmetros editados e `IComponent::getState`), e **instrumentos VST3 com MIDI** (`IEventList` com `kNoteOnEvent`/`kNoteOffEvent`, ativação de barramento `kEvent`, parser SMF `.mid`/`.midi` em sala limpa em `midi.rs` com fuzzing e prévia polifônica de fallback).
 
-## Paridade de UI/UX com o manual do VEGAS Pro 21
+## Paridade de UI/UX com os manuais do VEGAS Pro
 
-Levantamento feito capítulo por capítulo no manual do usuário do VEGAS Pro 21 e conferido no código do `main`. As páginas são as do manual. Cada item entrou pela interface do Neoveg, com nomes e desenho próprios (`AGENTS.md` §1 e §2). Todos os itens abaixo estão implementados.
+Levantamento feito capítulo por capítulo nos manuais do usuário do VEGAS Pro e conferido no código do `main`. As páginas são as do manual. Cada item entrou pela interface do Neoveg, com nomes e desenho próprios (`AGENTS.md` §1 e §2). Todos os itens abaixo estão implementados.
 
 ### Mídia do Projeto
 
