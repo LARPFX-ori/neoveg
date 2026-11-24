@@ -3149,3 +3149,76 @@ fn kittest_paridade_explorer_midia_plugins_e_escopos() {
         crate::panels::ScopeViewLayout::All
     );
 }
+
+/// Paridade do Color Grading (barra lateral de categorias, rodas com anel cromático e
+/// redefinição por roda) e histórico do Trimmer no formato `Arquivo [Diretório]`.
+#[test]
+fn kittest_paridade_color_grading_e_trimmer_historico() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.color_grading");
+    harness.run_steps(2);
+    harness.get_by_label("Ativar Color Grading").click();
+    harness.run_steps(2);
+
+    // Barra lateral de categorias e todas as seções visíveis em "Tudo"
+    assert!(harness.query_by_label("Tudo").is_some());
+    assert!(harness.query_by_label("Rodas de Cor").is_some());
+    assert!(harness.query_by_label("LUTs").is_some());
+    assert!(harness.query_by_label("Curvas").is_some());
+    assert!(harness.query_by_label("HSL").is_some());
+    assert!(harness
+        .query_by_label("LUT de Câmera / Look (.cube)")
+        .is_some());
+    assert!(harness.query_by_label("Curvas RGB").is_some());
+
+    // Filtrar apenas LUTs oculta Curvas RGB e mantém LUTs
+    harness.get_by_label("LUTs").click();
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("LUT de Câmera / Look (.cube)")
+        .is_some());
+    assert!(harness.query_by_label("Curvas RGB").is_none());
+
+    // Voltar para Tudo restaura todas as seções
+    harness.get_by_label("Tudo").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Curvas RGB").is_some());
+    assert!(harness.query_by_label("Curvas HSL (6 setores)").is_some());
+
+    // Trimmer exibe histórico no formato `Arquivo [Diretório]`
+    {
+        let st = harness.state_mut();
+        let mid = crate::model::new_id();
+        st.project.media.push(crate::model::MediaItem {
+            id: mid,
+            name: "take01.mp4".into(),
+            source: crate::model::MediaSource::File {
+                path: "/projetos/cena01/take01.mp4".into(),
+            },
+            duration: Some(crate::model::Ticks::from_secs_i64(8)),
+            has_video: true,
+            has_audio: true,
+            width: 1280,
+            height: 720,
+            fps: Some(crate::model::FrameRate::FPS_25),
+            info: String::new(),
+            proxy_path: None,
+        });
+        st.open_in_trimmer(mid);
+    }
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.trimmer");
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("take01.mp4 [/projetos/cena01]")
+            .is_some(),
+        "histórico do Trimmer deve exibir nome e diretório entre colchetes"
+    );
+}
