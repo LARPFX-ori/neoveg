@@ -2108,13 +2108,52 @@ impl App {
         );
 
         let box_r = r.shrink2(vec2(5.0, 4.0));
-        painter.rect_filled(box_r, 2.0, self.theme.extreme_bg);
-        painter.rect_stroke(
-            box_r,
-            2.0,
-            Stroke::new(1.0_f32, self.theme.border),
-            StrokeKind::Inside,
-        );
+        let layout_type = self.prefs.edit_layout.layout_type;
+        let corner =
+            if self.theme.high_contrast || layout_type == neoveg_common::LayoutType::SonicFoundry {
+                0.0
+            } else {
+                2.0
+            };
+        painter.rect_filled(box_r, corner, self.theme.extreme_bg);
+        if !self.theme.high_contrast && layout_type == neoveg_common::LayoutType::SonicFoundry {
+            // Moldura rebaixada 3D clássica do Visor de Tempo (Vegas 1.0)
+            painter.hline(
+                box_r.left()..=box_r.right(),
+                box_r.top() + 0.5,
+                Stroke::new(1.5_f32, self.theme.border),
+            );
+            painter.vline(
+                box_r.left() + 0.5,
+                box_r.top()..=box_r.bottom(),
+                Stroke::new(1.5_f32, self.theme.border),
+            );
+            painter.hline(
+                box_r.left()..=box_r.right(),
+                box_r.bottom() - 0.5,
+                Stroke::new(1.0_f32, Color32::from_white_alpha(210)),
+            );
+            painter.vline(
+                box_r.right() - 0.5,
+                box_r.top()..=box_r.bottom(),
+                Stroke::new(1.0_f32, Color32::from_white_alpha(210)),
+            );
+        } else {
+            painter.rect_stroke(
+                box_r,
+                corner,
+                Stroke::new(1.0_f32, self.theme.border),
+                StrokeKind::Inside,
+            );
+            if !self.theme.high_contrast && layout_type == neoveg_common::LayoutType::Moderno {
+                // Friso vertical de destaque discreto (visual renovado v23+)
+                let stripe = Rect::from_min_max(
+                    pos2(box_r.left() + 1.0, box_r.top() + 2.0),
+                    pos2(box_r.left() + 3.5, box_r.bottom() - 2.0),
+                );
+                painter.rect_filled(stripe, 1.0, self.theme.accent);
+            }
+        }
 
         let lang = self.lang();
         painter.text(

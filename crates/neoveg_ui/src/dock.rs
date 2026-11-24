@@ -854,6 +854,7 @@ impl NeovegTileBehavior<'_> {
                             && dragging_media.is_some()
                             && ui.rect_contains_pointer(r);
                         if ui.is_rect_visible(r) {
+                            let layout_type = self.app.prefs.edit_layout.layout_type;
                             let bg = if trimmer_drop_hover {
                                 th.accent.gamma_multiply(0.32)
                             } else if active {
@@ -864,6 +865,10 @@ impl NeovegTileBehavior<'_> {
                                 }
                             } else if resp.hovered() {
                                 th.widget_hover_bg
+                            } else if !th.high_contrast
+                                && layout_type == neoveg_common::LayoutType::SonicFoundry
+                            {
+                                th.widget_bg
                             } else {
                                 Color32::TRANSPARENT
                             };
@@ -878,24 +883,113 @@ impl NeovegTileBehavior<'_> {
                                     StrokeKind::Inside,
                                 );
                             }
-                            if active {
-                                let bar_col = if th.high_contrast {
-                                    th.accent
-                                } else {
-                                    th.text_primary
-                                };
-                                ui.painter().hline(
-                                    r.left()..=r.right(),
-                                    r.top() + 1.0,
-                                    Stroke::new(2.0_f32, bar_col),
-                                );
-                                if th.high_contrast {
+                            if th.high_contrast {
+                                if active {
+                                    ui.painter().hline(
+                                        r.left()..=r.right(),
+                                        r.top() + 1.0,
+                                        Stroke::new(2.0_f32, th.accent),
+                                    );
                                     ui.painter().rect_stroke(
                                         r,
                                         0.0,
                                         Stroke::new(1.5_f32, th.border),
                                         StrokeKind::Inside,
                                     );
+                                }
+                            } else {
+                                match layout_type {
+                                    neoveg_common::LayoutType::SonicFoundry => {
+                                        // Vegas 1.0 clássico: abas chanfradas 3D ligadas ao conteúdo acima
+                                        let light = Color32::from_white_alpha(200);
+                                        let dark = th.border;
+                                        let tab_r = if active {
+                                            r
+                                        } else {
+                                            Rect::from_min_max(
+                                                pos2(r.left(), r.top() + 2.0),
+                                                r.max,
+                                            )
+                                        };
+                                        ui.painter().vline(
+                                            tab_r.left() + 0.5,
+                                            tab_r.top()..=tab_r.bottom(),
+                                            Stroke::new(1.0_f32, light),
+                                        );
+                                        ui.painter().hline(
+                                            tab_r.left()..=tab_r.right(),
+                                            tab_r.bottom() - 0.5,
+                                            Stroke::new(1.0_f32, dark),
+                                        );
+                                        ui.painter().vline(
+                                            tab_r.right() - 0.5,
+                                            tab_r.top()..=tab_r.bottom(),
+                                            Stroke::new(1.0_f32, dark),
+                                        );
+                                        if !active {
+                                            ui.painter().hline(
+                                                tab_r.left()..=tab_r.right(),
+                                                tab_r.top() + 0.5,
+                                                Stroke::new(1.0_f32, dark),
+                                            );
+                                        }
+                                    }
+                                    neoveg_common::LayoutType::Sony => {
+                                        // Sony Vegas Pro 8–13: moldura metálica discreta na aba ativa e divisores verticais
+                                        if active {
+                                            ui.painter().vline(
+                                                r.left() + 0.5,
+                                                r.top()..=r.bottom(),
+                                                Stroke::new(1.0_f32, th.border),
+                                            );
+                                            ui.painter().vline(
+                                                r.right() - 0.5,
+                                                r.top()..=r.bottom(),
+                                                Stroke::new(1.0_f32, th.border),
+                                            );
+                                            ui.painter().hline(
+                                                r.left()..=r.right(),
+                                                r.bottom() - 0.5,
+                                                Stroke::new(1.5_f32, th.border),
+                                            );
+                                        } else {
+                                            ui.painter().vline(
+                                                r.right() - 0.5,
+                                                (r.top() + 3.0)..=(r.bottom() - 3.0),
+                                                Stroke::new(1.0_f32, th.border.gamma_multiply(0.65)),
+                                            );
+                                        }
+                                    }
+                                    neoveg_common::LayoutType::Magix => {
+                                        // VEGAS Pro 14–22: aba ativa plana com linha clara no topo
+                                        if active {
+                                            ui.painter().hline(
+                                                r.left()..=r.right(),
+                                                r.top() + 1.0,
+                                                Stroke::new(2.0_f32, th.text_primary),
+                                            );
+                                            ui.painter().vline(
+                                                r.left() + 0.5,
+                                                r.top()..=r.bottom(),
+                                                Stroke::new(1.0_f32, th.border.gamma_multiply(0.7)),
+                                            );
+                                            ui.painter().vline(
+                                                r.right() - 0.5,
+                                                r.top()..=r.bottom(),
+                                                Stroke::new(1.0_f32, th.border.gamma_multiply(0.7)),
+                                            );
+                                        }
+                                    }
+                                    neoveg_common::LayoutType::Moderno => {
+                                        // VEGAS Pro 23+: visual plano moderno com barra de destaque inferior
+                                        if active {
+                                            ui.painter().hline(
+                                                (r.left() + 2.0)..=(r.right() - 2.0),
+                                                r.bottom() - 1.0,
+                                                Stroke::new(2.0_f32, th.accent),
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             let ir = Rect::from_min_size(

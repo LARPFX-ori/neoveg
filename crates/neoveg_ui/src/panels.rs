@@ -891,9 +891,9 @@ impl App {
                     // p. 201-202), na ordem da barra principal: Gravar, Loop,
                     // Reproduzir do início, Reproduzir, Pausar, Parar, Início,
                     // Fim e quadros; estreita, fica só o essencial
-                    let full = ui.available_width() >= 300.0;
+                    let full = ui.available_width() >= 316.0;
                     let pad_x =
-                        ((ui.available_width() - if full { 290.0 } else { 116.0 }) * 0.5).max(0.0);
+                        ((ui.available_width() - if full { 314.0 } else { 116.0 }) * 0.5).max(0.0);
                     ui.add_space(pad_x);
                     if full {
                         self.cmd_tool_toggle(
@@ -920,6 +920,17 @@ impl App {
                         self.cmd_tool_btn(ui, Icon::GoEnd, None, "transport.project_end");
                         self.cmd_tool_btn(ui, Icon::PrevFrame, None, "transport.frame_back");
                         self.cmd_tool_btn(ui, Icon::NextFrame, None, "transport.frame_fwd");
+                        let ram_busy =
+                            self.ram_preview_job.is_some() || !self.ram_preview.frames.is_empty();
+                        if icons::small_icon_button(ui, Icon::RamCache, None, ram_busy, &self.theme)
+                            .on_hover_text(tr(
+                                lang,
+                                "Prévia dinâmica em RAM na seleção de tempo (Shift+B)",
+                            ))
+                            .clicked()
+                        {
+                            self.start_ram_preview();
+                        }
                     }
                 },
             );
@@ -935,11 +946,21 @@ impl App {
             (img_rect.width().round() as u32).max(1),
             (img_rect.height().round() as u32).max(1),
         );
+        let (prev_scaled, disp_scaled) =
+            preview_footer_scaled_flags((s.width, s.height), (pw, ph), (dw, dh));
         let frame_no = s.fps.ticks_to_frame_round(self.view_time());
-        let (info_rect, _) =
+        let (info_rect, info_resp) =
             ui.allocate_exact_size(vec2(avail.width().max(80.0), info_h), Sense::hover());
         let ip = ui.painter_at(info_rect);
         let fg = self.theme.text_muted;
+        // Aviso visual do VEGAS Pro (v9–v23, manual p. 51 / p. 197):
+        // destaca a linha de Exibição em vermelho quando há redimensionamento
+        // em relação à resolução do projeto ou da prévia.
+        let disp_fg = if disp_scaled || prev_scaled {
+            self.theme.offline_fg
+        } else {
+            fg
+        };
         let w_s = s.width.to_string();
         let h_s = s.height.to_string();
         let pw_s = pw.to_string();
@@ -948,57 +969,136 @@ impl App {
         let dh_s = dh.to_string();
         let frame_s = frame_no.to_string();
         let fps_s = s.fps.label_in(lang);
+        let is_moderno = self.prefs.edit_layout.layout_type == neoveg_common::LayoutType::Moderno;
         if two_line_info {
             let y1 = info_rect.top() + 1.0;
             let y2 = y1 + line_h + 2.0;
-            ip.text(
-                pos2(info_rect.left() + 2.0, y1),
-                egui::Align2::LEFT_TOP,
-                tr_args(
-                    lang,
-                    "Projeto: {w}x{h}; {fps}p",
-                    &[("w", &w_s), ("h", &h_s), ("fps", &fps_s)],
-                ),
-                font.clone(),
-                fg,
-            );
-            ip.text(
-                pos2(info_rect.left() + 2.0, y2),
-                egui::Align2::LEFT_TOP,
-                tr_args(
-                    lang,
-                    "Prévia: {w}x{h}; {fps}p",
-                    &[("w", &pw_s), ("h", &ph_s), ("fps", &fps_s)],
-                ),
-                font.clone(),
-                fg,
-            );
-            ip.text(
-                pos2(info_rect.right() - 2.0, y1),
-                egui::Align2::RIGHT_TOP,
-                tr_args(lang, "Quadro: {n}", &[("n", &frame_s)]),
-                font.clone(),
-                fg,
-            );
             // fps realmente exibido durante a reprodução (manual, p. 197)
-            let shown = match self.display_fps.fps().filter(|_| self.is_playing()) {
-                Some(fps) => {
-                    let fps_s = format!("{fps:.2}").replace('.', ",");
+            let shown_fps = self.display_fps.fps().filter(|_| self.is_playing());
+            if is_moderno {
+                // Visual renovado (v23+): rodapé compacto com mini-ícones por métrica
+                let ico_sz = 10.5_f32;
+                let ico_y1 = y1 + (line_h - ico_sz) * 0.5;
+                let ico_y2 = y2 + (line_h - ico_sz) * 0.5;
+                let lx = info_rect.left() + 2.0;
+                icons::paint(
+                    &ip,
+                    Rect::from_min_size(pos2(lx, ico_y1), vec2(ico_sz, ico_sz)),
+                    Icon::GearProps,
+                    &self.theme,
+                    false,
+                );
+                ip.text(
+                    pos2(lx + ico_sz + 4.0, y1),
+                    egui::Align2::LEFT_TOP,
+                    format!("{w_s}×{h_s}; {fps_s}p"),
+                    font.clone(),
+                    fg,
+                );
+                icons::paint(
+                    &ip,
+                    Rect::from_min_size(pos2(lx, ico_y2), vec2(ico_sz, ico_sz)),
+                    Icon::VideoTrack,
+                    &self.theme,
+                    false,
+                );
+                ip.text(
+                    pos2(lx + ico_sz + 4.0, y2),
+                    egui::Align2::LEFT_TOP,
+                    format!("{pw_s}×{ph_s}; {fps_s}p"),
+                    font.clone(),
+                    fg,
+                );
+
+                let right_disp = match shown_fps {
+                    Some(fps) => {
+                        let fps_cur = format!("{fps:.2}").replace('.', ",");
+                        format!("{dw_s}×{dh_s}; {fps_cur} qps")
+                    }
+                    None => format!("{dw_s}×{dh_s}"),
+                };
+                let frame_g = ip.layout_no_wrap(frame_s.clone(), font.clone(), fg);
+                let disp_g = ip.layout_no_wrap(right_disp, font, disp_fg);
+                let rx_frame_txt = info_rect.right() - 2.0 - frame_g.size().x;
+                icons::paint(
+                    &ip,
+                    Rect::from_min_size(
+                        pos2(
+                            (rx_frame_txt - ico_sz - 4.0).max(info_rect.center().x),
+                            ico_y1,
+                        ),
+                        vec2(ico_sz, ico_sz),
+                    ),
+                    Icon::GeneratorFrame,
+                    &self.theme,
+                    false,
+                );
+                ip.galley(pos2(rx_frame_txt, y1), frame_g, fg);
+
+                let rx_disp_txt = info_rect.right() - 2.0 - disp_g.size().x;
+                icons::paint(
+                    &ip,
+                    Rect::from_min_size(
+                        pos2(
+                            (rx_disp_txt - ico_sz - 4.0).max(info_rect.center().x),
+                            ico_y2,
+                        ),
+                        vec2(ico_sz, ico_sz),
+                    ),
+                    Icon::ExternalMonitor,
+                    &self.theme,
+                    disp_scaled || prev_scaled,
+                );
+                ip.galley(pos2(rx_disp_txt, y2), disp_g, disp_fg);
+            } else {
+                ip.text(
+                    pos2(info_rect.left() + 2.0, y1),
+                    egui::Align2::LEFT_TOP,
                     tr_args(
                         lang,
-                        "Exibição: {w}x{h}; {fps} qps",
-                        &[("w", &dw_s), ("h", &dh_s), ("fps", &fps_s)],
-                    )
-                }
-                None => tr_args(lang, "Exibição: {w}x{h}", &[("w", &dw_s), ("h", &dh_s)]),
-            };
-            ip.text(
-                pos2(info_rect.right() - 2.0, y2),
-                egui::Align2::RIGHT_TOP,
-                shown,
-                font,
-                fg,
-            );
+                        "Projeto: {w}x{h}; {fps}p",
+                        &[("w", &w_s), ("h", &h_s), ("fps", &fps_s)],
+                    ),
+                    font.clone(),
+                    fg,
+                );
+                ip.text(
+                    pos2(info_rect.left() + 2.0, y2),
+                    egui::Align2::LEFT_TOP,
+                    tr_args(
+                        lang,
+                        "Prévia: {w}x{h}; {fps}p",
+                        &[("w", &pw_s), ("h", &ph_s), ("fps", &fps_s)],
+                    ),
+                    font.clone(),
+                    fg,
+                );
+                ip.text(
+                    pos2(info_rect.right() - 2.0, y1),
+                    egui::Align2::RIGHT_TOP,
+                    tr_args(lang, "Quadro: {n}", &[("n", &frame_s)]),
+                    font.clone(),
+                    fg,
+                );
+                let shown = match shown_fps {
+                    Some(fps) => {
+                        let fps_cur = format!("{fps:.2}").replace('.', ",");
+                        tr_args(
+                            lang,
+                            "Exibição: {w}x{h}; {fps} qps",
+                            &[("w", &dw_s), ("h", &dh_s), ("fps", &fps_cur)],
+                        )
+                    }
+                    None => tr_args(lang, "Exibição: {w}x{h}", &[("w", &dw_s), ("h", &dh_s)]),
+                };
+                ip.text(
+                    pos2(info_rect.right() - 2.0, y2),
+                    egui::Align2::RIGHT_TOP,
+                    shown,
+                    font,
+                    disp_fg,
+                );
+            }
         } else {
             ip.text(
                 pos2(info_rect.left() + 2.0, info_rect.center().y),
@@ -1017,6 +1117,12 @@ impl App {
                 font,
                 fg,
             );
+        }
+        if disp_scaled || prev_scaled {
+            info_resp.on_hover_text(tr(
+                lang,
+                "Exibição destacada: a resolução da prévia ou do monitor está redimensionada em relação ao projeto",
+            ));
         }
     }
 
@@ -3042,6 +3148,19 @@ impl App {
     }
 }
 
+/// Indica se a prévia está redimensionada em relação ao projeto (`prev_scaled`)
+/// ou se o tamanho de exibição no monitor diverge da prévia (`disp_scaled`).
+/// Usado pelo rodapé da Prévia de Vídeo para aplicar o destaque visual do VEGAS Pro.
+pub(crate) fn preview_footer_scaled_flags(
+    proj: (u32, u32),
+    prev: (u32, u32),
+    disp: (u32, u32),
+) -> (bool, bool) {
+    let prev_scaled = prev.0 != proj.0 || prev.1 != proj.1;
+    let disp_scaled = disp.0 != prev.0 || disp.1 != prev.1;
+    (prev_scaled, disp_scaled)
+}
+
 /// Maior retângulo de proporção `aspect` (largura/altura) centrado em `r`.
 /// `None` para proporção ou retângulo inválidos (§0.4).
 fn centered_aspect_rect(r: Rect, aspect: f32) -> Option<Rect> {
@@ -3060,6 +3179,26 @@ fn centered_aspect_rect(r: Rect, aspect: f32) -> Option<Rect> {
 #[cfg(test)]
 mod safe_guide_tests {
     use super::*;
+
+    #[test]
+    fn preview_footer_scaled_flags_detecta_redimensionamento() {
+        assert_eq!(
+            preview_footer_scaled_flags((1920, 1080), (1920, 1080), (1920, 1080)),
+            (false, false)
+        );
+        assert_eq!(
+            preview_footer_scaled_flags((1920, 1080), (960, 540), (960, 540)),
+            (true, false)
+        );
+        assert_eq!(
+            preview_footer_scaled_flags((1920, 1080), (1920, 1080), (640, 360)),
+            (false, true)
+        );
+        assert_eq!(
+            preview_footer_scaled_flags((1920, 1080), (960, 540), (640, 360)),
+            (true, true)
+        );
+    }
 
     #[test]
     fn recorte_central_cabe_no_quadro_e_recusa_entrada_invalida() {

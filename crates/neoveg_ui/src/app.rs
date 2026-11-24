@@ -4554,6 +4554,7 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         ui.horizontal(|ui| {
+            let dur_str = self.fmt_time(self.project.duration());
             if self.status_at.elapsed().as_secs() < 20 && !self.status.is_empty() {
                 ui.label(&self.status);
             } else {
@@ -4562,8 +4563,14 @@ impl App {
                         .small()
                         .color(self.theme.text_muted),
                 );
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(tr_args(lang, "Concluído: {dur}", &[("dur", &dur_str)]))
+                        .small()
+                        .monospace()
+                        .color(self.theme.text_muted),
+                );
             }
-            let dur_str = self.fmt_time(self.project.duration());
             let wide = ui.available_width() >= 680.0;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let s = &self.project.settings;
@@ -4583,10 +4590,31 @@ impl App {
                 let h_s = s.height.to_string();
                 let fps_s = s.fps.label_in(lang);
                 let ms_s = format!("{:.0}", self.preview_ms);
+                let (ram_used_mb, ram_cap_mb) =
+                    format_ram_budget_mb(self.ram_preview.bytes_used, self.prefs.ram_preview_mb);
+                if wide {
+                    let used_s = ram_used_mb.to_string();
+                    let cap_s = ram_cap_mb.to_string();
+                    ui.label(
+                        egui::RichText::new(tr_args(
+                            lang,
+                            "RAM: {used}/{cap} MB",
+                            &[("used", &used_s), ("cap", &cap_s)],
+                        ))
+                        .small()
+                        .monospace()
+                        .color(self.theme.text_muted),
+                    )
+                    .on_hover_text(tr(
+                        lang,
+                        "Cache de Prévia em RAM usado / limite configurado",
+                    ));
+                    ui.separator();
+                }
                 let info_text = if wide {
                     tr_args(
                         lang,
-                        "{ch} | {sr} Hz | {w}x{h} {fps} | prévia {ms} ms | Duração: {dur} | {file}",
+                        "{ch} | {sr} Hz | {w}x{h} {fps} | prévia {ms} ms | {file}",
                         &[
                             ("ch", &ch_label),
                             ("sr", &sr_s),
@@ -4594,7 +4622,6 @@ impl App {
                             ("h", &h_s),
                             ("fps", &fps_s),
                             ("ms", &ms_s),
-                            ("dur", &dur_str),
                             ("file", &file_name),
                         ],
                     )
@@ -6145,5 +6172,24 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::Backslash => Key::Backslash,
         ShortcutKey::Equals => Key::Equals,
         ShortcutKey::Minus => Key::Minus,
+    }
+}
+
+/// Converte o uso atual do cache de Prévia em RAM (`used_bytes`) e o orçamento
+/// configurado (`budget_mb`) em megabytes arredondados com aritmética saturada (§0.4).
+pub(crate) fn format_ram_budget_mb(used_bytes: usize, budget_mb: u32) -> (u32, u32) {
+    let used_mb = (used_bytes / (1024 * 1024)).min(u32::MAX as usize) as u32;
+    (used_mb, budget_mb)
+}
+
+#[cfg(test)]
+mod status_bar_tests {
+    use super::*;
+
+    #[test]
+    fn format_ram_budget_mb_arredonda_com_seguranca() {
+        assert_eq!(format_ram_budget_mb(0, 256), (0, 256));
+        assert_eq!(format_ram_budget_mb(50 * 1024 * 1024, 512), (50, 512));
+        assert_eq!(format_ram_budget_mb(usize::MAX, 1024).1, 1024);
     }
 }
