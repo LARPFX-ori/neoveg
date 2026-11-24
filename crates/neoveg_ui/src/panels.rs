@@ -1010,20 +1010,7 @@ impl App {
             DockTab::Trimmer => self.trimmer_tab(ui),
             DockTab::EditDetails => self.edit_details_tab(ui),
             DockTab::Scopes => self.scopes_tab(ui),
-            DockTab::Notes => {
-                let lang = self.lang();
-                ui.label(tr(lang, "Notas do projeto:"));
-                if ui
-                    .add(
-                        egui::TextEdit::multiline(&mut self.project.notes)
-                            .desired_rows(12)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .changed()
-                {
-                    self.dirty = true;
-                }
-            }
+            DockTab::Notes => self.project_notes_tab(ui),
             DockTab::Encoder => self.encoder_tab(ui),
             DockTab::Transcript => self.transcript_tab(ui),
         }
@@ -1158,6 +1145,30 @@ impl App {
                             .clicked()
                         {
                             self.start_ram_preview();
+                        }
+                        let sp_tip = if self.prefs.spacebar_play_pause {
+                            tr(
+                                lang,
+                                "Barra de espaço: Reproduzir/Pausar (clique para alternar para Reproduzir/Parar)",
+                            )
+                        } else {
+                            tr(
+                                lang,
+                                "Barra de espaço: Reproduzir/Parar retornando ao cursor (clique para alternar para Reproduzir/Pausar)",
+                            )
+                        };
+                        if icons::small_icon_button(
+                            ui,
+                            Icon::SpacebarMode,
+                            None,
+                            !self.prefs.spacebar_play_pause,
+                            &self.theme,
+                        )
+                        .on_hover_text(sp_tip)
+                        .clicked()
+                        {
+                            self.prefs.spacebar_play_pause = !self.prefs.spacebar_play_pause;
+                            let _ = self.prefs.save();
                         }
                     }
                 },

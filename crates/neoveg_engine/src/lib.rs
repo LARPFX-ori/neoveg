@@ -20,6 +20,8 @@ pub mod aaf;
 #[forbid(unsafe_code)]
 mod aaf_metadict;
 #[forbid(unsafe_code)]
+pub mod archive;
+#[forbid(unsafe_code)]
 pub mod color;
 #[forbid(unsafe_code)]
 pub mod commands;
@@ -63,6 +65,8 @@ pub mod render;
 pub mod scopes;
 #[forbid(unsafe_code)]
 pub mod session;
+#[forbid(unsafe_code)]
+pub mod slideshow;
 #[forbid(unsafe_code)]
 pub mod speech;
 #[forbid(unsafe_code)]

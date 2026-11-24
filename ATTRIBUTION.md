@@ -62,10 +62,10 @@ Para preservar a densidade visual e legibilidade do VEGAS Pro sem copiar ou redi
 
 ## Ícones vetoriais nativos (`crates/neoveg_ui/src/icons.rs`)
 
-- **Recurso:** 107 ícones coloridos de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
+- **Recurso:** 146 ícones coloridos/adaptáveis de UI (`enum Icon`) desenhados programaticamente via `egui::Painter`
 - **Autor / Origem:** `original work` (contribuidores do projeto Neoveg, criados do zero em código Rust sem cópia ou traçado de terceiros)
 - **Licença:** `MIT OR Apache-2.0`
-- **Observações:** Nenhuma imagem ou SVG foi importada de bancos com licença restritiva/não-SPDX; os ícones se adaptam automaticamente aos 7 temas de cor (incluindo Alto Contraste WCAG AAA).
+- **Observações:** Nenhuma imagem ou SVG foi importada de bancos com licença restritiva/não-SPDX; os ícones suportam estilos por geração (*Automático*, *Colorido*, *Moderno*, *Clássico* e *Monocromático*), saturação configurável e adaptação automática aos 11 temas de cor (incluindo os 2 temas de Alto Contraste WCAG AAA).
 
 ## Arte vetorial da Tela de abertura / Splash Screen (`crates/neoveg_ui/src/splash.rs`)
 

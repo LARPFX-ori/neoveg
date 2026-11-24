@@ -133,11 +133,33 @@ pub enum Icon {
     PreventScaleX,
     PreventScaleY,
     MoveZOnly,
+    OpenParentTimeline,
+    OpenNestedTimeline,
+    CreateNestedTimeline,
+    FreezeFrame,
+    Slideshow,
+    AutoNormalize,
+    AutoDucking,
+    BeatDetect,
+    ArchiveProject,
+    VideoBusTrack,
+    VelocityEnvelope,
+    CdMarker,
+    CommandMarker,
+    SpacebarMode,
+    NoteAdd,
+    NoteJump,
+    NoteResolved,
+    RotateProject,
+    SyncRepair,
+    AdjustmentEvent,
+    CreditRoll,
+    LiveSave,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 124] = [
+    pub const ALL: [Icon; 146] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -262,6 +284,28 @@ impl Icon {
         Icon::PreventScaleX,
         Icon::PreventScaleY,
         Icon::MoveZOnly,
+        Icon::OpenParentTimeline,
+        Icon::OpenNestedTimeline,
+        Icon::CreateNestedTimeline,
+        Icon::FreezeFrame,
+        Icon::Slideshow,
+        Icon::AutoNormalize,
+        Icon::AutoDucking,
+        Icon::BeatDetect,
+        Icon::ArchiveProject,
+        Icon::VideoBusTrack,
+        Icon::VelocityEnvelope,
+        Icon::CdMarker,
+        Icon::CommandMarker,
+        Icon::SpacebarMode,
+        Icon::NoteAdd,
+        Icon::NoteJump,
+        Icon::NoteResolved,
+        Icon::RotateProject,
+        Icon::SyncRepair,
+        Icon::AdjustmentEvent,
+        Icon::CreditRoll,
+        Icon::LiveSave,
     ];
 }
 
@@ -291,11 +335,13 @@ struct Pal {
     purple: Color32,
 }
 
-/// Intensidade da cor dos ícones (% de saturação) e fundo dos botões ativos
-/// da aba Exibição, atualizados pelo `App` a cada quadro.
+/// Intensidade da cor dos ícones (% de saturação), estilo visual e fundo dos
+/// botões ativos da aba Exibição, atualizados pelo `App` a cada quadro.
 static ICON_STRENGTH_PCT: AtomicU32 = AtomicU32::new(100);
 /// `0` = cor do tema; senão `0x01RRGGBB`.
 static BUTTON_HIGHLIGHT: AtomicU32 = AtomicU32::new(0);
+/// `0` = Colored, `1` = Modern, `2` = Classic, `3` = Monochrome.
+static ICON_STYLE_CODE: AtomicU32 = AtomicU32::new(0);
 
 /// Aplica as opções da aba Exibição aos ícones e botões.
 pub fn set_display_prefs(icon_strength_pct: u16, button_highlight: Option<[u8; 3]>) {
@@ -304,6 +350,17 @@ pub fn set_display_prefs(icon_strength_pct: u16, button_highlight: Option<[u8; 3
         0x0100_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
     });
     BUTTON_HIGHLIGHT.store(packed, Ordering::Relaxed);
+}
+
+/// Atualiza o estilo visual efetivo dos ícones (já resolvido a partir da geração).
+pub fn set_icon_style(style: neoveg_common::IconStyle) {
+    let code = match style {
+        neoveg_common::IconStyle::Auto | neoveg_common::IconStyle::Colored => 0,
+        neoveg_common::IconStyle::Modern => 1,
+        neoveg_common::IconStyle::Classic => 2,
+        neoveg_common::IconStyle::Monochrome => 3,
+    };
+    ICON_STYLE_CODE.store(code, Ordering::Relaxed);
 }
 
 fn button_highlight(theme: &ThemeColors) -> Color32 {
@@ -367,15 +424,62 @@ impl Pal {
                 purple: Color32::from_rgb(130, 74, 214),
             }
         };
-        let strength = ICON_STRENGTH_PCT.load(Ordering::Relaxed);
-        if strength != 100 && !theme.high_contrast {
-            let s = |c: Color32| saturate(c, strength);
-            pal.blue = s(pal.blue);
-            pal.amber = s(pal.amber);
-            pal.green = s(pal.green);
-            pal.red = s(pal.red);
-            pal.cyan = s(pal.cyan);
-            pal.purple = s(pal.purple);
+        if !theme.high_contrast {
+            let style_code = ICON_STYLE_CODE.load(Ordering::Relaxed);
+            match style_code {
+                // Moderno (23+): glifos limpos em `ink`, acentos suavemente reduzidos
+                1 => {
+                    let blend_ink = |c: Color32, keep: f32| -> Color32 {
+                        let mix = |a: u8, b: u8| -> u8 {
+                            (f32::from(a) * keep + f32::from(b) * (1.0 - keep))
+                                .round()
+                                .clamp(0.0, 255.0) as u8
+                        };
+                        Color32::from_rgba_unmultiplied(
+                            mix(c.r(), pal.ink.r()),
+                            mix(c.g(), pal.ink.g()),
+                            mix(c.b(), pal.ink.b()),
+                            c.a(),
+                        )
+                    };
+                    pal.blue = blend_ink(pal.blue, 0.72);
+                    pal.amber = blend_ink(pal.amber, 0.68);
+                    pal.green = blend_ink(pal.green, 0.68);
+                    pal.red = blend_ink(pal.red, 0.80);
+                    pal.cyan = blend_ink(pal.cyan, 0.70);
+                    pal.purple = blend_ink(pal.purple, 0.68);
+                }
+                // Clássico (1–13): cores vivas e maior separação cromática
+                2 => {
+                    let boost = |c: Color32| saturate(c, 130);
+                    pal.blue = boost(pal.blue);
+                    pal.amber = boost(pal.amber);
+                    pal.green = boost(pal.green);
+                    pal.red = boost(pal.red);
+                    pal.cyan = boost(pal.cyan);
+                    pal.purple = boost(pal.purple);
+                }
+                // Monocromático limpo: todos os traços seguem a tinta do tema
+                3 => {
+                    pal.blue = pal.ink;
+                    pal.amber = pal.ink;
+                    pal.green = pal.ink;
+                    pal.red = pal.ink;
+                    pal.cyan = pal.ink;
+                    pal.purple = pal.ink;
+                }
+                _ => {}
+            }
+            let strength = ICON_STRENGTH_PCT.load(Ordering::Relaxed);
+            if strength != 100 {
+                let s = |c: Color32| saturate(c, strength);
+                pal.blue = s(pal.blue);
+                pal.amber = s(pal.amber);
+                pal.green = s(pal.green);
+                pal.red = s(pal.red);
+                pal.cyan = s(pal.cyan);
+                pal.purple = s(pal.purple);
+            }
         }
         if !enabled {
             let dim = |c: Color32| c.gamma_multiply(0.38);
@@ -1841,6 +1945,219 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 c.line(0.14, t, 0.86, t, pal.muted, 0.06);
             }
         }
+        Icon::OpenParentTimeline => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.56, 0.88, 0.86),
+                c.u(0.04),
+                c.stroke(0.07, pal.muted),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.68, 0.50, 0.18, pal.blue, 0.10);
+            c.poly(&[(0.50, 0.10), (0.28, 0.36), (0.72, 0.36)], pal.blue, None);
+        }
+        Icon::OpenNestedTimeline => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.14, 0.88, 0.44),
+                c.u(0.04),
+                c.stroke(0.07, pal.muted),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.32, 0.50, 0.82, pal.cyan, 0.10);
+            c.poly(&[(0.50, 0.90), (0.28, 0.64), (0.72, 0.64)], pal.cyan, None);
+        }
+        Icon::CreateNestedTimeline => {
+            c.p.rect_filled(c.rect(0.12, 0.18, 0.72, 0.40), c.u(0.04), pal.blue);
+            c.p.rect_filled(c.rect(0.12, 0.48, 0.56, 0.70), c.u(0.04), pal.cyan);
+            c.line(0.76, 0.56, 0.76, 0.88, pal.green, 0.10);
+            c.line(0.60, 0.72, 0.92, 0.72, pal.green, 0.10);
+        }
+        Icon::FreezeFrame => {
+            c.p.rect_stroke(
+                c.rect(0.12, 0.16, 0.88, 0.84),
+                c.u(0.04),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.26, 0.50, 0.74, pal.cyan, 0.08);
+            c.line(0.28, 0.50, 0.72, 0.50, pal.cyan, 0.08);
+            c.line(0.35, 0.35, 0.65, 0.65, pal.blue, 0.07);
+            c.line(0.65, 0.35, 0.35, 0.65, pal.blue, 0.07);
+        }
+        Icon::Slideshow => {
+            c.p.rect_stroke(
+                c.rect(0.22, 0.12, 0.90, 0.66),
+                c.u(0.04),
+                c.stroke(0.06, pal.muted),
+                StrokeKind::Inside,
+            );
+            c.p.rect_filled(c.rect(0.10, 0.28, 0.78, 0.84), c.u(0.04), pal.blue);
+            c.poly(&[(0.34, 0.42), (0.34, 0.70), (0.58, 0.56)], pal.paper, None);
+        }
+        Icon::AutoNormalize => {
+            c.line(0.12, 0.18, 0.88, 0.18, pal.red, 0.07);
+            c.line(0.12, 0.82, 0.88, 0.82, pal.muted, 0.06);
+            for (x, h) in [
+                (0.22, 0.36),
+                (0.36, 0.56),
+                (0.50, 0.62),
+                (0.64, 0.48),
+                (0.78, 0.60),
+            ] {
+                c.line(x, 0.80, x, 0.80 - h, pal.green, 0.09);
+            }
+        }
+        Icon::AutoDucking => {
+            c.line(0.10, 0.26, 0.90, 0.26, pal.muted, 0.05);
+            c.poly(
+                &[
+                    (0.10, 0.32),
+                    (0.30, 0.32),
+                    (0.42, 0.74),
+                    (0.66, 0.74),
+                    (0.78, 0.32),
+                    (0.90, 0.32),
+                ],
+                Color32::TRANSPARENT,
+                Some((0.09, pal.blue)),
+            );
+            c.p.circle_filled(c.pt(0.54, 0.30), c.u(0.09), pal.amber);
+        }
+        Icon::BeatDetect => {
+            c.poly(
+                &[(0.24, 0.86), (0.42, 0.16), (0.58, 0.16), (0.76, 0.86)],
+                Color32::TRANSPARENT,
+                Some((0.08, pal.ink)),
+            );
+            c.line(0.50, 0.78, 0.76, 0.28, pal.amber, 0.09);
+            c.p.circle_filled(c.pt(0.68, 0.42), c.u(0.09), pal.red);
+        }
+        Icon::ArchiveProject => {
+            c.p.rect_filled(c.rect(0.12, 0.16, 0.88, 0.34), c.u(0.04), pal.amber);
+            c.p.rect_stroke(
+                c.rect(0.16, 0.34, 0.84, 0.86),
+                c.u(0.04),
+                c.stroke(0.08, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.36, 0.56, 0.64, 0.56, pal.blue, 0.09);
+        }
+        Icon::VideoBusTrack => {
+            c.p.rect_stroke(
+                c.rect(0.10, 0.16, 0.90, 0.84),
+                c.u(0.05),
+                c.stroke(0.08, pal.blue),
+                StrokeKind::Inside,
+            );
+            c.line(0.20, 0.40, 0.80, 0.40, pal.cyan, 0.08);
+            c.line(0.20, 0.64, 0.80, 0.64, pal.amber, 0.08);
+        }
+        Icon::VelocityEnvelope => {
+            c.line(0.12, 0.78, 0.88, 0.78, pal.muted, 0.05);
+            c.line(0.12, 0.70, 0.44, 0.56, pal.green, 0.09);
+            c.line(0.44, 0.56, 0.78, 0.24, pal.green, 0.09);
+            c.poly(&[(0.86, 0.16), (0.64, 0.20), (0.78, 0.36)], pal.green, None);
+        }
+        Icon::CdMarker => {
+            c.p.circle_stroke(c.pt(0.46, 0.58), c.u(0.30), c.stroke(0.08, pal.cyan));
+            c.p.circle_filled(c.pt(0.46, 0.58), c.u(0.08), pal.ink);
+            c.poly(&[(0.74, 0.12), (0.92, 0.12), (0.83, 0.42)], pal.amber, None);
+        }
+        Icon::CommandMarker => {
+            c.line(0.24, 0.14, 0.24, 0.88, pal.ink, 0.08);
+            c.p.rect_filled(c.rect(0.26, 0.16, 0.86, 0.54), c.u(0.04), pal.purple);
+            c.line(0.40, 0.26, 0.56, 0.35, pal.paper, 0.07);
+            c.line(0.56, 0.35, 0.40, 0.44, pal.paper, 0.07);
+            c.line(0.60, 0.44, 0.76, 0.44, pal.paper, 0.07);
+        }
+        Icon::SpacebarMode => {
+            c.p.rect_stroke(
+                c.rect(0.10, 0.54, 0.90, 0.82),
+                c.u(0.06),
+                c.stroke(0.08, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.poly(&[(0.26, 0.16), (0.26, 0.44), (0.48, 0.30)], pal.green, None);
+            c.p.rect_filled(c.rect(0.58, 0.18, 0.76, 0.42), c.u(0.03), pal.blue);
+        }
+        Icon::NoteAdd => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.14, 0.72, 0.84),
+                c.u(0.04),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.26, 0.34, 0.60, 0.34, pal.muted, 0.06);
+            c.line(0.26, 0.52, 0.52, 0.52, pal.muted, 0.06);
+            c.line(0.74, 0.54, 0.74, 0.88, pal.green, 0.10);
+            c.line(0.58, 0.71, 0.90, 0.71, pal.green, 0.10);
+        }
+        Icon::NoteJump => {
+            c.p.circle_stroke(c.pt(0.42, 0.50), c.u(0.28), c.stroke(0.07, pal.ink));
+            c.line(0.42, 0.50, 0.42, 0.32, pal.amber, 0.07);
+            c.line(0.42, 0.50, 0.56, 0.50, pal.amber, 0.07);
+            c.line(0.68, 0.50, 0.90, 0.50, pal.blue, 0.09);
+            c.poly(&[(0.94, 0.50), (0.78, 0.36), (0.78, 0.64)], pal.blue, None);
+        }
+        Icon::NoteResolved => {
+            c.p.circle_stroke(c.pt(0.50, 0.50), c.u(0.36), c.stroke(0.08, pal.green));
+            c.line(0.30, 0.52, 0.45, 0.68, pal.green, 0.10);
+            c.line(0.45, 0.68, 0.72, 0.34, pal.green, 0.10);
+        }
+        Icon::RotateProject => {
+            c.p.rect_stroke(
+                c.rect(0.24, 0.30, 0.76, 0.82),
+                c.u(0.04),
+                c.stroke(0.07, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.30, 0.18, 0.70, 0.18, pal.blue, 0.08);
+            c.poly(&[(0.80, 0.18), (0.62, 0.08), (0.62, 0.28)], pal.blue, None);
+        }
+        Icon::SyncRepair => {
+            c.p.rect_filled(c.rect(0.12, 0.18, 0.62, 0.44), c.u(0.04), pal.blue);
+            c.p.rect_filled(c.rect(0.38, 0.56, 0.88, 0.82), c.u(0.04), pal.red);
+            c.line(0.26, 0.70, 0.14, 0.70, pal.amber, 0.09);
+            c.poly(&[(0.10, 0.70), (0.24, 0.58), (0.24, 0.82)], pal.amber, None);
+        }
+        Icon::AdjustmentEvent => {
+            c.p.rect_stroke(
+                c.rect(0.10, 0.22, 0.90, 0.78),
+                c.u(0.04),
+                c.stroke(0.08, pal.purple),
+                StrokeKind::Inside,
+            );
+            c.line(0.28, 0.40, 0.72, 0.40, pal.amber, 0.07);
+            c.line(0.28, 0.60, 0.72, 0.60, pal.cyan, 0.07);
+            c.p.circle_filled(c.pt(0.42, 0.40), c.u(0.08), pal.paper);
+            c.p.circle_filled(c.pt(0.60, 0.60), c.u(0.08), pal.paper);
+        }
+        Icon::CreditRoll => {
+            for y in [0.24, 0.42, 0.60, 0.78] {
+                c.line(0.16, y, 0.62, y, pal.ink, 0.07);
+            }
+            c.line(0.80, 0.82, 0.80, 0.24, pal.blue, 0.09);
+            c.poly(&[(0.80, 0.14), (0.68, 0.34), (0.92, 0.34)], pal.blue, None);
+        }
+        Icon::LiveSave => {
+            c.p.rect_stroke(
+                c.rect(0.14, 0.14, 0.84, 0.86),
+                c.u(0.04),
+                c.stroke(0.07, pal.blue),
+                StrokeKind::Inside,
+            );
+            c.poly(
+                &[
+                    (0.54, 0.24),
+                    (0.36, 0.54),
+                    (0.52, 0.54),
+                    (0.44, 0.78),
+                    (0.66, 0.46),
+                    (0.50, 0.46),
+                ],
+                pal.amber,
+                None,
+            );
+        }
     }
 }
 
@@ -2086,14 +2403,19 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                for tid in ThemeId::ALL {
-                    let th = palette(tid);
-                    for icon in Icon::ALL {
-                        let (rect, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-                        paint(ui.painter(), rect, icon, &th, true);
-                        paint(ui.painter(), rect, icon, &th, false);
+                for style in neoveg_common::IconStyle::ALL {
+                    set_icon_style(style);
+                    for tid in ThemeId::ALL {
+                        let th = palette(tid);
+                        for icon in Icon::ALL {
+                            let (rect, _) =
+                                ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                            paint(ui.painter(), rect, icon, &th, true);
+                            paint(ui.painter(), rect, icon, &th, false);
+                        }
                     }
                 }
+                set_icon_style(neoveg_common::IconStyle::Auto);
             });
         });
     }

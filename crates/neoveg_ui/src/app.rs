@@ -393,6 +393,8 @@ pub struct App {
     pub shuttle: f64,
     pub gen_fonts: Vec<String>,
     pub(crate) last_autosave: Instant,
+    pub(crate) last_adv_backup: Instant,
+    pub(crate) last_live_save: Instant,
     pub(crate) recovery_offer: bool,
     /// Sessões anteriores que não fecharam normalmente (janela de relatório).
     pub(crate) crash_reports: Vec<neoveg_engine::session_marker::CrashReport>,
@@ -631,6 +633,8 @@ impl App {
             shuttle: 0.0,
             gen_fonts: vec![],
             last_autosave: Instant::now(),
+            last_adv_backup: Instant::now(),
+            last_live_save: Instant::now(),
             recovery_offer,
             crash_reports: Vec::new(),
             crash_report_notes: String::new(),
@@ -829,10 +833,51 @@ impl App {
         }
     }
 
-    /// Salvamento automático para recuperação após falha (§0.7).
+    /// Salvamento automático para recuperação após falha (§0.7), Live Save e Backups Avançados.
     fn autosave(&mut self) {
-        if self.recovery_offer
-            || !self.prefs.autosave_enabled
+        if self.recovery_offer {
+            return;
+        }
+        // Live Save: grava silenciosamente no arquivo do projeto após breve pausa de edição.
+        if self.prefs.advanced_save.live_save
+            && self.dirty
+            && self.path.is_some()
+            && self.last_live_save.elapsed().as_secs() >= 3
+        {
+            self.last_live_save = Instant::now();
+            if let Some(p) = self.path.clone() {
+                if self.prefs.advanced_save.archive_realtime_enabled {
+                    let dir = recovery::advanced_backup_dir(&self.prefs.advanced_save, Some(&p));
+                    let _ = recovery::write_advanced_backup(
+                        &self.session.project,
+                        &dir,
+                        Some(&p),
+                        "realtime",
+                        self.prefs.advanced_save.max_realtime,
+                    );
+                }
+                let _ = self.write_project(&p);
+            }
+        }
+        // Backups avançados agendados por intervalo de minutos/horas.
+        if let Some(interval_s) = self.prefs.advanced_save.effective_interval_secs() {
+            if self.any_doc_dirty() && self.last_adv_backup.elapsed().as_secs() >= interval_s {
+                self.last_adv_backup = Instant::now();
+                let p_opt = self.path.as_deref();
+                let dir = recovery::advanced_backup_dir(&self.prefs.advanced_save, p_opt);
+                let max_keep = self.prefs.advanced_save.max_daily;
+                if let Err(e) = recovery::write_advanced_backup(
+                    &self.main_session().project,
+                    &dir,
+                    p_opt,
+                    "auto",
+                    max_keep,
+                ) {
+                    util::log_warn(&format!("falha no backup avançado: {e}"));
+                }
+            }
+        }
+        if !self.prefs.autosave_enabled
             || !self.any_doc_dirty()
             || self.last_autosave.elapsed().as_secs() < self.prefs.autosave_secs.clamp(15, 600)
         {
@@ -1255,7 +1300,7 @@ impl App {
 
     pub fn toggle_play(&mut self) {
         if self.is_playing() {
-            self.stop(false);
+            self.stop(!self.prefs.spacebar_play_pause);
         } else {
             self.play();
         }
@@ -2933,6 +2978,39 @@ impl App {
                 self.dlg.work_folders_open = true;
                 self.dlg.work_folders_draft = Some(self.session.project.work_folders.clone());
             }
+            UiAction::OpenAdvancedSaveDialog => {
+                self.dlg.adv_save.open = true;
+                self.dlg.adv_save.draft = Some(self.prefs.advanced_save.clone());
+            }
+            UiAction::OpenArchiveProjectDialog => {
+                self.dlg.adv_save.archive_open = true;
+            }
+            UiAction::OpenSlideshowDialog => {
+                self.dlg.slideshow.open = true;
+            }
+            UiAction::OpenParentTimeline => {
+                let lang = self.lang();
+                if self.active_doc > 0 {
+                    self.switch_doc_tab(0);
+                    self.set_status(tr(lang, "Retornou ao projeto pai."));
+                } else if let Some(&root_seq) = self.project.sequence_order.first() {
+                    if self.project.active_sequence_id != Some(root_seq) {
+                        self.switch_sequence_app(root_seq);
+                        self.set_status(tr(lang, "Retornou à sequência principal."));
+                    } else {
+                        self.set_status(tr(lang, "Já está na linha do tempo principal."));
+                    }
+                } else {
+                    self.set_status(tr(lang, "Já está na linha do tempo principal."));
+                }
+            }
+            UiAction::AddProjectNoteAtCursor => {
+                self.add_project_note_at_cursor();
+                self.dock_visible = true;
+                self.closed_tabs.remove(&DockTab::Notes);
+                self.dock_tab = DockTab::Notes;
+                self.pending_dock_focus = Some(DockTab::Notes);
+            }
             UiAction::OpenEventProps => {
                 self.dlg.event_props = self.sel_events.iter().next().copied();
             }
@@ -3492,6 +3570,8 @@ impl App {
                 self.cmd_menu_btn(ui, "file.save");
                 self.cmd_menu_btn(ui, "file.save_as");
                 self.cmd_menu_btn(ui, "file.save_version");
+                self.cmd_menu_btn(ui, "file.advanced_save");
+                self.cmd_menu_btn(ui, "file.archive_project");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.import_media");
                 self.cmd_menu_btn(ui, "file.import_sequence");
@@ -3878,6 +3958,8 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.gen_text");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
                 self.cmd_menu_btn(ui, "insert.empty_event");
+                self.cmd_menu_btn(ui, "insert.slideshow");
+                self.cmd_menu_btn(ui, "notes.add");
                 self.cmd_menu_btn(ui, "media.insert_storyboard");
                 ui.separator();
                 ui.label(tr(lang, "Envelopes da trilha selecionada:"));
@@ -4111,10 +4193,69 @@ impl App {
             ),
             "edit.properties.layout" => (Icon::LayoutWindow, None, None),
             "tools.integrations" => (Icon::ExternalApps, None, None),
-            "insert.marker" => (Icon::InsertMarker, Some("M"), None),
-            "insert.marker_cd_track" => (Icon::AudioTrack, Some("CD"), None),
-            "insert.marker_command" => (Icon::FxSparkle, Some("CMD"), None),
+            "insert.marker" => (Icon::InsertMarker, None, None),
+            "insert.marker_cd_track" => (Icon::CdMarker, None, None),
+            "insert.marker_cd_index" => (Icon::CdMarker, None, None),
+            "insert.marker_command" => (Icon::CommandMarker, None, None),
+            "insert.region" => (Icon::InsertRegion, None, None),
+            "insert.slideshow" => (Icon::Slideshow, None, None),
+            "insert.track_video" => (Icon::VideoTrack, None, None),
+            "insert.track_audio" => (Icon::AudioTrack, None, None),
+            "insert.track_folder" => (Icon::TrackFolder, None, None),
+            "insert.nested_timeline" => (Icon::NestedTimeline, None, None),
+            "insert.audio_bus" => (Icon::BusTrack, None, None),
+            "file.advanced_save" => (Icon::LiveSave, None, None),
+            "file.archive_project" => (Icon::ArchiveProject, None, None),
+            "file.snapshot" => (Icon::CameraSnap, None, None),
+            "file.open_nested_tab" => (Icon::OpenNestedTimeline, None, None),
+            "timeline.open_parent" => (Icon::OpenParentTimeline, None, None),
+            "sequence.nest_selection" => (Icon::CreateNestedTimeline, None, None),
+            "edit.split" => (Icon::Split, None, None),
+            "edit.smart_split" => (Icon::SmartSplit, None, None),
+            "edit.heal_events" => (Icon::HealEvents, None, None),
+            "edit.cut_to_overlap" => (Icon::AutoCrossfades, None, None),
+            "edit.crossfade_to_cut" => (Icon::Split, None, None),
+            "edit.delete" => (Icon::DeleteTrash, None, None),
+            "edit.trim_to_selection" => (Icon::TrimSelection, None, None),
+            "edit.trim_start" => (Icon::TrimStart, None, None),
+            "edit.trim_end" => (Icon::TrimEnd, None, None),
+            "edit.detect_scenes" => (Icon::SceneDetect, None, None),
+            "edit.expanded_edit_mode" => (Icon::ExpandedEdit, None, None),
+            "edit.paste_attributes" | "edit.paste_attributes_selective" => {
+                (Icon::PasteAttributes, None, None)
+            }
+            "tools.freeze_frame" => (Icon::FreezeFrame, None, None),
+            "tools.pan_crop" => (Icon::PanCrop, None, None),
+            "tools.fx_event" | "tools.fx_master_video" => (Icon::FxSparkle, None, None),
+            "tools.fx_master_audio" => (Icon::FxAudio, None, None),
+            "view.tab.color_grading" => (
+                Icon::ColorWheels,
+                None,
+                Some(self.is_panel_open(DockTab::ColorGrading)),
+            ),
+            "view.tab.project_media" => (Icon::MediaItem, None, None),
+            "view.tab.explorer" => (Icon::FolderItem, None, None),
+            "view.tab.trimmer" => (Icon::TrimmerBlade, None, None),
+            "view.tab.edit_details" => (Icon::EditDetailsTable, None, None),
+            "view.tab.transitions" => (Icon::TransitionSplit, None, None),
+            "view.tab.video_fx" => (Icon::FxSparkle, None, None),
+            "view.tab.audio_fx" => (Icon::FxAudio, None, None),
+            "view.tab.generators" => (Icon::GeneratorFrame, None, None),
+            "view.tab.mixer" => (Icon::MixerFaders, None, None),
+            "view.tab.loudness" => (Icon::LoudnessMeter, None, None),
+            "view.tab.surround_panner" => (Icon::SurroundSpeakers, None, None),
+            "view.tab.plugin_manager" => (Icon::PluginPlug, None, None),
+            "view.tab.compositors" => (Icon::Compositors, None, None),
+            "view.tab.scopes" => (Icon::ScopesWave, None, None),
+            "view.tab.notes" => (Icon::NotesPad, None, None),
+            "notes.add" => (Icon::NoteAdd, None, None),
             "track.cycle_automation" => (Icon::Envelopes, Some("Auto"), None),
+            "track.render_to_new_track" => (Icon::RenderTrack, None, None),
+            "tools.multicam_mode" => (Icon::Multicam, None, None),
+            "view.stereo_3d" => (Icon::Stereo3d, None, None),
+            "preview.external_monitor" => (Icon::ExternalMonitor, None, None),
+            "preview.copy_frame" => (Icon::CopyFrame, None, None),
+            "preview.ram_build" => (Icon::RamCache, None, None),
             other => {
                 let lbl = commands::find_command(other).map(|c| c.label);
                 (Icon::GearProps, lbl, None)
@@ -4139,10 +4280,15 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("⋮")
-                    .on_hover_text(tr(lang, "Personalizar barra de ferramentas..."))
-                    .clicked()
+                if icons::icon_button_named(
+                    ui,
+                    Icon::MoreDots,
+                    tr(lang, "Personalizar barra de ferramentas..."),
+                    false,
+                    true,
+                    &self.theme,
+                )
+                .clicked()
                 {
                     self.open_customize_toolbar();
                 }
@@ -4420,6 +4566,14 @@ impl App {
                 Icon::ColorWheels,
                 None,
                 "view.tab.color_grading",
+            );
+            self.cmd_tool_btn(ui, Icon::OpenParentTimeline, None, "timeline.open_parent");
+            self.cmd_tool_btn(ui, Icon::OpenNestedTimeline, None, "file.open_nested_tab");
+            self.cmd_tool_btn(
+                ui,
+                Icon::CreateNestedTimeline,
+                None,
+                "sequence.nest_selection",
             );
             // do Neoveg, depois dos botões do manual
             ui.separator();
@@ -5191,10 +5345,16 @@ impl App {
     }
 
     pub fn frame_ui(&mut self, ctx: &egui::Context) {
-        // aba Exibição: cor dos ícones e dos botões ativos
+        // aba Exibição: cor, estilo dos ícones e destaque dos botões ativos
         crate::icons::set_display_prefs(
             self.prefs.display.icon_strength_pct,
             self.prefs.display.button_highlight,
+        );
+        crate::icons::set_icon_style(
+            self.prefs
+                .display
+                .icon_style
+                .resolve(self.prefs.edit_layout.layout_type),
         );
         // idioma, ícone e acoplamento persistido das janelas próprias dos diálogos
         self.active_cursor = crate::cursors::NeovegCursor::default();
