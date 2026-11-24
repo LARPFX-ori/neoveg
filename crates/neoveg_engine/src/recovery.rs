@@ -320,7 +320,8 @@ pub fn list_advanced_backups(
         if !name.ends_with(".neoveg.bak") {
             continue;
         }
-        let mut parts = name.split("__");
+        let file_name = name.to_string();
+        let mut parts = file_name.split("__");
         let project_tag = parts.next().unwrap_or("sem_titulo").to_string();
         let raw_kind = parts.next().unwrap_or("auto");
         if let Some(ref want) = filter_tag {
@@ -342,7 +343,7 @@ pub fn list_advanced_backups(
             .unwrap_or(0);
         out.push(BackupEntry {
             path: p,
-            file_name: name.to_string(),
+            file_name,
             project_tag,
             kind,
             modified_secs,
