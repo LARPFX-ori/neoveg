@@ -3018,3 +3018,32 @@ fn kittest_layouts_vegas_acoplados_sem_janelas_soltas() {
         assert_ne!(cg_g, sc_g);
     }
 }
+
+/// Paridade visual das 4 gerações de layout (Clássico v1, Intermediário v8–13,
+/// Recente v14–22 e Moderno v23+), rodapé da Prévia de Vídeo e barra de status.
+#[test]
+fn kittest_paridade_geracoes_previa_e_barra_status() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1480.0, 900.0))
+        .build_eframe(build_ready_app);
+    harness.state_mut().status.clear();
+    harness.run_steps(2);
+
+    assert!(
+        harness.query_by_label_contains("Concluído:").is_some(),
+        "barra de status ociosa deve exibir Concluído: com a duração do projeto"
+    );
+    assert!(
+        harness.query_by_label_contains("RAM:").is_some(),
+        "barra de status ampla deve exibir o orçamento de Prévia em RAM"
+    );
+
+    let ctx = harness.ctx.clone();
+    for lt in neoveg_common::LayoutType::ALL {
+        harness
+            .state_mut()
+            .select_layout_type(Some(&ctx), lt, false);
+        harness.run_steps(2);
+        assert_eq!(harness.state().prefs.edit_layout.layout_type, lt);
+    }
+}
