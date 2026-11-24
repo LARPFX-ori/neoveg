@@ -10,25 +10,36 @@ use eframe::egui;
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind};
 use neoveg_common::{tr, tr_args, Language};
 
-/// Seções de trabalho do painel Color Grading (paridade com a barra lateral do VEGAS Pro 21/23).
+/// Seções de trabalho do painel Color Grading (paridade com a barra lateral do VEGAS Pro 21/2026).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ColorGradingSection {
     #[default]
     All,
     Wheels,
+    RlWheels,
+    Utilities,
     Luts,
     Curves,
     Hsl,
 }
 
 impl ColorGradingSection {
-    pub(crate) const ALL: [Self; 5] =
-        [Self::All, Self::Wheels, Self::Luts, Self::Curves, Self::Hsl];
+    pub(crate) const ALL: [Self; 7] = [
+        Self::All,
+        Self::Wheels,
+        Self::RlWheels,
+        Self::Utilities,
+        Self::Luts,
+        Self::Curves,
+        Self::Hsl,
+    ];
 
     pub(crate) fn label_in(self, lang: Language) -> &'static str {
         let key = match self {
             Self::All => "Tudo",
             Self::Wheels => "Rodas de Cor",
+            Self::RlWheels => "Rodas RL",
+            Self::Utilities => "Utilitários",
             Self::Luts => "LUTs",
             Self::Curves => "Curvas",
             Self::Hsl => "HSL",
@@ -38,6 +49,14 @@ impl ColorGradingSection {
 
     pub(crate) fn show_wheels(self) -> bool {
         matches!(self, Self::All | Self::Wheels)
+    }
+
+    pub(crate) fn show_rl_wheels(self) -> bool {
+        matches!(self, Self::All | Self::RlWheels)
+    }
+
+    pub(crate) fn show_utilities(self) -> bool {
+        matches!(self, Self::All | Self::Utilities)
     }
 
     pub(crate) fn show_luts(self) -> bool {
@@ -295,6 +314,14 @@ impl App {
             vals.get(i)
                 .is_some_and(|v| v.is_finite() && (*v - spec.default).abs() > 1e-4)
         });
+        let rl_active = fx_work
+            .color_grade
+            .as_ref()
+            .is_some_and(|c| c.has_rl_edits());
+        let util_active = fx_work
+            .color_grade
+            .as_ref()
+            .is_some_and(|c| c.has_utility_edits());
         let lut_active = fx_work
             .color_grade
             .as_ref()
@@ -433,7 +460,12 @@ impl App {
                             });
                     }
 
-                    if active_sec.show_luts() || active_sec.show_curves() || active_sec.show_hsl() {
+                    if active_sec.show_rl_wheels()
+                        || active_sec.show_utilities()
+                        || active_sec.show_luts()
+                        || active_sec.show_curves()
+                        || active_sec.show_hsl()
+                    {
                         if active_sec.show_wheels() {
                             ui.add_space(6.0);
                             ui.separator();
@@ -448,16 +480,7 @@ impl App {
                                 checkpoint_op = true;
                             }
                         }
-                        let cg_empty = cg.lut_path.is_none()
-                            && cg.master.is_empty()
-                            && cg.red.is_empty()
-                            && cg.green.is_empty()
-                            && cg.blue.is_empty()
-                            && cg
-                                .hsl_bands
-                                .iter()
-                                .all(|b| b[0] == 0.0 && b[1] == 0.0 && b[2] == 0.0);
-                        fx_work.color_grade = (!cg_empty).then_some(cg);
+                        fx_work.color_grade = (!cg.is_identity()).then_some(cg);
                     }
                 });
         };
@@ -472,9 +495,16 @@ impl App {
                         for sec in ColorGradingSection::ALL {
                             let has_edit = match sec {
                                 ColorGradingSection::All => {
-                                    wheels_active || lut_active || curves_active || hsl_active
+                                    wheels_active
+                                        || rl_active
+                                        || util_active
+                                        || lut_active
+                                        || curves_active
+                                        || hsl_active
                                 }
                                 ColorGradingSection::Wheels => wheels_active,
+                                ColorGradingSection::RlWheels => rl_active,
+                                ColorGradingSection::Utilities => util_active,
                                 ColorGradingSection::Luts => lut_active,
                                 ColorGradingSection::Curves => curves_active,
                                 ColorGradingSection::Hsl => hsl_active,
@@ -1068,7 +1098,128 @@ fn draw_lut_curves_hsl_section(
     let mut ckpt = false;
     let mut drew_prev = false;
 
+    if section.show_rl_wheels() {
+        ui.horizontal(|ui| {
+            ui.strong(tr(lang, "Rodas de Cor RL (Limite de Faixa)"));
+            if ui.small_button(tr(lang, "Zerar RL")).clicked() {
+                cg.rl_shadows = [0.0; 4];
+                cg.rl_midtones = [0.0; 4];
+                cg.rl_highlights = [0.0; 4];
+                cg.rl_offset = [0.0; 4];
+                cg.rl_shadow_thresh = 0.33;
+                cg.rl_highlight_thresh = 0.67;
+                changed = true;
+                ckpt = true;
+            }
+        });
+        egui::Grid::new("cg_rl_thresholds")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(tr(lang, "Limiar de sombras:"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut cg.rl_shadow_thresh, 0.05..=0.60).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Limiar de realces:"));
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut cg.rl_highlight_thresh, 0.40..=0.95)
+                            .fixed_decimals(2),
+                    )
+                    .changed();
+                ui.end_row();
+            });
+        ui.add_space(4.0);
+        let bands: [(&str, &mut [f32; 4]); 4] = [
+            (tr(lang, "Sombras RL"), &mut cg.rl_shadows),
+            (tr(lang, "Médios RL"), &mut cg.rl_midtones),
+            (tr(lang, "Realces RL"), &mut cg.rl_highlights),
+            (tr(lang, "Offset RL"), &mut cg.rl_offset),
+        ];
+        egui::Grid::new("cg_rl_wheels_grid")
+            .num_columns(5)
+            .spacing([6.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("");
+                ui.label(egui::RichText::new("R").small().strong());
+                ui.label(egui::RichText::new("G").small().strong());
+                ui.label(egui::RichText::new("B").small().strong());
+                ui.label(egui::RichText::new("Lum").small().strong());
+                ui.end_row();
+                for (name, arr) in bands {
+                    ui.label(name);
+                    for v in arr.iter_mut() {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(v)
+                                    .range(-1.0..=1.0)
+                                    .speed(0.01)
+                                    .fixed_decimals(2),
+                            )
+                            .changed();
+                    }
+                    ui.end_row();
+                }
+            });
+        drew_prev = true;
+    }
+
+    if section.show_utilities() {
+        if drew_prev {
+            ui.add_space(6.0);
+            ui.separator();
+        }
+        ui.horizontal(|ui| {
+            ui.strong(tr(lang, "Utilitários de Cor"));
+            if ui.small_button(tr(lang, "Zerar utilitários")).clicked() {
+                cg.exposure = 0.0;
+                cg.contrast = 0.0;
+                cg.saturation = 0.0;
+                cg.temperature = 0.0;
+                cg.tint = 0.0;
+                changed = true;
+                ckpt = true;
+            }
+        });
+        egui::Grid::new("cg_utilities_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(tr(lang, "Exposição (EV)"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut cg.exposure, -3.0..=3.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Contraste"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut cg.contrast, -1.0..=1.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Saturação"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut cg.saturation, -1.0..=1.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Temperatura"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut cg.temperature, -1.0..=1.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+                ui.label(tr(lang, "Tinta"));
+                changed |= ui
+                    .add(egui::Slider::new(&mut cg.tint, -1.0..=1.0).fixed_decimals(2))
+                    .changed();
+                ui.end_row();
+            });
+        drew_prev = true;
+    }
+
     if section.show_luts() {
+        if drew_prev {
+            ui.add_space(6.0);
+            ui.separator();
+        }
         ui.strong(tr(lang, "LUT de Câmera / Look (.cube)"));
         ui.horizontal_wrapped(|ui| {
             let cur_label = lut_display_name(cg.lut_path.as_deref(), lang);
@@ -1460,12 +1611,17 @@ mod tests {
 
     #[test]
     fn secoes_color_grading_e_anel_cromatico_resistem_a_entradas_hostis() {
-        assert_eq!(ColorGradingSection::ALL.len(), 5);
+        assert_eq!(ColorGradingSection::ALL.len(), 7);
         assert!(ColorGradingSection::All.show_wheels());
+        assert!(ColorGradingSection::All.show_rl_wheels());
+        assert!(ColorGradingSection::All.show_utilities());
         assert!(ColorGradingSection::All.show_luts());
         assert!(ColorGradingSection::All.show_curves());
         assert!(ColorGradingSection::All.show_hsl());
 
+        assert!(ColorGradingSection::RlWheels.show_rl_wheels());
+        assert!(!ColorGradingSection::RlWheels.show_utilities());
+        assert!(ColorGradingSection::Utilities.show_utilities());
         assert!(ColorGradingSection::Luts.show_luts());
         assert!(!ColorGradingSection::Luts.show_curves());
         assert!(!ColorGradingSection::Curves.show_wheels());

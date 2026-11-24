@@ -2,6 +2,7 @@
 
 pub mod afx;
 pub mod audio;
+pub mod audio_tools;
 pub mod fx_preview;
 pub mod loudness;
 pub mod motion3d;

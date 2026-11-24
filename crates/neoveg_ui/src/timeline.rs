@@ -41,9 +41,12 @@ const SEQ_TAB_H: f32 = 22.0;
 enum EnvOwner {
     Track(usize),
     Bus(usize),
+    MasterVideo,
 }
 
 struct TimelineRows {
+    /// Trilha do Barramento de Vídeo (*Video Bus Track*, `Ctrl+Shift+B`) no topo.
+    video_bus_rect: Option<(f32, f32)>,
     /// Área dos eventos de cada trilha (sem as linhas de quadros-chave).
     track_rects: Vec<(f32, f32)>,
     /// Trilha inteira, com as linhas de quadros-chave: para saber em que
@@ -59,10 +62,16 @@ impl TimelineRows {
         match owner {
             EnvOwner::Track(ti) => self.track_rects.get(ti).copied(),
             EnvOwner::Bus(bi) => self.bus_rects.get(bi).copied(),
+            EnvOwner::MasterVideo => self.video_bus_rect,
         }
     }
 
     fn owner_at(&self, y: f32) -> Option<EnvOwner> {
+        if let Some((y0, h)) = self.video_bus_rect {
+            if y >= y0 && y < y0 + h {
+                return Some(EnvOwner::MasterVideo);
+            }
+        }
         if let Some(ti) = self
             .track_rects
             .iter()
@@ -512,6 +521,13 @@ const TRACK_MAX_FILL_H: f32 = 2000.0;
 impl App {
     fn timeline_rows(&self, lanes_top: f32) -> TimelineRows {
         let mut y = lanes_top - self.tl.scroll_y;
+        let video_bus_rect = if self.opts.show_video_bus_track {
+            let r = (y, BUS_TRACK_H);
+            y += BUS_TRACK_H;
+            Some(r)
+        } else {
+            None
+        };
         let n = self.project.tracks.len();
         let mut track_rects = Vec::with_capacity(n);
         let mut track_spans = Vec::with_capacity(n);
@@ -551,6 +567,7 @@ impl App {
             Vec::new()
         };
         TimelineRows {
+            video_bus_rect,
             track_rects,
             track_spans,
             kf_areas,
@@ -566,6 +583,7 @@ impl App {
                 .audio_buses
                 .get(bi)
                 .map(|b| b.envelopes.as_slice()),
+            EnvOwner::MasterVideo => Some(self.project.master.video_envelopes.as_slice()),
         }
     }
 
@@ -577,6 +595,7 @@ impl App {
                 .audio_buses
                 .get_mut(bi)
                 .map(|b| &mut b.envelopes),
+            EnvOwner::MasterVideo => Some(&mut self.project.master.video_envelopes),
         }
     }
 
@@ -999,11 +1018,17 @@ impl App {
         self.tl.width = lanes.width().max(10.0);
 
         // limite de rolagem vertical
-        let bus_h: f32 = if self.opts.show_bus_tracks {
-            self.project.audio_buses.len() as f32 * BUS_TRACK_H
+        let vbus_h: f32 = if self.opts.show_video_bus_track {
+            BUS_TRACK_H
         } else {
             0.0
         };
+        let bus_h: f32 = vbus_h
+            + if self.opts.show_bus_tracks {
+                self.project.audio_buses.len() as f32 * BUS_TRACK_H
+            } else {
+                0.0
+            };
         let total_h: f32 = self
             .project
             .tracks
@@ -3897,6 +3922,90 @@ impl App {
             }
         }
 
+        // Trilha do Barramento de Vídeo (Master Video Bus Track, Ctrl+Shift+B)
+        if let Some((y0, h)) = rows.video_bus_rect {
+            let r = Rect::from_min_size(pos2(area.left(), y0), vec2(hdr_w, h));
+            if r.bottom() >= area.top() && r.top() <= area.bottom() {
+                painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, self.theme.tl_header_sel);
+                painter.rect_filled(
+                    Rect::from_min_size(r.min, vec2(6.0, h)),
+                    0.0,
+                    Color32::from_rgb(168, 114, 232),
+                );
+                painter.line_segment(
+                    [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
+                    Stroke::new(1.0_f32, self.theme.border),
+                );
+                let inner = Rect::from_min_max(
+                    pos2(r.left() + 10.0, r.top() + 3.0),
+                    pos2(r.right() - 10.0, r.bottom() - 3.0),
+                );
+                let mut child =
+                    ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt("vbus_hdr"));
+                child.set_clip_rect(inner.intersect(area));
+                let lang = self.lang();
+                child.horizontal(|ui| {
+                    icons::paint_inline(ui, Icon::VideoBusTrack, 14.0, &self.theme);
+                    ui.label(
+                        egui::RichText::new(tr(lang, "Barramento de Vídeo"))
+                            .small()
+                            .strong(),
+                    );
+                    let fx_lbl = if self.project.master.video_fx.is_empty() {
+                        "fx"
+                    } else {
+                        "FX"
+                    };
+                    if ui
+                        .small_button(fx_lbl)
+                        .on_hover_text(tr(lang, "Efeitos de saída de vídeo (Master)"))
+                        .clicked()
+                    {
+                        self.open_fx_target(FxTarget::MasterVideo);
+                    }
+                });
+                child.horizontal(|ui| {
+                    let has_op = self
+                        .project
+                        .master
+                        .video_envelope(EnvKind::Opacity)
+                        .is_some();
+                    let has_ftc = self
+                        .project
+                        .master
+                        .video_envelope(EnvKind::FadeToColor)
+                        .is_some();
+                    let has_mb = self
+                        .project
+                        .master
+                        .video_envelope(EnvKind::MotionBlur)
+                        .is_some();
+                    if ui.selectable_label(has_op, tr(lang, "Opacidade")).clicked() {
+                        self.session.toggle_master_video_envelope(EnvKind::Opacity);
+                        self.sync_after_session();
+                    }
+                    if ui
+                        .selectable_label(has_ftc, tr(lang, "Fade"))
+                        .on_hover_text(tr(lang, "Fade para cor"))
+                        .clicked()
+                    {
+                        self.session
+                            .toggle_master_video_envelope(EnvKind::FadeToColor);
+                        self.sync_after_session();
+                    }
+                    if ui
+                        .selectable_label(has_mb, tr(lang, "Mov."))
+                        .on_hover_text(tr(lang, "Desfoque de movimento"))
+                        .clicked()
+                    {
+                        self.session
+                            .toggle_master_video_envelope(EnvKind::MotionBlur);
+                        self.sync_after_session();
+                    }
+                });
+            }
+        }
+
         // Trilhas de barramentos auxiliares (Ctrl+B)
         for bi in 0..rows.bus_rects.len() {
             if bi >= self.project.audio_buses.len() {
@@ -4052,6 +4161,32 @@ impl App {
                 self.changed();
                 ui.close_menu();
             }
+        }
+        if kind == TrackKind::Audio {
+            let cur_pm = self.project.tracks[ti].pan_mode;
+            ui.menu_button(tr(lang, "Modo de panorâmica (Pan)"), |ui| {
+                if ui
+                    .selectable_label(cur_pm.is_none(), tr(lang, "Padrão do projeto"))
+                    .clicked()
+                {
+                    self.checkpoint();
+                    self.project.tracks[ti].pan_mode = None;
+                    self.changed();
+                    ui.close_menu();
+                }
+                ui.separator();
+                for pm in AudioPanMode::ALL {
+                    if ui
+                        .selectable_label(cur_pm == Some(pm), pm.name_in(lang))
+                        .clicked()
+                    {
+                        self.checkpoint();
+                        self.project.tracks[ti].pan_mode = Some(pm);
+                        self.changed();
+                        ui.close_menu();
+                    }
+                }
+            });
         }
         // Curvas de suavização da faixa (áudio e vídeo): define a curva padrão da trilha
         // e permite aplicar suavização imediatamente aos envelopes e fades da faixa.
@@ -4660,6 +4795,7 @@ impl App {
                                 .get(bi)
                                 .map(|b| (b.default_env_curve, b.default_env_smoothness))
                                 .unwrap_or((Curve::Linear, 0.0)),
+                            EnvOwner::MasterVideo => (Curve::Linear, 0.0),
                         };
                         let Some(env) = self
                             .owner_envelopes_mut(owner)
@@ -6146,6 +6282,7 @@ impl App {
                             .get(bi)
                             .map(|b| (b.default_env_curve, b.default_env_smoothness))
                             .unwrap_or((Curve::Linear, 0.0)),
+                        EnvOwner::MasterVideo => (Curve::Linear, 0.0),
                     };
                     if let Some(env) = self
                         .owner_envelopes_mut(owner)
@@ -6870,6 +7007,53 @@ impl App {
                 self.cmd_menu_chk(ui, e.lock_pitch_to_stretch, "event.toggle_pitch_lock");
                 self.cmd_menu_btn(ui, "event.pitch_reset");
             });
+            ui.menu_button(tr(lang, "Ferramentas de áudio"), |ui| {
+                self.cmd_menu_btn(ui, "tools.auto_normalize");
+                self.cmd_menu_btn(ui, "tools.auto_ducking");
+                self.cmd_menu_btn(ui, "tools.beat_detection");
+            });
+        }
+        let track_kind = if is_video {
+            TrackKind::Video
+        } else {
+            TrackKind::Audio
+        };
+        if neoveg_engine::engine::audio_tools::event_sync_offset(&self.project, track_kind, &e)
+            .is_some()
+        {
+            ui.separator();
+            self.cmd_menu_btn(ui, "event.repair_sync_move");
+            self.cmd_menu_btn(ui, "event.repair_sync_slip");
+        }
+        if is_video {
+            ui.menu_button(tr(lang, "Envelope de velocidade"), |ui| {
+                let has_vel = e.velocity_envelope().is_some();
+                let lbl = if has_vel {
+                    tr(lang, "Remover envelope de velocidade")
+                } else {
+                    tr(lang, "Inserir envelope de velocidade")
+                };
+                if ui.button(lbl).clicked() {
+                    self.session.toggle_velocity_envelope_selected();
+                    self.sync_after_session();
+                    ui.close_menu();
+                }
+                ui.separator();
+                for (lbl_pt, spd) in [
+                    ("0% (Congelar quadro)", 0.0_f32),
+                    ("50% (Câmera lenta)", 0.5_f32),
+                    ("100% (Normal)", 1.0_f32),
+                    ("200% (Rápido)", 2.0_f32),
+                    ("300% (Máximo)", 3.0_f32),
+                    ("-100% (Reverso)", -1.0_f32),
+                ] {
+                    if ui.button(tr(lang, lbl_pt)).clicked() {
+                        self.session.set_velocity_preset_selected(spd);
+                        self.sync_after_session();
+                        ui.close_menu();
+                    }
+                }
+            });
         }
         if is_video && ui.button(tr(lang, "Congelar quadro no cursor")).clicked() {
             self.freeze_frame();
@@ -6910,6 +7094,8 @@ impl App {
                 EnvKind::Pan => self.envelope_color(1, self.theme.tl_env_secondary),
                 EnvKind::Opacity => self.envelope_color(2, self.theme.tl_env_primary),
                 EnvKind::FadeToColor => self.envelope_color(3, self.theme.tl_env_secondary),
+                EnvKind::Velocity => Color32::from_rgb(76, 224, 108),
+                EnvKind::MotionBlur => Color32::from_rgb(186, 132, 245),
             };
             let mut pts = vec![];
             let mut x = lanes.left();
@@ -7675,6 +7861,86 @@ impl App {
                     Stroke::new(1.0_f32, self.theme.tl_event_border)
                 };
                 painter.rect_stroke(r, 2.0, border, StrokeKind::Inside);
+                // Evento de Ajuste (VEGAS Pro 20/2026): faixa violeta + etiqueta FX AJUSTE
+                if e.is_adjustment {
+                    let ev_clip = painter.with_clip_rect(r.intersect(lanes));
+                    let adj_col = Color32::from_rgb(154, 92, 224);
+                    ev_clip.rect_filled(
+                        Rect::from_min_max(r.min, pos2(r.right(), (r.top() + 5.0).min(r.bottom()))),
+                        0.0,
+                        adj_col,
+                    );
+                    if r.width() > 54.0 {
+                        let badge_g = ev_clip.layout_no_wrap(
+                            tr(self.lang(), "FX AJUSTE").to_string(),
+                            FontId::proportional(9.5),
+                            Color32::WHITE,
+                        );
+                        let br = Rect::from_min_size(
+                            pos2(r.left() + 4.0, (r.bottom() - 16.0).max(r.top() + 6.0)),
+                            badge_g.size() + vec2(6.0, 2.0),
+                        );
+                        ev_clip.rect_filled(br, 2.0, adj_col);
+                        ev_clip.galley(br.min + vec2(3.0, 1.0), badge_g, Color32::WHITE);
+                    }
+                }
+                // Envelope de Velocidade no evento de vídeo (curva verde -100%..+300%)
+                if track.kind == TrackKind::Video && self.opts.show_envelopes {
+                    if let Some(venv) = e.velocity_envelope().filter(|v| v.visible) {
+                        let vis_r = r.intersect(lanes);
+                        if vis_r.width() > 4.0 && vis_r.height() > 12.0 {
+                            let vp = painter.with_clip_rect(vis_r);
+                            let vcol = Color32::from_rgb(76, 224, 108);
+                            let mut pts = Vec::new();
+                            let mut sx = vis_r.left();
+                            while sx <= vis_r.right() + 3.0 {
+                                let local_t = (self.tl.x2t(sx, left) - e.start)
+                                    .clamp_safe(Ticks::ZERO, e.length);
+                                let spd = venv.eval(local_t);
+                                pts.push(pos2(
+                                    sx,
+                                    Self::env_y(EnvKind::Velocity, spd, r.top(), r.height()),
+                                ));
+                                sx += 3.0;
+                            }
+                            if pts.len() >= 2 {
+                                vp.add(Shape::line(pts, Stroke::new(1.8_f32, vcol)));
+                            }
+                            for pt in &venv.points {
+                                let px = self.tl.t2x(e.start + pt.t, left);
+                                if px >= vis_r.left() - 4.0 && px <= vis_r.right() + 4.0 {
+                                    let py =
+                                        Self::env_y(EnvKind::Velocity, pt.v, r.top(), r.height());
+                                    vp.rect_filled(
+                                        Rect::from_center_size(pos2(px, py), vec2(6.0, 6.0)),
+                                        1.0,
+                                        vcol,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Alerta de dessincronia A/V entre eventos agrupados (pílula vermelha VEGAS Pro)
+                if let Some(sync_off) = neoveg_engine::engine::audio_tools::event_sync_offset(
+                    &self.project,
+                    track.kind,
+                    e,
+                ) {
+                    let vis_r = r.intersect(lanes);
+                    if vis_r.width() > 38.0 {
+                        let sp = painter.with_clip_rect(vis_r);
+                        let secs = sync_off.delta_ticks.as_secs_f64();
+                        let txt = format!("{secs:+.2}s ({:+}q)", sync_off.delta_frames);
+                        let g = sp.layout_no_wrap(txt, FontId::monospace(9.5), Color32::WHITE);
+                        let pr = Rect::from_min_size(
+                            pos2(vis_r.left() + 3.0, (r.bottom() - 16.0).max(r.top() + 2.0)),
+                            g.size() + vec2(6.0, 2.0),
+                        );
+                        sp.rect_filled(pr, 2.0, Color32::from_rgb(198, 42, 42));
+                        sp.galley(pr.min + vec2(3.0, 1.0), g, Color32::WHITE);
+                    }
+                }
                 if e.locked {
                     let lock_rect = Rect::from_min_size(
                         pos2(r.right() - 15.0, r.bottom() - 14.0),
@@ -7904,6 +8170,35 @@ impl App {
             }
             // envelopes
             self.draw_row_envelopes(&painter, lanes, left, y0, h, &track.envelopes);
+        }
+        // Trilha do Barramento de Vídeo (Ctrl+Shift+B)
+        if let Some((y0, h)) = rows.video_bus_rect {
+            if y0 + h >= lanes.top() && y0 <= lanes.bottom() {
+                let lane = Rect::from_min_max(pos2(lanes.left(), y0), pos2(lanes.right(), y0 + h));
+                painter.rect_filled(lane, 0.0, self.theme.tl_lane_even);
+                painter.line_segment(
+                    [
+                        pos2(lane.left(), lane.bottom()),
+                        pos2(lane.right(), lane.bottom()),
+                    ],
+                    Stroke::new(1.0_f32, self.theme.border),
+                );
+                painter.text(
+                    pos2(lane.left() + 6.0, lane.top() + 3.0),
+                    Align2::LEFT_TOP,
+                    tr(self.lang(), "Barramento de Vídeo (Master)"),
+                    FontId::proportional(10.0),
+                    self.theme.text_muted,
+                );
+                self.draw_row_envelopes(
+                    &painter,
+                    lanes,
+                    left,
+                    y0,
+                    h,
+                    &self.project.master.video_envelopes,
+                );
+            }
         }
         // trilhas de barramentos auxiliares (Ctrl+B)
         for bi in 0..rows.bus_rects.len() {

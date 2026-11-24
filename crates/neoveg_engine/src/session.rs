@@ -280,6 +280,8 @@ pub struct EditorOptions {
     pub show_waveforms: bool,
     pub show_thumbs: bool,
     pub show_bus_tracks: bool,
+    /// Exibir *Trilha do Barramento de Vídeo* (*Video Bus Track*, `Ctrl+Shift+B`) no topo da timeline.
+    pub show_video_bus_track: bool,
     pub time_format: TimeFormat,
     pub preview_quality: PreviewQuality,
     pub safe_areas: bool,
@@ -404,6 +406,7 @@ impl Default for EditorOptions {
             show_waveforms: true,
             show_thumbs: true,
             show_bus_tracks: false,
+            show_video_bus_track: false,
             time_format: TimeFormat::SmpteDrop,
             preview_quality: PreviewQuality::Preview,
             safe_areas: false,
@@ -4188,6 +4191,181 @@ impl EditorSession {
 
     /// Insere um evento vazio no cursor (ou na seleção de tempo) na trilha selecionada
     /// (manual do VEGAS Pro 21: `Insert > Empty Event`).
+    /// Insere um *Evento de Ajuste* (*Adjustment Event*, VEGAS Pro 20/2026) no cursor
+    /// na trilha de vídeo selecionada (ou na primeira trilha de vídeo livre).
+    pub fn insert_adjustment_event(&mut self) -> Id {
+        self.checkpoint();
+        let target_track = self
+            .sel_track
+            .filter(|&i| {
+                self.project.tracks.get(i).is_some_and(|t| {
+                    t.kind == TrackKind::Video && !t.locked && !t.is_adjustment() && !t.is_folder
+                })
+            })
+            .or_else(|| {
+                self.project.tracks.iter().position(|t| {
+                    t.kind == TrackKind::Video && !t.locked && !t.is_adjustment() && !t.is_folder
+                })
+            })
+            .unwrap_or_else(|| self.insert_track(TrackKind::Video));
+
+        let start = if self.opts.quantize {
+            self.project.settings.quantize(self.cursor)
+        } else {
+            self.cursor
+        };
+        let len = self
+            .time_sel
+            .or(self.project.loop_region)
+            .filter(|(a, b)| b > a)
+            .map(|(a, b)| b - a)
+            .unwrap_or_else(|| Ticks::from_secs_i64(5));
+        let ev = Event::new_adjustment(tr(self.lang, "Evento de ajuste"), start, len);
+        let id = ev.id;
+        self.project.tracks[target_track].events.push(ev);
+        self.project.sort_events();
+        self.sel_events.clear();
+        self.sel_events.insert(id);
+        self.sel_track = Some(target_track);
+        self.changed();
+        self.set_status(tr(self.lang, "Evento de ajuste inserido no cursor."));
+        id
+    }
+
+    /// Alterna o envelope de velocidade (`EnvKind::Velocity`, -100%..+300%) nos eventos
+    /// de vídeo selecionados.
+    pub fn toggle_velocity_envelope_selected(&mut self) -> bool {
+        let targets: Vec<(usize, usize)> = self
+            .sel_events
+            .iter()
+            .filter_map(|&id| {
+                let (ti, ei) = self.project.find_event(id)?;
+                let tr = self.project.tracks.get(ti)?;
+                (tr.kind == TrackKind::Video && !tr.locked && !tr.events.get(ei)?.locked)
+                    .then_some((ti, ei))
+            })
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        self.checkpoint();
+        let any_missing = targets.iter().any(|&(ti, ei)| {
+            self.project.tracks[ti].events[ei]
+                .envelope(EnvKind::Velocity)
+                .is_none()
+        });
+        for (ti, ei) in targets {
+            let ev = &mut self.project.tracks[ti].events[ei];
+            if any_missing {
+                if ev.envelope(EnvKind::Velocity).is_none() {
+                    ev.envelopes.push(Envelope::new(EnvKind::Velocity));
+                }
+            } else {
+                ev.envelopes.retain(|e| e.kind != EnvKind::Velocity);
+            }
+        }
+        if any_missing {
+            self.opts.show_envelopes = true;
+        }
+        self.changed();
+        true
+    }
+
+    /// Define um ponto de velocidade (`-1.0..=3.0`) no envelope de velocidade dos eventos
+    /// de vídeo selecionados (no tempo local do cursor ou em `0` se o cursor estiver fora).
+    pub fn set_velocity_preset_selected(&mut self, speed: f32) -> bool {
+        let speed = if speed.is_finite() {
+            speed.clamp(-1.0, 3.0)
+        } else {
+            1.0
+        };
+        let targets: Vec<(usize, usize)> = self
+            .sel_events
+            .iter()
+            .filter_map(|&id| {
+                let (ti, ei) = self.project.find_event(id)?;
+                let tr = self.project.tracks.get(ti)?;
+                (tr.kind == TrackKind::Video && !tr.locked && !tr.events.get(ei)?.locked)
+                    .then_some((ti, ei))
+            })
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        self.checkpoint();
+        let cursor = self.cursor;
+        let tol = self.project.settings.frame_dur().div_i64(2);
+        for (ti, ei) in targets {
+            let ev = &mut self.project.tracks[ti].events[ei];
+            let local_t = if ev.contains(cursor) {
+                cursor - ev.start
+            } else {
+                Ticks::ZERO
+            };
+            if let Some(env) = ev.envelope_mut(EnvKind::Velocity) {
+                env.visible = true;
+                if let Some(pt) = env.points.iter_mut().find(|p| p.t.abs_diff(local_t) <= tol) {
+                    pt.v = speed;
+                } else {
+                    env.points.push(EnvPoint {
+                        t: local_t,
+                        v: speed,
+                        curve: Curve::Linear,
+                        smoothness: 0.0,
+                    });
+                    env.sort();
+                }
+            } else {
+                let mut env = Envelope::new(EnvKind::Velocity);
+                if local_t <= tol {
+                    if let Some(p0) = env.points.first_mut() {
+                        p0.v = speed;
+                    }
+                } else {
+                    env.points.push(EnvPoint {
+                        t: local_t,
+                        v: speed,
+                        curve: Curve::Linear,
+                        smoothness: 0.0,
+                    });
+                }
+                ev.envelopes.push(env);
+            }
+        }
+        self.opts.show_envelopes = true;
+        self.changed();
+        true
+    }
+
+    /// Alterna um envelope na *Trilha do Barramento de Vídeo* (`MasterBus.video_envelopes`).
+    pub fn toggle_master_video_envelope(&mut self, kind: EnvKind) -> bool {
+        if !matches!(
+            kind,
+            EnvKind::Opacity | EnvKind::FadeToColor | EnvKind::MotionBlur
+        ) {
+            return false;
+        }
+        self.checkpoint();
+        if let Some(pos) = self
+            .project
+            .master
+            .video_envelopes
+            .iter()
+            .position(|e| e.kind == kind)
+        {
+            self.project.master.video_envelopes.remove(pos);
+        } else {
+            self.project
+                .master
+                .video_envelopes
+                .push(Envelope::new(kind));
+            self.opts.show_envelopes = true;
+            self.opts.show_video_bus_track = true;
+        }
+        self.changed();
+        true
+    }
+
     pub fn insert_empty_event(&mut self) -> Id {
         self.checkpoint();
         let target_track = self

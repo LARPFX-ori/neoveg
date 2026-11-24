@@ -230,6 +230,7 @@ pub fn render(spec: &GenSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
             animated,
         } => render_noise_texture(*a, *b, *scale, *octaves, *animated, t, w, h),
         GenSpec::Text(ts) => render_text(ts, t, w, h, fonts),
+        GenSpec::CreditRoll(cr) => render_credit_roll(cr, t, w, h, fonts),
         GenSpec::Ofx(r) => render_ofx_generator(r, t, w, h),
     }
 }
@@ -711,6 +712,172 @@ fn render_text(ts: &TextSpec, t: f64, w: u32, h: u32, fonts: &Fonts) -> RgbaImag
         }
         over([fill[0], fill[1], fill[2]], laid.mask[i] * fill[3]);
         px.copy_from_slice(&[to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3])]);
+    }
+    img
+}
+
+/// Renderiza o gerador *Rolagem de Créditos* (`GenSpec::CreditRoll`):
+/// título principal, cabeçalhos (`# Seção`), pares em duas colunas (`Função | Nome`) e linhas livres,
+/// com rolagem vertical contínua ou letreiro horizontal (*crawl*).
+fn render_credit_roll(
+    cr: &crate::model::CreditRollSpec,
+    t: f64,
+    w: u32,
+    h: u32,
+    fonts: &Fonts,
+) -> RgbaImage {
+    let mut img = RgbaImage::from_pixel(w, h, image::Rgba(rgba8(cr.background)));
+    let Some(font) = fonts.get(&cr.font_path) else {
+        return img;
+    };
+    let dur = f64::from(cr.scroll_duration.max(0.5));
+    let prog = (t / dur).clamp(0.0, 1.0) as f32;
+    let base_px = (cr.font_size.clamp(1.5, 30.0) / 100.0 * h as f32).max(10.0);
+    let line_h = base_px * cr.line_spacing.clamp(0.8, 4.0);
+
+    let draw_str =
+        |img: &mut RgbaImage, text: &str, scale_px: f32, x0: f32, baseline: f32, col: [f32; 4]| {
+            if baseline + scale_px < -8.0 || baseline - scale_px > h as f32 + 8.0 {
+                return;
+            }
+            let scale = PxScale::from(scale_px);
+            let sf = font.as_scaled(scale);
+            let mut x = x0;
+            let mut prev = None;
+            for ch in text.chars() {
+                let gid = font.glyph_id(ch);
+                if let Some(p) = prev {
+                    x += sf.kern(p, gid);
+                }
+                let glyph = gid.with_scale_and_position(scale, point(x, baseline));
+                x += sf.h_advance(gid);
+                prev = Some(gid);
+                if let Some(og) = font.outline_glyph(glyph) {
+                    let b = og.px_bounds();
+                    og.draw(|gx, gy, cov| {
+                        let px = b.min.x as i32 + gx as i32;
+                        let py = b.min.y as i32 + gy as i32;
+                        if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                            let a = (cov * col[3]).clamp(0.0, 1.0);
+                            if a <= 0.0 {
+                                return;
+                            }
+                            let dst = img.get_pixel_mut(px as u32, py as u32);
+                            let da = f32::from(dst[3]) / 255.0;
+                            let out_a = a + da * (1.0 - a);
+                            if out_a > 0.0 {
+                                for k in 0..3 {
+                                    let dc = f32::from(dst[k]) / 255.0;
+                                    let nc = (col[k] * a + dc * da * (1.0 - a)) / out_a;
+                                    dst[k] = to8(nc);
+                                }
+                                dst[3] = to8(out_a);
+                            }
+                        }
+                    });
+                }
+            }
+        };
+
+    let measure_w = |text: &str, scale_px: f32| -> f32 {
+        let scale = PxScale::from(scale_px);
+        let sf = font.as_scaled(scale);
+        let mut x = 0.0_f32;
+        let mut prev = None;
+        for ch in text.chars() {
+            let gid = font.glyph_id(ch);
+            if let Some(p) = prev {
+                x += sf.kern(p, gid);
+            }
+            x += sf.h_advance(gid);
+            prev = Some(gid);
+        }
+        x
+    };
+
+    if cr.crawl_horizontal {
+        let mut flat = String::new();
+        if !cr.title.trim().is_empty() {
+            flat.push_str(cr.title.trim());
+            flat.push_str("   •   ");
+        }
+        for line in cr.lines.lines() {
+            let tr = line.trim().trim_start_matches('#').trim();
+            if tr.is_empty() {
+                continue;
+            }
+            flat.push_str(&tr.replace('|', " — "));
+            flat.push_str("   •   ");
+        }
+        let tw = measure_w(&flat, base_px);
+        let x0 = w as f32 - (w as f32 + tw) * prog;
+        let y0 = h as f32 * 0.85;
+        draw_str(&mut img, &flat, base_px, x0, y0, cr.color);
+        return img;
+    }
+
+    enum Row<'a> {
+        Title(&'a str),
+        Header(&'a str),
+        Pair(&'a str, &'a str),
+        Plain(&'a str),
+        Blank,
+    }
+    let mut rows: Vec<Row<'_>> = Vec::new();
+    if !cr.title.trim().is_empty() {
+        rows.push(Row::Title(cr.title.trim()));
+        rows.push(Row::Blank);
+    }
+    for raw in cr.lines.lines() {
+        let s = raw.trim();
+        if s.is_empty() {
+            rows.push(Row::Blank);
+        } else if let Some(h_txt) = s.strip_prefix('#') {
+            rows.push(Row::Header(h_txt.trim()));
+        } else if let Some((l, r)) = s.split_once('|') {
+            rows.push(Row::Pair(l.trim(), r.trim()));
+        } else {
+            rows.push(Row::Plain(s));
+        }
+    }
+
+    let total_h = rows.len() as f32 * line_h + line_h * 1.5;
+    let start_y = h as f32 + base_px;
+    let y_base = start_y - (h as f32 + total_h) * prog;
+    let mid_x = w as f32 * 0.5;
+    let gap = (w as f32 * 0.025).max(12.0);
+
+    for (i, row) in rows.iter().enumerate() {
+        let y = y_base + i as f32 * line_h;
+        match row {
+            Row::Title(s) => {
+                let sc = base_px * 1.45;
+                let tw = measure_w(s, sc);
+                draw_str(&mut img, s, sc, mid_x - tw * 0.5, y, cr.header_color);
+            }
+            Row::Header(s) => {
+                let sc = base_px * 1.15;
+                let tw = measure_w(s, sc);
+                draw_str(&mut img, s, sc, mid_x - tw * 0.5, y, cr.header_color);
+            }
+            Row::Pair(role, person) => {
+                let rw = measure_w(role, base_px);
+                draw_str(
+                    &mut img,
+                    role,
+                    base_px,
+                    mid_x - gap - rw,
+                    y,
+                    cr.header_color,
+                );
+                draw_str(&mut img, person, base_px, mid_x + gap, y, cr.color);
+            }
+            Row::Plain(s) => {
+                let tw = measure_w(s, base_px);
+                draw_str(&mut img, s, base_px, mid_x - tw * 0.5, y, cr.color);
+            }
+            Row::Blank => {}
+        }
     }
     img
 }

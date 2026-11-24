@@ -3120,6 +3120,8 @@ fn env_type_name(k: EnvKind) -> &'static str {
         EnvKind::Pan => "Pan",
         EnvKind::Opacity => "Composite",
         EnvKind::FadeToColor => "FadeToColor",
+        EnvKind::Velocity => "Velocity",
+        EnvKind::MotionBlur => "MotionBlur",
     }
 }
 

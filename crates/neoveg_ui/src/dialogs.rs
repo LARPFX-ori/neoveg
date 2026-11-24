@@ -998,6 +998,7 @@ pub struct Dialogs {
     pub notes_ui: crate::project_notes::ProjectNotesUiState,
     pub adv_save: crate::dlg_advanced_save::AdvancedSaveUiState,
     pub slideshow: crate::dlg_slideshow::SlideshowUiState,
+    pub audio_tools: crate::dlg_audio_tools::AudioToolsUiState,
 }
 
 const PRESETS: [(&str, u32, u32, FrameRate); 12] = [
@@ -1412,6 +1413,7 @@ impl App {
         crate::dlg_work_folders::show_work_folders_window(self, ctx);
         crate::dlg_advanced_save::show_advanced_save_windows(self, ctx);
         crate::dlg_slideshow::show_slideshow_window(self, ctx);
+        crate::dlg_audio_tools::show_audio_tools_windows(self, ctx);
         self.misc_windows(ctx);
     }
 
@@ -2685,6 +2687,17 @@ impl App {
                                                 l,
                                                 l.name_in(lang),
                                             )
+                                            .changed();
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr(lang, "Modo de panorâmica (Pan)"));
+                            egui::ComboBox::from_id_salt("pp_pan_mode")
+                                .selected_text(s.pan_mode.name_in(lang))
+                                .show_ui(ui, |ui| {
+                                    for pm in AudioPanMode::ALL {
+                                        changed |= ui
+                                            .selectable_value(&mut s.pan_mode, pm, pm.name_in(lang))
                                             .changed();
                                     }
                                 });
@@ -4507,6 +4520,45 @@ impl App {
                     ui.add(egui::Slider::new(scale, 0.01..=1.0).text(tr(lang, "Escala")));
                     ui.add(egui::Slider::new(octaves, 1..=8).text(tr(lang, "Detalhe")));
                     ui.checkbox(animated, tr(lang, "Animado"));
+                }
+                GenSpec::CreditRoll(cr) => {
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "Título:"));
+                        ui.text_edit_singleline(&mut cr.title);
+                    });
+                    ui.label(tr(
+                        lang,
+                        "Linhas (use # para cabeçalho e Função | Nome para duas colunas):",
+                    ));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut cr.lines)
+                            .desired_rows(6)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut cr.font_size, 1.5..=20.0)
+                            .text(tr(lang, "Tamanho (%)")),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut cr.scroll_duration, 1.0..=120.0)
+                            .text(tr(lang, "Duração da rolagem (s)")),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut cr.line_spacing, 0.9..=3.0)
+                            .text(tr(lang, "Espaçamento entre linhas")),
+                    );
+                    ui.checkbox(
+                        &mut cr.crawl_horizontal,
+                        tr(lang, "Letreiro horizontal (crawl)"),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "Cor do texto"));
+                        ui.color_edit_button_rgba_unmultiplied(&mut cr.color);
+                        ui.label(tr(lang, "Cabeçalhos"));
+                        ui.color_edit_button_rgba_unmultiplied(&mut cr.header_color);
+                        ui.label(tr(lang, "Fundo"));
+                        ui.color_edit_button_rgba_unmultiplied(&mut cr.background);
+                    });
                 }
                 GenSpec::Ofx(ofx_ref) => {
                     let mut tmp_fx = crate::model::FxInstance::new(FxKind::Ofx);

@@ -742,7 +742,7 @@ fn render_track_eye(
     let mut active: Vec<&Event> = track
         .events
         .iter()
-        .filter(|e| !e.mute && e.contains(t))
+        .filter(|e| !e.mute && !e.is_adjustment && e.contains(t))
         .collect();
     if active.is_empty() {
         return None;
@@ -831,6 +831,50 @@ fn render_track_eye(
             Some(b)
         }
         (b, l) => l.or(b),
+    }
+}
+
+/// Aplica eventos de ajuste (`Event.is_adjustment`) ativos na trilha no instante `t`
+/// sobre a composição acumulada `out`, ponderados por opacidade × fades do evento.
+fn apply_adjustment_events(track: &Track, out: &mut Frame, t: Ticks, fps: FrameRate) {
+    let track_op = (track.opacity * track.env_value(EnvKind::Opacity, t)).clamp(0.0, 1.0);
+    if !track_op.is_finite() || track_op <= 1e-4 {
+        return;
+    }
+    let mut active: Vec<&Event> = track
+        .events
+        .iter()
+        .filter(|e| e.is_adjustment && !e.mute && e.contains(t))
+        .collect();
+    if active.is_empty() {
+        return;
+    }
+    active.sort_by_key(|e| (e.start, e.id));
+    for ev in active {
+        if !ev.fx.iter().any(|fx| fx.enabled) {
+            continue;
+        }
+        let op = (event_alpha(ev, t, false, false) * track_op).clamp(0.0, 1.0);
+        if !op.is_finite() || op <= 1e-4 {
+            continue;
+        }
+        let local_t = t - ev.start;
+        let mut adj = out.clone();
+        for fx in &ev.fx {
+            vfx::apply(fx, &mut adj, local_t, fps);
+        }
+        if op >= 1.0 - 1e-4 {
+            *out = adj;
+        } else {
+            out.px
+                .par_iter_mut()
+                .zip(adj.px.par_iter())
+                .for_each(|(o, a)| {
+                    for c in 0..4 {
+                        o[c] += (a[c] - o[c]) * op;
+                    }
+                });
+        }
     }
 }
 
@@ -1074,16 +1118,18 @@ fn compose_subtree(
         if !track_active {
             return;
         }
-        let Some(layer) =
+        if let Some(layer) =
             render_track_processed(p, media, track, t, w, h, opts, eye, parent_3d, Some(out))
-        else {
-            return;
-        };
-        if track.mask_mode != TrackMaskMode::None {
-            apply_track_mask(out, &layer, track.mask_mode);
-        } else {
-            let op = track.opacity * track.env_value(EnvKind::Opacity, t);
-            blend(out, &layer, track.blend_at(t), op);
+        {
+            if track.mask_mode != TrackMaskMode::None {
+                apply_track_mask(out, &layer, track.mask_mode);
+            } else {
+                let op = track.opacity * track.env_value(EnvKind::Opacity, t);
+                blend(out, &layer, track.blend_at(t), op);
+            }
+        }
+        if !opts.bypass_fx {
+            apply_adjustment_events(track, out, t, p.settings.fps);
         }
         return;
     }
@@ -1202,6 +1248,35 @@ fn render_frame_eye(
         for fx in &p.master.video_fx {
             vfx::apply(fx, &mut out, t, p.settings.fps);
         }
+        // Envelope de Desfoque de Movimento do Barramento de Vídeo (Ctrl+Shift+B)
+        let mb = p.master.video_env_value(EnvKind::MotionBlur, t);
+        if mb.is_finite() && mb > 1e-3 {
+            let mut fx_mb = FxInstance::new(FxKind::MotionBlur);
+            if let Some(p1) = fx_mb.params.get_mut(1) {
+                p1.value = (mb.clamp(0.0, 1.0) * 6.0).clamp(0.0, 15.0);
+            }
+            vfx::apply(&fx_mb, &mut out, t, p.settings.fps);
+        }
+    }
+    // Envelopes de Nível de Composição e Fade para Cor da Trilha do Barramento de Vídeo
+    let master_op = p.master.video_env_value(EnvKind::Opacity, t);
+    if master_op.is_finite() && master_op < 1.0 - 1e-4 {
+        let k = master_op.clamp(0.0, 1.0);
+        out.px.par_iter_mut().for_each(|px| {
+            px[0] = bg[0] + (px[0] - bg[0]) * k;
+            px[1] = bg[1] + (px[1] - bg[1]) * k;
+            px[2] = bg[2] + (px[2] - bg[2]) * k;
+        });
+    }
+    let master_ftc = p.master.video_env_value(EnvKind::FadeToColor, t);
+    if master_ftc.is_finite() && master_ftc.abs() > 1e-4 {
+        let target = if master_ftc > 0.0 { 1.0 } else { 0.0 };
+        let k = master_ftc.abs().min(1.0);
+        out.px.par_iter_mut().for_each(|px| {
+            for c in 0..3 {
+                px[c] += (target * px[3] - px[c]) * k;
+            }
+        });
     }
     // garante saída opaca
     out.px.par_iter_mut().for_each(|px| {
@@ -1901,5 +1976,105 @@ mod pan_crop_tests {
         let r180 = rotate_frame(&f, OutputRotation::Deg180);
         assert_eq!((r180.w, r180.h), (2, 3));
         assert!(r180.px[5][0] > 0.99);
+    }
+
+    #[test]
+    fn evento_de_ajuste_envelope_velocidade_e_video_bus_track() {
+        // 1. Evento de ajuste aplica Invert somente durante seu intervalo [1s, 2s]
+        let mut p = Project::new_default();
+        p.tracks.clear();
+        let m = MediaItem {
+            id: new_id(),
+            name: "branco".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [1.0, 1.0, 1.0, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(4)),
+            has_video: true,
+            has_audio: false,
+            width: 8,
+            height: 8,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let mut t_adj = Track::new(TrackKind::Video, "V1 Ajuste");
+        let mut ev_adj =
+            Event::new_adjustment("Ajuste", Ticks::from_secs_i64(1), Ticks::from_secs_i64(1));
+        ev_adj.fx.push(FxInstance::new(FxKind::Invert));
+        t_adj.events.push(ev_adj);
+
+        let mut t_base = Track::new(TrackKind::Video, "V2 Base");
+        t_base
+            .events
+            .push(Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(4)));
+        p.media.push(m.clone());
+        p.tracks.push(t_adj);
+        p.tracks.push(t_base);
+
+        let media = MediaCache::default();
+        let f_before = render_frame(&p, &media, Ticks::from_millis_i64(500), 8, 8);
+        let f_during = render_frame(&p, &media, Ticks::from_millis_i64(1500), 8, 8);
+        let f_after = render_frame(&p, &media, Ticks::from_millis_i64(2500), 8, 8);
+        assert!(f_before.px[0][0] > 0.95);
+        assert!(
+            f_during.px[0][0] < 0.05,
+            "evento de ajuste deve inverter em [1s, 2s]"
+        );
+        assert!(f_after.px[0][0] > 0.95);
+
+        // 2. Envelope de Velocidade: 0% congela tempo da mídia, 200% dobra
+        let mut ev_vel = Event::new(&m, Ticks::ZERO, Ticks::from_secs_i64(4));
+        ev_vel.envelopes.push(Envelope {
+            kind: EnvKind::Velocity,
+            points: vec![
+                EnvPoint {
+                    t: Ticks::ZERO,
+                    v: 2.0,
+                    curve: Curve::Hold,
+                    smoothness: 0.0,
+                },
+                EnvPoint {
+                    t: Ticks::from_secs_i64(1),
+                    v: 0.0,
+                    curve: Curve::Hold,
+                    smoothness: 0.0,
+                },
+            ],
+            visible: true,
+        });
+        let mt_1s = ev_vel
+            .media_time(Ticks::from_secs_i64(1), Some(Ticks::from_secs_i64(10)))
+            .expect("media_time 1s");
+        let mt_2s = ev_vel
+            .media_time(Ticks::from_secs_i64(2), Some(Ticks::from_secs_i64(10)))
+            .expect("media_time 2s");
+        assert!(
+            mt_1s.abs_diff(Ticks::from_secs_i64(2)) <= Ticks::from_millis_i64(10),
+            "200% durante 1s -> 2s de mídia (obtido {:?})",
+            mt_1s
+        );
+        assert!(
+            mt_2s.abs_diff(mt_1s) <= Ticks::from_millis_i64(10),
+            "0% congela quadro entre 1s e 2s"
+        );
+
+        // 3. Video Bus Track (FadeToColor = -1.0 -> preto no Master)
+        p.master.video_envelopes.push(Envelope {
+            kind: EnvKind::FadeToColor,
+            points: vec![EnvPoint {
+                t: Ticks::ZERO,
+                v: -1.0,
+                curve: Curve::Linear,
+                smoothness: 0.0,
+            }],
+            visible: true,
+        });
+        let f_black = render_frame(&p, &media, Ticks::from_millis_i64(500), 8, 8);
+        assert!(
+            f_black.px[0][0] < 0.05 && f_black.px[0][1] < 0.05 && f_black.px[0][2] < 0.05,
+            "Video Bus FadeToColor -1 deve escurecer saída: {:?}",
+            f_black.px[0]
+        );
     }
 }

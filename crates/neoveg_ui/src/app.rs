@@ -3011,6 +3011,35 @@ impl App {
                 self.dock_tab = DockTab::Notes;
                 self.pending_dock_focus = Some(DockTab::Notes);
             }
+            UiAction::AutoNormalizeSelected => {
+                let lang = self.lang();
+                let audio_map = self.media.audio_map();
+                let n = neoveg_engine::engine::audio_tools::auto_normalize_selected(
+                    &mut self.session,
+                    &audio_map,
+                    -0.1,
+                );
+                self.sync_after_session();
+                if n > 0 {
+                    let n_s = n.to_string();
+                    self.set_status(tr_args(
+                        lang,
+                        "{n} evento(s) de áudio normalizado(s) (-0,1 dBFS).",
+                        &[("n", &n_s)],
+                    ));
+                } else {
+                    self.set_status(tr(
+                        lang,
+                        "Selecione um ou mais eventos de áudio carregados para normalizar.",
+                    ));
+                }
+            }
+            UiAction::OpenAutoDuckingDialog => {
+                self.dlg.audio_tools.ducking_open = true;
+            }
+            UiAction::OpenBeatDetectionDialog => {
+                self.dlg.audio_tools.tempo_open = true;
+            }
             UiAction::OpenEventProps => {
                 self.dlg.event_props = self.sel_events.iter().next().copied();
             }
@@ -3914,6 +3943,7 @@ impl App {
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
                 self.cmd_menu_chk(ui, self.opts.safe_areas, "view.safe_areas");
                 self.cmd_menu_chk(ui, self.opts.show_bus_tracks, "view.bus_tracks");
+                self.cmd_menu_chk(ui, self.opts.show_video_bus_track, "view.video_bus_track");
                 ui.menu_button("Modo de exibição (Mídia do Projeto)", |ui| {
                     self.cmd_menu_btn(ui, "media.view.thumbnails");
                     self.cmd_menu_btn(ui, "media.view.list");
@@ -3956,8 +3986,10 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.subtitles_from_regions");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.gen_text");
+                self.cmd_menu_btn(ui, "insert.gen_credit_roll");
                 self.cmd_menu_btn(ui, "insert.gen_solid");
                 self.cmd_menu_btn(ui, "insert.empty_event");
+                self.cmd_menu_btn(ui, "insert.adjustment_event");
                 self.cmd_menu_btn(ui, "insert.slideshow");
                 self.cmd_menu_btn(ui, "notes.add");
                 self.cmd_menu_btn(ui, "media.insert_storyboard");
@@ -3984,8 +4016,15 @@ impl App {
                 self.cmd_menu_btn(ui, "tools.fx_event");
                 self.cmd_menu_btn(ui, "tools.motion_track");
                 self.cmd_menu_btn(ui, "tools.apply_audio_fx");
+                self.cmd_menu_btn(ui, "tools.auto_normalize");
+                self.cmd_menu_btn(ui, "tools.auto_ducking");
+                self.cmd_menu_btn(ui, "tools.beat_detection");
+                ui.separator();
                 self.cmd_menu_btn(ui, "tools.reverse");
                 self.cmd_menu_btn(ui, "tools.freeze_frame");
+                self.cmd_menu_btn(ui, "event.toggle_velocity_envelope");
+                self.cmd_menu_btn(ui, "event.repair_sync_move");
+                self.cmd_menu_btn(ui, "event.repair_sync_slip");
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.build_proxy");
                 self.cmd_menu_btn(ui, "tools.prerender");
@@ -4225,6 +4264,18 @@ impl App {
                 (Icon::PasteAttributes, None, None)
             }
             "tools.freeze_frame" => (Icon::FreezeFrame, None, None),
+            "tools.auto_normalize" => (Icon::AutoNormalize, None, None),
+            "tools.auto_ducking" => (Icon::AutoDucking, None, None),
+            "tools.beat_detection" => (Icon::BeatDetect, None, None),
+            "view.video_bus_track" => (
+                Icon::VideoBusTrack,
+                None,
+                Some(self.opts.show_video_bus_track),
+            ),
+            "event.toggle_velocity_envelope" => (Icon::VelocityEnvelope, None, None),
+            "event.repair_sync_move" | "event.repair_sync_slip" => (Icon::SyncRepair, None, None),
+            "insert.adjustment_event" => (Icon::AdjustmentEvent, None, None),
+            "insert.gen_credit_roll" => (Icon::CreditRoll, None, None),
             "tools.pan_crop" => (Icon::PanCrop, None, None),
             "tools.fx_event" | "tools.fx_master_video" => (Icon::FxSparkle, None, None),
             "tools.fx_master_audio" => (Icon::FxAudio, None, None),
