@@ -3258,9 +3258,9 @@ impl EditorSession {
             .frame_dur()
             .max(Ticks::from_millis_i64(1));
         self.checkpoint();
-        let tr = &mut self.project.tracks[ti];
+        let track = &mut self.project.tracks[ti];
         let ok = if li < ri {
-            let (head, tail) = tr.events.split_at_mut(ri);
+            let (head, tail) = track.events.split_at_mut(ri);
             crate::crossfade::convert_overlap_pair_to_cut(
                 &mut head[li],
                 &mut tail[0],
@@ -3268,7 +3268,7 @@ impl EditorSession {
                 min_len,
             )
         } else {
-            let (head, tail) = tr.events.split_at_mut(li);
+            let (head, tail) = track.events.split_at_mut(li);
             crate::crossfade::convert_overlap_pair_to_cut(
                 &mut tail[0],
                 &mut head[ri],
