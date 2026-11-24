@@ -381,9 +381,8 @@ fn show_beat_detection_dialog(app: &mut crate::App, ctx: &egui::Context) {
         }
     }
     if apply_clicked {
-        if let (Some(ref ev), Some(ref res)) =
-            (&selected_audio_ev, &app.dlg.audio_tools.tempo_result)
-        {
+        let res_opt = app.dlg.audio_tools.tempo_result.clone();
+        if let (Some(ref ev), Some(ref res)) = (&selected_audio_ev, &res_opt) {
             let added = apply_tempo_detection(
                 &mut app.session,
                 ev,
