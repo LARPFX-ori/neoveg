@@ -1,5 +1,6 @@
 //! Preferências do usuário, matriz de prévia e limites de hardware (§3.2 / §3.6).
 
+use crate::curve::Curve;
 use crate::i18n::{tr, Language};
 use crate::time::TimeFormat;
 use crate::util;
@@ -414,6 +415,36 @@ impl DisplayPrefs {
     }
 }
 
+/// Alinhamento da conversão de corte seco em crossfade (*Cut-to-overlap conversion*,
+/// manual do VEGAS Pro, Preferências > Edição).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CutToOverlapAlign {
+    /// Centraliza o crossfade no ponto de corte (metade antes, metade depois).
+    #[default]
+    Center,
+    /// Cria a sobreposição antes do ponto de corte (evento seguinte entra mais cedo).
+    BeforeCut,
+    /// Cria a sobreposição depois do ponto de corte (evento anterior se estende à direita).
+    AfterCut,
+}
+
+impl CutToOverlapAlign {
+    pub const ALL: [Self; 3] = [Self::Center, Self::BeforeCut, Self::AfterCut];
+
+    pub fn label_in(self, lang: Language) -> &'static str {
+        let pt = match self {
+            Self::Center => "Centralizado no corte",
+            Self::BeforeCut => "Antes do corte",
+            Self::AfterCut => "Depois do corte",
+        };
+        tr(lang, pt)
+    }
+
+    pub fn label(self) -> &'static str {
+        self.label_in(Language::PtBr)
+    }
+}
+
 /// Modo de rolagem automática da timeline durante a reprodução.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaybackScrollMode {
@@ -821,6 +852,24 @@ pub struct Preferences {
     /// Ativa o encaixe magnético (Snapping) ao iniciar ou criar novo projeto.
     #[serde(default = "default_true")]
     pub default_snapping: bool,
+    /// Ativa crossfades automáticos ao sobrepor eventos na mesma trilha (Ctrl+Shift+X).
+    #[serde(default = "default_true")]
+    pub default_auto_crossfades: bool,
+    /// Duração padrão (em segundos) da conversão corte → sobreposição (*Cut-to-overlap*).
+    #[serde(default = "default_cut_to_overlap_secs")]
+    pub cut_to_overlap_secs: f32,
+    /// Alinhamento da conversão corte → sobreposição em relação ao ponto de corte.
+    #[serde(default)]
+    pub cut_to_overlap_align: CutToOverlapAlign,
+    /// Sobrepõe automaticamente múltiplas mídias ao adicioná-las em sequência.
+    #[serde(default)]
+    pub auto_overlap_multiple_media: bool,
+    /// Curva padrão para novos crossfades de áudio (padrão VEGAS: Rápida / potência constante).
+    #[serde(default = "default_audio_crossfade_curve")]
+    pub default_audio_crossfade_curve: Curve,
+    /// Curva padrão para novos crossfades de vídeo (padrão VEGAS: Linear).
+    #[serde(default = "default_video_crossfade_curve")]
+    pub default_video_crossfade_curve: Curve,
     /// Quantiza edições nos limites exatos de quadros ao iniciar ou criar novo projeto.
     #[serde(default = "default_true")]
     pub default_quantize: bool,
@@ -952,6 +1001,7 @@ pub fn default_toolbar_buttons() -> Vec<String> {
         "|",
         "options.snapping",
         "options.snap_to_grid",
+        "options.auto_crossfades",
         "options.auto_ripple",
         "view.envelopes",
         "options.ignore_grouping",
@@ -1342,6 +1392,18 @@ fn default_still_image_secs() -> f32 {
     5.0
 }
 
+fn default_cut_to_overlap_secs() -> f32 {
+    1.0
+}
+
+fn default_audio_crossfade_curve() -> Curve {
+    Curve::Fast
+}
+
+fn default_video_crossfade_curve() -> Curve {
+    Curve::Linear
+}
+
 fn default_time_format() -> TimeFormat {
     TimeFormat::SmpteDrop
 }
@@ -1441,6 +1503,12 @@ impl Default for Preferences {
             always_draw_marker_lines: true,
             show_tooltips: true,
             default_snapping: true,
+            default_auto_crossfades: true,
+            cut_to_overlap_secs: default_cut_to_overlap_secs(),
+            cut_to_overlap_align: CutToOverlapAlign::default(),
+            auto_overlap_multiple_media: false,
+            default_audio_crossfade_curve: default_audio_crossfade_curve(),
+            default_video_crossfade_curve: default_video_crossfade_curve(),
             default_quantize: true,
             default_show_waveforms: true,
             default_show_thumbs: true,
@@ -1535,6 +1603,16 @@ impl Preferences {
             self.still_image_secs = default_still_image_secs();
         }
         self.still_image_secs = self.still_image_secs.clamp(0.5, 60.0);
+        if !self.cut_to_overlap_secs.is_finite() {
+            self.cut_to_overlap_secs = default_cut_to_overlap_secs();
+        }
+        self.cut_to_overlap_secs = self.cut_to_overlap_secs.clamp(0.05, 30.0);
+        if self.default_audio_crossfade_curve == Curve::Hold {
+            self.default_audio_crossfade_curve = default_audio_crossfade_curve();
+        }
+        if self.default_video_crossfade_curve == Curve::Hold {
+            self.default_video_crossfade_curve = default_video_crossfade_curve();
+        }
         if !matches!(self.default_sample_rate, 44100 | 48000 | 96000) {
             self.default_sample_rate = default_sample_rate();
         }

@@ -44,6 +44,8 @@ pub(crate) const MORE_TOOLS_COMMANDS: &[&[&str]] = &[
         "edit.paste_attributes_selective",
         "edit.smart_split",
         "edit.heal_events",
+        "edit.cut_to_overlap",
+        "edit.crossfade_to_cut",
         "edit.detect_scenes",
         "edit.expanded_edit_mode",
         "edit.trim_to_selection",
@@ -431,6 +433,13 @@ impl DerefMut for App {
 /// Aplica os padrões globais de edição/prévia das Preferências às opções da sessão.
 pub(crate) fn apply_pref_defaults(opts: &mut Options, prefs: &Preferences) {
     opts.snapping = prefs.default_snapping;
+    opts.auto_crossfades = prefs.default_auto_crossfades;
+    opts.cut_to_overlap_ticks =
+        Ticks::from_secs_f64_clamped(f64::from(prefs.cut_to_overlap_secs.clamp(0.05, 30.0)));
+    opts.cut_to_overlap_align = prefs.cut_to_overlap_align;
+    opts.auto_overlap_multiple_media = prefs.auto_overlap_multiple_media;
+    opts.default_audio_crossfade_curve = prefs.default_audio_crossfade_curve;
+    opts.default_video_crossfade_curve = prefs.default_video_crossfade_curve;
     opts.quantize = prefs.default_quantize;
     opts.show_waveforms = prefs.default_show_waveforms;
     opts.show_thumbs = prefs.default_show_thumbs;
@@ -3532,6 +3541,8 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.split");
                 self.cmd_menu_btn(ui, "edit.smart_split");
                 self.cmd_menu_btn(ui, "edit.heal_events");
+                self.cmd_menu_btn(ui, "edit.cut_to_overlap");
+                self.cmd_menu_btn(ui, "edit.crossfade_to_cut");
                 self.cmd_menu_btn(ui, "edit.detect_scenes");
                 self.cmd_menu_btn(ui, "edit.expanded_edit_mode");
                 if self.session.expanded_edit.is_some() {
@@ -3944,6 +3955,7 @@ impl App {
             ui.menu_button(tr(lang, "Opções"), |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
                 self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
+                self.cmd_menu_chk(ui, self.opts.auto_crossfades, "options.auto_crossfades");
                 ui.menu_button("Grade da régua", |ui| {
                     for g in neoveg_engine::session::RulerGridSpacing::ALL {
                         if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
@@ -4072,6 +4084,9 @@ impl App {
             "edit.redo" => (Icon::Redo, None, None),
             "options.snapping" => (Icon::MagnetSnap, None, Some(self.opts.snapping)),
             "options.snap_to_grid" => (Icon::TimelineGrid, None, Some(self.opts.snap_to_grid)),
+            "options.auto_crossfades" => {
+                (Icon::AutoCrossfades, None, Some(self.opts.auto_crossfades))
+            }
             "options.auto_ripple" => (Icon::AutoRipple, None, Some(self.opts.auto_ripple)),
             "options.lock_envelopes" => (Icon::LockEnvelopes, None, Some(self.opts.lock_envelopes)),
             "view.envelopes" => (Icon::Envelopes, None, Some(self.opts.show_envelopes)),
@@ -4370,6 +4385,13 @@ impl App {
                 Icon::MagnetSnap,
                 None,
                 "options.snapping",
+            );
+            self.cmd_tool_toggle(
+                ui,
+                self.opts.auto_crossfades,
+                Icon::AutoCrossfades,
+                None,
+                "options.auto_crossfades",
             );
             self.cmd_tool_toggle(
                 ui,

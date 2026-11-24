@@ -23,6 +23,7 @@ pub enum Icon {
     Split,
     DeleteTrash,
     MagnetSnap,
+    AutoCrossfades,
     AutoRipple,
     IgnoreGrouping,
     LockEnvelopes,
@@ -136,7 +137,7 @@ pub enum Icon {
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 123] = [
+    pub const ALL: [Icon; 124] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -151,6 +152,7 @@ impl Icon {
         Icon::Split,
         Icon::DeleteTrash,
         Icon::MagnetSnap,
+        Icon::AutoCrossfades,
         Icon::AutoRipple,
         Icon::IgnoreGrouping,
         Icon::LockEnvelopes,
@@ -668,6 +670,37 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.p.rect_filled(c.rect(0.18, 0.14, 0.34, 0.32), 0.0, pal.paper);
             c.p.rect_filled(c.rect(0.66, 0.14, 0.82, 0.32), 0.0, pal.paper);
             c.line(0.50, 0.10, 0.50, 0.44, pal.cyan, 0.07);
+        }
+        Icon::AutoCrossfades => {
+            // Dois eventos sobrepostos com curvas X de crossfade no centro (desenho original)
+            let left_ev = c.rect(0.06, 0.20, 0.64, 0.80);
+            let right_ev = c.rect(0.36, 0.20, 0.94, 0.80);
+            let ov = c.rect(0.36, 0.20, 0.64, 0.80);
+            c.p.rect_filled(left_ev, c.u(0.04), pal.blue.gamma_multiply(0.75));
+            c.p.rect_filled(right_ev, c.u(0.04), pal.cyan.gamma_multiply(0.75));
+            c.p.rect_filled(ov, 0.0, pal.paper.gamma_multiply(0.28));
+            c.p.rect_stroke(
+                left_ev,
+                c.u(0.04),
+                c.stroke(0.06, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.p.rect_stroke(
+                right_ev,
+                c.u(0.04),
+                c.stroke(0.06, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.polyline(
+                &[(0.37, 0.24), (0.48, 0.36), (0.56, 0.56), (0.63, 0.76)],
+                pal.amber,
+                0.09,
+            );
+            c.polyline(
+                &[(0.37, 0.76), (0.44, 0.56), (0.52, 0.36), (0.63, 0.24)],
+                pal.amber,
+                0.09,
+            );
         }
         Icon::AutoRipple => {
             let b1 = c.rect(0.08, 0.20, 0.40, 0.48);

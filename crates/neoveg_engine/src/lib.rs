@@ -24,6 +24,8 @@ pub mod color;
 #[forbid(unsafe_code)]
 pub mod commands;
 #[forbid(unsafe_code)]
+pub mod crossfade;
+#[forbid(unsafe_code)]
 pub mod edl;
 #[forbid(unsafe_code)]
 pub mod encoder;

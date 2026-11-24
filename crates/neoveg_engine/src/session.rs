@@ -4,7 +4,7 @@
 
 use crate::media::MediaCache;
 use crate::model::*;
-use crate::prefs::PreviewQuality;
+use crate::prefs::{CutToOverlapAlign, PreviewQuality};
 use neoveg_common::{tr, tr_args, Language, NeovegError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -261,6 +261,18 @@ impl EditTool {
 #[derive(Clone, Debug)]
 pub struct EditorOptions {
     pub snapping: bool,
+    /// Crossfades automáticos ao sobrepor eventos na mesma trilha (`Ctrl+Shift+X`).
+    pub auto_crossfades: bool,
+    /// Duração padrão da conversão corte → sobreposição (*Cut-to-overlap conversion*).
+    pub cut_to_overlap_ticks: Ticks,
+    /// Alinhamento padrão da conversão corte → sobreposição.
+    pub cut_to_overlap_align: CutToOverlapAlign,
+    /// Sobrepõe automaticamente múltiplas mídias ao adicioná-las em sequência.
+    pub auto_overlap_multiple_media: bool,
+    /// Curva padrão para novos crossfades de áudio.
+    pub default_audio_crossfade_curve: Curve,
+    /// Curva padrão para novos crossfades de vídeo.
+    pub default_video_crossfade_curve: Curve,
     pub quantize: bool,
     pub auto_ripple: bool,
     pub ignore_grouping: bool,
@@ -379,6 +391,12 @@ impl Default for EditorOptions {
     fn default() -> Self {
         Self {
             snapping: true,
+            auto_crossfades: true,
+            cut_to_overlap_ticks: Ticks::from_secs_i64(1),
+            cut_to_overlap_align: CutToOverlapAlign::Center,
+            auto_overlap_multiple_media: false,
+            default_audio_crossfade_curve: Curve::Fast,
+            default_video_crossfade_curve: Curve::Linear,
             quantize: true,
             auto_ripple: false,
             ignore_grouping: false,
@@ -1191,6 +1209,8 @@ impl EditorSession {
             return;
         }
         self.checkpoint();
+        let prev_overlaps = crate::crossfade::overlap_pairs(&self.project.tracks);
+        let mut touched_tracks = Vec::new();
         let base_track = self.sel_track.unwrap_or(0);
         let t0 = self.cursor;
         let max_end = self
@@ -1230,8 +1250,10 @@ impl EditorSession {
             new_sel.insert(e.id);
             if let Some(track) = self.project.tracks.get_mut(ti) {
                 track.events.push(e);
+                touched_tracks.push(ti);
             }
         }
+        self.sync_overlap_crossfades(&touched_tracks, &prev_overlaps);
         self.sel_events = new_sel;
         self.cursor = t0 + span;
         self.changed();
@@ -2401,6 +2423,7 @@ impl EditorSession {
             .collect();
 
         // Fase 3: efetivação atômica em 1 passo de histórico.
+        let prev_overlaps = crate::crossfade::overlap_pairs(&self.project.tracks);
         self.checkpoint();
 
         let mut created_map: HashMap<u64, usize> = HashMap::new();
@@ -2460,6 +2483,11 @@ impl EditorSession {
             self.sel_events = result_ids.iter().copied().collect();
         }
 
+        let mut touched: Vec<usize> = target_indices;
+        for &(orig_ti, _) in &resolved_origins {
+            touched.push(orig_ti);
+        }
+        self.sync_overlap_crossfades(&touched, &prev_overlaps);
         self.project.sort_events();
         self.changed();
         Ok(result_ids)
@@ -2982,6 +3010,368 @@ impl EditorSession {
         healed_count
     }
 
+    /// Sincroniza crossfades em sobreposições recém-criadas conforme `opts.auto_crossfades`
+    /// e as curvas padrão de áudio/vídeo configuradas.
+    pub fn sync_overlap_crossfades(
+        &mut self,
+        track_indices: &[usize],
+        prev_overlaps: &HashSet<(Id, Id)>,
+    ) {
+        crate::crossfade::sync_new_overlaps(
+            &mut self.project.tracks,
+            track_indices,
+            prev_overlaps,
+            self.opts.auto_crossfades,
+            self.opts.default_audio_crossfade_curve,
+            self.opts.default_video_crossfade_curve,
+        );
+    }
+
+    /// Define as curvas de saída e entrada de um crossfade `(left_id, right_id)` em 1 passo
+    /// de Desfazer, ativando-o caso estivesse desativado.
+    pub fn set_crossfade_curves(
+        &mut self,
+        left_id: Id,
+        right_id: Id,
+        out_curve: Curve,
+        in_curve: Curve,
+    ) -> bool {
+        let Some((lti, _)) = self.project.find_event(left_id) else {
+            return false;
+        };
+        let Some((rti, _)) = self.project.find_event(right_id) else {
+            return false;
+        };
+        if lti != rti || self.project.tracks[lti].locked {
+            return false;
+        }
+        let kind = self.project.tracks[lti].kind;
+        let out_c = crate::crossfade::sanitize_crossfade_curve(out_curve, kind);
+        let in_c = crate::crossfade::sanitize_crossfade_curve(in_curve, kind);
+        self.checkpoint();
+        if let Some(le) = self.project.event_mut(left_id) {
+            le.crossfade_out_curve = Some(out_c);
+        }
+        if let Some(re) = self.project.event_mut(right_id) {
+            re.crossfade_in_curve = Some(in_c);
+            re.no_crossfade_in = false;
+        }
+        self.changed();
+        let out_name = out_c.name_in(self.lang);
+        let in_name = in_c.name_in(self.lang);
+        self.set_status(tr_args(
+            self.lang,
+            "Crossfade: {out} / {inc}",
+            &[("out", &out_name), ("inc", &in_name)],
+        ));
+        true
+    }
+
+    /// Ativa ou desativa (corte seco) o crossfade na entrada de `right_id`.
+    pub fn set_crossfade_enabled(&mut self, right_id: Id, enabled: bool) -> bool {
+        let Some((ti, _)) = self.project.find_event(right_id) else {
+            return false;
+        };
+        if self.project.tracks[ti].locked {
+            return false;
+        }
+        let Some(cur) = self.project.event(right_id).map(|e| !e.no_crossfade_in) else {
+            return false;
+        };
+        if cur == enabled {
+            return false;
+        }
+        self.checkpoint();
+        if let Some(re) = self.project.event_mut(right_id) {
+            re.no_crossfade_in = !enabled;
+        }
+        self.changed();
+        let msg = if enabled {
+            tr(self.lang, "Crossfade ativado.")
+        } else {
+            tr(self.lang, "Crossfade desativado (corte seco).")
+        };
+        self.set_status(msg);
+        true
+    }
+
+    /// Coleta pares contíguos `(track_idx, left_id, right_id)` elegíveis para
+    /// conversão corte → crossfade (no cursor ou entre eventos selecionados).
+    fn collect_cut_pairs_for_overlap(&self) -> Vec<(usize, Id, Id)> {
+        let tol = Ticks::from_millis_i64(2);
+        let cur = self.cursor;
+        let sel = self.expand_groups(&self.sel_events);
+        let mut pairs = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            if tr.locked {
+                continue;
+            }
+            let mut order: Vec<usize> = (0..tr.events.len()).collect();
+            order.sort_by_key(|&i| (tr.events[i].start, tr.events[i].id));
+            for w in order.windows(2) {
+                let l = &tr.events[w[0]];
+                let r = &tr.events[w[1]];
+                if l.locked || r.locked || l.end().abs_diff(r.start) > tol {
+                    continue;
+                }
+                let at_cursor = l.end().abs_diff(cur) <= tol || r.start.abs_diff(cur) <= tol;
+                let both_selected = sel.contains(&l.id) && sel.contains(&r.id);
+                let touches_selected =
+                    !sel.is_empty() && (sel.contains(&l.id) || sel.contains(&r.id));
+                if both_selected || (at_cursor && (sel.is_empty() || touches_selected)) {
+                    pairs.push((ti, l.id, r.id));
+                }
+            }
+        }
+        if pairs.is_empty() && !sel.is_empty() {
+            for (ti, tr) in self.project.tracks.iter().enumerate() {
+                if tr.locked {
+                    continue;
+                }
+                let mut order: Vec<usize> = (0..tr.events.len()).collect();
+                order.sort_by_key(|&i| (tr.events[i].start, tr.events[i].id));
+                for w in order.windows(2) {
+                    let l = &tr.events[w[0]];
+                    let r = &tr.events[w[1]];
+                    if l.locked || r.locked || l.end().abs_diff(r.start) > tol {
+                        continue;
+                    }
+                    if sel.contains(&l.id) || sel.contains(&r.id) {
+                        pairs.push((ti, l.id, r.id));
+                    }
+                }
+            }
+        }
+        pairs
+    }
+
+    pub fn can_convert_cut_to_overlap(&self) -> bool {
+        !self.collect_cut_pairs_for_overlap().is_empty()
+    }
+
+    /// Converte cortes secos no cursor ou na seleção em crossfades usando a duração e o
+    /// alinhamento configurados (*Cut-to-overlap conversion*, Preferências > Edição).
+    pub fn convert_cut_to_overlap(&mut self) -> usize {
+        let pairs = self.collect_cut_pairs_for_overlap();
+        if pairs.is_empty() {
+            self.set_status(tr(
+                self.lang,
+                "Posicione o cursor em um corte ou selecione eventos contíguos para criar crossfade.",
+            ));
+            return 0;
+        }
+        let amount = self
+            .opts
+            .cut_to_overlap_ticks
+            .max(Ticks::from_millis_i64(50));
+        let align = self.opts.cut_to_overlap_align;
+        let min_len = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        let media_durs = crate::crossfade::media_durations_map(&self.project);
+
+        self.checkpoint();
+        let mut converted = 0usize;
+        for (ti, lid, rid) in pairs {
+            let Some(tr) = self.project.tracks.get_mut(ti) else {
+                continue;
+            };
+            let kind = tr.kind;
+            let def_curve = match kind {
+                TrackKind::Audio => self.opts.default_audio_crossfade_curve,
+                TrackKind::Video => self.opts.default_video_crossfade_curve,
+            };
+            let Some(li) = tr.events.iter().position(|e| e.id == lid) else {
+                continue;
+            };
+            let Some(ri) = tr.events.iter().position(|e| e.id == rid) else {
+                continue;
+            };
+            if li == ri {
+                continue;
+            }
+            let left_dur = media_durs.get(&tr.events[li].media_id).copied().flatten();
+            let ok = if li < ri {
+                let (head, tail) = tr.events.split_at_mut(ri);
+                crate::crossfade::convert_cut_pair_to_overlap(
+                    &mut head[li],
+                    &mut tail[0],
+                    left_dur,
+                    kind,
+                    amount,
+                    align,
+                    min_len,
+                    def_curve,
+                )
+            } else {
+                let (head, tail) = tr.events.split_at_mut(li);
+                crate::crossfade::convert_cut_pair_to_overlap(
+                    &mut tail[0],
+                    &mut head[ri],
+                    left_dur,
+                    kind,
+                    amount,
+                    align,
+                    min_len,
+                    def_curve,
+                )
+            };
+            if ok {
+                converted += 1;
+            }
+        }
+        if converted > 0 {
+            self.project.sort_events();
+            self.changed();
+            let n_s = converted.to_string();
+            self.set_status(tr_args(
+                self.lang,
+                "{n} corte(s) convertido(s) em crossfade.",
+                &[("n", &n_s)],
+            ));
+        }
+        converted
+    }
+
+    /// Converte uma sobreposição `(left_id, right_id)` de volta em um corte seco,
+    /// aparando as bordas sobrepostas no alinhamento pedido.
+    pub fn convert_crossfade_to_cut(
+        &mut self,
+        left_id: Id,
+        right_id: Id,
+        align: CutToOverlapAlign,
+    ) -> bool {
+        let Some((ti, li)) = self.project.find_event(left_id) else {
+            return false;
+        };
+        let Some((rti, ri)) = self.project.find_event(right_id) else {
+            return false;
+        };
+        if ti != rti || li == ri || self.project.tracks[ti].locked {
+            return false;
+        }
+        let min_len = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        self.checkpoint();
+        let track = &mut self.project.tracks[ti];
+        let ok = if li < ri {
+            let (head, tail) = track.events.split_at_mut(ri);
+            crate::crossfade::convert_overlap_pair_to_cut(
+                &mut head[li],
+                &mut tail[0],
+                align,
+                min_len,
+            )
+        } else {
+            let (head, tail) = track.events.split_at_mut(li);
+            crate::crossfade::convert_overlap_pair_to_cut(
+                &mut tail[0],
+                &mut head[ri],
+                align,
+                min_len,
+            )
+        };
+        if ok {
+            self.project.sort_events();
+            self.changed();
+            self.set_status(tr(self.lang, "Crossfade convertido em corte seco."));
+        }
+        ok
+    }
+
+    fn collect_target_crossfades(&self) -> Vec<(usize, Id, Id)> {
+        let cur = self.cursor;
+        let sel = self.expand_groups(&self.sel_events);
+        let mut out = Vec::new();
+        for (ti, tr) in self.project.tracks.iter().enumerate() {
+            if tr.locked {
+                continue;
+            }
+            for xf in crate::crossfade::track_crossfades(tr, true) {
+                let at_cursor = cur >= xf.start && cur <= xf.end;
+                let selected = sel.contains(&xf.left_id) || sel.contains(&xf.right_id);
+                if selected || (sel.is_empty() && at_cursor) {
+                    out.push((ti, xf.left_id, xf.right_id));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn has_target_crossfade(&self) -> bool {
+        !self.collect_target_crossfades().is_empty()
+    }
+
+    /// Converte os crossfades selecionados (ou sob o cursor) em cortes secos.
+    pub fn convert_target_crossfades_to_cuts(&mut self) -> usize {
+        let pairs = self.collect_target_crossfades();
+        if pairs.is_empty() {
+            self.set_status(tr(
+                self.lang,
+                "Nenhum crossfade encontrado na seleção ou cursor.",
+            ));
+            return 0;
+        }
+        let align = self.opts.cut_to_overlap_align;
+        let min_len = self
+            .project
+            .settings
+            .frame_dur()
+            .max(Ticks::from_millis_i64(1));
+        self.checkpoint();
+        let mut count = 0usize;
+        for (ti, lid, rid) in pairs {
+            let Some(tr) = self.project.tracks.get_mut(ti) else {
+                continue;
+            };
+            let Some(li) = tr.events.iter().position(|e| e.id == lid) else {
+                continue;
+            };
+            let Some(ri) = tr.events.iter().position(|e| e.id == rid) else {
+                continue;
+            };
+            if li == ri {
+                continue;
+            }
+            let ok = if li < ri {
+                let (head, tail) = tr.events.split_at_mut(ri);
+                crate::crossfade::convert_overlap_pair_to_cut(
+                    &mut head[li],
+                    &mut tail[0],
+                    align,
+                    min_len,
+                )
+            } else {
+                let (head, tail) = tr.events.split_at_mut(li);
+                crate::crossfade::convert_overlap_pair_to_cut(
+                    &mut tail[0],
+                    &mut head[ri],
+                    align,
+                    min_len,
+                )
+            };
+            if ok {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.project.sort_events();
+            self.changed();
+            let n_s = count.to_string();
+            self.set_status(tr_args(
+                self.lang,
+                "{n} crossfade(s) convertido(s) em corte seco.",
+                &[("n", &n_s)],
+            ));
+        }
+        count
+    }
+
     /// Smart Split (`Alt+S`): remove o trecho `time_sel`, aplica crossfade curto com Warp Flow
     /// (~5 quadros), agrupa as duas partes e desloca o restante da trilha.
     pub fn smart_split(&mut self) -> usize {
@@ -3215,6 +3605,8 @@ impl EditorSession {
                 dst.fade_out = src_ev.fade_out.clone();
                 dst.fade_in.len = dst.fade_in.len.min(dst.length);
                 dst.fade_out.len = dst.fade_out.len.min(dst.length - dst.fade_in.len);
+                dst.crossfade_in_curve = src_ev.crossfade_in_curve;
+                dst.crossfade_out_curve = src_ev.crossfade_out_curve;
             }
             if mask.switches {
                 dst.mute = src_ev.mute;
@@ -4880,7 +5272,23 @@ impl EditorSession {
         let mut audio_ti: Option<usize> = None;
         let mut pos = start.max(Ticks::ZERO);
         let mut created = Vec::new();
+        let auto_ov = self.opts.auto_overlap_multiple_media && self.opts.auto_crossfades;
+        let ov_target = if auto_ov {
+            self.opts.cut_to_overlap_ticks.max(Ticks::ZERO)
+        } else {
+            Ticks::ZERO
+        };
+        let mut prev_dur: Option<Ticks> = None;
         for (m, trim_in, dur) in plan {
+            if let Some(pd) = prev_dur {
+                if ov_target > Ticks::ZERO {
+                    let max_ov = (pd - min_len).min(dur - min_len).max(Ticks::ZERO);
+                    let ov = ov_target.min(max_ov);
+                    if ov > Ticks::ZERO {
+                        pos = (pos - ov).max(Ticks::ZERO);
+                    }
+                }
+            }
             let group = if m.has_video && m.has_audio {
                 Some(new_id())
             } else {
@@ -4955,6 +5363,7 @@ impl EditorSession {
                 self.project.tracks[ti].events.push(e);
             }
             pos = Ticks::from_raw(pos.0.saturating_add(dur.0));
+            prev_dur = Some(dur);
         }
         self.project.sort_events();
         self.sel_events = created.iter().copied().collect();

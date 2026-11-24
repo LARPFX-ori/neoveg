@@ -2058,6 +2058,12 @@ fn sanitize_tracks_slice(
                 .fade_out
                 .len
                 .clamp_safe(Ticks::ZERO, e.length - e.fade_in.len);
+            if e.crossfade_in_curve == Some(Curve::Hold) {
+                e.crossfade_in_curve = None;
+            }
+            if e.crossfade_out_curve == Some(Curve::Hold) {
+                e.crossfade_out_curve = None;
+            }
             for k in &mut e.pan_crop.keys {
                 k.t = k.t.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
                 let v = &mut k.value;
@@ -4096,6 +4102,16 @@ pub struct Event {
     /// Transição usada quando este evento se sobrepõe ao anterior (crossfade).
     #[serde(default)]
     pub transition: Option<TransitionSpec>,
+    /// Quando `true`, a sobreposição com o evento anterior nesta trilha é tratada
+    /// como corte seco (sem crossfade automático, p. ex. com Crossfades Automáticos desligado).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_crossfade_in: bool,
+    /// Curva explícita de saída usada quando este evento faz crossfade com o seguinte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crossfade_out_curve: Option<Curve>,
+    /// Curva explícita de entrada usada quando este evento faz crossfade com o anterior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crossfade_in_curve: Option<Curve>,
     /// Takes alternativos (não ativos) do evento (manual do VEGAS Pro 21,
     /// p. 346). O take ativo continua em `media_id` / `offset` /
     /// `take_name`, então render e edição não mudam.
@@ -4169,6 +4185,9 @@ impl Event {
             fx: vec![],
             group: None,
             transition: None,
+            no_crossfade_in: false,
+            crossfade_out_curve: None,
+            crossfade_in_curve: None,
             alt_takes: Vec::new(),
             take_index: 0,
             take_name: String::new(),

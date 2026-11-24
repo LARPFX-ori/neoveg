@@ -101,6 +101,46 @@ fn warp_flow(a: &Frame, b: &Frame, p: f32) -> Frame {
     out
 }
 
+/// Combina dois quadros em crossfade usando pesos independentes de saída (`wa`) e
+/// entrada (`wb`), permitindo todas as 25 combinações de curvas (*Fade Type* 5×5):
+/// - Curvas complementares (`wa + wb == 1.0`): dissolução exata `a*wa + b*wb`;
+/// - Curvas com queda no meio (`wa + wb < 1.0`, ex.: Lenta/Lenta): mergulha para transparente;
+/// - Curvas com soma > 1.0 (ex.: Rápida/Rápida): normaliza sem estourar brilho.
+pub fn dissolve_curves(a: &Frame, b: &Frame, wa: f32, wb: f32) -> Frame {
+    let (w, h) = (a.w, a.h);
+    let wa = if wa.is_finite() {
+        wa.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let wb = if wb.is_finite() {
+        wb.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if w == 0 || h == 0 || a.px.len() != w * h {
+        return Frame::new(w.min(a.px.len()), h.min(a.px.len()));
+    }
+    if b.w != w || b.h != h || b.px.len() != a.px.len() {
+        return if wb < wa { a.clone() } else { b.clone() };
+    }
+    let sum = wa + wb;
+    let (ka, kb) = if sum > 1.0 {
+        (wa / sum, wb / sum)
+    } else {
+        (wa, wb)
+    };
+    let mut out = Frame::new(w, h);
+    out.px.par_iter_mut().enumerate().for_each(|(i, o)| {
+        let pa = a.px[i];
+        let pb = b.px[i];
+        for k in 0..4 {
+            o[k] = pa[k] * ka + pb[k] * kb;
+        }
+    });
+    out
+}
+
 /// Combina o quadro de saída `a` com o de entrada `b` no progresso `p` (0..1).
 pub fn apply(kind: TransitionKind, softness: f32, a: &Frame, b: &Frame, p: f32) -> Frame {
     let (w, h) = (a.w, a.h);

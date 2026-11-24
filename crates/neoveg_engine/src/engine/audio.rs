@@ -675,30 +675,10 @@ impl Drop for Mixer {
     }
 }
 
-/// Fades efetivos de um evento de áudio: o maior entre o fade definido e a
-/// sobreposição com o evento vizinho (crossfade automático).
+/// Fades efetivos de um evento de áudio: usa a fonte única de verdade em
+/// `crate::crossfade` para combinar fades explícitos com crossfades ativos.
 fn effective_fades(track: &Track, idx: usize) -> (Fade, Fade) {
-    let e = &track.events[idx];
-    let mut fi = e.fade_in.clone();
-    let mut fo = e.fade_out.clone();
-    for (j, o) in track.events.iter().enumerate() {
-        if j == idx || o.mute {
-            continue;
-        }
-        if o.start < e.start && o.end() > e.start && o.end() < e.end() {
-            let ov = o.end() - e.start;
-            if ov > fi.len {
-                fi.len = ov;
-            }
-        }
-        if o.start > e.start && o.start < e.end() && o.end() > e.end() {
-            let ov = e.end() - o.start;
-            if ov > fo.len {
-                fo.len = ov;
-            }
-        }
-    }
-    (fi, fo)
+    crate::crossfade::effective_audio_fades(track, idx)
 }
 
 #[inline]
@@ -2314,5 +2294,73 @@ mod tests {
         let mut double_inv = vec![0.0_f32; 256 * 2];
         Mixer::new(sr).process(&p, &audio_map, 0, &mut double_inv);
         assert!((double_inv[256] - normal[256]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn crossfade_de_audio_usa_curva_rapida_padrao_e_respeita_corte_seco() {
+        let sr = 48_000;
+        let mut p = Project::new_default();
+        let mid_a = new_id();
+        let mid_b = new_id();
+        let ma = test_audio_item(mid_a, 4);
+        let mb = test_audio_item(mid_b, 4);
+        let ev_a = Event::new(&ma, Ticks::ZERO, Ticks::from_secs_i64(2));
+        let ev_b = Event::new(&mb, Ticks::from_secs_i64(1), Ticks::from_secs_i64(2));
+        p.media.push(ma);
+        p.media.push(mb);
+        let mut audio_map = HashMap::new();
+        audio_map.insert(
+            mid_a,
+            Arc::new(AudioData::from_stereo(
+                sr,
+                vec![0.5_f32; sr as usize * 4 * 2],
+            )),
+        );
+        audio_map.insert(
+            mid_b,
+            Arc::new(AudioData::from_stereo(
+                sr,
+                vec![0.5_f32; sr as usize * 4 * 2],
+            )),
+        );
+        let at_idx = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio");
+        p.tracks[at_idx].events.push(ev_a);
+        p.tracks[at_idx].events.push(ev_b);
+
+        // No meio do crossfade (t = 1.5s, amostra 72_000): padrão de áudio é Fast/Fast
+        // (0.875 + 0.875) * 0.5 = 0.875 (mais alto que Linear/Linear que daria 0.5).
+        let mid_sample = (sr as i64) + (sr as i64) / 2;
+        let mut buf_fast = vec![0.0_f32; 16 * 2];
+        Mixer::new(sr).process(&p, &audio_map, mid_sample, &mut buf_fast);
+        assert!(
+            buf_fast[0] > 0.80,
+            "crossfade padrão Fast/Fast deve evitar queda no meio, obtido {}",
+            buf_fast[0]
+        );
+
+        // Curva explícita Linear / Linear produz soma exata 0.5 * 0.5 + 0.5 * 0.5 = 0.5
+        p.tracks[at_idx].events[0].crossfade_out_curve = Some(Curve::Linear);
+        p.tracks[at_idx].events[1].crossfade_in_curve = Some(Curve::Linear);
+        let mut buf_lin = vec![0.0_f32; 16 * 2];
+        Mixer::new(sr).process(&p, &audio_map, mid_sample, &mut buf_lin);
+        assert!(
+            (buf_lin[0] - 0.5).abs() < 0.02,
+            "crossfade Linear/Linear esperado ~0.5, obtido {}",
+            buf_lin[0]
+        );
+
+        // Com crossfade desativado (`no_crossfade_in = true`), ambos tocam sem fade automático (0.5 + 0.5 = 1.0)
+        p.tracks[at_idx].events[1].no_crossfade_in = true;
+        let mut buf_off = vec![0.0_f32; 16 * 2];
+        Mixer::new(sr).process(&p, &audio_map, mid_sample, &mut buf_off);
+        assert!(
+            (buf_off[0] - 1.0).abs() < 0.02,
+            "sobreposição sem crossfade esperado ~1.0, obtido {}",
+            buf_off[0]
+        );
     }
 }
