@@ -706,6 +706,7 @@ pub(crate) enum PluginCategory {
 }
 
 impl PluginCategory {
+    #[cfg(test)]
     pub(crate) const ALL: [PluginCategory; 4] = [
         PluginCategory::VideoFx,
         PluginCategory::AudioFx,
