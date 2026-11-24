@@ -3106,3 +3106,46 @@ fn kittest_paridade_console_master_loudness_e_surround() {
     harness.run_steps(2);
     assert!(harness.query_by_label("LFE").is_some());
 }
+
+/// Paridade do Explorer (migalhas, favoritos, árvore e detalhes), Mídia do Projeto
+/// (Mídia por Tipo), Plug-In Manager (árvore Vídeo/Áudio + migalhas) e Escopos (seletor de layout).
+#[test]
+fn kittest_paridade_explorer_midia_plugins_e_escopos() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+
+    // 1. Mídia do Projeto exibe grupo recolhível "Mídia por Tipo"
+    assert!(
+        harness.query_by_label("Mídia por Tipo").is_some(),
+        "Mídia do Projeto deve agrupar filtros embutidos sob Mídia por Tipo"
+    );
+
+    // 2. Explorer: alterna favoritos e árvore lateral
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.explorer");
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Árvore").is_some());
+    assert!(harness.query_by_label("Detalhes").is_some());
+    harness.get_by_label("☆").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().explorer_ui.favorites.len(), 1);
+
+    // 3. Plug-In Manager: árvore hierárquica Vídeo/Áudio e migalhas
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.plugin_manager");
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Plug-Ins").is_some());
+
+    // 4. Escopos de Vídeo: seletor de layout "Todos (2×2)"
+    harness.state_mut().exec_cmd(Some(&ctx), "view.tab.scopes");
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().scopes_layout,
+        crate::panels::ScopeViewLayout::All
+    );
+}
