@@ -1755,6 +1755,32 @@ impl EditorSession {
         self.changed();
     }
 
+    /// Limpar grupo (VEGAS Pro: "Clear group without deleting events"):
+    /// desfaz os grupos inteiros dos eventos selecionados, sem apagar nada.
+    /// Devolve quantos eventos saíram de um grupo.
+    pub fn clear_group_selected(&mut self) -> usize {
+        let groups: HashSet<Id> = self
+            .sel_events
+            .iter()
+            .filter_map(|&id| self.project.event(id).and_then(|e| e.group))
+            .collect();
+        if groups.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let mut n = 0usize;
+        for t in &mut self.project.tracks {
+            for e in &mut t.events {
+                if e.group.is_some_and(|g| groups.contains(&g)) {
+                    e.group = None;
+                    n += 1;
+                }
+            }
+        }
+        self.changed();
+        n
+    }
+
     pub fn select_group(&mut self) {
         let saved = self.opts.ignore_grouping;
         self.opts.ignore_grouping = false;
@@ -2236,6 +2262,36 @@ impl EditorSession {
         }
         self.changed();
         true
+    }
+
+    /// Mudo (ou solo) só na trilha selecionada e fora de todas as outras
+    /// (VEGAS Pro: Shift+Z / Shift+X, "remove other tracks from the mute/solo
+    /// group"). `false` sem trilha selecionada.
+    pub fn set_selected_track_exclusive(&mut self, solo: bool) -> bool {
+        let Some(ti) = self.sel_track.filter(|&ti| ti < self.project.tracks.len()) else {
+            return false;
+        };
+        self.checkpoint();
+        for (i, t) in self.project.tracks.iter_mut().enumerate() {
+            if solo {
+                t.solo = i == ti;
+            } else {
+                t.mute = i == ti;
+            }
+        }
+        self.changed();
+        true
+    }
+
+    /// Soma `delta` à altura de todas as trilhas (28..=400 pontos), como o
+    /// arraste de altura: é exibição e não entra no Desfazer.
+    pub fn adjust_all_track_heights(&mut self, delta: f32) {
+        if !delta.is_finite() || delta == 0.0 {
+            return;
+        }
+        for t in &mut self.project.tracks {
+            t.height = (t.height + delta).clamp(28.0, 400.0);
+        }
     }
 
     pub fn toggle_selected_track_solo(&mut self) -> bool {
@@ -3942,7 +3998,7 @@ impl EditorSession {
         if count > 0 {
             self.changed();
             self.set_status(format!(
-                "Tom ajustado ({:+.1} st) em {count} evento(s).",
+                "Tom ajustado ({:+.2} st) em {count} evento(s).",
                 semitones
             ));
         } else {
@@ -6701,6 +6757,52 @@ mod tests {
         assert!(aid.iter().all(|id| s.sel_events.contains(id)));
         // não cria passo de Desfazer: é só seleção
         assert!(s.undo.is_empty());
+    }
+
+    #[test]
+    fn limpar_grupo_mudo_solo_exclusivos_e_altura_das_trilhas() {
+        let mut p = Project::default();
+        p.tracks.push(Track::new(TrackKind::Video, "V1"));
+        p.tracks.push(Track::new(TrackKind::Video, "V2"));
+        let m = sample_media(new_id(), 64, 64, Some(FrameRate::FPS_30));
+        let secs = Ticks::from_secs_i64;
+        let mut a = Event::new(&m, secs(0), secs(1));
+        let mut b = Event::new(&m, secs(2), secs(1));
+        let mut c = Event::new(&m, secs(4), secs(1));
+        a.group = Some(77);
+        b.group = Some(77);
+        c.group = Some(88);
+        let (ida, idb, idc) = (a.id, b.id, c.id);
+        p.media.push(m);
+        p.tracks[0].events = vec![a, b];
+        p.tracks[1].events = vec![c];
+        let mut s = EditorSession::new(p);
+        // sem seleção nada muda
+        assert_eq!(s.clear_group_selected(), 0);
+        // selecionar só `a` desfaz o grupo 77 inteiro (a e b); o 88 fica
+        s.sel_events.insert(ida);
+        assert_eq!(s.clear_group_selected(), 2);
+        let g = |s: &EditorSession, id| s.project.event(id).and_then(|e| e.group);
+        assert_eq!((g(&s, ida), g(&s, idb), g(&s, idc)), (None, None, Some(88)));
+        assert_eq!(s.undo.len(), 1);
+
+        // a sessão já abre com a primeira trilha selecionada: tirar a seleção
+        s.sel_track = None;
+        assert!(!s.set_selected_track_exclusive(false));
+        s.project.tracks[0].mute = true;
+        s.sel_track = Some(1);
+        assert!(s.set_selected_track_exclusive(false));
+        assert!(!s.project.tracks[0].mute && s.project.tracks[1].mute);
+        assert!(s.set_selected_track_exclusive(true));
+        assert!(!s.project.tracks[0].solo && s.project.tracks[1].solo);
+
+        s.project.tracks[0].height = 390.0;
+        s.adjust_all_track_heights(24.0);
+        assert_eq!(s.project.tracks[0].height, 400.0);
+        s.adjust_all_track_heights(f32::NAN);
+        assert_eq!(s.project.tracks[0].height, 400.0);
+        s.adjust_all_track_heights(-10_000.0);
+        assert!(s.project.tracks.iter().all(|t| t.height == 28.0));
     }
 
     #[test]

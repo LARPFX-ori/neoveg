@@ -797,7 +797,94 @@ fn ok_mutated(
 }
 
 /// Tabela Única de Comandos do Neoveg (§3.3).
+/// Passo de Ctrl+Shift+Cima/Baixo na altura das trilhas (pontos).
+const TRACK_HEIGHT_STEP: f32 = 12.0;
+
 pub static COMMANDS: &[CommandDef] = &[
+    CommandDef {
+        id: "edit.clear_group",
+        label: "Limpar grupo",
+        menu_path: "Editar/Limpar grupo",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::U)),
+        needs_ui: false,
+        enabled: has_selected_events,
+        run: |s, h| {
+            s.clear_group_selected();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_up_cent",
+        label: "Subir tom (+1 cent)",
+        menu_path: "Editar/Pitch/Subir 1 cent",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Equals)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(0.01);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "event.pitch_down_cent",
+        label: "Descer tom (-1 cent)",
+        menu_path: "Editar/Pitch/Descer 1 cent",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Minus)),
+        needs_ui: false,
+        enabled: has_selected_audio_events,
+        run: |s, h| {
+            s.shift_pitch_selected(-0.01);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.mute_exclusive",
+        label: "Mudo só na trilha selecionada",
+        menu_path: "Trilha/Mudo exclusivo",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::Z)),
+        needs_ui: false,
+        enabled: has_selected_track,
+        run: |s, h| {
+            s.set_selected_track_exclusive(false);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "track.solo_exclusive",
+        label: "Solo só na trilha selecionada",
+        menu_path: "Trilha/Solo exclusivo",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::X)),
+        needs_ui: false,
+        enabled: has_selected_track,
+        run: |s, h| {
+            s.set_selected_track_exclusive(true);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.tracks_taller",
+        label: "Aumentar a altura de todas as trilhas",
+        menu_path: "Exibir/Aumentar a altura de todas as trilhas",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::ArrowUp)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.adjust_all_track_heights(TRACK_HEIGHT_STEP);
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.tracks_shorter",
+        label: "Diminuir a altura de todas as trilhas",
+        menu_path: "Exibir/Diminuir a altura de todas as trilhas",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::ArrowDown)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.adjust_all_track_heights(-TRACK_HEIGHT_STEP);
+            ok_mutated(s, h)
+        },
+    },
     // --- Arquivo ---
     CommandDef {
         id: "file.new",
@@ -1514,7 +1601,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "edit.tool.normal",
         label: "Ferramenta Normal",
         menu_path: "Editar/Ferramenta de edição/Normal",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::D)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, _| {
@@ -2218,7 +2305,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.waveforms",
         label: "Mostrar formas de onda",
         menu_path: "Exibir/Mostrar formas de onda",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::W)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -2925,7 +3012,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "track.record_arm",
         label: "Armar trilha para gravação (Rec)",
         menu_path: "Trilha/Armar gravação",
-        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::R)),
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::R)),
         needs_ui: false,
         enabled: has_selected_audio_track,
         run: |s, h| {
@@ -3735,7 +3822,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "options.quantize",
         label: "Quantizar para quadros",
         menu_path: "Opções/Quantizar para quadros",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::F8)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -4748,6 +4835,17 @@ mod vegas_keymap_tests {
         ("M", "insert.marker"),
         ("R", "insert.region"),
         ("N", "insert.marker_cd_track"),
+        ("Alt+F8", "options.quantize"),
+        ("Ctrl+Shift+W", "view.waveforms"),
+        ("Ctrl+D", "edit.tool.normal"),
+        ("Ctrl+Alt+R", "track.record_arm"),
+        ("Ctrl+U", "edit.clear_group"),
+        ("Ctrl+=", "event.pitch_up_cent"),
+        ("Ctrl+-", "event.pitch_down_cent"),
+        ("Shift+Z", "track.mute_exclusive"),
+        ("Shift+X", "track.solo_exclusive"),
+        ("Ctrl+Shift+Up", "view.tracks_taller"),
+        ("Ctrl+Shift+Down", "view.tracks_shorter"),
         ("Alt+1", "view.tab.explorer"),
         ("Alt+4", "view.preview"),
         ("Alt+5", "view.tab.project_media"),
@@ -4774,8 +4872,6 @@ mod vegas_keymap_tests {
     const VEGAS_RESERVED_UNBOUND: &[(&str, &str)] = &[
         ("Ctrl+Alt+M", "mostrar/ocultar cabeçalhos dos eventos"),
         ("Ctrl+B", "colar repetindo"),
-        ("Ctrl+=", "subir o tom 1 cent"),
-        ("Ctrl+-", "descer o tom 1 cent"),
     ];
 
     fn bound_to(sc: Shortcut) -> Vec<&'static str> {
