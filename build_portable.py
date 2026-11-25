@@ -386,6 +386,35 @@ def _wait_for_new_run(
     )
 
 
+def _wait_until_run_visible(
+    repo: str,
+    run_id: int,
+    timeout_secs: int = GH_DISCOVERY_TIMEOUT_SECS,
+) -> None:
+    """Espera `gh run view` enxergar a execução antes do `gh run watch`.
+
+    Logo depois do `workflow_dispatch`, a execução já aparece em `gh run list`,
+    mas o endpoint `actions/runs/<id>` ainda pode responder HTTP 404 por alguns
+    segundos; o `gh run watch` desiste no primeiro 404.
+    """
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        res = subprocess.run(
+            ["gh", "run", "view", str(run_id), "-R", repo, "--json", "status"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if res.returncode == 0:
+            return
+        if time.monotonic() >= deadline:
+            detail = (res.stderr or res.stdout or "").strip()
+            raise RuntimeError(
+                f"A execução #{run_id} não ficou acessível em {timeout_secs}s: {detail}"
+            )
+        time.sleep(GH_POLL_INTERVAL_SECS)
+
+
 def verify_sha256sums(sums_file: Path) -> list[Path]:
     """Verifica todos os arquivos listados em `SHA256SUMS.txt` no mesmo diretório."""
     base_dir = sums_file.parent.resolve()
@@ -539,6 +568,7 @@ def build_via_github_actions(
         print("Aguardando início da execução no GitHub Actions...")
         run_id, run_url = _wait_for_new_run(repo, known_ids) #type: ignore
         print(f"Execução #{run_id} iniciada{f': {run_url}' if run_url else ''}")
+        _wait_until_run_visible(repo, run_id)
         subprocess.run(
             ["gh", "run", "watch", str(run_id), "-R", repo, "--exit-status"],
             cwd=repo_root,
