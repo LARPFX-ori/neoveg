@@ -1736,17 +1736,7 @@ impl App {
                 Sense::click_and_drag(),
             );
             canvas_resp.context_menu(|ui| {
-                let lang = self.lang();
-                if ui
-                    .checkbox(
-                        &mut self.prefs.preview_simulate_device_aspect,
-                        tr(lang, "Simular proporção do dispositivo"),
-                    )
-                    .changed()
-                {
-                    let _ = self.prefs.save();
-                    ui.close_menu();
-                }
+                self.preview_context_menu(ui, is_floating);
             });
             if canvas_resp.hovered() {
                 // roda: 10% por passo; com Ctrl, 1% (manual, p. 209). O egui
