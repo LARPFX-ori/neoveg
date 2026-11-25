@@ -6980,6 +6980,13 @@ impl App {
             self.ungroup_selected();
             ui.close_menu();
         }
+        if ui
+            .button(tr(lang, "Selecionar eventos até o fim"))
+            .clicked()
+        {
+            self.exec_cmd(Some(ui.ctx()), "edit.select_events_to_end");
+            ui.close_menu();
+        }
         if e.group.is_some() && ui.button(tr(lang, "Selecionar grupo (Shift+G)")).clicked() {
             self.select_group();
             ui.close_menu();
