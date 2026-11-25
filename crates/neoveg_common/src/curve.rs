@@ -1,6 +1,7 @@
 //! Identificadores únicos e curvas/keyframes/fades usados por timeline,
 //! envelopes, Pan/Crop e Track Motion.
 
+use crate::ease::{self, EaseKey, KeyEase};
 use crate::time::Ticks;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,11 +88,23 @@ impl Curve {
 
 pub trait Lerp: Clone {
     fn lerp(&self, other: &Self, t: f32) -> Self;
+
+    /// Valor numérico único da propriedade, quando ela tem um só número.
+    /// Permite que o gráfico de velocidade e o Bézier automático usem a
+    /// variação real; propriedades compostas (posição, recorte) devolvem
+    /// `None` e são tratadas por fração do trecho.
+    fn ease_scalar(&self) -> Option<f32> {
+        None
+    }
 }
 
 impl Lerp for f32 {
     fn lerp(&self, other: &Self, t: f32) -> Self {
         self + (other - self) * t
+    }
+
+    fn ease_scalar(&self) -> Option<f32> {
+        Some(*self)
     }
 }
 
@@ -103,6 +116,10 @@ pub struct Keyframe<T> {
     pub value: T,
     #[serde(default)]
     pub curve: Curve,
+    /// Interpolação temporal Bézier (velocidade e influência das alças).
+    /// `None` usa só a `curve` do VEGAS; projetos antigos não têm o campo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<KeyEase>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,6 +134,7 @@ impl<T: Lerp + Default> Default for Keyframes<T> {
                 t: Ticks::ZERO,
                 value: T::default(),
                 curve: Curve::Smooth,
+                ease: None,
             }],
         }
     }
@@ -130,11 +148,23 @@ impl<T: Lerp + Default> Keyframes<T> {
         if t <= self.keys[0].t {
             return self.keys[0].value.clone();
         }
-        for w in self.keys.windows(2) {
+        let eased = self.has_ease();
+        for (i, w) in self.keys.windows(2).enumerate() {
             let (a, b) = (&w[0], &w[1]);
             if t >= a.t && t < b.t {
                 let x = Ticks::lerp_factor(t, a.t, b.t);
-                return a.value.lerp(&b.value, a.curve.shape(x));
+                let u = if eased {
+                    // propriedades compostas não ultrapassam os quadros-chave
+                    let u = ease::segment_progress(&self.ease_keys(), i, a.curve, x);
+                    if a.value.ease_scalar().is_some() {
+                        u.clamp(-1.0, 2.0)
+                    } else {
+                        u.clamp(0.0, 1.0)
+                    }
+                } else {
+                    a.curve.shape(x)
+                };
+                return a.value.lerp(&b.value, u);
             }
         }
         self.keys
@@ -150,8 +180,45 @@ impl<T: Lerp + Default> Keyframes<T> {
             return;
         }
         let curve = self.keys.first().map(|k| k.curve).unwrap_or(Curve::Smooth);
-        self.keys.push(Keyframe { t, value, curve });
+        self.keys.push(Keyframe {
+            t,
+            value,
+            curve,
+            ease: None,
+        });
         self.keys.sort_by_key(|k| k.t);
+    }
+
+    /// Algum quadro-chave usa interpolação temporal Bézier.
+    pub fn has_ease(&self) -> bool {
+        self.keys.iter().any(|k| k.ease.is_some())
+    }
+
+    /// Visão dos quadros-chave para o resolvedor de alças Bézier.
+    pub fn ease_keys(&self) -> Vec<EaseKey> {
+        self.keys
+            .iter()
+            .map(|k| EaseKey {
+                t: k.t,
+                scalar: k.value.ease_scalar(),
+                ease: k.ease,
+            })
+            .collect()
+    }
+
+    /// Grava a interpolação Bézier do quadro-chave `i` (`None` volta à curva
+    /// do VEGAS). No Bézier contínuo, `edited_out` diz qual alça foi mexida
+    /// e a outra é ajustada para manter a velocidade. Índice inválido: `false`.
+    pub fn set_ease(&mut self, i: usize, ease: Option<KeyEase>, edited_out: bool) -> bool {
+        let keys = self.ease_keys();
+        let Some(k) = self.keys.get_mut(i) else {
+            return false;
+        };
+        k.ease = ease.map(|e| ease::enforce_continuous(&keys, i, e, edited_out));
+        if k.ease.is_some() && k.curve == Curve::Hold {
+            k.curve = Curve::Smooth;
+        }
+        true
     }
 
     pub fn is_identity(&self) -> bool

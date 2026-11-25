@@ -15,7 +15,7 @@
 //! guarda o valor dele como valor fixo; Track Motion nunca fica sem
 //! quadro-chave.
 
-use crate::model::{Curve, FxKind, Id, Ticks, Track, TrackKind};
+use crate::model::{Curve, FxKind, Id, KeyEase, Ticks, Track, TrackKind};
 
 /// Linha de quadros-chave de uma trilha.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +259,8 @@ pub fn set_motion_curve(track: &mut Track, t: Ticks, curve: Curve, tol: Ticks) -
     for k in &mut track.motion.keys {
         if k.t.abs_diff(t) <= tol {
             k.curve = curve;
+            // escolher uma curva do VEGAS desliga o Bézier desse quadro-chave
+            k.ease = None;
             found = true;
         }
     }
@@ -319,6 +321,60 @@ pub fn key_curve(track: &Track, row: &KfRowKind, t: Ticks, tol: Ticks) -> Option
     match row {
         KfRowKind::Motion => motion_curve(track, t, tol),
         KfRowKind::Fx(id) => fx_curve(track, *id, t, tol),
+    }
+}
+
+/// Interpolação temporal Bézier do quadro-chave em `t` (Motion ou Fx).
+/// `None` quando não há quadro-chave ali ou ele usa só a curva do VEGAS.
+pub fn key_ease(track: &Track, row: &KfRowKind, t: Ticks, tol: Ticks) -> Option<KeyEase> {
+    match row {
+        KfRowKind::Motion => track
+            .motion
+            .keys
+            .iter()
+            .find(|k| k.t.abs_diff(t) <= tol)
+            .and_then(|k| k.ease),
+        KfRowKind::Fx(id) => {
+            let fx = track.fx.iter().find(|f| f.id == *id)?;
+            fx.params.iter().find_map(|p| p.ease_at(t, tol))
+        }
+    }
+}
+
+/// Grava a interpolação Bézier do quadro-chave em `t` (`None` volta à curva
+/// do VEGAS). Nos efeitos vale para todos os parâmetros com quadro-chave
+/// ali, como a curva. Devolve `false` se não há quadro-chave em `t`.
+pub fn set_key_ease(
+    track: &mut Track,
+    row: &KfRowKind,
+    t: Ticks,
+    ease: Option<KeyEase>,
+    tol: Ticks,
+) -> bool {
+    match row {
+        KfRowKind::Motion => {
+            let Some(i) = track
+                .motion
+                .keys
+                .iter()
+                .position(|k| k.t.abs_diff(t) <= tol)
+            else {
+                return false;
+            };
+            track.motion.set_ease(i, ease, true)
+        }
+        KfRowKind::Fx(id) => {
+            let Some(fx) = track.fx.iter_mut().find(|f| f.id == *id) else {
+                return false;
+            };
+            let mut found = false;
+            for p in &mut fx.params {
+                if p.set_ease(t, ease, tol) {
+                    found = true;
+                }
+            }
+            found
+        }
     }
 }
 
@@ -508,5 +564,76 @@ mod tests {
             Some(Curve::Hold)
         );
         assert_eq!(t.fx[0].params[0].eval(secs(2)), 0.0);
+    }
+
+    #[test]
+    fn bezier_no_movimento_e_nos_efeitos_da_trilha() {
+        use crate::model::{EaseMode, KeyEase};
+        let mut t = video_track();
+        t.fx.push(fx_with_keys(&[(0, 0.0), (2, 1.0)]));
+        let fx_id = t.fx[0].id;
+        let row = KfRowKind::Fx(fx_id);
+        // suavizar os dois lados: no meio do trecho o valor é a metade, mas
+        // no primeiro décimo andou bem menos que o linear
+        assert!(set_key_ease(
+            &mut t,
+            &row,
+            secs(0),
+            Some(KeyEase::easy_ease()),
+            TOL
+        ));
+        assert!(set_key_ease(
+            &mut t,
+            &row,
+            secs(2),
+            Some(KeyEase::easy_ease()),
+            TOL
+        ));
+        let p = &t.fx[0].params[0];
+        assert!((p.eval(secs(1)) - 0.5).abs() < 1e-3);
+        assert!(p.eval(Ticks::from_millis_i64(200)) < 0.05);
+        assert_eq!(key_ease(&t, &row, secs(0), TOL), Some(KeyEase::easy_ease()));
+        // escolher uma curva do VEGAS desliga o Bézier
+        assert!(set_key_curve(&mut t, &row, secs(0), Curve::Linear, TOL));
+        assert_eq!(key_ease(&t, &row, secs(0), TOL), None);
+        // sem quadro-chave no tempo pedido: nada muda
+        assert!(!set_key_ease(
+            &mut t,
+            &row,
+            secs(7),
+            Some(KeyEase::new(EaseMode::Auto)),
+            TOL
+        ));
+        assert!(!set_key_ease(
+            &mut t,
+            &KfRowKind::Fx(fx_id + 999),
+            secs(0),
+            None,
+            TOL
+        ));
+
+        t.motion.keys[0].value.x = 0.0;
+        t.motion.set(
+            secs(4),
+            MotionKey {
+                x: 1.0,
+                ..MotionKey::default()
+            },
+            TOL,
+        );
+        assert!(set_key_ease(
+            &mut t,
+            &KfRowKind::Motion,
+            secs(4),
+            Some(KeyEase::ease_in(None)),
+            TOL
+        ));
+        assert_eq!(
+            key_ease(&t, &KfRowKind::Motion, secs(4), TOL).map(|e| e.incoming.speed),
+            Some(0.0)
+        );
+        assert!(t.motion.eval(secs(3)).x > 0.75, "desacelera perto do fim");
+        assert!(set_motion_curve(&mut t, secs(4), Curve::Smooth, TOL));
+        assert_eq!(key_ease(&t, &KfRowKind::Motion, secs(4), TOL), None);
     }
 }
