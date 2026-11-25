@@ -7487,10 +7487,7 @@ fn prefs_audio(
     prefs_group_box(
         ui,
         cx.theme,
-        tr(
-            lang,
-            "Dispositivo de Saída e Motor (cpal / fundsp / rubato)",
-        ),
+        tr(lang, "Dispositivo de Saída de Áudio"),
         |ui| {
             prefs_ro_row(
                 ui,
@@ -7594,7 +7591,7 @@ fn prefs_memory(
     prefs_group_box(
         ui,
         cx.theme,
-        tr(lang, "Adaptabilidade a Hardware Limitado (§3.6)"),
+        tr(lang, "Adaptabilidade a Hardware Limitado"),
         |ui| {
             ui.add(
                 egui::Label::new(
@@ -7739,7 +7736,7 @@ fn prefs_shortcuts(
             let custom_n = draft.shortcuts.len();
             let stats = tr_args(
                 lang,
-                "{cmds} comando(s) na Tabela Única • {custom} atalho(s) personalizado(s)",
+                "{cmds} comando(s) • {custom} atalho(s) personalizado(s)",
                 &[("cmds", &cmds_n), ("custom", &custom_n)],
             );
             prefs_ro_row(
@@ -7764,7 +7761,7 @@ fn prefs_shortcuts(
     prefs_group_box(
         ui,
         cx.theme,
-        tr(lang, "Mapeamento Clássico do VEGAS Pro Preservado"),
+        tr(lang, "Atalhos clássicos do VEGAS Pro"),
         |ui| {
             ui.add(
                 egui::Label::new(
@@ -7857,35 +7854,35 @@ fn prefs_preview_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mu
     prefs_group_box(
         ui,
         cx.theme,
-        "Dispositivo de Prévia Secundário (p. 1061)",
+        tr(cx.lang, "Dispositivo de Prévia Secundário"),
         |ui| {
             let mode_label = match draft.preview_device.device_mode.as_str() {
                 "window" => "Janela destacável no editor",
                 "external_deck" => "Monitor externo / Saída secundária dedicada",
                 _ => "Monitor secundário do Windows (Tela cheia)",
             };
-            prefs_row(ui, inner_lw, "Dispositivo de saída:", |ui| {
+            prefs_row(ui, inner_lw, tr(cx.lang, "Dispositivo de saída:"), |ui| {
                 egui::ComboBox::from_id_salt("prefs_prev_dev_mode")
-                    .selected_text(mode_label)
+                    .selected_text(tr(cx.lang, mode_label))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut draft.preview_device.device_mode,
                             "secondary_monitor".into(),
-                            "Monitor secundário do Windows (Tela cheia)",
+                            tr(cx.lang, "Monitor secundário do Windows (Tela cheia)"),
                         );
                         ui.selectable_value(
                             &mut draft.preview_device.device_mode,
                             "window".into(),
-                            "Janela destacável no editor",
+                            tr(cx.lang, "Janela destacável no editor"),
                         );
                         ui.selectable_value(
                             &mut draft.preview_device.device_mode,
                             "external_deck".into(),
-                            "Monitor externo / Saída secundária dedicada",
+                            tr(cx.lang, "Monitor externo / Saída secundária dedicada"),
                         );
                     });
             });
-            prefs_row(ui, inner_lw, "Nível de fundo (cinza):", |ui| {
+            prefs_row(ui, inner_lw, tr(cx.lang, "Nível de fundo (cinza):"), |ui| {
                 ui.add_sized(
                     [64.0, 20.0],
                     egui::DragValue::new(&mut draft.preview_device.bg_gray).range(0..=48),
@@ -7894,15 +7891,24 @@ fn prefs_preview_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mu
             prefs_indented(ui, inner_lw, |ui| {
                 ui.checkbox(
                     &mut draft.preview_device.scale_to_fit,
-                    "Ajustar imagem para caber mantendo a proporção (Scale to Fit)",
+                    tr(
+                        cx.lang,
+                        "Ajustar imagem para caber mantendo a proporção (Scale to Fit)",
+                    ),
                 );
                 ui.checkbox(
                     &mut draft.preview_device.match_project_fps,
-                    "Sincronizar taxa de atualização com os quadros por segundo do projeto",
+                    tr(
+                        cx.lang,
+                        "Sincronizar taxa de atualização com os quadros por segundo do projeto",
+                    ),
                 );
                 ui.checkbox(
                     &mut draft.preview_device.show_alpha_checkerboard,
-                    "Exibir quadriculado para áreas transparentes (Canal Alfa)",
+                    tr(
+                        cx.lang,
+                        "Exibir quadriculado para áreas transparentes (Canal Alfa)",
+                    ),
                 );
             });
         },
@@ -7914,37 +7920,37 @@ fn prefs_audio_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut 
     prefs_group_box(
         ui,
         cx.theme,
-        "Driver e Dispositivo de Áudio (p. 1075)",
+        tr(cx.lang, "Driver e Dispositivo de Áudio"),
         |ui| {
             let drv_label = match draft.audio_device.driver_mode.as_str() {
                 "wasapi_shared" => "WASAPI Compartilhado (Windows)",
                 "wasapi_exclusive" => "WASAPI Exclusivo (Baixa latência)",
                 "low_latency" => "Modo Baixa Latência",
-                _ => "Mapper / Padrão do Sistema Operacional (cpal)",
+                _ => "Mapper / Padrão do Sistema Operacional",
             };
-            prefs_row(ui, inner_lw, "Tipo de dispositivo:", |ui| {
+            prefs_row(ui, inner_lw, tr(cx.lang, "Tipo de dispositivo:"), |ui| {
                 egui::ComboBox::from_id_salt("prefs_aud_dev_drv")
-                    .selected_text(drv_label)
+                    .selected_text(tr(cx.lang, drv_label))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut draft.audio_device.driver_mode,
                             "os_default".into(),
-                            "Mapper / Padrão do Sistema Operacional (cpal)",
+                            tr(cx.lang, "Mapper / Padrão do Sistema Operacional"),
                         );
                         ui.selectable_value(
                             &mut draft.audio_device.driver_mode,
                             "wasapi_shared".into(),
-                            "WASAPI Compartilhado (Windows)",
+                            tr(cx.lang, "WASAPI Compartilhado (Windows)"),
                         );
                         ui.selectable_value(
                             &mut draft.audio_device.driver_mode,
                             "wasapi_exclusive".into(),
-                            "WASAPI Exclusivo (Baixa latência)",
+                            tr(cx.lang, "WASAPI Exclusivo (Baixa latência)"),
                         );
                         ui.selectable_value(
                             &mut draft.audio_device.driver_mode,
                             "low_latency".into(),
-                            "Modo Baixa Latência",
+                            tr(cx.lang, "Modo Baixa Latência"),
                         );
                     });
             });
@@ -7952,45 +7958,66 @@ fn prefs_audio_device(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut 
                 ui,
                 cx.theme,
                 inner_lw,
-                "Dispositivo ativo no motor:",
+                tr(cx.lang, "Dispositivo ativo no motor:"),
                 &format!("{} ({} Hz)", cx.audio_device, cx.audio_sr),
                 false,
             );
-            prefs_row(ui, inner_lw, "Dispositivo preferencial:", |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.audio_device.preferred_device)
-                        .desired_width(210.0)
-                        .hint_text("Automático (padrão do SO)"),
-                );
-            });
-            prefs_row(ui, inner_lw, "Tamanho do buffer (latência):", |ui| {
-                ui.add_sized(
-                    [68.0, 20.0],
-                    egui::DragValue::new(&mut draft.audio_device.buffer_ms)
-                        .range(5..=250)
-                        .suffix(" ms"),
-                );
-            });
-            prefs_row(ui, inner_lw, "Compensação de gravação:", |ui| {
-                ui.add_sized(
-                    [68.0, 20.0],
-                    egui::DragValue::new(&mut draft.audio_device.record_offset_ms)
-                        .range(-500..=500)
-                        .suffix(" ms"),
-                );
-            });
-            prefs_row(ui, inner_lw, "Pasta padrão de gravações:", |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.audio_device.default_record_dir)
-                        .desired_width(200.0)
-                        .hint_text("Pasta do projeto / temporária"),
-                );
-                if ui.small_button("...").clicked() {
-                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                        draft.audio_device.default_record_dir = d.to_string_lossy().into_owned();
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Dispositivo preferencial:"),
+                |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.audio_device.preferred_device)
+                            .desired_width(210.0)
+                            .hint_text(tr(cx.lang, "Automático (padrão do SO)")),
+                    );
+                },
+            );
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Tamanho do buffer (latência):"),
+                |ui| {
+                    ui.add_sized(
+                        [68.0, 20.0],
+                        egui::DragValue::new(&mut draft.audio_device.buffer_ms)
+                            .range(5..=250)
+                            .suffix(" ms"),
+                    );
+                },
+            );
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Compensação de gravação:"),
+                |ui| {
+                    ui.add_sized(
+                        [68.0, 20.0],
+                        egui::DragValue::new(&mut draft.audio_device.record_offset_ms)
+                            .range(-500..=500)
+                            .suffix(" ms"),
+                    );
+                },
+            );
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Pasta padrão de gravações:"),
+                |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.audio_device.default_record_dir)
+                            .desired_width(200.0)
+                            .hint_text(tr(cx.lang, "Pasta do projeto / temporária")),
+                    );
+                    if ui.small_button("...").clicked() {
+                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                            draft.audio_device.default_record_dir =
+                                d.to_string_lossy().into_owned();
+                        }
                     }
-                }
-            });
+                },
+            );
         },
     );
 }
@@ -8000,46 +8027,57 @@ fn prefs_midi_sync(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Pre
     prefs_group_box(
         ui,
         cx.theme,
-        "MIDI e Sincronização MTC / SMPTE (p. 1090)",
+        tr(cx.lang, "MIDI e Sincronização MTC / SMPTE"),
         |ui| {
             prefs_indented(ui, inner_lw, |ui| {
                 ui.checkbox(
                     &mut draft.midi_sync.mtc_input_enabled,
-                    "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+                    tr(
+                        cx.lang,
+                        "Receber código de tempo MIDI (MTC / Disparo de transporte)",
+                    ),
                 );
                 ui.checkbox(
                     &mut draft.midi_sync.mtc_output_enabled,
-                    "Enviar código de tempo MIDI (Gerador MTC para dispositivos externos)",
+                    tr(
+                        cx.lang,
+                        "Enviar código de tempo MIDI (Gerador MTC para dispositivos externos)",
+                    ),
                 );
             });
-            prefs_row(ui, inner_lw, "Porta de entrada MIDI:", |ui| {
+            prefs_row(ui, inner_lw, tr(cx.lang, "Porta de entrada MIDI:"), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.midi_sync.midi_in_device)
                         .desired_width(210.0)
-                        .hint_text("Nenhuma / Todas"),
+                        .hint_text(tr(cx.lang, "Nenhuma / Todas")),
                 );
             });
-            prefs_row(ui, inner_lw, "Porta de saída MIDI:", |ui| {
+            prefs_row(ui, inner_lw, tr(cx.lang, "Porta de saída MIDI:"), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.midi_sync.midi_out_device)
                         .desired_width(210.0)
-                        .hint_text("Nenhuma"),
+                        .hint_text(tr(cx.lang, "Nenhuma")),
                 );
             });
-            prefs_row(ui, inner_lw, "Taxa de quadros de Sync:", |ui| {
-                egui::ComboBox::from_id_salt("prefs_sync_fps")
-                    .selected_text(format!("{} qps", draft.midi_sync.sync_fps))
-                    .show_ui(ui, |ui| {
-                        for f in ["24", "25", "29.97", "30"] {
-                            ui.selectable_value(
-                                &mut draft.midi_sync.sync_fps,
-                                f.to_string(),
-                                format!("{f} qps SMPTE"),
-                            );
-                        }
-                    });
-            });
-            prefs_row(ui, inner_lw, "Deslocamento de Sync:", |ui| {
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Taxa de quadros de Sync:"),
+                |ui| {
+                    egui::ComboBox::from_id_salt("prefs_sync_fps")
+                        .selected_text(format!("{} qps", draft.midi_sync.sync_fps))
+                        .show_ui(ui, |ui| {
+                            for f in ["24", "25", "29.97", "30"] {
+                                ui.selectable_value(
+                                    &mut draft.midi_sync.sync_fps,
+                                    f.to_string(),
+                                    format!("{f} qps SMPTE"),
+                                );
+                            }
+                        });
+                },
+            );
+            prefs_row(ui, inner_lw, tr(cx.lang, "Deslocamento de Sync:"), |ui| {
                 ui.add_sized(
                     [76.0, 20.0],
                     egui::DragValue::new(&mut draft.midi_sync.sync_offset_ms)
@@ -8050,45 +8088,69 @@ fn prefs_midi_sync(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Pre
         },
     );
 
-    prefs_group_box(ui, cx.theme, "Dispositivos de Controle Externo", |ui| {
-        prefs_indented(ui, inner_lw, |ui| {
-            ui.checkbox(
-                &mut draft.midi_sync.control_surface_enabled,
-                "Ativar superfície de controle externa (faders e transporte)",
+    prefs_group_box(
+        ui,
+        cx.theme,
+        tr(cx.lang, "Dispositivos de Controle Externo"),
+        |ui| {
+            prefs_indented(ui, inner_lw, |ui| {
+                ui.checkbox(
+                    &mut draft.midi_sync.control_surface_enabled,
+                    tr(
+                        cx.lang,
+                        "Ativar superfície de controle externa (faders e transporte)",
+                    ),
+                );
+            });
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Protocolo da superfície:"),
+                |ui| {
+                    egui::ComboBox::from_id_salt("prefs_ctrl_proto")
+                        .selected_text(tr(
+                            cx.lang,
+                            match draft.midi_sync.control_surface_protocol.as_str() {
+                                "generic_cc" => "MIDI CC Genérico",
+                                "osc" => "Open Sound Control (OSC)",
+                                _ => "Mackie Control Universal",
+                            },
+                        ))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut draft.midi_sync.control_surface_protocol,
+                                "mackie".into(),
+                                tr(cx.lang, "Mackie Control Universal"),
+                            );
+                            ui.selectable_value(
+                                &mut draft.midi_sync.control_surface_protocol,
+                                "generic_cc".into(),
+                                tr(cx.lang, "MIDI CC Genérico"),
+                            );
+                            ui.selectable_value(
+                                &mut draft.midi_sync.control_surface_protocol,
+                                "osc".into(),
+                                tr(cx.lang, "Open Sound Control (OSC)"),
+                            );
+                        });
+                },
             );
-        });
-        prefs_row(ui, inner_lw, "Protocolo da superfície:", |ui| {
-            egui::ComboBox::from_id_salt("prefs_ctrl_proto")
-                .selected_text(match draft.midi_sync.control_surface_protocol.as_str() {
-                    "generic_cc" => "MIDI CC Genérico",
-                    "osc" => "Open Sound Control (OSC)",
-                    _ => "Mackie Control Universal",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut draft.midi_sync.control_surface_protocol,
-                        "mackie".into(),
-                        "Mackie Control Universal",
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Sensibilidade dos controles:"),
+                |ui| {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut draft.midi_sync.control_surface_sensitivity,
+                            0.2..=3.0,
+                        )
+                        .fixed_decimals(2),
                     );
-                    ui.selectable_value(
-                        &mut draft.midi_sync.control_surface_protocol,
-                        "generic_cc".into(),
-                        "MIDI CC Genérico",
-                    );
-                    ui.selectable_value(
-                        &mut draft.midi_sync.control_surface_protocol,
-                        "osc".into(),
-                        "Open Sound Control (OSC)",
-                    );
-                });
-        });
-        prefs_row(ui, inner_lw, "Sensibilidade dos controles:", |ui| {
-            ui.add(
-                egui::Slider::new(&mut draft.midi_sync.control_surface_sensitivity, 0.2..=3.0)
-                    .fixed_decimals(2),
+                },
             );
-        });
-    });
+        },
+    );
 }
 
 fn prefs_file_io(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Preferences) {
@@ -8096,58 +8158,85 @@ fn prefs_file_io(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Prefe
     prefs_group_box(
         ui,
         cx.theme,
-        "Entrada / Saída e Hardware de Vídeo (p. 1105)",
+        tr(cx.lang, "Entrada / Saída e Hardware de Vídeo"),
         |ui| {
             prefs_indented(ui, inner_lw, |ui| {
                 ui.checkbox(
                     &mut draft.file_io.hardware_accel_decode,
-                    "Ativar decodificação de vídeo acelerada por hardware (GPU/SO)",
+                    tr(
+                        cx.lang,
+                        "Ativar decodificação de vídeo acelerada por hardware (GPU/SO)",
+                    ),
                 );
                 ui.checkbox(
                     &mut draft.file_io.hardware_accel_encode,
-                    "Usar aceleração por hardware na renderização quando suportado",
+                    tr(
+                        cx.lang,
+                        "Usar aceleração por hardware na renderização quando suportado",
+                    ),
                 );
                 ui.checkbox(
                     &mut draft.file_io.prefer_system_demuxer,
-                    "Priorizar leitores nativos do sistema operacional para MP4/MOV",
+                    tr(
+                        cx.lang,
+                        "Priorizar leitores nativos do sistema operacional para MP4/MOV",
+                    ),
                 );
                 ui.checkbox(
                     &mut draft.file_io.auto_build_proxies_4k,
-                    "Sugerir/gerar proxies automaticamente para mídias 4K ou superiores",
+                    tr(
+                        cx.lang,
+                        "Sugerir/gerar proxies automaticamente para mídias 4K ou superiores",
+                    ),
                 );
             });
-            prefs_row(ui, inner_lw, "FPS de sequências de imagem:", |ui| {
-                ui.add_sized(
-                    [76.0, 20.0],
-                    egui::DragValue::new(&mut draft.file_io.image_sequence_fps)
-                        .range(1.0..=120.0)
-                        .fixed_decimals(2),
-                );
-            });
-            prefs_row(ui, inner_lw, "Pasta padrão de projetos:", |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.file_io.default_project_dir)
-                        .desired_width(200.0)
-                        .hint_text("Padrão do sistema"),
-                );
-                if ui.small_button("...").clicked() {
-                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                        draft.file_io.default_project_dir = d.to_string_lossy().into_owned();
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "FPS de sequências de imagem:"),
+                |ui| {
+                    ui.add_sized(
+                        [76.0, 20.0],
+                        egui::DragValue::new(&mut draft.file_io.image_sequence_fps)
+                            .range(1.0..=120.0)
+                            .fixed_decimals(2),
+                    );
+                },
+            );
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Pasta padrão de projetos:"),
+                |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.file_io.default_project_dir)
+                            .desired_width(200.0)
+                            .hint_text(tr(cx.lang, "Padrão do sistema")),
+                    );
+                    if ui.small_button("...").clicked() {
+                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                            draft.file_io.default_project_dir = d.to_string_lossy().into_owned();
+                        }
                     }
-                }
-            });
-            prefs_row(ui, inner_lw, "Pasta de arquivos proxy:", |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.file_io.default_proxy_dir)
-                        .desired_width(200.0)
-                        .hint_text("Mesma pasta da mídia original"),
-                );
-                if ui.small_button("...").clicked() {
-                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                        draft.file_io.default_proxy_dir = d.to_string_lossy().into_owned();
+                },
+            );
+            prefs_row(
+                ui,
+                inner_lw,
+                tr(cx.lang, "Pasta de arquivos proxy:"),
+                |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.file_io.default_proxy_dir)
+                            .desired_width(200.0)
+                            .hint_text(tr(cx.lang, "Mesma pasta da mídia original")),
+                    );
+                    if ui.small_button("...").clicked() {
+                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                            draft.file_io.default_proxy_dir = d.to_string_lossy().into_owned();
+                        }
                     }
-                }
-            });
+                },
+            );
         },
     );
 }

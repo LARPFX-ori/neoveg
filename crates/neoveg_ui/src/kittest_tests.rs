@@ -2080,10 +2080,7 @@ fn kittest_barra_grade_marcadores_cd_automacao_borda_e_preferencias() {
     harness.state_mut().exec_cmd(Some(&ctx), "options.prefs");
     harness.run_steps(2);
     for (tab_lbl, expected_txt) in [
-        (
-            "Dispositivo de Prévia",
-            "Dispositivo de Prévia Secundário (p. 1061)",
-        ),
+        ("Dispositivo de Prévia", "Dispositivo de Prévia Secundário"),
         ("Dispositivo de Áudio", "Compensação de gravação:"),
         (
             "MIDI / Sync / Controle",
