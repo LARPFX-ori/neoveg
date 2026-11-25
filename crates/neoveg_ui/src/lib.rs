@@ -53,6 +53,7 @@ mod timeline;
 mod track_motion_window;
 mod transcript_panel;
 mod trimmer_panel;
+mod velocity_graph;
 mod welcome;
 
 #[cfg(test)]

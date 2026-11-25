@@ -8,10 +8,12 @@
 
 use crate::icons::{self, Icon};
 use crate::theme::ThemeColors;
+use crate::velocity_graph::{self, GraphKey};
 use eframe::egui::{
     self, pos2, vec2, Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
 };
 use neoveg_common::curve::Curve;
+use neoveg_common::ease::{EaseMode, KeyEase};
 use neoveg_common::i18n::{tr, Language};
 use neoveg_common::time::Ticks;
 
@@ -468,10 +470,166 @@ pub(crate) fn paint_curve_preview(ui: &mut Ui, curve: Curve, smoothness: f32, th
     p.add(Shape::line(pts, Stroke::new(2.0_f32, theme.accent)));
 }
 
+/// Escolha no combo "Tipo" de interpolação.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum InterpChoice {
+    /// Curva do VEGAS (desliga o Bézier).
+    Curve(Curve),
+    /// Interpolação temporal Bézier.
+    Ease(KeyEase),
+}
+
+/// Combo "Tipo" de interpolação do quadro-chave: as curvas do VEGAS, os
+/// três tipos de Bézier e as suavizações de entrada e saída.
+pub(crate) fn interp_combo(
+    ui: &mut Ui,
+    id_salt: &str,
+    curve: Option<Curve>,
+    ease: Option<KeyEase>,
+    lang: Language,
+) -> Option<InterpChoice> {
+    let selected = match (ease, curve) {
+        (Some(e), _) => e.mode.name_in(lang),
+        (None, Some(c)) => c.name_in(lang),
+        (None, None) => Curve::default().name_in(lang),
+    };
+    let mut choice = None;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for k in Curve::ALL.iter().take(6) {
+                let on = ease.is_none() && curve == Some(*k);
+                if ui.selectable_label(on, k.name_in(lang)).clicked() {
+                    choice = Some(InterpChoice::Curve(*k));
+                }
+            }
+            ui.separator();
+            for m in EaseMode::ALL {
+                let on = ease.is_some_and(|e| e.mode == m);
+                if ui.selectable_label(on, m.name_in(lang)).clicked() {
+                    let mut e = ease.unwrap_or_else(|| KeyEase::new(m));
+                    e.mode = m;
+                    choice = Some(InterpChoice::Ease(e));
+                }
+            }
+            ui.separator();
+            if ui
+                .selectable_label(false, tr(lang, "Suavizar entrada"))
+                .clicked()
+            {
+                choice = Some(InterpChoice::Ease(KeyEase::ease_in(ease)));
+            }
+            if ui
+                .selectable_label(false, tr(lang, "Suavizar saída"))
+                .clicked()
+            {
+                choice = Some(InterpChoice::Ease(KeyEase::ease_out(ease)));
+            }
+            if ui
+                .selectable_label(false, tr(lang, "Suavizar entrada e saída"))
+                .clicked()
+            {
+                choice = Some(InterpChoice::Ease(KeyEase::easy_ease()));
+            }
+        });
+    choice
+}
+
+/// Campos de velocidade e influência das alças Bézier (em %). Devolve o
+/// Bézier editado e se a alça mexida foi a de saída. O automático vira
+/// contínuo quando um campo é editado.
+pub(crate) fn ease_fields(ui: &mut Ui, ease: KeyEase, lang: Language) -> Option<(KeyEase, bool)> {
+    let mut e = ease;
+    let mut edited = None;
+    let rows: [(&str, bool, bool); 4] = [
+        ("Velocidade de entrada (%):", false, true),
+        ("Influência de entrada (%):", false, false),
+        ("Velocidade de saída (%):", true, true),
+        ("Influência de saída (%):", true, false),
+    ];
+    for (label, out_side, is_speed) in rows {
+        let side = if out_side {
+            &mut e.outgoing
+        } else {
+            &mut e.incoming
+        };
+        let (mut v, range) = if is_speed {
+            (
+                side.speed * 100.0,
+                -neoveg_common::ease::MAX_SPEED * 100.0..=neoveg_common::ease::MAX_SPEED * 100.0,
+            )
+        } else {
+            (
+                side.influence * 100.0,
+                neoveg_common::ease::MIN_INFLUENCE * 100.0..=100.0,
+            )
+        };
+        if prop_num(ui, tr(lang, label), &mut v, 1.0, 1, range) {
+            if is_speed {
+                side.speed = v / 100.0;
+            } else {
+                side.influence = v / 100.0;
+            }
+            edited = Some(out_side);
+        }
+    }
+    let out_side = edited?;
+    if e.mode == EaseMode::Auto {
+        e.mode = EaseMode::Continuous;
+    }
+    Some((e.sanitized(), out_side))
+}
+
+/// Prévia compacta da interpolação de um trecho dada por `progress(u)`.
+pub(crate) fn paint_progress_preview(
+    ui: &mut Ui,
+    theme: &ThemeColors,
+    progress: impl Fn(f32) -> f32,
+) {
+    let (r, _) = ui.allocate_exact_size(
+        vec2(ui.available_width().clamp(80.0, 180.0), 34.0),
+        Sense::hover(),
+    );
+    let p = ui.painter_at(r);
+    p.rect_filled(r, 2.0, theme.extreme_bg);
+    p.rect_stroke(
+        r,
+        2.0,
+        Stroke::new(1.0_f32, theme.border),
+        StrokeKind::Inside,
+    );
+    let inner = r.shrink(4.0);
+    p.line_segment(
+        [inner.left_bottom(), inner.right_top()],
+        Stroke::new(1.0_f32, theme.border),
+    );
+    let steps = 32usize;
+    let pts: Vec<Pos2> = (0..=steps)
+        .map(|i| {
+            let u = i as f32 / steps as f32;
+            let y = progress(u);
+            let y = if y.is_finite() {
+                y.clamp(-0.25, 1.25)
+            } else {
+                0.0
+            };
+            pos2(
+                inner.left() + u * inner.width(),
+                inner.bottom() - y * inner.height(),
+            )
+        })
+        .collect();
+    p.add(Shape::line(pts, Stroke::new(2.0_f32, theme.accent)));
+}
+
 /// Uma trilha de animação na linha do tempo de quadros-chave.
 pub(crate) struct KfRow<'a> {
     pub label: &'a str,
     pub keys: Vec<(Ticks, Curve)>,
+    /// Interpolação Bézier de cada quadro-chave (paralelo a `keys`).
+    pub eases: Vec<Option<KeyEase>>,
+    /// A linha aceita interpolação temporal Bézier e gráfico de velocidade.
+    pub bezier: bool,
     /// Caixa de seleção opcional à esquerda do nome (ex.: Máscara, Sombra 2D, Brilho 2D).
     pub checked: Option<bool>,
     /// Destaca a linha ativa no cabeçalho da trilha de quadros-chave.
@@ -498,6 +656,9 @@ pub(crate) struct KfStripOut {
     pub move_key: Option<(usize, usize, Ticks)>,
     /// Interpolação escolhida no menu de contexto: (trilha, índice, curva).
     pub set_curve: Option<(usize, usize, Curve)>,
+    /// Bézier escolhido no menu ou alça arrastada no gráfico de velocidade:
+    /// (trilha, índice, Bézier, alça de saída foi a mexida).
+    pub set_ease: Option<(usize, usize, KeyEase, bool)>,
     /// "Excluir" no menu de contexto: (trilha, índice).
     pub delete_key: Option<(usize, usize)>,
     /// Clique no nome da trilha de quadros-chave: seleciona a trilha ativa.
@@ -510,6 +671,8 @@ const KF_LABEL_W: f32 = 150.0;
 const KF_RULER_H: f32 = 20.0;
 const KF_ROW_H: f32 = 16.0;
 const KF_HIT: f32 = 6.0;
+/// Altura mínima do gráfico de velocidade abaixo das trilhas.
+const KF_GRAPH_MIN_H: f32 = 110.0;
 
 /// Escolhe o passo da régua (em segundos) para dar ~90 px entre rótulos.
 fn ruler_step_secs(len_secs: f64, width: f32) -> f64 {
@@ -541,7 +704,21 @@ pub(crate) fn keyframe_strip(
     let mut out = KfStripOut::default();
     let len = length.max(Ticks::from_raw(1));
     let full_w = ui.available_width();
-    let area_h = (ui.available_height() - 28.0).max(KF_RULER_H + KF_ROW_H * rows.len() as f32);
+    // linha cujo gráfico de velocidade aparece: a ativa, se aceitar Bézier
+    let graph_id = id.with("kf_graph_on");
+    let graph_on: bool = ui.data(|d| d.get_temp(graph_id)).unwrap_or(false);
+    let graph_row = rows
+        .iter()
+        .position(|r| r.selected)
+        .or(if rows.is_empty() { None } else { Some(0) })
+        .filter(|ri| rows.get(*ri).is_some_and(|r| r.bezier));
+    let rows_h = KF_RULER_H + KF_ROW_H * rows.len() as f32;
+    let min_h = if graph_on && graph_row.is_some() {
+        rows_h + KF_GRAPH_MIN_H
+    } else {
+        rows_h
+    };
+    let area_h = (ui.available_height() - 28.0).max(min_h);
     let (rect, resp) = ui.allocate_exact_size(vec2(full_w, area_h), Sense::click_and_drag());
     let p = ui.painter_at(rect);
     let names = Rect::from_min_max(rect.min, pos2(rect.left() + KF_LABEL_W, rect.bottom()));
@@ -681,9 +858,10 @@ pub(crate) fn keyframe_strip(
             theme.text_muted,
             Stroke::NONE,
         ));
-        for &(t, _) in &row.keys {
+        for (ki, &(t, _)) in row.keys.iter().enumerate() {
             let x = x_of(t);
             let cy = lane.center().y;
+            let is_bezier = row.eases.get(ki).copied().flatten().is_some();
             let (fill, stroke_col, stroke_w) = if theme.high_contrast {
                 (theme.accent, theme.text_primary, 1.5_f32)
             } else {
@@ -699,6 +877,9 @@ pub(crate) fn keyframe_strip(
                 fill,
                 Stroke::new(stroke_w, stroke_col),
             ));
+            if is_bezier {
+                velocity_graph::paint_bezier_mark(&p, pos2(x, cy), stroke_col);
+            }
         }
     }
     // cursor
@@ -720,6 +901,41 @@ pub(crate) fn keyframe_strip(
         Stroke::new(1.0_f32, theme.border),
         StrokeKind::Inside,
     );
+
+    // gráfico de velocidade da linha ativa, abaixo das trilhas
+    if let (true, Some(gr)) = (graph_on, graph_row) {
+        let graph_rect = Some(Rect::from_min_max(
+            pos2(rect.left(), rows_bottom + 2.0),
+            rect.max,
+        ))
+        .filter(|r| r.height() >= 40.0);
+        if let (Some(r), Some(row)) = (graph_rect, rows.get(gr)) {
+            let gkeys: Vec<GraphKey> = row
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(ki, &(t, curve))| GraphKey {
+                    t,
+                    curve,
+                    ease: row.eases.get(ki).copied().flatten(),
+                    scalar: None,
+                })
+                .collect();
+            if let Some(edit) = velocity_graph::graph_in_rect(
+                ui,
+                id.with("kf_vgraph"),
+                r,
+                KF_LABEL_W,
+                &gkeys,
+                len,
+                cursor,
+                theme,
+                lang,
+            ) {
+                out.set_ease = Some((gr, edit.key, edit.ease, edit.edited_out));
+            }
+        }
+    }
 
     // interação: arrastar losango move o quadro-chave; o resto posiciona o cursor
     let key_at = |pos: Pos2| -> Option<(usize, usize)> {
@@ -785,10 +1001,26 @@ pub(crate) fn keyframe_strip(
             ui.label(tr(lang, "Clique com o botão direito num quadro-chave"));
             return;
         };
-        let current = rows.get(ri).and_then(|r| r.keys.get(ki)).map(|k| k.1);
+        let current_ease = rows
+            .get(ri)
+            .and_then(|r| r.eases.get(ki))
+            .copied()
+            .flatten();
+        let current = rows
+            .get(ri)
+            .and_then(|r| r.keys.get(ki))
+            .map(|k| k.1)
+            .filter(|_| current_ease.is_none());
         for c in Curve::ALL.iter().take(6) {
             if ui.radio(current == Some(*c), c.name_in(lang)).clicked() {
                 out.set_curve = Some((ri, ki, *c));
+                ui.close_menu();
+            }
+        }
+        if rows.get(ri).is_some_and(|r| r.bezier) {
+            ui.separator();
+            if let Some(e) = velocity_graph::bezier_menu_items(ui, current_ease, lang) {
+                out.set_ease = Some((ri, ki, e, true));
                 ui.close_menu();
             }
         }
@@ -823,6 +1055,21 @@ pub(crate) fn keyframe_strip(
             {
                 out.nav = Some(act);
             }
+        }
+        ui.add_space(6.0);
+        let can_graph = graph_row.is_some();
+        if icons::icon_button(ui, Icon::VelocityEnvelope, None, graph_on, can_graph, theme)
+            .on_hover_text(tr(
+                lang,
+                "Gráfico de velocidade: arraste as alças para ajustar a interpolação Bézier",
+            ))
+            .on_disabled_hover_text(tr(
+                lang,
+                "Esta linha de quadros-chave não suporta interpolação Bézier.",
+            ))
+            .clicked()
+        {
+            ui.data_mut(|d| d.insert_temp(graph_id, !graph_on));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(

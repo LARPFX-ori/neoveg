@@ -6969,6 +6969,7 @@ mod tests {
             t: Ticks::from_secs_i64(2),
             value: PanCropKey::default(),
             curve: Curve::Linear,
+            ease: None,
         });
         let id = ev.id;
         p.tracks[0].events.push(ev);

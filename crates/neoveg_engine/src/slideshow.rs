@@ -275,6 +275,7 @@ pub fn apply_slideshow(session: &mut EditorSession, spec: &SlideshowSpec) -> (us
                             t: Ticks::ZERO,
                             value: k,
                             curve: crate::model::Curve::Smooth,
+                            ease: None,
                         }],
                     };
                 }
@@ -289,6 +290,7 @@ pub fn apply_slideshow(session: &mut EditorSession, spec: &SlideshowSpec) -> (us
                         t: Ticks::ZERO,
                         value: k,
                         curve: crate::model::Curve::Smooth,
+                        ease: None,
                     }],
                 };
             }
@@ -309,11 +311,13 @@ pub fn apply_slideshow(session: &mut EditorSession, spec: &SlideshowSpec) -> (us
                             t: Ticks::ZERO,
                             value: k0,
                             curve: crate::model::Curve::Smooth,
+                            ease: None,
                         },
                         Keyframe {
                             t: slide_dur,
                             value: k1,
                             curve: crate::model::Curve::Smooth,
+                            ease: None,
                         },
                     ],
                 };
