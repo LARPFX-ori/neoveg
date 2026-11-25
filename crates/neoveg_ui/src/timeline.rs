@@ -7256,7 +7256,7 @@ impl App {
                 } else if reverse {
                     shade(tc, k * 1.35)
                 } else {
-                    shade(tc, k * 0.55)
+                    shade(tc, k * self.theme.tl_event_body_k)
                 };
                 let hdr_h = 14.0f32.min(r.height() * 0.3);
                 let hdr_col = if e.mute || muted {
@@ -7266,7 +7266,7 @@ impl App {
                         Color32::from_gray(176)
                     }
                 } else {
-                    shade(tc, k * 0.9)
+                    shade(tc, k * self.theme.tl_event_header_k)
                 };
                 let hdr = Rect::from_min_max(r.min, pos2(r.right(), r.top() + hdr_h));
                 if let Some(xf) = xf_in {
