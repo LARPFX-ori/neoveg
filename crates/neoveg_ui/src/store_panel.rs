@@ -357,34 +357,23 @@ impl App {
                                     ui.spinner();
                                 }
                                 let compatible = p.compatible_with(current);
-                                match (&row.catalog, &row.installed) {
-                                    (Some(c), None) => {
-                                        if ui
-                                            .add_enabled(
-                                                compatible && !busy,
-                                                egui::Button::new(tr(lang, "Instalar")),
-                                            )
-                                            .clicked()
-                                        {
-                                            action = Some(StoreAction::Install(Box::new(c.clone())));
-                                        }
+                                // Instalar (fora da máquina) ou Atualizar (versão nova)
+                                let offer = match (&row.catalog, &row.installed) {
+                                    (Some(c), None) => Some((c, tr(lang, "Instalar").to_string())),
+                                    (Some(c), Some(_)) if row.has_update() => Some((
+                                        c,
+                                        tr_args(lang, "Atualizar para {ver}", &[("ver", &c.versao)]),
+                                    )),
+                                    _ => None,
+                                };
+                                if let Some((c, label)) = offer {
+                                    let resp = ui.add_enabled(
+                                        compatible && !busy,
+                                        egui::Button::new(label),
+                                    );
+                                    if resp.clicked() {
+                                        action = Some(StoreAction::Install(Box::new(c.clone())));
                                     }
-                                    (Some(c), Some(_)) if row.has_update() => {
-                                        if ui
-                                            .add_enabled(
-                                                compatible && !busy,
-                                                egui::Button::new(tr_args(
-                                                    lang,
-                                                    "Atualizar para {ver}",
-                                                    &[("ver", &c.versao)],
-                                                )),
-                                            )
-                                            .clicked()
-                                        {
-                                            action = Some(StoreAction::Install(Box::new(c.clone())));
-                                        }
-                                    }
-                                    _ => {}
                                 }
                                 if !compatible {
                                     ui.weak(tr_args(
