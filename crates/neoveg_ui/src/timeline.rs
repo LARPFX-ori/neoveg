@@ -6490,7 +6490,7 @@ impl App {
                     self.insert_generated(GenSpec::Text(TextSpec::default()));
                     ui.close_menu();
                 }
-                if ui.button("Inserir evento vazio aqui").clicked() {
+                if ui.button(tr(lang, "Inserir evento vazio aqui")).clicked() {
                     self.cursor = t;
                     self.sel_track = Some(ti);
                     self.session.insert_empty_event();
@@ -6499,7 +6499,7 @@ impl App {
                 }
                 if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
                     ui.separator();
-                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                    ui.menu_button(tr(lang, "Eixo da seleção/zoom"), |ui| {
                         for axis in BoxAxisMode::ALL {
                             if ui
                                 .radio(self.session.box_axis == axis, axis.name())
@@ -6515,8 +6515,16 @@ impl App {
                 self.track_menu(ui, ti);
             }
             _ => {
+                // área vazia, fora das trilhas: como no VEGAS, inserir trilhas,
+                // colar e selecionar (antes mostrava só "—")
+                self.cmd_menu_btn(ui, "insert.track_video");
+                self.cmd_menu_btn(ui, "insert.track_audio");
+                ui.separator();
+                self.cmd_menu_btn(ui, "edit.paste");
+                self.cmd_menu_btn(ui, "edit.select_all");
                 if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
-                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                    ui.separator();
+                    ui.menu_button(tr(lang, "Eixo da seleção/zoom"), |ui| {
                         for axis in BoxAxisMode::ALL {
                             if ui
                                 .radio(self.session.box_axis == axis, axis.name())
@@ -6527,8 +6535,6 @@ impl App {
                             }
                         }
                     });
-                } else {
-                    ui.label("—");
                 }
             }
         }
