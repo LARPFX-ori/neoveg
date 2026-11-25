@@ -375,10 +375,11 @@ pub enum DockPanel {
     Notes,
     Encoder,
     Transcript,
+    Store,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 18] = [
+    pub const ALL: [DockPanel; 19] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -397,6 +398,7 @@ impl DockPanel {
         DockPanel::Notes,
         DockPanel::Encoder,
         DockPanel::Transcript,
+        DockPanel::Store,
     ];
 
     pub fn name_in(self, lang: Language) -> &'static str {
@@ -419,6 +421,7 @@ impl DockPanel {
             DockPanel::Notes => "Notas",
             DockPanel::Encoder => "Neoveg Encoder",
             DockPanel::Transcript => "Transcrição de fala",
+            DockPanel::Store => "Loja de scripts",
         };
         tr(lang, pt)
     }
@@ -447,6 +450,7 @@ impl DockPanel {
             DockPanel::Notes => "view.tab.notes",
             DockPanel::Encoder => "view.tab.encoder",
             DockPanel::Transcript => "view.tab.transcript",
+            DockPanel::Store => "view.tab.store",
         }
     }
 }
@@ -2515,6 +2519,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Transcript), h),
+    },
+    CommandDef {
+        id: "view.tab.store",
+        label: "Loja de scripts",
+        menu_path: "Exibir/Loja de scripts",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Store), h),
     },
     CommandDef {
         id: "speech.remove_silences",
