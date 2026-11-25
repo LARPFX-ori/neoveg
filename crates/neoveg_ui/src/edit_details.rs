@@ -1,4 +1,4 @@
-//! Janela acoplável Detalhes da Edição (Edit Details — `Alt+3`) em formato tabular
+//! Janela acoplável Detalhes da Edição (Edit Details — `Ctrl+Alt+4`) em formato tabular
 //! para inspeção e edição precisa de Eventos, Marcadores, Regiões, Trilhas e Barramentos.
 
 use super::{App, FxTarget};

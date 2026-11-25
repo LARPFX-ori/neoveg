@@ -54,7 +54,7 @@ Neoveg をインストールまたは使用された方は、ぜひ **[Neoveg �
 - **外部プラグイン（OFX・VST3）:** 標準フォルダーおよびユーザー指定フォルダー（Google Drive 等、*プラグイン マネージャー → プラグインフォルダー*）から VST3/OFX を自動検出し、*プラグイン マネージャー* およびチェーンピル付き 2 カラム *Plug-In Chooser* で管理。**OFX** ビデオエフェクト・ジェネレーター（`SupportsTiles = 1` タイルレンダリング、複数補助入力対応の *General* コンテキスト、*メディア ジェネレーター → サードパーティ* 内の *Filter*/*Generator*、パラメーターキーフレーム、`getValueAtTime`/`getDerivative`/`getIntegral` によるホスト評価）および **VST3** エフェクト・インストゥルメント（イベント/トラック/バス/マスター対応、ネイティブ `IPlugView`/`IPlugFrame` GUI、`IParameterChanges` によるリアルタイムサンプル精度オートメーション、`IEventList` とクリーンルーム SMF `.mid`/`.midi` パーサーによる MIDI インストゥルメント、`IComponent::getState`/`setState` 状態保存、自動レイテンシ補正 PDC）を隔離サブプロセス `neoveg --plugin-host` で実行するため、プラグイン障害でエディター本体が落ちません。
 - **単一コマンドテーブル・ショートカット・`.NET` スクリプト:** メニュー、ツールバー、キーボードショートカット、CLI コマンドがすべて同一のコマンド `id` 経由で実行されます。*ヘルプ → キーボード ショートカット* でカスタム割り当て・解除が可能で、*ツール → スクリプトを実行 (.cs/.dll)...*（`tools.run_script`）または `--run-script` により `ScriptPortal.Vegas` 互換（クリーンルーム、プロトコル 6）の `.cs`/`.dll` スクリプトをオンデマンド実行できます。API 名は MAGIX 公開の *VEGAS Pro Scripting API Summary* およびマニュアル FAQ に準拠した独自実装で、プロジェクト、トラック（名前、Mute/Solo、選択、`Events`、`Effects`、`Envelopes`）、イベント（`Start`/`Length`/`End`、名前、Mute、Locked、選択、`FadeIn`/`FadeOut`、`Effects`、`Envelopes`、同種トラック間移動・削除）、エフェクトパラメーターとキーフレーム（`Effect.Keyframes`、`Effect.Parameters`、`Effect.Preset`、検出済み OFX/VST3 の ID 指定生成を含む）、マーカー、`Vegas.Cursor`、`Transport.CursorPosition`/`SelectionStart`/`SelectionLength`、演算子付き厳密ティック `Timecode`、プロジェクトメディア（`Project.MediaPool`、`Media`、`VideoStream`/`AudioStream`）、テイク（`Takes`、`ActiveTake`、`AddTake`、`Take.Offset`/`Name`/`MediaPath`）、イベント生成（`AddVideoEvent`/`AddAudioEvent` + `AddTake`）および新規メディア読み込み（`MediaPool.AddMedia` または `new Media(path)`、1 実行あたり最大 64 件）に対応。`Microsoft.WindowsDesktop.App` ランタイムのある Windows では STA スレッド上で本物の `System.Windows.Forms` を使用し、Linux・macOS および `WindowsDesktop` 非導入環境では `crates/neoveg_ui/src/script_forms.rs` の独自レイヤーでダイアログ・フォーム（`MessageBox`、`Form.ShowDialog`、ファイル選択）が動作します。
 - **インターフェイス・カーソル・カスタマイズ・アクセシビリティ:** 高密度エディトリアルデザインと 7 テーマ（*表示 → テーマ* または *オプション → ユーザー設定...*、コントラスト比 7:1 以上の WCAG AAA ハイコントラスト ダーク/ライトを含む）、**22 種類のオリジナルベクター編集カーソル**（`cursors.rs`：左右/隣接トリム、タイムストレッチ、*Split Trim*、フェードオフセット、*Slip*、*Slide*、クロスフェードスリップ、*スクラブ*、回転、自由/X/Y 移動、エンベロープハンド、ズーム +/-、範囲選択ボックス、ベジェマスクのペン/頂点ツール）、`もっと見る (…)` メニュー付き 22 px カラー縦ガターのトラックヘッダー、イベントのダークカプセルラベルとカスタマイズ可能なイベントボタン（`パン/クロップ`、`fx`、`…`）、*マスター バス* の中央 dB スケール、アニメーション可能なインタラクティブ **ベジェマスク** 行・プリセット・FX チェーンピルを備えた **パン/クロップ**、完全な **2D/3D Track Motion**（ピボット、向き、2D シャドウ/グロー、3D 親子合成、Z ソート、*off-axis* ステレオスコピック 3D カメラ）、**CC1–CC4** 字幕デコードと **インタラクティブ 360° 正距円筒ビュー** を備えた **ビデオ プレビュー**、クラシック配置タイプ（*クラシック*、*中級*、*最近*、*モダン*）を切り替えられる **編集 → プロパティ → レイアウト**、**スプラッシュ画面** と **ようこそ画面**、ドッキング可能な **カラーグレーディング** パネル、2 カラム **名前を付けてレンダリング...**、123 種類のネイティブカラーベクターアイコン（`crates/neoveg_ui/src/icons.rs`）、マニュアル順のトランスポート/編集バー（`開始`/`終了`/`長さ` 表示）、マルチタブのフローティングドックおよびダイアログの永続ドッキング（`Preferences.docked_dialogs`）、`F11`/`Shift+F11`/`Ctrl+F11`、`.neoveglayout` レイアウト保存。
-- **Neoveg Encoder（バッチエンコードキューと複数出力）:** ドッキング領域外の独立ウィンドウ（上部ツールバーの **Encoder** ボタン、*表示 → Neoveg Encoder* `Ctrl+Alt+M`、*名前を付けてレンダリング...* 内の **Encoder に送る**、*ファイル → Neoveg Encoder へ送る...* `Ctrl+Shift+M`）および CLI `--encode` が全 7 テーマと統合。ソースごとの並列複数出力を持つ永続キュー（`encoder/queue.json`）、サムネイルと残り時間付きライブ *エンコード* パネル、協調的一時停止と個別/全体停止、*プリセットブラウザー*（システム、カスタム `.neovegpreset`、グループ、エイリアス）、*監視フォルダー*（自動検知・上書き防止）、*書き出し設定* ウィンドウ（`In`/`Out` 範囲、縦横比ロック付き *Crop*、5 種類のソーススケーリング、*ソース/出力* プレビュー）、エンコード前エフェクト（カラー補正、クリーンルーム 1D/3D `.cube` LUT、画像/名前/SMPTE タイムコード重ね合わせ、タイム調整）、`logs/neoveg_encoder*.log` へのログ記録を備えます。
+- **Neoveg Encoder（バッチエンコードキューと複数出力）:** ドッキング領域外の独立ウィンドウ（上部ツールバーの **Encoder** ボタン、*表示 → Neoveg Encoder* `Ctrl+Shift+Alt+M`、*名前を付けてレンダリング...* 内の **Encoder に送る**、*ファイル → Neoveg Encoder へ送る...* `Ctrl+Shift+M`）および CLI `--encode` が全 7 テーマと統合。ソースごとの並列複数出力を持つ永続キュー（`encoder/queue.json`）、サムネイルと残り時間付きライブ *エンコード* パネル、協調的一時停止と個別/全体停止、*プリセットブラウザー*（システム、カスタム `.neovegpreset`、グループ、エイリアス）、*監視フォルダー*（自動検知・上書き防止）、*書き出し設定* ウィンドウ（`In`/`Out` 範囲、縦横比ロック付き *Crop*、5 種類のソーススケーリング、*ソース/出力* プレビュー）、エンコード前エフェクト（カラー補正、クリーンルーム 1D/3D `.cube` LUT、画像/名前/SMPTE タイムコード重ね合わせ、タイム調整）、`logs/neoveg_encoder*.log` へのログ記録を備えます。
 - **ArtCraft & Blender 連携（*ツール → 連携*）:** **PhotoCraft**、**VectorCraft**、**FilmCraft**、**EffectCraft**、**AniCraft**、**SoundCraft**、**Blender** の自動検出と手動パス設定（*ユーザー設定 → 外部アプリ*）。編集用コピーを *テイク* としてやり取りする *Round-Trip*（PhotoCraft 用 PNG、VectorCraft 用クリーン SVG、SoundCraft 用 `bext` `TimeReference` 付き BWF WAV — 保存時自動リロード対応）、起動中 ArtCraft アプリ向け HMAC-SHA256 認証付き TCP ループバック（`127.0.0.1`）クライアント、FilmCraft への OTIO 書き出し、`.anicraft`/`.ecproj`/`.blend` シーンのヘッドレス PNG 連番レンダリングとタイムライン配置、FPS/マーカー/パン・クロップ同期用 `.py` スクリプト生成、Blender カメラ（`.json`）の *Track Motion*/*パン/クロップ* キーフレーム取り込みに対応します。
 - **対応フォーマット:**
   - **交換形式（純 Rust・クリーンルーム）:** OpenTimelineIO `.otio`（スキーマ 0.17）、Final Cut Pro XML `.fcpxml`、Final Cut Pro 7 XML `.xml`（`xmeml`）、AAF `.aaf`、EDL CMX 3600 `.edl`、および SubRip `.srt` / W3C WebVTT `.vtt` 字幕（読み込み・書き出し対応）。*ファイル → 交換形式と字幕* またはドラッグ＆ドロップで利用可能。準拠した仕様書の版は [`crates/neoveg_engine/README.md`](crates/neoveg_engine/README.md) に記載しています。
@@ -117,17 +117,17 @@ cargo run -p neoveg -- --encode input.mp4 output.mp4 sys.web_1080p_hq
 | マーカー / リージョン挿入 | `M` / `R` |
 | トラックのボリューム / パン エンベロープ | `V` / `P` |
 | 選択トラックのミュート / ソロ | `Z` / `X` |
-| ビデオ / オーディオ / バストラック挿入 | `Ctrl+Shift+Q` / `Ctrl+Q` / `Ctrl+B` |
+| ビデオ / オーディオ / バストラック挿入 | `Ctrl+Shift+Q` / `Ctrl+Q` / `B` |
 | スナップ（`snapping`）/ オートリップル | `F8` / `Ctrl+L` |
 | 水平ズーム / 波形の垂直ズーム | `↑` / `↓` (`Shift+↑` / `Shift+↓`) |
 | 元に戻す / やり直す | `Ctrl+Z` / `Ctrl+Y` |
 | イベントのプロパティ | `F2` |
-| Neoveg Encoder / タイムライン送信 | `Ctrl+Alt+M` / `Ctrl+Shift+M` |
-| 名前を付けてレンダリング... | `Ctrl+M` |
+| Neoveg Encoder / タイムライン送信 | `Ctrl+Shift+Alt+M` / `Ctrl+Shift+M` |
+| 新しいトラックにレンダリング | `Ctrl+M` |
 
 - **編集ツールとモード（`D` / `Shift+D`）:** トランスポートバーや *編集 → 編集ツール* から、**通常**（*通常* または *スリップ* での移動・トリム）、**エンベロープ**（エンベロープ点のみ移動）、**選択**（矩形選択、`Shift`/`Ctrl` で追加）、**ズーム**（矩形拡大、単クリックで全体表示）を切り替えられます。
 - **フェード・ゲイン・キーフレーム:** 同じトラック上でイベントを重ねると自動でクロスフェードが作成されます。上隅のハンドルでフェード、オーディオクリップ上部のバーで dB ゲインを調整でき、トラック下の行で *Track Motion* とトラック FX のキーフレームを編集できます。
-- **ヘッダー・トランスポート・表形式編集:** 下部バーは VEGAS Pro 順で `開始`/`終了`/`長さ` の確認・入力、`Playback Rate`（`0.25×`–`4.00×`）制御を備えます。トラックヘッダーの `もっと見る`（`…`）ボタンで表示ボタンを設定でき、**編集の詳細** パネル（`Alt+3`）で表形式の編集が可能です。
+- **ヘッダー・トランスポート・表形式編集:** 下部バーは VEGAS Pro 順で `開始`/`終了`/`長さ` の確認・入力、`Playback Rate`（`0.25×`–`4.00×`）制御を備えます。トラックヘッダーの `もっと見る`（`…`）ボタンで表示ボタンを設定でき、**編集の詳細** パネル（`Ctrl+Alt+4`）で表形式の編集が可能です。
 - **シーケンス・単独 `.nvegseq`・ネスト:** タイムライン上部のタブで同一プロジェクト内の複数シーケンスを切り替えられ、単独 `.nvegseq` シーケンスの読み込み・書き出し（*編集 → シーケンス → シーケンスのインポート/エクスポート...* またはドラッグ＆ドロップ）および未保存のネスト済み `.neoveg` タブの自動復旧（`autosave/recuperacao_aninhados.json`）に対応します。多階層ネスト（孫プロジェクト含む）のメモリ上リアルタイム伝播もサポート。*プロジェクト メディア* からシーケンスをタイムラインへドラッグするか *選択範囲を新規シーケンスにネスト*（`sequence.nest_selection`）を使用でき、循環参照の厳格な防止と最大 32 階層の上限が適用されます。
 
 ### テイク
@@ -143,18 +143,18 @@ cargo run -p neoveg -- --encode input.mp4 output.mp4 sys.web_1080p_hq
 
 ### オーディオ・ミキサー・5.1 サラウンド・ラウドネス
 
-- **ミキサーと補助バス（`Bus A`..`Bus Z`）:** *ミキサー* の **＋ バス** または *挿入 → オーディオ バス* で最大 26 バスを作成し、*pre/post-fader* センドやタイムライン表示（`Ctrl+B`）を行えます。
+- **ミキサーと補助バス（`Bus A`..`Bus Z`）:** *ミキサー* の **＋ バス** または *挿入 → オーディオ バス* で最大 26 バスを作成し、*pre/post-fader* センドやタイムライン表示（`B`）を行えます。
 - **マスター バス:** 右側パネルに `fx`、`Mono`、`Dim`（`-20 dB`）、`M`（ミュート）を備えたステレオモニターを配置。
 - **5.1 サラウンド パンナー:** *サラウンド パンナー* タブ（または *プロジェクトのプロパティ*）で *マスターモード* を `5.1 Surround` に切り替え、各トラックやバスを ITU-R BS.775 リング上に配置し、LFE を調整して 6 チャンネルマルチチャンネル WAV としてレンダリングできます。
 - **EBU R128 ラウドネス メーター（`Ctrl+Alt+7`）:** `M`、`S`、`I`、`LRA`、`True Peak` を設定可能な目標値（*EBU R128 -23 LUFS*、ストリーミング、ATSC、ポッドキャスト）で確認でき、オフライン解析（*プロジェクトを解析* / *選択範囲を解析*）も実行できます。
 
 ### レンダリング
 
-*ファイル → 名前を付けてレンダリング...*（`Ctrl+M`）は、検索・★ お気に入り・範囲サマリー（*プロジェクト全体* または *ループ領域*）と **対応 31 出力フォーマット** を備えた 2 カラムウィンドウを開きます：`MP4 (H.264/HEVC + AAC)`、`MOV`、`3GP`、`WMV`（Windows Media Foundation）、`AVI MJPEG` と `非圧縮 RGB24 AVI`（OpenDML 対応）、アニメーション `GIF`、`Y4M`、10 種の連番画像（`PNG`、`JPEG`、`TIFF`、`TGA`、`BMP`、`WebP`、`PNM`、`QOI`、`DPX`、`EXR`）、およびオーディオ（`WAV`、`BWF`、`RF64`、`Wave64`、`AIFF`、`AU`、`CAF`、`QOA`、`M4A`、`AAC`、`WMA`、`MP3`）。同じ画面から **Encoder に送る** を押すか、`neoveg --render project.neoveg output.ext` でヘッドレス書き出しも可能です。
+*ファイル → 名前を付けてレンダリング...*は、検索・★ お気に入り・範囲サマリー（*プロジェクト全体* または *ループ領域*）と **対応 31 出力フォーマット** を備えた 2 カラムウィンドウを開きます：`MP4 (H.264/HEVC + AAC)`、`MOV`、`3GP`、`WMV`（Windows Media Foundation）、`AVI MJPEG` と `非圧縮 RGB24 AVI`（OpenDML 対応）、アニメーション `GIF`、`Y4M`、10 種の連番画像（`PNG`、`JPEG`、`TIFF`、`TGA`、`BMP`、`WebP`、`PNM`、`QOI`、`DPX`、`EXR`）、およびオーディオ（`WAV`、`BWF`、`RF64`、`Wave64`、`AIFF`、`AU`、`CAF`、`QOA`、`M4A`、`AAC`、`WMA`、`MP3`）。同じ画面から **Encoder に送る** を押すか、`neoveg --render project.neoveg output.ext` でヘッドレス書き出しも可能です。
 
 ### Neoveg Encoder（バッチキューと監視フォルダー）
 
-**Neoveg Encoder** は上部バーの **Encoder** ボタン、*表示 → Neoveg Encoder*（`Ctrl+Alt+M`）、*ツール → Neoveg Encoder*、*名前を付けてレンダリング...* 内の **Encoder に送る**、または *ファイル → Neoveg Encoder へ送る...*（`Ctrl+Shift+M`、現在のタイムラインまたは選択範囲をキューへ追加）から開けます。タブバーの **分離** をクリックすると、ドック外の広い独立ウィンドウとして利用できます。
+**Neoveg Encoder** は上部バーの **Encoder** ボタン、*表示 → Neoveg Encoder*（`Ctrl+Shift+Alt+M`）、*ツール → Neoveg Encoder*、*名前を付けてレンダリング...* 内の **Encoder に送る**、または *ファイル → Neoveg Encoder へ送る...*（`Ctrl+Shift+M`、現在のタイムラインまたは選択範囲をキューへ追加）から開けます。タブバーの **分離** をクリックすると、ドック外の広い独立ウィンドウとして利用できます。
 
 - **4 つのパネル:** *エンコードキュー*（1 ソースへの複数並列出力、複製、並べ替え、フッテージ解釈）、*エンコード（ライブ）*（サムネイル、残り時間、協調的一時停止、個別/全体停止）、*プリセットブラウザー*（システム、カスタム `.neovegpreset`、複数出力グループ）、*監視フォルダー*（入力フォルダーの自動検知）。
 - **書き出し設定:** `In`/`Out` 範囲トリム、縦横比ロック付き *Crop*、5 種類のスケーリングモード、カラー補正、1D/3D `.cube` LUT、画像/名前/SMPTE タイムコード重ね合わせ、*タイム調整*（%）。コマンドラインからも利用できます：`neoveg --encode input.mp4 output.mp4 sys.web_1080p_hq`。

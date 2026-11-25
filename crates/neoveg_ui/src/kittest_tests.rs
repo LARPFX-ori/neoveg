@@ -243,7 +243,7 @@ fn kittest_loudness_e_trilhas_de_barramentos() {
     harness.run_steps(2);
     assert!(harness.get_all_by_label("fx").count() >= 1);
 
-    // Alterna trilhas de barramentos na timeline (Ctrl+B via Tabela de Comandos).
+    // Alterna trilhas de barramentos na timeline (B via Tabela de Comandos).
     let ctx = harness.ctx.clone();
     harness.state_mut().exec_cmd(Some(&ctx), "view.bus_tracks");
     harness.run_steps(2);

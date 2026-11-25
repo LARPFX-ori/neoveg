@@ -2391,7 +2391,7 @@ impl App {
                 }
                 if ui
                     .small_button(tr(lang, "Renderizar..."))
-                    .on_hover_text(tr(lang, "Abrir janela Renderizar como (Ctrl+M)"))
+                    .on_hover_text(tr(lang, "Abrir janela Renderizar como"))
                     .clicked()
                 {
                     trigger_render = true;
@@ -4006,7 +4006,7 @@ impl App {
             }
         }
 
-        // Trilhas de barramentos auxiliares (Ctrl+B)
+        // Trilhas de barramentos auxiliares (B)
         for bi in 0..rows.bus_rects.len() {
             if bi >= self.project.audio_buses.len() {
                 break;
@@ -8203,7 +8203,7 @@ impl App {
                 );
             }
         }
-        // trilhas de barramentos auxiliares (Ctrl+B)
+        // trilhas de barramentos auxiliares (B)
         for bi in 0..rows.bus_rects.len() {
             let Some(bus) = self.project.audio_buses.get(bi) else {
                 break;

@@ -1311,7 +1311,7 @@ fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
 /// de Vídeo, Geradores de Mídia e Plug-In Manager; o Trimmer no grupo da
 /// Prévia; os outros painéis fechados até o menu Exibir abrir. "Fechar
 /// painel" fecha de verdade e o layout salvo lembra. O zoom de teclado do
-/// egui fica desligado (Ctrl+= / Ctrl+- são do tom em oitavas).
+/// egui fica desligado (Ctrl+= / Ctrl+- são teclas do VEGAS).
 #[test]
 fn dock_padrao_cinco_paineis_trimmer_na_previa_e_fechar_painel() {
     use crate::dock::{build_dock_tree, find_pane_tile, DockPane};
