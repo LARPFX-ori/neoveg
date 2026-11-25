@@ -7209,12 +7209,16 @@ impl App {
             painter.rect_filled(r, 0.0, self.theme.tl_sel_band);
         }
         let audio_map = self.media.audio_map();
+        // `project` vem por Deref do App: calcula antes de mexer em `self.tl`
+        let rolls: Vec<(Id, u8)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video && self.tl.layers_expanded.contains(&t.id))
+            .flat_map(|t| ab_rolls(&t.events))
+            .collect();
         self.tl.layer_row.clear();
-        for t in &self.project.tracks {
-            if t.kind == TrackKind::Video && self.tl.layers_expanded.contains(&t.id) {
-                self.tl.layer_row.extend(ab_rolls(&t.events));
-            }
-        }
+        self.tl.layer_row.extend(rolls);
         let sync_masters: HashSet<Id> = self
             .project
             .tracks
