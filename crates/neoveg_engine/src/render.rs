@@ -969,7 +969,7 @@ pub fn run_with_options(
         },
         Gif(
             Box<image::codecs::gif::GifEncoder<BufWriter<File>>>,
-            image::Delay,
+            FrameRate,
         ),
         Seq(PathBuf, String, ImageSeqFormat),
         Y4m(Y4mWriter),
@@ -1078,13 +1078,7 @@ pub fn run_with_options(
             );
             let mut enc = image::codecs::gif::GifEncoder::new_with_speed(bw, 10);
             enc.set_repeat(image::codecs::gif::Repeat::Infinite)?;
-            let ms_num = (fps.den.max(1) as u64).saturating_mul(1000);
-            let ms_den = fps.num.max(1) as u64;
-            let delay_ms = (ms_num / ms_den).max(20) as u32;
-            Sink::Gif(
-                Box::new(enc),
-                image::Delay::from_numer_denom_ms(delay_ms, 1),
-            )
+            Sink::Gif(Box::new(enc), fps)
         }
         RenderFormat::Y4m => Sink::Y4m(Y4mWriter::create(
             &s.path,
@@ -1303,13 +1297,17 @@ pub fn run_with_options(
                     let vts = writer.frame_pts_ms(fi);
                     writer.write_video_packet(vts, true, data)?;
                 }
-                Sink::Gif(enc, delay) => {
+                Sink::Gif(enc, gif_fps) => {
                     let Some(rgba_img) =
                         image::RgbaImage::from_raw(render_w as u32, render_h as u32, data)
                     else {
                         bail!("quadro GIF inválido");
                     };
-                    enc.encode_frame(image::Frame::from_parts(rgba_img, 0, 0, *delay))?;
+                    let delay = image::Delay::from_numer_denom_ms(
+                        u32::from(gif_frame_delay_cs(fi, *gif_fps)) * 10,
+                        1,
+                    );
+                    enc.encode_frame(image::Frame::from_parts(rgba_img, 0, 0, delay))?;
                 }
                 Sink::Seq(dir, stem, seq) => {
                     std::fs::write(dir.join(format!("{stem}_{:06}.{}", fi, seq.ext())), &data)?;
@@ -1368,6 +1366,22 @@ pub fn run_with_options(
     Ok(())
 }
 
+/// Atraso do quadro `fi` de um GIF animado, em centésimos de segundo.
+///
+/// O GIF guarda o atraso em centésimos inteiros. Um atraso fixo arredondado
+/// (24 qps → 4 cs = 25 qps) acelera a animação e encurta o clipe; aqui o
+/// resto é distribuído pelos quadros (4, 4, 4, 5, ...), de modo que o fim do
+/// quadro `fi` cai em `floor((fi + 1) · 100 · den / num)` e a duração total
+/// bate com a do projeto. O mínimo é 2 cs: muitos tocadores trocam atrasos
+/// menores por 10 cs, o que deixaria a animação lenta.
+pub(crate) fn gif_frame_delay_cs(fi: u64, fps: FrameRate) -> u16 {
+    let num = u128::from(fps.num.max(1));
+    let den = u128::from(fps.den.max(1));
+    let end_cs = |n: u64| u128::from(n).saturating_mul(100).saturating_mul(den) / num;
+    let cs = end_cs(fi.saturating_add(1)).saturating_sub(end_cs(fi));
+    u16::try_from(cs.max(2)).unwrap_or(u16::MAX)
+}
+
 /// Salva uma imagem RGBA arbitrária em arquivo (reutilizado pelo Trimmer e pela Prévia).
 pub fn save_rgba_snapshot(img: &image::RgbaImage, path: &Path) -> Result<()> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
@@ -1389,6 +1403,57 @@ pub fn save_snapshot(p: &Project, media: &MediaCache, t: Ticks, path: &Path) -> 
         bail!("quadro com tamanho inválido")
     };
     save_rgba_snapshot(&img, path)
+}
+
+#[cfg(test)]
+mod gif_delay_tests {
+    use super::*;
+
+    fn total_cs(frames: u64, fps: FrameRate) -> u64 {
+        (0..frames)
+            .map(|i| u64::from(gif_frame_delay_cs(i, fps)))
+            .sum()
+    }
+
+    #[test]
+    fn gif_24fps_keeps_project_duration() {
+        // 24 quadros a 24 qps = 1 s; o atraso fixo antigo (4 cs) dava 0,96 s.
+        let fps = FrameRate { num: 24, den: 1 };
+        assert_eq!(total_cs(24, fps), 100);
+        assert_eq!(total_cs(181, fps), 754);
+        assert!((0..181).all(|i| matches!(gif_frame_delay_cs(i, fps), 4 | 5)));
+    }
+
+    #[test]
+    fn gif_ntsc_and_integer_rates_are_exact() {
+        let ntsc = FrameRate {
+            num: 30_000,
+            den: 1001,
+        };
+        // 30000 quadros a 29,97 qps = 1001 s.
+        assert_eq!(total_cs(30_000, ntsc), 100_100);
+        assert_eq!(total_cs(25, FrameRate { num: 25, den: 1 }), 100);
+        assert_eq!(total_cs(10, FrameRate { num: 10, den: 1 }), 100);
+    }
+
+    #[test]
+    fn gif_delay_hostile_rates_do_not_panic() {
+        assert_eq!(gif_frame_delay_cs(0, FrameRate { num: 60, den: 1 }), 2);
+        assert_eq!(
+            gif_frame_delay_cs(u64::MAX, FrameRate { num: 0, den: 0 }),
+            2
+        );
+        assert_eq!(
+            gif_frame_delay_cs(
+                0,
+                FrameRate {
+                    num: 1,
+                    den: u32::MAX
+                }
+            ),
+            u16::MAX
+        );
+    }
 }
 
 #[cfg(test)]
