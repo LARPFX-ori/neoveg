@@ -6786,6 +6786,8 @@ mod tests {
         assert_eq!((g(&s, ida), g(&s, idb), g(&s, idc)), (None, None, Some(88)));
         assert_eq!(s.undo.len(), 1);
 
+        // a sessão já abre com a primeira trilha selecionada: tirar a seleção
+        s.sel_track = None;
         assert!(!s.set_selected_track_exclusive(false));
         s.project.tracks[0].mute = true;
         s.sel_track = Some(1);
