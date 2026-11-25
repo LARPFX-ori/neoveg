@@ -475,6 +475,33 @@ fn extract_stereo_eye(src: &RgbaImage, s3d: &Stereo3dClip, eye: StereoEye) -> Op
     }
 }
 
+/// *Reduzir cintilação de entrelaçamento* (chave do evento no VEGAS Pro):
+/// filtro vertical `[1, 2, 1] / 4`. Linhas de 1 pixel de altura ficam
+/// divididas entre os dois campos e param de piscar na saída entrelaçada.
+/// Quadros com menos de 3 linhas ou com `px` menor que `w × h` ficam como
+/// estão (entrada hostil, §0.4).
+pub(crate) fn reduce_interlace_flicker(f: &mut Frame) {
+    let (w, h) = (f.w, f.h);
+    if w == 0 || h < 3 || w.checked_mul(h).is_none_or(|n| f.px.len() < n) {
+        return;
+    }
+    let src = f.px.clone();
+    for y in 0..h {
+        let up = y.saturating_sub(1);
+        let dn = (y + 1).min(h - 1);
+        for x in 0..w {
+            let (Some(a), Some(b), Some(c)) =
+                (src.get(up * w + x), src.get(y * w + x), src.get(dn * w + x))
+            else {
+                continue;
+            };
+            if let Some(o) = f.px.get_mut(y * w + x) {
+                *o = std::array::from_fn(|ch| 0.25 * a[ch] + 0.5 * b[ch] + 0.25 * c[ch]);
+            }
+        }
+    }
+}
+
 fn shift_frame_horizontal(src: &Frame, dx_px: f32) -> Frame {
     if dx_px.abs() < 0.25 {
         return src.clone();
@@ -602,6 +629,9 @@ fn event_layer_eye(
         e.maintain_aspect,
         e.pan_crop_stretch_to_fill,
     );
+    if e.reduce_flicker {
+        reduce_interlace_flicker(&mut f);
+    }
     if e.pan_crop_mask_enabled {
         if let Some(mask_data) = e.pan_crop_mask.as_deref() {
             let (path, feather, opacity, expansion) = mask_data.evaluate_at(local);
@@ -2076,5 +2106,47 @@ mod pan_crop_tests {
             "Video Bus FadeToColor -1 deve escurecer saída: {:?}",
             f_black.px[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod flicker_tests {
+    use super::*;
+
+    #[test]
+    fn linhas_finas_alternadas_viram_cinza_medio() {
+        let (w, h) = (4, 6);
+        let mut f = Frame::new(w, h);
+        for y in 0..h {
+            let v = if y % 2 == 0 { 1.0 } else { 0.0 };
+            for x in 0..w {
+                f.px[y * w + x] = [v, v, v, 1.0];
+            }
+        }
+        reduce_interlace_flicker(&mut f);
+        // linhas internas: metade da própria + um quarto de cada vizinha
+        for y in 1..h - 1 {
+            let p = f.px[y * w];
+            assert!((p[0] - 0.5).abs() < 1e-6, "linha {y}: {p:?}");
+            assert!((p[3] - 1.0).abs() < 1e-6, "alfa preservado");
+        }
+    }
+
+    #[test]
+    fn imagem_lisa_nao_muda_e_quadros_hostis_nao_travam() {
+        let mut f = Frame::new(3, 3);
+        f.px.fill([0.2, 0.4, 0.6, 1.0]);
+        let before = f.px.clone();
+        reduce_interlace_flicker(&mut f);
+        assert_eq!(f.px, before);
+        let mut tiny = Frame::new(5, 2);
+        reduce_interlace_flicker(&mut tiny);
+        let mut broken = Frame {
+            w: 10,
+            h: 10,
+            px: vec![[1.0; 4]; 3],
+        };
+        reduce_interlace_flicker(&mut broken);
+        assert_eq!(broken.px.len(), 3);
     }
 }

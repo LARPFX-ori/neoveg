@@ -192,6 +192,8 @@ enum TmAction {
     MoveKey(usize, usize, Ticks),
     DeleteKey(usize, usize),
     SetCurve(usize, usize, Curve),
+    /// Bézier de um quadro-chave (linha, índice, Bézier, alça de saída mexida).
+    SetEase(usize, usize, neoveg_common::ease::KeyEase, bool),
     Blend(BlendMode),
     /// *Alfa da origem 3D* ligado/desligado (vale para trilha e para Pai/Filho 3D).
     Mode3d(bool),
@@ -297,6 +299,7 @@ pub(crate) fn constrained_rotate(g: &BoxGeom, from: Vec2, to: Vec2, st: &TrackMo
 
 impl App {
     pub(crate) fn track_motion_window(&mut self, ctx: &egui::Context) {
+        self.dlg.tm_kb_rect = None;
         let Some(tid) = self.dlg.track_motion else {
             return;
         };
@@ -353,6 +356,7 @@ impl App {
         let mut new_key: Option<MotionKey> = None;
         let mut actions: Vec<TmAction> = Vec::new();
         let mut seek: Option<Ticks> = None;
+        let mut kb_rect: Option<egui::Rect> = None;
         crate::dialog_window::DialogWindow::new(tr_args(
             lang,
             "Movimento da trilha — {name}",
@@ -364,6 +368,19 @@ impl App {
         .min_size([640.0, 420.0])
         .resizable(true)
         .show(ctx, |ui| {
+            // teclas da janela (manual do VEGAS Pro 21, atalhos "Track Motion"):
+            // valem na janela solta (o teclado é dela) ou, acoplada, com o
+            // mouse sobre ela
+            let docked = ui.ctx().viewport_id() == egui::ViewportId::ROOT;
+            let area = ui.max_rect();
+            if docked {
+                kb_rect = Some(area);
+            }
+            if !ui.ctx().wants_keyboard_input() && (!docked || ui.rect_contains_pointer(area)) {
+                for k in take_window_keys(ui) {
+                    apply_window_key(&mut st, k);
+                }
+            }
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Predefinição:"));
                 let sel = PRESETS.get(st.preset).copied().unwrap_or(PRESETS[0]);
@@ -433,18 +450,24 @@ impl App {
                 KfRow {
                     label: tr(lang, "Posição"),
                     keys: motion.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: motion.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: None,
                     selected: st.active_row == 0,
                 },
                 KfRow {
                     label: tr(lang, "Sombra 2D"),
                     keys: shadow_kf.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: shadow_kf.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: Some(shadow_enabled),
                     selected: st.active_row == 1,
                 },
                 KfRow {
                     label: tr(lang, "Brilho 2D"),
                     keys: glow_kf.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: glow_kf.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: Some(glow_enabled),
                     selected: st.active_row == 2,
                 },
@@ -490,6 +513,9 @@ impl App {
             if let Some((ri, ki, c)) = out.set_curve {
                 actions.push(TmAction::SetCurve(ri, ki, c));
             }
+            if let Some((ri, ki, e, edited_out)) = out.set_ease {
+                actions.push(TmAction::SetEase(ri, ki, e, edited_out));
+            }
             if let Some((ri, ki)) = out.delete_key {
                 actions.push(TmAction::DeleteKey(ri, ki));
             }
@@ -519,6 +545,7 @@ impl App {
             tid, parent, active_row, t, tol, frame, length, new_key, &actions,
         );
         self.dlg.tm = st;
+        self.dlg.tm_kb_rect = kb_rect;
         if changed {
             self.dialog_change();
         }
@@ -993,20 +1020,32 @@ impl App {
             );
         }
         kf_window::prop_section(ui, sec("kf"), tr(lang, "Quadro-chave"), true, th, |ui| {
+            let current = motion.keys.get(key_idx).map(|k| k.curve);
+            let cur_ease = motion.keys.get(key_idx).and_then(|k| k.ease);
             kf_window::prop_row(ui, tr(lang, "Tipo:"), |ui| {
-                let current = motion.keys.get(key_idx).map(|k| k.curve);
-                let mut c = current.unwrap_or_default();
-                egui::ComboBox::from_id_salt("tm_curve")
-                    .selected_text(c.name_in(lang))
-                    .show_ui(ui, |ui| {
-                        for k in Curve::ALL.iter().take(6) {
-                            ui.selectable_value(&mut c, *k, k.name_in(lang));
+                let choice = kf_window::interp_combo(ui, "tm_curve", current, cur_ease, lang);
+                if current.is_some() {
+                    match choice {
+                        Some(kf_window::InterpChoice::Curve(c)) => {
+                            actions.push(TmAction::SetCurve(0, key_idx, c));
                         }
-                    });
-                if current.is_some() && Some(c) != current {
-                    actions.push(TmAction::SetCurve(0, key_idx, c));
+                        Some(kf_window::InterpChoice::Ease(e)) => {
+                            actions.push(TmAction::SetEase(0, key_idx, e, true));
+                        }
+                        None => {}
+                    }
                 }
             });
+            if let Some(e) = cur_ease {
+                if let Some((ne, edited_out)) = kf_window::ease_fields(ui, e, lang) {
+                    actions.push(TmAction::SetEase(0, key_idx, ne, edited_out));
+                }
+                let sides = neoveg_common::ease::segment_sides(&motion.ease_keys(), key_idx);
+                kf_window::paint_progress_preview(ui, th, |u| match sides {
+                    Some((o, i)) => neoveg_common::ease::bezier_progress(o, i, u),
+                    None => u,
+                });
+            }
         });
         kf_window::prop_section(
             ui,
@@ -1621,6 +1660,24 @@ impl App {
                     }
                     continue;
                 }
+                TmAction::SetEase(ri, ki, e, edited_out) => {
+                    let ok = match *ri {
+                        1 => set_kf_ease(&mut track.shadow_2d, *ki, *e, *edited_out),
+                        2 => set_kf_ease(&mut track.glow_2d, *ki, *e, *edited_out),
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            set_kf_ease(m, *ki, *e, *edited_out)
+                        }
+                    };
+                    if ok {
+                        changed = true;
+                    }
+                    continue;
+                }
                 TmAction::SetCurve(ri, ki, c) => {
                     let ok = match *ri {
                         1 => set_kf_curve(&mut track.shadow_2d, *ki, *c),
@@ -1768,7 +1825,196 @@ fn set_kf_curve<T>(kf: &mut Keyframes<T>, ki: usize, c: Curve) -> bool {
         return false;
     };
     k.curve = c;
+    // escolher uma curva do VEGAS desliga o Bézier
+    k.ease = None;
     true
+}
+
+/// Grava o Bézier do quadro-chave `ki`. `false` se o índice não existe ou
+/// nada mudou (não cria passo de Desfazer à toa).
+fn set_kf_ease<T: neoveg_common::Lerp + Default>(
+    kf: &mut Keyframes<T>,
+    ki: usize,
+    e: neoveg_common::ease::KeyEase,
+    edited_out: bool,
+) -> bool {
+    if kf.keys.get(ki).is_some_and(|k| k.ease == Some(e)) {
+        return false;
+    }
+    kf.set_ease(ki, Some(e), edited_out)
+}
+
+/// Eixo das teclas X, Y e Z da janela Movimento da trilha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+/// Ação de uma tecla da janela Movimento da trilha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowKey {
+    LockAspect,
+    AboutCenter,
+    ObjectSpace,
+    PreventMove(Axis),
+    PreventScale(Axis),
+    Snap,
+    Rotation,
+    /// Disposição 3D `1..=6` (as que o Neoveg ainda não tem são ignoradas).
+    Layout(u8),
+}
+
+/// Tecla → ação, como na lista de atalhos do VEGAS Pro 21 ("Track
+/// Motion"): A, C, O, X/Y/Z, Shift+X/Y/Z, F8, Shift+F8 e 1–6 (fora do
+/// teclado numérico). Com Ctrl ou Alt não é tecla da janela.
+pub(crate) fn window_key(ctrl: bool, shift: bool, alt: bool, key: egui::Key) -> Option<WindowKey> {
+    use egui::Key as K;
+    if ctrl || alt {
+        return None;
+    }
+    Some(match (shift, key) {
+        (false, K::A) => WindowKey::LockAspect,
+        (false, K::C) => WindowKey::AboutCenter,
+        (false, K::O) => WindowKey::ObjectSpace,
+        (false, K::X) => WindowKey::PreventMove(Axis::X),
+        (false, K::Y) => WindowKey::PreventMove(Axis::Y),
+        (false, K::Z) => WindowKey::PreventMove(Axis::Z),
+        (true, K::X) => WindowKey::PreventScale(Axis::X),
+        (true, K::Y) => WindowKey::PreventScale(Axis::Y),
+        (true, K::Z) => WindowKey::PreventScale(Axis::Z),
+        (false, K::F8) => WindowKey::Snap,
+        (true, K::F8) => WindowKey::Rotation,
+        (false, K::Num1) => WindowKey::Layout(1),
+        (false, K::Num2) => WindowKey::Layout(2),
+        (false, K::Num3) => WindowKey::Layout(3),
+        (false, K::Num4) => WindowKey::Layout(4),
+        (false, K::Num5) => WindowKey::Layout(5),
+        (false, K::Num6) => WindowKey::Layout(6),
+        _ => return None,
+    })
+}
+
+/// Teclas da janela apertadas neste quadro (consumidas, para não chegarem
+/// a outro tratador).
+fn take_window_keys(ui: &egui::Ui) -> Vec<WindowKey> {
+    ui.input_mut(|i| {
+        let presses: Vec<(egui::Modifiers, egui::Key)> = i
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some((*modifiers, *key)),
+                _ => None,
+            })
+            .collect();
+        presses
+            .into_iter()
+            .filter_map(|(m, k)| {
+                let wk = window_key(m.command || m.ctrl, m.shift, m.alt, k)?;
+                i.consume_key(m, k).then_some(wk)
+            })
+            .collect()
+    })
+}
+
+/// Com o mouse sobre a janela acoplada (`rect`), alguma tecla deste quadro
+/// é da janela: a timeline não deve tratá-la.
+pub(crate) fn window_owns_keys(ctx: &egui::Context, rect: Option<egui::Rect>) -> bool {
+    let Some(rect) = rect else {
+        return false;
+    };
+    ctx.input(|i| {
+        i.pointer.hover_pos().is_some_and(|p| rect.contains(p))
+            && i.events.iter().any(|e| {
+                matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. }
+                    if window_key(modifiers.command || modifiers.ctrl, modifiers.shift, modifiers.alt, *key).is_some())
+            })
+    })
+}
+
+/// Aplica a tecla ao estado da janela (liga/desliga a opção).
+pub(crate) fn apply_window_key(st: &mut TrackMotionUi, k: WindowKey) {
+    match k {
+        WindowKey::LockAspect => st.lock_aspect = !st.lock_aspect,
+        WindowKey::AboutCenter => st.about_center = !st.about_center,
+        WindowKey::ObjectSpace => st.object_space = !st.object_space,
+        WindowKey::PreventMove(Axis::X) => st.prevent_move_x = !st.prevent_move_x,
+        WindowKey::PreventMove(Axis::Y) => st.prevent_move_y = !st.prevent_move_y,
+        WindowKey::PreventMove(Axis::Z) => st.prevent_move_z = !st.prevent_move_z,
+        WindowKey::PreventScale(Axis::X) => st.prevent_scale_x = !st.prevent_scale_x,
+        WindowKey::PreventScale(Axis::Y) => st.prevent_scale_y = !st.prevent_scale_y,
+        // o Neoveg ainda não tem "impedir escala em Z"
+        WindowKey::PreventScale(Axis::Z) => {}
+        WindowKey::Snap => st.snap = !st.snap,
+        WindowKey::Rotation => st.enable_rotation = !st.enable_rotation,
+        WindowKey::Layout(n) => {
+            if let Some(l) = usize::from(n)
+                .checked_sub(1)
+                .and_then(|i| Layout3d::ALL.get(i))
+            {
+                st.layout = *l;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_key_tests {
+    use super::*;
+    use egui::Key as K;
+
+    #[test]
+    fn teclas_da_janela_seguem_o_vegas() {
+        assert_eq!(
+            window_key(false, false, false, K::A),
+            Some(WindowKey::LockAspect)
+        );
+        assert_eq!(
+            window_key(false, false, false, K::C),
+            Some(WindowKey::AboutCenter)
+        );
+        assert_eq!(
+            window_key(false, false, false, K::O),
+            Some(WindowKey::ObjectSpace)
+        );
+        assert_eq!(
+            window_key(false, true, false, K::Y),
+            Some(WindowKey::PreventScale(Axis::Y))
+        );
+        assert_eq!(
+            window_key(false, true, false, K::F8),
+            Some(WindowKey::Rotation)
+        );
+        assert_eq!(
+            window_key(false, false, false, K::Num6),
+            Some(WindowKey::Layout(6))
+        );
+        // com Ctrl/Alt são atalhos globais (ex.: Ctrl+C copiar, Alt+C aninhar)
+        assert_eq!(window_key(true, false, false, K::C), None);
+        assert_eq!(window_key(false, false, true, K::C), None);
+        assert_eq!(window_key(false, false, false, K::Num7), None);
+    }
+
+    #[test]
+    fn aplicar_tecla_alterna_a_opcao_e_ignora_layout_inexistente() {
+        let mut st = TrackMotionUi::default();
+        let before = st.lock_aspect;
+        apply_window_key(&mut st, WindowKey::LockAspect);
+        assert_eq!(st.lock_aspect, !before);
+        apply_window_key(&mut st, WindowKey::Layout(2));
+        assert_eq!(st.layout, Layout3d::Perspective);
+        apply_window_key(&mut st, WindowKey::Layout(6));
+        assert_eq!(st.layout, Layout3d::Perspective);
+        apply_window_key(&mut st, WindowKey::Layout(0));
+        assert_eq!(st.layout, Layout3d::Perspective);
+    }
 }
 
 #[cfg(test)]

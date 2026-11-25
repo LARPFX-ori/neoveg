@@ -919,6 +919,10 @@ pub struct Dialogs {
     pub event_props: Option<Id>,
     pub pan_crop: Option<Id>,
     pub track_motion: Option<Id>,
+    /// Área da janela Movimento da trilha quando acoplada na janela
+    /// principal (quadro anterior): com o mouse sobre ela, as teclas da
+    /// janela não chegam aos atalhos da timeline.
+    pub(crate) tm_kb_rect: Option<egui::Rect>,
     pub fx_target: Option<FxTarget>,
     pub(crate) fx_chooser_open: bool,
     fx_chooser_cat: usize,
@@ -3194,7 +3198,9 @@ impl App {
             return;
         };
         let lang = self.lang();
-        let (title, audio, local_t) = match target {
+        // `span`: duração do eixo de tempo dos gráficos de velocidade (o
+        // evento inteiro; nos outros alvos, até depois do último quadro-chave)
+        let (title, audio, local_t, span) = match target {
             FxTarget::Event(id) => {
                 let Some((ti, _)) = self.project.find_event(id) else {
                     self.dlg.fx_target = None;
@@ -3207,6 +3213,7 @@ impl App {
                     tr_args(lang, "Efeitos do evento — {name}", &[("name", &e.name)]),
                     self.project.tracks[ti].kind == TrackKind::Audio,
                     (self.cursor - e.start).clamp_safe(Ticks::ZERO, e.length),
+                    Some(e.length),
                 )
             }
             FxTarget::Track(id) => {
@@ -3218,6 +3225,7 @@ impl App {
                     tr_args(lang, "Efeitos da trilha — {name}", &[("name", &t.name)]),
                     t.kind == TrackKind::Audio,
                     self.cursor,
+                    None,
                 )
             }
             FxTarget::AudioBus(id) => {
@@ -3229,17 +3237,20 @@ impl App {
                     tr_args(lang, "Efeitos do barramento — {name}", &[("name", &b.name)]),
                     true,
                     self.cursor,
+                    None,
                 )
             }
             FxTarget::MasterAudio => (
                 tr(lang, "Efeitos do master bus (áudio)").into(),
                 true,
                 self.cursor,
+                None,
             ),
             FxTarget::MasterVideo => (
                 tr(lang, "Efeitos de saída de vídeo").into(),
                 false,
                 self.cursor,
+                None,
             ),
         };
         let tol = self.project.settings.frame_dur().div_i64(2);
@@ -4011,6 +4022,7 @@ impl App {
                                     );
                                 }
                                 let specs = fx.kind.params();
+                                let fx_id = fx.id;
                                 egui::Grid::new("params").num_columns(3).show(ui, |ui| {
                                     for (pi, spec) in specs.iter().enumerate() {
                                         let Some(p) = fx.params.get_mut(pi) else {
@@ -4084,14 +4096,45 @@ impl App {
                                                 .clicked()
                                                 {
                                                     p.value = v;
-                                                    p.keys.clear();
+                                                    p.clear_keys();
                                                     changed = true;
+                                                }
+                                            }
+                                            if p.keys.len() >= 2 {
+                                                let gid = egui::Id::new(("fx_vgraph", fx_id, pi));
+                                                let on: bool =
+                                                    ui.data(|d| d.get_temp(gid)).unwrap_or(false);
+                                                if icons::small_icon_button(
+                                                    ui,
+                                                    Icon::VelocityEnvelope,
+                                                    None,
+                                                    on,
+                                                    &self.theme,
+                                                )
+                                                .on_hover_text(tr(
+                                                    lang,
+                                                    "Gráfico de velocidade: arraste as alças para ajustar a interpolação Bézier",
+                                                ))
+                                                .clicked()
+                                                {
+                                                    ui.data_mut(|d| d.insert_temp(gid, !on));
                                                 }
                                             }
                                         });
                                         ui.end_row();
                                     }
                                 });
+                                changed |= crate::velocity_graph::fx_param_graphs(
+                                    ui,
+                                    fx,
+                                    specs,
+                                    fx_id,
+                                    local_t,
+                                    span,
+                                    tol,
+                                    &self.theme,
+                                    lang,
+                                );
                                 ui.separator();
                             });
                         }

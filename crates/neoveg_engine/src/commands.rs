@@ -1061,7 +1061,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "file.render",
         label: "Renderizar como...",
         menu_path: "Arquivo/Renderizar como...",
-        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::M)),
+        default_shortcut: None,
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenRenderDialog, h),
@@ -1308,7 +1308,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "edit.expanded_edit_mode",
         label: "Modo de edição expandido (A/B)",
         menu_path: "Editar/Modo de edição expandido",
-        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::E)),
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::E)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -1428,7 +1428,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "event.pitch_up_oct",
         label: "Subir tom (+1 oitava)",
         menu_path: "Editar/Pitch/Subir 1 oitava",
-        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Equals)),
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::Equals)),
         needs_ui: false,
         enabled: has_selected_audio_events,
         run: |s, h| {
@@ -1440,7 +1440,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "event.pitch_down_oct",
         label: "Descer tom (-1 oitava)",
         menu_path: "Editar/Pitch/Descer 1 oitava",
-        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::Minus)),
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::Minus)),
         needs_ui: false,
         enabled: has_selected_audio_events,
         run: |s, h| {
@@ -1452,7 +1452,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "event.pitch_reset",
         label: "Redefinir tom (0 st)",
         menu_path: "Editar/Pitch/Redefinir tom",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::Equals)),
         needs_ui: false,
         enabled: has_selected_audio_events,
         run: |s, h| {
@@ -1833,6 +1833,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.select_events_to_end",
+        label: "Selecionar eventos até o fim",
+        menu_path: "Editar/Selecionar eventos até o fim",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_events,
+        run: |s, h| {
+            s.select_events_to_end();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "edit.select_all",
         label: "Selecionar todos",
         menu_path: "Editar/Selecionar todos",
@@ -1896,7 +1908,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "file.open_nested_tab",
         label: "Abrir projeto aninhado em aba",
         menu_path: "Arquivo/Abrir projeto aninhado em aba",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::N)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenNestedProjectTab, h),
@@ -1905,7 +1917,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "timeline.open_parent",
         label: "Voltar à linha do tempo pai",
         menu_path: "Editar/Voltar à linha do tempo pai",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::P)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenParentTimeline, h),
@@ -1969,7 +1981,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.project_media",
         label: "Mídia do Projeto",
         menu_path: "Exibir/Mídia do Projeto",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num5)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::ProjectMedia), h),
@@ -1978,7 +1990,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.explorer",
         label: "Explorer",
         menu_path: "Exibir/Explorer",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num1)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Explorer), h),
@@ -1996,7 +2008,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.edit_details",
         label: "Detalhes da Edição",
         menu_path: "Exibir/Detalhes da Edição",
-        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num3)),
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num4)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::EditDetails), h),
@@ -2005,7 +2017,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.transitions",
         label: "Transições",
         menu_path: "Exibir/Transições",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num7)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Transitions), h),
@@ -2014,7 +2026,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.video_fx",
         label: "Efeitos de Vídeo",
         menu_path: "Exibir/Efeitos de Vídeo",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num8)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::VideoFx), h),
@@ -2023,7 +2035,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.color_grading",
         label: "Color Grading",
         menu_path: "Exibir/Color Grading",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::G)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::ColorGrading), h),
@@ -2041,7 +2053,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.generators",
         label: "Geradores de Mídia",
         menu_path: "Exibir/Geradores de Mídia",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num9)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Generators), h),
@@ -2050,7 +2062,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.mixer",
         label: "Mixer",
         menu_path: "Exibir/Mixer",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num5)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Mixer), h),
@@ -2068,7 +2080,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.surround_panner",
         label: "Surround Panner",
         menu_path: "Exibir/Surround Panner",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num3)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::SurroundPanner), h),
@@ -2095,7 +2107,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.bus_tracks",
         label: "Mostrar trilhas de barramentos",
         menu_path: "Exibir/Mostrar trilhas de barramentos",
-        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::B)),
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::B)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -2119,7 +2131,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.scopes",
         label: "Escopos",
         menu_path: "Exibir/Escopos",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::Num2)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Scopes), h),
@@ -2128,7 +2140,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.notes",
         label: "Notas",
         menu_path: "Exibir/Notas",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num6)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Notes), h),
@@ -2137,7 +2149,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.tab.encoder",
         label: "Neoveg Encoder",
         menu_path: "Exibir/Neoveg Encoder",
-        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::M)),
+        default_shortcut: Some(Shortcut::new(true, true, true, ShortcutKey::M)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
@@ -2194,7 +2206,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.envelopes",
         label: "Mostrar envelopes",
         menu_path: "Exibir/Mostrar envelopes",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::E)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -2270,7 +2282,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.preview",
         label: "Prévia de Vídeo",
         menu_path: "Exibir/Prévia de Vídeo",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num4)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::TogglePreview, h),
@@ -2279,7 +2291,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "view.master_bus",
         label: "Master Bus",
         menu_path: "Exibir/Master Bus",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::Num3)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::ToggleMasterBus, h),
@@ -2539,7 +2551,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "insert.track_adjustment",
         label: "Trilha de ajuste",
         menu_path: "Inserir/Trilha de ajuste",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::new(true, true, true, ShortcutKey::Q)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -2616,7 +2628,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "insert.marker_cd_index",
         label: "Marcador de índice de CD",
         menu_path: "Inserir/Marcador de índice de CD",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::N)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -2628,7 +2640,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "insert.marker_command",
         label: "Marcador de comando...",
         menu_path: "Inserir/Marcador de comando...",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::C)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenCommandMarkerDialog, h),
@@ -2796,7 +2808,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "sequence.nest_selection",
         label: "Aninhar seleção em nova sequência",
         menu_path: "Editar/Sequência/Aninhar seleção em nova sequência",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::alt(ShortcutKey::C)),
         needs_ui: false,
         enabled: |s, _| !s.sel_events.is_empty(),
         run: |s, h| {
@@ -3093,7 +3105,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "tools.prerender",
         label: "Pré-renderizar seletivamente região...",
         menu_path: "Ferramentas/Pré-renderizar seletivamente região...",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::M)),
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::PrerenderRegion, h),
@@ -3374,7 +3386,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "track.render_to_new_track",
         label: "Renderizar para nova trilha...",
         menu_path: "Ferramentas/Renderizar para nova trilha...",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::M)),
         needs_ui: true,
         enabled: |s, h| {
             h.supports_ui()
@@ -3759,7 +3771,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "options.ignore_grouping",
         label: "Ignorar agrupamento de eventos",
         menu_path: "Opções/Ignorar agrupamento de eventos",
-        default_shortcut: None,
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::U)),
         needs_ui: false,
         enabled: always_enabled,
         run: |s, h| {
@@ -4653,5 +4665,155 @@ mod tests {
         // Desfazer restaura as pastas anteriores
         assert!(s.undo());
         assert!(s.work_folders().is_empty());
+    }
+}
+
+/// As teclas padrão seguem a lista oficial de atalhos do VEGAS Pro (manual
+/// do VEGAS Pro 21 e lista de teclado do VEGAS Pro 18). Quem vem do VEGAS
+/// aperta a tecla e espera o mesmo comando; um recurso novo não pode tomar
+/// uma tecla do VEGAS (aconteceu com `Ctrl+Alt+M`, `Ctrl+Shift+E`, `Ctrl+B`,
+/// `Ctrl+M`, `Alt+3` e `Ctrl+=`/`Ctrl+-`). Este teste diz o que ele previne:
+/// mudar uma linha aqui exige conferir o manual antes.
+#[cfg(test)]
+mod vegas_keymap_tests {
+    use super::*;
+
+    /// (tecla do VEGAS, comando do Neoveg que deve usá-la).
+    const VEGAS_KEYS: &[(&str, &str)] = &[
+        ("Ctrl+N", "file.new"),
+        ("Ctrl+O", "file.open"),
+        ("Ctrl+S", "file.save"),
+        ("Ctrl+Shift+S", "file.save_as"),
+        ("Ctrl+Alt+S", "file.save_version"),
+        ("Alt+Enter", "file.project_props"),
+        ("Alt+2", "view.tab.trimmer"),
+        ("Alt+3", "view.master_bus"),
+        ("Ctrl+Alt+1", "view.tab.plugin_manager"),
+        ("Ctrl+Alt+4", "view.tab.edit_details"),
+        ("Ctrl+Alt+7", "view.tab.loudness"),
+        ("B", "view.bus_tracks"),
+        ("Ctrl+Shift+B", "view.video_bus_track"),
+        ("Ctrl+Shift+E", "view.envelopes"),
+        ("F11", "view.toggle_dock_area"),
+        ("Ctrl+F11", "view.maximize_timeline"),
+        ("Shift+F11", "view.toggle_track_list"),
+        ("Ctrl+G", "edit.goto"),
+        ("Ctrl+Home", "transport.project_start"),
+        ("Ctrl+End", "transport.project_end"),
+        ("Shift+Q", "edit.select_loop_region"),
+        ("Ctrl+X", "edit.cut"),
+        ("Ctrl+C", "edit.copy"),
+        ("Ctrl+V", "edit.paste"),
+        ("Ctrl+Shift+V", "edit.paste_insert"),
+        ("Delete", "edit.delete"),
+        ("Ctrl+T", "edit.trim_to_selection"),
+        ("Ctrl+M", "track.render_to_new_track"),
+        ("Ctrl+Z", "edit.undo"),
+        ("Ctrl+Y", "edit.redo"),
+        ("D", "edit.tool.next"),
+        ("Shift+D", "edit.tool.prev"),
+        ("Ctrl+Shift+D", "tools.multicam_mode"),
+        ("Ctrl+A", "edit.select_all"),
+        ("Ctrl+Shift+A", "edit.deselect_all"),
+        ("S", "edit.split"),
+        ("Alt+S", "edit.smart_split"),
+        ("Alt+[", "edit.trim_start"),
+        ("Alt+]", "edit.trim_end"),
+        ("T", "event.next_take"),
+        ("Shift+T", "event.prev_take"),
+        ("Shift+=", "event.pitch_up_oct"),
+        ("Shift+-", "event.pitch_down_oct"),
+        ("Ctrl+Shift+=", "event.pitch_reset"),
+        ("Ctrl+R", "transport.record"),
+        ("Q", "options.loop_playback"),
+        ("Shift+Space", "transport.play_from_start"),
+        ("Alt+Left", "transport.frame_back"),
+        ("Alt+Right", "transport.frame_fwd"),
+        ("Shift+B", "preview.ram_build"),
+        ("Ctrl+Q", "insert.track_audio"),
+        ("Ctrl+Shift+Q", "insert.track_video"),
+        ("Z", "track.mute"),
+        ("X", "track.solo"),
+        ("F8", "options.snapping"),
+        ("Ctrl+F8", "options.snap_to_grid"),
+        ("Ctrl+L", "options.auto_ripple"),
+        ("Ctrl+Shift+X", "options.auto_crossfades"),
+        ("G", "edit.group"),
+        ("U", "edit.ungroup"),
+        ("Shift+G", "edit.select_group"),
+        ("V", "insert.env_volume"),
+        ("Shift+V", "insert.remove_env_volume"),
+        ("P", "insert.env_pan"),
+        ("Shift+P", "insert.remove_env_pan"),
+        ("M", "insert.marker"),
+        ("R", "insert.region"),
+        ("N", "insert.marker_cd_track"),
+        ("Alt+1", "view.tab.explorer"),
+        ("Alt+4", "view.preview"),
+        ("Alt+5", "view.tab.project_media"),
+        ("Alt+6", "view.tab.notes"),
+        ("Alt+7", "view.tab.transitions"),
+        ("Alt+8", "view.tab.video_fx"),
+        ("Alt+9", "view.tab.generators"),
+        ("Ctrl+Alt+2", "view.tab.scopes"),
+        ("Ctrl+Alt+3", "view.tab.surround_panner"),
+        ("Ctrl+Alt+5", "view.tab.mixer"),
+        ("Alt+G", "view.tab.color_grading"),
+        ("Shift+M", "tools.prerender"),
+        ("Ctrl+Shift+U", "options.ignore_grouping"),
+        ("Alt+C", "sequence.nest_selection"),
+        ("Alt+N", "file.open_nested_tab"),
+        ("Alt+P", "timeline.open_parent"),
+        ("Ctrl+Shift+Alt+Q", "insert.track_adjustment"),
+        ("Shift+N", "insert.marker_cd_index"),
+        ("C", "insert.marker_command"),
+    ];
+
+    /// Teclas de comandos do VEGAS que o Neoveg ainda não tem: ficam livres
+    /// até o comando existir, para não fazerem outra coisa.
+    const VEGAS_RESERVED_UNBOUND: &[(&str, &str)] = &[
+        ("Ctrl+Alt+M", "mostrar/ocultar cabeçalhos dos eventos"),
+        ("Ctrl+B", "colar repetindo"),
+        ("Ctrl+=", "subir o tom 1 cent"),
+        ("Ctrl+-", "descer o tom 1 cent"),
+    ];
+
+    fn bound_to(sc: Shortcut) -> Vec<&'static str> {
+        COMMANDS
+            .iter()
+            .filter(|c| c.default_shortcut == Some(sc))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[test]
+    fn teclas_do_vegas_chamam_o_mesmo_comando() {
+        for (key, id) in VEGAS_KEYS {
+            let Some(sc) = Shortcut::parse(key) else {
+                panic!("tecla inválida na tabela do teste: {key}");
+            };
+            assert!(
+                find_command(id).is_some(),
+                "comando {id} da tabela não existe"
+            );
+            assert_eq!(
+                bound_to(sc),
+                vec![*id],
+                "{key} é a tecla do VEGAS para {id}; confira o manual antes de mudar"
+            );
+        }
+    }
+
+    #[test]
+    fn teclas_reservadas_do_vegas_ficam_livres() {
+        for (key, what) in VEGAS_RESERVED_UNBOUND {
+            let Some(sc) = Shortcut::parse(key) else {
+                panic!("tecla inválida na tabela do teste: {key}");
+            };
+            assert!(
+                bound_to(sc).is_empty(),
+                "{key} é a tecla do VEGAS para {what}; não ligue outro comando a ela"
+            );
+        }
     }
 }

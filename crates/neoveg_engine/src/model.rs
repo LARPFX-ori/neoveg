@@ -7,6 +7,7 @@
 
 pub use crate::curve::*;
 pub use crate::time::*;
+pub use neoveg_common::ease::{EaseKey, EaseMode, EaseSide, KeyEase};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -2243,6 +2244,7 @@ fn sanitize_tracks_slice(
         let sanitize_motion_list = |mk: &mut Keyframes<MotionKey>| {
             for k in &mut mk.keys {
                 k.t = k.t.clamp_safe(Ticks::ZERO, Ticks::MAX);
+                k.ease = k.ease.map(KeyEase::sanitized);
                 let v = &mut k.value;
                 v.x = clampf(fin32(v.x, 0.0), -100.0, 100.0);
                 v.y = clampf(fin32(v.y, 0.0), -100.0, 100.0);
@@ -2303,6 +2305,7 @@ fn sanitize_tracks_slice(
             }
             for k in &mut e.pan_crop.keys {
                 k.t = k.t.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
+                k.ease = k.ease.map(KeyEase::sanitized);
                 let v = &mut k.value;
                 v.cx = clampf(fin32(v.cx, 0.5), -100.0, 100.0);
                 v.cy = clampf(fin32(v.cy, 0.5), -100.0, 100.0);
@@ -2508,6 +2511,7 @@ fn sanitize_fx(f: &mut FxInstance) {
             value: d,
             keys: vec![],
             curves: vec![],
+            eases: vec![],
         });
     }
     for (p, spec) in f.params.iter_mut().zip(specs.iter()) {
@@ -2519,6 +2523,10 @@ fn sanitize_fx(f: &mut FxInstance) {
             k.0 = k.0.clamp_safe(Ticks::MIN_NEGATIVE, Ticks::MAX);
         }
         p.keys.sort_by_key(|k| k.0);
+        p.eases.truncate(p.keys.len());
+        for e in p.eases.iter_mut().flatten() {
+            *e = e.sanitized();
+        }
     }
 }
 
@@ -3883,6 +3891,7 @@ fn default_glow_keyframes() -> Keyframes<ShadowGlowKey> {
             t: Ticks::ZERO,
             value: ShadowGlowKey::default_glow(),
             curve: Curve::Smooth,
+            ease: None,
         }],
     }
 }
@@ -4213,11 +4222,23 @@ pub fn eval_pan_crop_smooth(kf: &Keyframes<PanCropKey>, t: Ticks) -> PanCropKey 
             return last.value.clone();
         }
     }
+    let ease_keys = if kf.has_ease() {
+        kf.ease_keys()
+    } else {
+        Vec::new()
+    };
     for i in 0..kf.keys.len() - 1 {
         let a = &kf.keys[i];
         let b = &kf.keys[i + 1];
         if t >= a.t && t <= b.t {
             let lin = t.fraction_in(a.t, b.t);
+            // Bézier temporal: as alças substituem a curva e a suavidade
+            if a.curve != Curve::Hold {
+                if let Some((out, inn)) = neoveg_common::ease::segment_sides(&ease_keys, i) {
+                    let u = neoveg_common::ease::bezier_progress(out, inn, lin).clamp(0.0, 1.0);
+                    return a.value.lerp(&b.value, u);
+                }
+            }
             let mut u = a.curve.shape(lin);
             let sm = (a.value.smoothness_safe() * 0.01).clamp(0.0, 1.0);
             if sm > 0.0 && a.curve != Curve::Hold {
@@ -4430,6 +4451,10 @@ pub struct Event {
     /// Manter proporção da mídia (letterbox) em eventos de vídeo.
     #[serde(default = "yes")]
     pub maintain_aspect: bool,
+    /// Chave *Reduzir cintilação de entrelaçamento* do evento de vídeo:
+    /// suaviza linhas finas horizontais que piscam em saída entrelaçada.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reduce_flicker: bool,
     /// *Esticar para preencher o quadro* no Pan/Crop (`true` = padrão; `false` mantém
     /// tamanho nativo sem esticar a origem para o quadro de saída, manual p. 251).
     #[serde(default = "yes")]
@@ -4530,6 +4555,7 @@ impl Event {
             gain_db: 0.0,
             opacity: 1.0,
             maintain_aspect: true,
+            reduce_flicker: false,
             pan_crop_stretch_to_fill: true,
             pan_crop: Keyframes::default(),
             pan_crop_mask_enabled: false,
@@ -4573,6 +4599,7 @@ impl Event {
             gain_db: 0.0,
             opacity: 1.0,
             maintain_aspect: true,
+            reduce_flicker: false,
             pan_crop_stretch_to_fill: true,
             pan_crop: Keyframes::default(),
             pan_crop_mask_enabled: false,
@@ -6238,6 +6265,10 @@ pub struct AnimParam {
     /// Curvas de interpolação por quadro-chave até o próximo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub curves: Vec<Curve>,
+    /// Interpolação temporal Bézier por quadro-chave (paralelo a `keys`;
+    /// vazio ou `None` = só a curva do VEGAS).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eases: Vec<Option<KeyEase>>,
 }
 
 impl AnimParam {
@@ -6249,15 +6280,88 @@ impl AnimParam {
         if t <= k[0].0 {
             return k[0].1;
         }
+        let eased = self.has_ease();
         for (i, w) in k.windows(2).enumerate() {
             if t >= w[0].0 && t < w[1].0 {
                 let x = Ticks::lerp_factor(t, w[0].0, w[1].0);
                 let curve = self.curves.get(i).copied().unwrap_or(Curve::Linear);
-                let shaped_x = curve.shape(x);
+                let shaped_x = if eased {
+                    neoveg_common::ease::segment_progress(&self.ease_keys(), i, curve, x)
+                        .clamp(-1.0, 2.0)
+                } else {
+                    curve.shape(x)
+                };
                 return w[0].1 + (w[1].1 - w[0].1) * shaped_x;
             }
         }
         k.last().map(|x| x.1).unwrap_or(self.value)
+    }
+
+    /// Algum quadro-chave usa interpolação temporal Bézier.
+    pub fn has_ease(&self) -> bool {
+        self.eases.iter().take(self.keys.len()).any(Option::is_some)
+    }
+
+    /// Visão dos quadros-chave para o resolvedor de alças Bézier.
+    pub fn ease_keys(&self) -> Vec<neoveg_common::ease::EaseKey> {
+        self.keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| neoveg_common::ease::EaseKey {
+                t: k.0,
+                scalar: Some(k.1),
+                ease: self.eases.get(i).copied().flatten(),
+            })
+            .collect()
+    }
+
+    /// Bézier do quadro-chave de índice `i`.
+    pub fn ease_index(&self, i: usize) -> Option<KeyEase> {
+        self.eases.get(i).copied().flatten()
+    }
+
+    /// Grava o Bézier do quadro-chave de índice `i` (`None` volta à curva
+    /// do VEGAS). No Bézier contínuo, `edited_out` diz qual alça foi mexida.
+    /// Índice inválido: `false`.
+    pub fn set_ease_index(&mut self, i: usize, ease: Option<KeyEase>, edited_out: bool) -> bool {
+        if i >= self.keys.len() {
+            return false;
+        }
+        let keys = self.ease_keys();
+        self.eases.resize(self.keys.len(), None);
+        if let Some(slot) = self.eases.get_mut(i) {
+            *slot = ease.map(|e| neoveg_common::ease::enforce_continuous(&keys, i, e, edited_out));
+        }
+        if ease.is_some() && self.curves.get(i) == Some(&Curve::Hold) {
+            if let Some(c) = self.curves.get_mut(i) {
+                *c = Curve::Linear;
+            }
+        }
+        if self.eases.iter().all(Option::is_none) {
+            self.eases.clear();
+        }
+        true
+    }
+
+    /// Bézier do quadro-chave perto de `t`.
+    pub fn ease_at(&self, t: Ticks, tol: Ticks) -> Option<KeyEase> {
+        let i = self.keys.iter().position(|k| k.0.abs_diff(t) <= tol)?;
+        self.ease_index(i)
+    }
+
+    /// Grava o Bézier do quadro-chave perto de `t`.
+    pub fn set_ease(&mut self, t: Ticks, ease: Option<KeyEase>, tol: Ticks) -> bool {
+        let Some(i) = self.keys.iter().position(|k| k.0.abs_diff(t) <= tol) else {
+            return false;
+        };
+        self.set_ease_index(i, ease, false)
+    }
+
+    /// Remove todos os quadros-chave (e as curvas e alças deles).
+    pub fn clear_keys(&mut self) {
+        self.keys.clear();
+        self.curves.clear();
+        self.eases.clear();
     }
 
     pub fn set_key(&mut self, t: Ticks, v: f32, tol: Ticks) {
@@ -6269,6 +6373,10 @@ impl AnimParam {
             if !self.curves.is_empty() {
                 let insert_at = at.min(self.curves.len());
                 self.curves.insert(insert_at, Curve::Linear);
+            }
+            if !self.eases.is_empty() {
+                let insert_at = at.min(self.eases.len());
+                self.eases.insert(insert_at, None);
             }
         }
     }
@@ -6291,6 +6399,13 @@ impl AnimParam {
         if self.curves.iter().all(|&c| c == Curve::Linear) {
             self.curves.clear();
         }
+        // escolher uma curva do VEGAS desliga o Bézier desse quadro-chave
+        if let Some(e) = self.eases.get_mut(i) {
+            *e = None;
+        }
+        if self.eases.iter().all(Option::is_none) {
+            self.eases.clear();
+        }
         true
     }
 
@@ -6303,6 +6418,9 @@ impl AnimParam {
                 if i < self.curves.len() {
                     self.curves.remove(i);
                 }
+                if i < self.eases.len() {
+                    self.eases.remove(i);
+                }
             } else {
                 i += 1;
             }
@@ -6310,11 +6428,14 @@ impl AnimParam {
         if self.curves.iter().all(|&c| c == Curve::Linear) {
             self.curves.clear();
         }
+        if self.eases.iter().all(Option::is_none) {
+            self.eases.clear();
+        }
         last
     }
 
     pub fn retime(&mut self, anchor: Ticks, target: Ticks, tol: Ticks) {
-        let mut pairs: Vec<((Ticks, f32), Curve)> = self
+        let mut pairs: Vec<((Ticks, f32), Curve, Option<KeyEase>)> = self
             .keys
             .iter()
             .enumerate()
@@ -6325,11 +6446,16 @@ impl AnimParam {
                 } else {
                     k.0
                 };
-                ((t, k.1), c)
+                ((t, k.1), c, self.eases.get(i).copied().flatten())
             })
             .collect();
         pairs.sort_by_key(|p| (p.0).0);
         self.keys = pairs.iter().map(|p| p.0).collect();
+        self.eases = if pairs.iter().any(|p| p.2.is_some()) {
+            pairs.iter().map(|p| p.2).collect()
+        } else {
+            Vec::new()
+        };
         if self.curves.is_empty() && pairs.iter().all(|p| p.1 == Curve::Linear) {
             // mantém vazio
         } else {
@@ -6588,6 +6714,7 @@ impl FxInstance {
                     value: s.default,
                     keys: vec![],
                     curves: vec![],
+                    eases: vec![],
                 })
                 .collect(),
             ofx: None,

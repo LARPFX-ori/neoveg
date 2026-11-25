@@ -471,7 +471,7 @@ impl App {
         }
         let lang = prefs.lang();
         neoveg_common::set_active_language(lang);
-        // Ctrl+= / Ctrl+- / Ctrl+0 são atalhos do VEGAS (tom em oitavas);
+        // Ctrl+= / Ctrl+- (tom em cents) e Ctrl+0 são teclas do VEGAS;
         // o zoom da interface do egui não pode tomar essas teclas.
         egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // nos testes fica a fonte embutida, para as medidas de layout serem
@@ -3391,6 +3391,16 @@ impl App {
             return;
         }
 
+        // Movimento da trilha acoplada com o mouse sobre ela: A, C, O, X, Y,
+        // Z, F8 e 1–6 são teclas da janela (lista do VEGAS Pro), não da timeline
+        if crate::track_motion_window::window_owns_keys(ctx, self.dlg.tm_kb_rect) {
+            return;
+        }
+        // idem para o Mixer: Q, U, A, T, F, H, M, S, D/N/W e Shift+C
+        if crate::panels::mixer_owns_keys(ctx, self.mixer_ui.kb_rect) {
+            return;
+        }
+
         // Alias clássico Ctrl+Shift+Z para Refazer além do Ctrl+Y da tabela
         if ctrl && shift && !alt && pressed(Key::Z) {
             self.exec_cmd(Some(ctx), "edit.redo");
@@ -3713,6 +3723,7 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.group");
                 self.cmd_menu_btn(ui, "edit.ungroup");
                 self.cmd_menu_btn(ui, "edit.select_all");
+                self.cmd_menu_btn(ui, "edit.select_events_to_end");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.goto");
                 ui.separator();
