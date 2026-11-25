@@ -5535,7 +5535,6 @@ impl App {
         let def_h = 500.0_f32.min(max_h);
         let extra_wrap = if def_w < 460.0 { 44.0 } else { 0.0 };
         let body_h = (def_h - 108.0 - extra_wrap).max(110.0);
-        let nav_inner_h = (body_h - 10.0).max(90.0);
 
         self.dlg
             .prefs_orig_metrics
@@ -5554,7 +5553,7 @@ impl App {
         let mut live_theme: Option<ThemeId> = None;
         let mut live_language: Option<Language> = None;
 
-        let mut win = crate::dialog_window::DialogWindow::new(tr(lang, "Preferências..."))
+        let mut win = crate::dialog_window::DialogWindow::new(tr(lang, "Preferências"))
             .id(egui::Id::new("prefs_win"))
             .open(&mut open)
             .collapsible(false)
@@ -5569,6 +5568,11 @@ impl App {
             ]);
         }
         win.show(ctx, |ui| {
+            // altura real da janela (a padrão só vale na primeira abertura):
+            // com a janela maior, o corpo crescia pouco e sobrava uma faixa
+            // vazia embaixo do rodapé
+            let body_h = prefs_body_height(ui.available_height(), 40.0 + extra_wrap, body_h);
+            let nav_inner_h = (body_h - 10.0).max(90.0);
             let avail_w = ui.available_width().max(260.0);
             let side_by_side = avail_w >= 480.0;
 
@@ -8243,6 +8247,30 @@ fn prefs_file_io(ui: &mut egui::Ui, cx: &PrefsFormContext<'_>, draft: &mut Prefe
             );
         },
     );
+}
+
+/// Altura do corpo das Preferências: o que a janela tem agora menos o rodapé
+/// (`footer`), no mínimo 110 px; sem altura útil, a altura calculada pela
+/// janela padrão (`fallback`).
+fn prefs_body_height(available: f32, footer: f32, fallback: f32) -> f32 {
+    if available.is_finite() && footer.is_finite() && available > footer + 110.0 {
+        available - footer
+    } else {
+        fallback
+    }
+}
+
+#[cfg(test)]
+mod prefs_body_height_tests {
+    use super::prefs_body_height;
+
+    #[test]
+    fn corpo_das_preferencias_ocupa_a_janela() {
+        assert_eq!(prefs_body_height(600.0, 40.0, 300.0), 560.0);
+        assert_eq!(prefs_body_height(120.0, 40.0, 300.0), 300.0);
+        assert_eq!(prefs_body_height(f32::NAN, 40.0, 300.0), 300.0);
+        assert_eq!(prefs_body_height(f32::INFINITY, 40.0, 300.0), 300.0);
+    }
 }
 
 /// Altura da lista de formatos e modelos do Renderizar como: o que sobra na
