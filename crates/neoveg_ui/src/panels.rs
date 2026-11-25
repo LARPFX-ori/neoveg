@@ -46,6 +46,18 @@ impl MixerChannelFilter {
     }
 }
 
+/// Proporção de tela da prévia: largura/altura do projeto e, com *Simular
+/// proporção do dispositivo*, corrigida pela proporção do pixel (PAR).
+/// Valores inválidos caem para pixels quadrados (§0.4).
+pub(crate) fn preview_display_aspect(w: u32, h: u32, par: f32, simulate: bool) -> f32 {
+    let base = w.max(1) as f32 / h.max(1) as f32;
+    if simulate && par.is_finite() && par > 0.0 {
+        base * par.clamp(0.1, 4.0)
+    } else {
+        base
+    }
+}
+
 /// Estado persistente da interface do Console de Mixagem (barra lateral, visibilidade
 /// individual de faixas/barramentos, seções de tira e largura dos canais, p. 63).
 pub struct MixerConsoleState {
@@ -1385,7 +1397,12 @@ impl App {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, self.theme.tl_preview_bg);
         let (proj_w, proj_h) = (self.project.settings.width, self.project.settings.height);
-        let aspect = proj_w as f32 / proj_h.max(1) as f32;
+        let aspect = preview_display_aspect(
+            proj_w,
+            proj_h,
+            self.project.settings.pixel_aspect,
+            self.prefs.preview_simulate_device_aspect,
+        );
         let (mut fw, mut fh) = (rect.width(), rect.width() / aspect);
         if fh > rect.height() {
             fh = rect.height();
@@ -1605,6 +1622,19 @@ impl App {
                 ui.id().with("pv_zoom_pan_canvas"),
                 Sense::click_and_drag(),
             );
+            canvas_resp.context_menu(|ui| {
+                let lang = self.lang();
+                if ui
+                    .checkbox(
+                        &mut self.prefs.preview_simulate_device_aspect,
+                        tr(lang, "Simular proporção do dispositivo"),
+                    )
+                    .changed()
+                {
+                    let _ = self.prefs.save();
+                    ui.close_menu();
+                }
+            });
             if canvas_resp.hovered() {
                 // roda: 10% por passo; com Ctrl, 1% (manual, p. 209). O egui
                 // entrega Ctrl+roda como zoom_delta.
@@ -4605,6 +4635,28 @@ mod safe_guide_tests {
             preview_footer_scaled_flags((1920, 1080), (960, 540), (640, 360)),
             (true, true)
         );
+    }
+
+    #[test]
+    fn proporcao_da_previa_simula_o_pixel_do_dispositivo() {
+        // DV NTSC 720x480 com PAR 0,9091 aparece em 4:3 só com a simulação
+        let sim = preview_display_aspect(720, 480, 0.9091, true);
+        assert!((sim - 4.0 / 3.0).abs() < 0.01, "{sim}");
+        assert!((preview_display_aspect(720, 480, 0.9091, false) - 1.5).abs() < 1e-6);
+        // pixels quadrados não mudam; valores hostis caem para quadrado
+        assert_eq!(
+            preview_display_aspect(1920, 1080, 1.0, true),
+            1920.0 / 1080.0
+        );
+        assert_eq!(
+            preview_display_aspect(1920, 1080, f32::NAN, true),
+            1920.0 / 1080.0
+        );
+        assert_eq!(
+            preview_display_aspect(1920, 1080, -2.0, true),
+            1920.0 / 1080.0
+        );
+        assert!(preview_display_aspect(0, 0, 1.0, true).is_finite());
     }
 
     #[test]
