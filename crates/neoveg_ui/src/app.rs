@@ -471,7 +471,7 @@ impl App {
         }
         let lang = prefs.lang();
         neoveg_common::set_active_language(lang);
-        // Ctrl+= / Ctrl+- / Ctrl+0 são atalhos do VEGAS (tom em oitavas);
+        // Ctrl+= / Ctrl+- (tom em cents) e Ctrl+0 são teclas do VEGAS;
         // o zoom da interface do egui não pode tomar essas teclas.
         egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // nos testes fica a fonte embutida, para as medidas de layout serem
