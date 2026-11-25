@@ -4786,9 +4786,13 @@ impl App {
                     });
                     left.separator();
                     let query = r.filter.trim().to_lowercase();
+                    // a lista acompanha a altura da janela (antes ficava em
+                    // 280 px e sobrava área vazia com a janela grande); o
+                    // resumo do modelo ativo fica embaixo
+                    let list_h = render_template_list_height(left.available_height());
                     egui::ScrollArea::vertical()
                         .id_salt("render_templates_scroll")
-                        .max_height(280.0)
+                        .max_height(list_h)
                         .show(left, |ui| {
                             let mut any = false;
                             for fmt in RenderFormat::ALL {
@@ -8177,5 +8181,28 @@ mod prefs_body_height_tests {
         assert_eq!(prefs_body_height(120.0, 40.0, 300.0), 300.0);
         assert_eq!(prefs_body_height(f32::NAN, 40.0, 300.0), 300.0);
         assert_eq!(prefs_body_height(f32::INFINITY, 40.0, 300.0), 300.0);
+    }
+}
+
+/// Altura da lista de formatos e modelos do Renderizar como: o que sobra na
+/// coluna menos o resumo do modelo ativo (~64 px), nunca menos de 180 px.
+fn render_template_list_height(available: f32) -> f32 {
+    if available.is_finite() {
+        (available - 64.0).max(180.0)
+    } else {
+        280.0
+    }
+}
+
+#[cfg(test)]
+mod render_list_height_tests {
+    use super::render_template_list_height;
+
+    #[test]
+    fn lista_do_renderizar_como_cresce_com_a_janela() {
+        assert_eq!(render_template_list_height(800.0), 736.0);
+        assert_eq!(render_template_list_height(100.0), 180.0);
+        assert_eq!(render_template_list_height(f32::INFINITY), 280.0);
+        assert_eq!(render_template_list_height(f32::NAN), 280.0);
     }
 }

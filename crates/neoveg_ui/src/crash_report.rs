@@ -62,7 +62,7 @@ fn relaunch_neoveg() -> Result<(), String> {
 /// Abre uma pasta no gerenciador de arquivos do sistema. O `explorer` do
 /// Windows devolve código 1 mesmo quando abre a pasta, então só a falha ao
 /// iniciar o processo conta como erro.
-fn open_folder(dir: &Path) -> Result<(), String> {
+pub(crate) fn open_folder(dir: &Path) -> Result<(), String> {
     let cmd = if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {

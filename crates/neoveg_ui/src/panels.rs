@@ -1138,6 +1138,7 @@ impl App {
             DockTab::Notes => self.project_notes_tab(ui),
             DockTab::Encoder => self.encoder_tab(ui),
             DockTab::Transcript => self.transcript_tab(ui),
+            DockTab::Store => self.store_tab(ui),
         }
     }
 
@@ -1736,17 +1737,8 @@ impl App {
                 Sense::click_and_drag(),
             );
             canvas_resp.context_menu(|ui| {
-                let lang = self.lang();
-                if ui
-                    .checkbox(
-                        &mut self.prefs.preview_simulate_device_aspect,
-                        tr(lang, "Simular proporção do dispositivo"),
-                    )
-                    .changed()
-                {
-                    let _ = self.prefs.save();
-                    ui.close_menu();
-                }
+                let floating = self.preview_detached;
+                self.preview_context_menu(ui, floating);
             });
             if canvas_resp.hovered() {
                 // roda: 10% por passo; com Ctrl, 1% (manual, p. 209). O egui

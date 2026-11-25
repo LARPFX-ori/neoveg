@@ -72,6 +72,8 @@ pub mod slideshow;
 #[forbid(unsafe_code)]
 pub mod speech;
 #[forbid(unsafe_code)]
+pub mod store;
+#[forbid(unsafe_code)]
 pub mod subtitles;
 #[forbid(unsafe_code)]
 pub mod takes;

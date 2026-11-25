@@ -1131,9 +1131,18 @@ impl App {
         let lang = self.lang();
         let card_w = self.project_media.thumb_size.card_width();
         let thumb_h = self.project_media.thumb_size.thumb_height();
-        let cols = ((ui.available_width() + 8.0) / (card_w + 8.0))
-            .floor()
-            .max(1.0) as usize;
+        // Colunas pela largura visível (a área rola nos dois eixos, então a
+        // largura disponível não limita nada) e pela largura real do cartão no
+        // quadro anterior: o nome ao lado da miniatura alarga o cartão, e com a
+        // largura nominal a última coluna ficava cortada à direita.
+        let measured_id = egui::Id::new("pm_thumb_card_measured_w");
+        let real_w = ui
+            .ctx()
+            .data(|d| d.get_temp::<f32>(measured_id))
+            .unwrap_or(card_w)
+            .max(card_w);
+        let cols = thumb_grid_columns(ui.clip_rect().width(), real_w);
+        let mut widest = card_w;
         let paint_aspect_tex = |painter: &egui::Painter, rect: Rect, t: &TextureHandle| {
             let [tw, th] = t.size();
             let asp = (tw.max(1) as f32) / (th.max(1) as f32);
@@ -1400,12 +1409,17 @@ impl App {
                         self.session.active_media_id = Some(m.id);
                         actions.push(MediaRowAction::AddAtCursor(m.id));
                     }
+                    widest = widest.max(resp.rect.width());
                     self.media_item_context_menu(&resp, m, actions);
                     if (idx + 1) % cols == 0 {
                         ui.end_row();
                     }
                 }
             });
+        if (widest - real_w).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(measured_id, widest));
+            ui.ctx().request_repaint();
+        }
     }
 
     fn draw_media_list(
@@ -2069,5 +2083,30 @@ fn paint_alpha_checkerboard(painter: &egui::Painter, rect: Rect) {
                 painter.rect_filled(Rect::from_min_max(pos2(x0, y0), pos2(x1, y1)), 0.0, light);
             }
         }
+    }
+}
+
+/// Quantas colunas de cartões de largura `card_w` cabem em `view_w` (com 8 px
+/// entre eles), no mínimo uma.
+fn thumb_grid_columns(view_w: f32, card_w: f32) -> usize {
+    if !view_w.is_finite() || !card_w.is_finite() || card_w <= 0.0 {
+        return 1;
+    }
+    ((view_w + 8.0) / (card_w + 8.0)).floor().clamp(1.0, 256.0) as usize
+}
+
+#[cfg(test)]
+mod thumb_grid_tests {
+    use super::thumb_grid_columns;
+
+    #[test]
+    fn colunas_cabem_na_largura_visivel() {
+        // painel de 550 px com cartões reais de 260 px: duas colunas, não três
+        assert_eq!(thumb_grid_columns(550.0, 260.0), 2);
+        assert_eq!(thumb_grid_columns(100.0, 260.0), 1);
+        assert_eq!(thumb_grid_columns(f32::INFINITY, 168.0), 1);
+        assert_eq!(thumb_grid_columns(f32::NAN, 168.0), 1);
+        assert_eq!(thumb_grid_columns(800.0, 0.0), 1);
+        assert_eq!(thumb_grid_columns(1e9, 1.0), 256);
     }
 }
