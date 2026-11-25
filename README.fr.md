@@ -121,9 +121,21 @@ Les journaux, sauvegardes automatiques, préférences (`preferencias.json`), dis
 | Magnétisme (`snapping`) / Ripple automatique | `F8` / `Ctrl+L` |
 | Zoom horizontal / zoom vertical des formes d'onde | `↑` / `↓` (`Shift+↑` / `Shift+↓`) |
 | Annuler / rétablir | `Ctrl+Z` / `Ctrl+Y` |
-| Propriétés de l'événement | `F2` |
+| Renommer l'événement | `F2` |
 | Neoveg Encoder / Envoyer la timeline | `Ctrl+Shift+Alt+M` / `Ctrl+Shift+M` |
 | Rendre vers une nouvelle piste | `Ctrl+M` |
+| Aligner sur les marqueurs / sur tous les événements | `Shift+F8` / `Ctrl+Shift+F8` |
+| Ripple après édition : pistes concernées / avec bus, marqueurs et régions / tout | `F` / `Ctrl+F` / `Ctrl+Shift+F` |
+| Coller en répétition | `Ctrl+B` |
+| Restaurer la sélection temporelle précédente (jusqu'à 5) | `Backspace` |
+| Déplacer le curseur selon la grille (gauche / droite) | `PageUp` / `PageDown` |
+| Curseur au bord de l'événement sélectionné précédent / suivant | `Ctrl+[` / `Ctrl+]` |
+| Aller au début du projet | `W` / `Ctrl+Home` |
+| Effacer le groupe / muet et solo seulement sur la piste sélectionnée | `Ctrl+U` / `Shift+Z` / `Shift+X` |
+| Hauteur tonale +1 / −1 cent / hauteur de toutes les pistes | `Ctrl+=` / `Ctrl+-` / `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
+| Afficher / masquer les en-têtes d'événement | `Ctrl+Alt+M` |
+| Atténuer la sortie Master (Dim) / reconstruire les crêtes audio | `Ctrl+Shift+F12` / `Shift+F5` |
+| Fermer le projet | `Ctrl+F4` |
 
 - **Outils et modes d'édition (`D` / `Shift+D`) :** dans la barre de transport et sous *Édition → Outil d'édition*, alternez entre **Normal** (déplacement et rognage en mode *Normal* ou *Slip*), **Enveloppe** (ne déplace que les points d'enveloppe), **Sélection** (cadre rectangulaire ; `Shift`/`Ctrl` ajoutent) et **Zoom** (cadre pour zoomer ; un clic ajuste le projet à la fenêtre).
 - **Fondus, gain et images clés :** chevaucher deux événements sur la même piste crée un fondu enchaîné automatique ; les poignées aux coins supérieurs ajustent les fondus, la barre supérieure des clips audio règle le gain en dB et les lignes sous la piste éditent les images clés de *Track Motion* et d'effets de piste.

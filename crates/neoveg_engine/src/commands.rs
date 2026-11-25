@@ -70,6 +70,12 @@ pub enum ShortcutKey {
     Backslash,
     Equals,
     Minus,
+    Backspace,
+    PageUp,
+    PageDown,
+    F4,
+    F5,
+    F12,
 }
 
 impl ShortcutKey {
@@ -158,6 +164,12 @@ impl ShortcutKey {
             ShortcutKey::Backslash => "\\",
             ShortcutKey::Equals => "=",
             ShortcutKey::Minus => "-",
+            ShortcutKey::Backspace => "Backspace",
+            ShortcutKey::PageUp => "PageUp",
+            ShortcutKey::PageDown => "PageDown",
+            ShortcutKey::F4 => "F4",
+            ShortcutKey::F5 => "F5",
+            ShortcutKey::F12 => "F12",
         }
     }
 
@@ -219,6 +231,12 @@ impl ShortcutKey {
             "\\" | "backslash" => ShortcutKey::Backslash,
             "=" | "+" | "equal" | "equals" | "plus" => ShortcutKey::Equals,
             "-" | "minus" => ShortcutKey::Minus,
+            "backspace" | "bksp" => ShortcutKey::Backspace,
+            "pageup" | "pgup" => ShortcutKey::PageUp,
+            "pagedown" | "pgdn" | "pgdown" => ShortcutKey::PageDown,
+            "f4" => ShortcutKey::F4,
+            "f5" => ShortcutKey::F5,
+            "f12" => ShortcutKey::F12,
             _ => return None,
         })
     }
@@ -554,6 +572,19 @@ pub enum UiAction {
     OpenCustomizeToolbar,
     OpenCommandMarkerDialog,
     SetRulerGrid(crate::session::RulerGridSpacing),
+    /// PageUp/PageDown: move o cursor para a marca de grade anterior (`-1`)
+    /// ou seguinte (`1`), na grade visível da régua.
+    MoveByGrid(i64),
+    /// Ctrl+Shift+F12: atenua a saída do Master em 20 dB (*Dim*).
+    ToggleMasterDim,
+    /// Shift+F5: relê do disco o áudio das mídias para refazer as formas de onda.
+    RebuildAudioPeaks,
+    /// Ctrl+F4: fecha o projeto da aba ativa.
+    CloseProject,
+    /// F2: renomeia o evento selecionado na timeline.
+    RenameSelectedEvent,
+    /// Ctrl+B: diálogo *Colar repetindo*.
+    OpenPasteRepeatDialog,
 }
 
 /// Resultado de execução de um comando.
@@ -796,11 +827,243 @@ fn ok_mutated(
     Ok(CommandOutcome::Executed)
 }
 
+/// Leva o cursor a `t`: pela interface quando há uma (a prévia acompanha),
+/// direto na sessão no modo headless.
+fn move_cursor(
+    s: &mut EditorSession,
+    h: &mut dyn CommandHost,
+    t: Ticks,
+) -> Result<CommandOutcome, String> {
+    if h.supports_ui() {
+        ui_action(UiAction::SetCursor(t), h)
+    } else {
+        s.cursor = t;
+        ok_mutated(s, h)
+    }
+}
+
+/// PageUp/PageDown: a interface usa a grade visível da régua; sem
+/// interface, o espaçamento escolhido (1 segundo na grade automática).
+fn move_by_grid(
+    s: &mut EditorSession,
+    h: &mut dyn CommandHost,
+    dir: i64,
+) -> Result<CommandOutcome, String> {
+    if h.supports_ui() {
+        return ui_action(UiAction::MoveByGrid(dir), h);
+    }
+    let step = s
+        .opts
+        .ruler_grid
+        .step_ticks(&s.project.settings)
+        .unwrap_or_else(|| Ticks::from_secs_i64(1));
+    s.cursor = crate::session::grid_neighbor(s.cursor, step, dir);
+    ok_mutated(s, h)
+}
+
+/// Ctrl+[ / Ctrl+]: no modo de edição expandido desloca o corte um quadro;
+/// fora dele leva o cursor à borda do evento selecionado anterior/seguinte
+/// (lista de atalhos do VEGAS Pro).
+fn selected_edge_or_nudge(
+    s: &mut EditorSession,
+    h: &mut dyn CommandHost,
+    forward: bool,
+) -> Result<CommandOutcome, String> {
+    if s.expanded_edit.is_some() {
+        let fd = s.project.settings.frame_dur();
+        s.nudge_expanded_edit(if forward { fd } else { -fd });
+        return ok_mutated(s, h);
+    }
+    match s.selected_edge_time(forward) {
+        Some(t) => move_cursor(s, h, t),
+        None => Ok(CommandOutcome::Executed),
+    }
+}
+
+fn post_ripple(
+    s: &mut EditorSession,
+    h: &mut dyn CommandHost,
+    scope: crate::session::PostEditRipple,
+) -> Result<CommandOutcome, String> {
+    let n = s.post_edit_ripple(scope);
+    s.set_status(tr_args(
+        s.lang,
+        "Ripple pós-edição: {n} evento(s) deslocado(s).",
+        &[("n", &n)],
+    ));
+    ok_mutated(s, h)
+}
+
+fn can_post_ripple(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    !s.post_edit_ripple_plan().is_empty()
+}
+
+fn can_restore_time_selection(s: &EditorSession, _h: &dyn CommandHost) -> bool {
+    !s.time_sel_history.is_empty()
+        || (s.time_sel != s.time_sel_seen && s.time_sel_seen.is_some_and(|(a, b)| b > a))
+}
+
 /// Tabela Única de Comandos do Neoveg (§3.3).
 /// Passo de Ctrl+Shift+Cima/Baixo na altura das trilhas (pontos).
 const TRACK_HEIGHT_STEP: f32 = 12.0;
 
 pub static COMMANDS: &[CommandDef] = &[
+    CommandDef {
+        id: "options.snap_to_markers",
+        label: "Encaixar em marcadores",
+        menu_path: "Opções/Encaixar em marcadores",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::F8)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.snap_to_markers = !s.opts.snap_to_markers;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "options.snap_to_events",
+        label: "Encaixar em todos os eventos",
+        menu_path: "Opções/Encaixar em todos os eventos",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::F8)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.snap_to_all_events = !s.opts.snap_to_all_events;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "view.event_headers",
+        label: "Mostrar cabeçalhos dos eventos",
+        menu_path: "Exibir/Mostrar cabeçalhos dos eventos",
+        default_shortcut: Some(Shortcut::ctrl_alt(ShortcutKey::M)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| {
+            s.opts.show_event_headers = !s.opts.show_event_headers;
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "edit.restore_time_selection",
+        label: "Restaurar seleção de tempo anterior",
+        menu_path: "Editar/Restaurar seleção de tempo anterior",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::Backspace)),
+        needs_ui: false,
+        enabled: can_restore_time_selection,
+        run: |s, h| {
+            s.restore_previous_time_selection();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
+        id: "transport.grid_left",
+        label: "Mover à esquerda pela grade",
+        menu_path: "Transporte/Mover à esquerda pela grade",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::PageUp)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| move_by_grid(s, h, -1),
+    },
+    CommandDef {
+        id: "transport.grid_right",
+        label: "Mover à direita pela grade",
+        menu_path: "Transporte/Mover à direita pela grade",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::PageDown)),
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, h| move_by_grid(s, h, 1),
+    },
+    CommandDef {
+        id: "options.dim_master",
+        label: "Atenuar saída do Master (Dim)",
+        menu_path: "Opções/Atenuar saída do Master (Dim)",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::F12)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ToggleMasterDim, h),
+    },
+    CommandDef {
+        id: "tools.rebuild_peaks",
+        label: "Reconstruir picos de áudio",
+        menu_path: "Ferramentas/Reconstruir picos de áudio",
+        default_shortcut: Some(Shortcut::shift(ShortcutKey::F5)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::RebuildAudioPeaks, h),
+    },
+    CommandDef {
+        id: "file.close",
+        label: "Fechar projeto",
+        menu_path: "Arquivo/Fechar projeto",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::F4)),
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::CloseProject, h),
+    },
+    CommandDef {
+        id: "edit.paste_repeat",
+        label: "Colar repetindo...",
+        menu_path: "Editar/Colar repetindo...",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::B)),
+        needs_ui: true,
+        enabled: |s, h| h.supports_ui() && !s.clipboard.is_empty(),
+        run: |_s, h| ui_action(UiAction::OpenPasteRepeatDialog, h),
+    },
+    CommandDef {
+        id: "edit.post_ripple_tracks",
+        label: "Ripple pós-edição: trilhas afetadas",
+        menu_path: "Editar/Ripple pós-edição/Trilhas afetadas",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::F)),
+        needs_ui: false,
+        enabled: can_post_ripple,
+        run: |s, h| post_ripple(s, h, crate::session::PostEditRipple::AffectedTracks),
+    },
+    CommandDef {
+        id: "edit.post_ripple_markers",
+        label: "Ripple pós-edição: trilhas afetadas, barramentos, marcadores e regiões",
+        menu_path: "Editar/Ripple pós-edição/Trilhas afetadas, barramentos, marcadores e regiões",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::F)),
+        needs_ui: false,
+        enabled: can_post_ripple,
+        run: |s, h| post_ripple(s, h, crate::session::PostEditRipple::AffectedBusesMarkers),
+    },
+    CommandDef {
+        id: "edit.post_ripple_all",
+        label: "Ripple pós-edição: todas as trilhas, marcadores e regiões",
+        menu_path: "Editar/Ripple pós-edição/Todas as trilhas, marcadores e regiões",
+        default_shortcut: Some(Shortcut::ctrl_shift(ShortcutKey::F)),
+        needs_ui: false,
+        enabled: can_post_ripple,
+        run: |s, h| post_ripple(s, h, crate::session::PostEditRipple::All),
+    },
+    CommandDef {
+        id: "edit.rename_event",
+        label: "Renomear evento",
+        menu_path: "Editar/Renomear evento",
+        default_shortcut: Some(Shortcut::plain(ShortcutKey::F2)),
+        needs_ui: true,
+        enabled: has_selected_events_ui,
+        run: |_s, h| ui_action(UiAction::RenameSelectedEvent, h),
+    },
+    CommandDef {
+        id: "edit.cursor_prev_selected_edge",
+        label: "Ir para a borda do evento selecionado anterior",
+        menu_path: "Editar/Ir para a borda do evento selecionado anterior",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::OpenBracket)),
+        needs_ui: false,
+        enabled: |s, _| s.expanded_edit.is_some() || !s.sel_events.is_empty(),
+        run: |s, h| selected_edge_or_nudge(s, h, false),
+    },
+    CommandDef {
+        id: "edit.cursor_next_selected_edge",
+        label: "Ir para a borda do evento selecionado seguinte",
+        menu_path: "Editar/Ir para a borda do evento selecionado seguinte",
+        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::CloseBracket)),
+        needs_ui: false,
+        enabled: |s, _| s.expanded_edit.is_some() || !s.sel_events.is_empty(),
+        run: |s, h| selected_edge_or_nudge(s, h, true),
+    },
     CommandDef {
         id: "edit.clear_group",
         label: "Limpar grupo",
@@ -1407,7 +1670,9 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "edit.expanded_nudge_left",
         label: "Deslocar corte 1 quadro à esquerda",
         menu_path: "Editar/Expandido: -1 quadro",
-        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::OpenBracket)),
+        // Ctrl+[ passa por `edit.cursor_prev_selected_edge`, que desloca o
+        // corte quando o modo expandido está ativo
+        default_shortcut: None,
         needs_ui: false,
         enabled: |s, _| s.expanded_edit.is_some(),
         run: |s, h| {
@@ -1420,7 +1685,8 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "edit.expanded_nudge_right",
         label: "Deslocar corte 1 quadro à direita",
         menu_path: "Editar/Expandido: +1 quadro",
-        default_shortcut: Some(Shortcut::ctrl(ShortcutKey::CloseBracket)),
+        // Ctrl+] passa por `edit.cursor_next_selected_edge`
+        default_shortcut: None,
         needs_ui: false,
         enabled: |s, _| s.expanded_edit.is_some(),
         run: |s, h| {
@@ -3045,7 +3311,7 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "tools.event_props",
         label: "Propriedades do evento...",
         menu_path: "Ferramentas/Propriedades do evento...",
-        default_shortcut: Some(Shortcut::plain(ShortcutKey::F2)),
+        default_shortcut: None,
         needs_ui: true,
         enabled: has_selected_events_ui,
         run: |_s, h| ui_action(UiAction::OpenEventProps, h),
@@ -4142,20 +4408,13 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         id: "transport.rewind_w",
-        label: "Ir para o início da seleção (W)",
+        label: "Ir para o início do projeto (W)",
         menu_path: "Transporte/Ir para início (W)",
         default_shortcut: Some(Shortcut::plain(ShortcutKey::W)),
         needs_ui: false,
         enabled: always_enabled,
-        run: |s, h| {
-            let t = s.time_sel.map(|sel| sel.0).unwrap_or(Ticks::ZERO);
-            if h.supports_ui() {
-                ui_action(UiAction::SetCursor(t), h)
-            } else {
-                s.cursor = t;
-                ok_mutated(s, h)
-            }
-        },
+        // lista do VEGAS Pro: "Go to beginning of project: Ctrl+Home or W"
+        run: |s, h| move_cursor(s, h, Ticks::ZERO),
     },
     CommandDef {
         id: "transport.sel_end",
@@ -4276,6 +4535,8 @@ pub fn run_command(
 ) -> Result<CommandOutcome, String> {
     let cmd = find_command(id)
         .ok_or_else(|| tr_args(session.lang, "comando desconhecido: '{id}'", &[("id", &id)]))?;
+    // a seleção de tempo de antes do comando entra no histórico do Backspace
+    session.note_time_selection();
     if !(cmd.enabled)(session, host) {
         return Err(tr_args(
             session.lang,
@@ -4753,6 +5014,269 @@ mod tests {
         assert!(s.undo());
         assert!(s.work_folders().is_empty());
     }
+
+    fn midia_teste() -> MediaItem {
+        MediaItem {
+            id: new_id(),
+            name: "v".into(),
+            source: MediaSource::Generated(GenSpec::ColorBars),
+            duration: Some(Ticks::from_secs_i64(60)),
+            has_video: true,
+            has_audio: false,
+            width: 64,
+            height: 64,
+            fps: Some(FrameRate::FPS_30),
+            info: String::new(),
+            proxy_path: None,
+        }
+    }
+
+    #[test]
+    fn teclas_novas_fazem_parse_e_voltam_ao_mesmo_texto() {
+        for spec in [
+            "Backspace",
+            "PageUp",
+            "PageDown",
+            "Ctrl+F4",
+            "Shift+F5",
+            "Ctrl+Shift+F12",
+        ] {
+            let sc = Shortcut::parse(spec).unwrap();
+            assert_eq!(sc.format(), spec);
+            assert_eq!(Shortcut::parse(&sc.format_canonical()), Some(sc));
+        }
+        assert_eq!(ShortcutKey::parse("pgdn"), Some(ShortcutKey::PageDown));
+    }
+
+    /// Delete sem Ripple automático deixa o buraco; F fecha só nas trilhas
+    /// editadas, Ctrl+F leva os marcadores, Ctrl+Shift+F leva tudo. O mesmo
+    /// ripple não se aplica duas vezes.
+    #[test]
+    fn ripple_pos_edicao_fecha_o_buraco_conforme_o_escopo() {
+        let secs = Ticks::from_secs_i64;
+        let m = midia_teste();
+        let mut p = Project::new_default();
+        let a = Event::new(&m, secs(0), secs(2));
+        let b = Event::new(&m, secs(2), secs(2));
+        let c = Event::new(&m, secs(4), secs(2));
+        let outra = Event::new(&m, secs(5), secs(1));
+        let (ida, idb, idc, id_outra) = (a.id, b.id, c.id, outra.id);
+        p.media.push(m);
+        p.tracks[0].events = vec![a, b, c];
+        p.tracks[1].events = vec![outra];
+        p.markers
+            .push(Marker::new(secs(5), MarkerKind::default(), "m"));
+        let mut s = EditorSession::new(p);
+        let mut h = HeadlessHost;
+        assert!(!is_command_enabled("edit.post_ripple_tracks", &s, &h));
+
+        s.sel_events.insert(idb);
+        run_command("edit.delete", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(idc).unwrap().start, secs(4));
+        assert!(is_command_enabled("edit.post_ripple_tracks", &s, &h));
+        run_command("edit.post_ripple_tracks", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(idc).unwrap().start, secs(2));
+        assert_eq!(s.project.event(ida).unwrap().start, secs(0));
+        assert_eq!(s.project.event(id_outra).unwrap().start, secs(5));
+        assert_eq!(s.project.markers[0].t, secs(5), "F não mexe em marcadores");
+        assert!(
+            !is_command_enabled("edit.post_ripple_tracks", &s, &h),
+            "o mesmo ripple não se repete"
+        );
+
+        // desfazer volta ao estado logo depois do Delete
+        run_command("edit.undo", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(idc).unwrap().start, secs(4));
+        run_command("edit.post_ripple_markers", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(idc).unwrap().start, secs(2));
+        assert_eq!(s.project.markers[0].t, secs(3));
+        assert_eq!(s.project.event(id_outra).unwrap().start, secs(5));
+
+        run_command("edit.undo", &mut s, &mut h).unwrap();
+        run_command("edit.post_ripple_all", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(idc).unwrap().start, secs(2));
+        assert_eq!(s.project.event(id_outra).unwrap().start, secs(3));
+        assert_eq!(s.project.markers[0].t, secs(3));
+    }
+
+    /// Aparar o fim de um evento para frente empurra o que vem depois
+    /// pela mesma diferença; dividir não muda fim nenhum.
+    #[test]
+    fn ripple_pos_edicao_apos_aparar_e_dividir() {
+        let secs = Ticks::from_secs_i64;
+        let m = midia_teste();
+        let mut p = Project::new_default();
+        let a = Event::new(&m, secs(0), secs(2));
+        let b = Event::new(&m, secs(3), secs(2));
+        let (ida, idb) = (a.id, b.id);
+        p.media.push(m);
+        p.tracks[0].events = vec![a, b];
+        let mut s = EditorSession::new(p);
+        let mut h = HeadlessHost;
+        s.checkpoint();
+        if let Some(e) = s.project.event_mut(ida) {
+            e.length = secs(4);
+        }
+        s.changed();
+        let plan = s.post_edit_ripple_plan();
+        assert_eq!(plan, vec![(0, secs(2), secs(2))]);
+        run_command("edit.post_ripple_tracks", &mut s, &mut h).unwrap();
+        assert_eq!(s.project.event(idb).unwrap().start, secs(5));
+        assert_eq!(s.project.event(ida).unwrap().length, secs(4));
+
+        // dividir não muda o fim de nada: não há o que propagar
+        s.sel_events = [ida].into_iter().collect();
+        s.cursor = secs(1);
+        run_command("edit.split", &mut s, &mut h).unwrap();
+        assert!(s.post_edit_ripple_plan().is_empty());
+    }
+
+    #[test]
+    fn colar_repetindo_lado_a_lado_e_com_espacamento() {
+        let secs = Ticks::from_secs_i64;
+        let m = midia_teste();
+        let mut p = Project::new_default();
+        let a = Event::new(&m, secs(0), secs(2));
+        let ida = a.id;
+        p.media.push(m);
+        p.tracks[0].events = vec![a];
+        let mut s = EditorSession::new(p);
+        let mut h = HeadlessHost;
+        s.sel_events.insert(ida);
+        run_command("edit.copy", &mut s, &mut h).unwrap();
+        // sem interface, o diálogo não abre
+        assert!(run_command("edit.paste_repeat", &mut s, &mut h).is_err());
+
+        let starts = |s: &EditorSession| {
+            let mut v: Vec<Ticks> = s.project.tracks[0]
+                .events
+                .iter()
+                .filter(|e| e.id != ida)
+                .map(|e| e.start)
+                .collect();
+            v.sort();
+            v
+        };
+        s.cursor = secs(10);
+        let undo_before = s.undo.len();
+        assert_eq!(s.paste_repeat(3, None), 3);
+        assert_eq!(starts(&s), vec![secs(10), secs(12), secs(14)]);
+        assert_eq!(s.cursor, secs(16));
+        assert_eq!(s.undo.len(), undo_before + 1, "um passo de Desfazer");
+
+        assert!(s.undo());
+        s.cursor = secs(10);
+        assert_eq!(s.paste_repeat(2, Some(secs(5))), 2);
+        assert_eq!(starts(&s), vec![secs(10), secs(15)]);
+
+        // parâmetros hostis
+        assert_eq!(s.paste_repeat(0, None), 0);
+        assert!(s.undo());
+        s.cursor = Ticks::ZERO;
+        assert_eq!(
+            s.paste_repeat(u32::MAX, Some(Ticks::from_raw(-5))),
+            crate::session::MAX_PASTE_REPEAT as usize
+        );
+    }
+
+    #[test]
+    fn backspace_restaura_as_ultimas_cinco_selecoes_de_tempo() {
+        let secs = Ticks::from_secs_i64;
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert!(!is_command_enabled("edit.restore_time_selection", &s, &h));
+        for i in 1..=7 {
+            s.time_sel = Some((secs(i), secs(i + 1)));
+            s.note_time_selection();
+        }
+        for want in (2..=6).rev() {
+            run_command("edit.restore_time_selection", &mut s, &mut h).unwrap();
+            assert_eq!(s.time_sel, Some((secs(want), secs(want + 1))));
+        }
+        assert!(!is_command_enabled("edit.restore_time_selection", &s, &h));
+        assert!(s.undo.is_empty(), "seleção não entra no Desfazer");
+    }
+
+    #[test]
+    fn pageup_pagedown_andam_pela_grade() {
+        use crate::session::grid_neighbor;
+        let secs = Ticks::from_secs_i64;
+        let one = secs(1);
+        assert_eq!(grid_neighbor(Ticks::ZERO, one, 1), one);
+        assert_eq!(grid_neighbor(Ticks::from_millis_i64(1500), one, 1), secs(2));
+        assert_eq!(grid_neighbor(Ticks::from_millis_i64(1500), one, -1), one);
+        assert_eq!(grid_neighbor(secs(2), one, -1), one);
+        assert_eq!(grid_neighbor(Ticks::ZERO, one, -1), Ticks::ZERO);
+        // passo hostil vira 1 tick; o topo não estoura
+        assert_eq!(
+            grid_neighbor(Ticks::from_raw(5), Ticks::ZERO, 1),
+            Ticks::from_raw(6)
+        );
+        assert!(grid_neighbor(Ticks::MAX, one, 1) <= Ticks::MAX);
+
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        run_command("transport.grid_right", &mut s, &mut h).unwrap();
+        run_command("transport.grid_right", &mut s, &mut h).unwrap();
+        assert_eq!(s.cursor, secs(2));
+        run_command("transport.grid_left", &mut s, &mut h).unwrap();
+        assert_eq!(s.cursor, one);
+    }
+
+    #[test]
+    fn ctrl_colchetes_vao_as_bordas_dos_eventos_selecionados_e_w_ao_inicio() {
+        let secs = Ticks::from_secs_i64;
+        let m = midia_teste();
+        let mut p = Project::new_default();
+        let a = Event::new(&m, secs(0), secs(2));
+        let c = Event::new(&m, secs(4), secs(2));
+        let ids = [a.id, c.id];
+        p.media.push(m);
+        p.tracks[0].events = vec![a, c];
+        let mut s = EditorSession::new(p);
+        let mut h = HeadlessHost;
+        assert!(!is_command_enabled(
+            "edit.cursor_prev_selected_edge",
+            &s,
+            &h
+        ));
+        s.sel_events = ids.into_iter().collect();
+        s.cursor = secs(3);
+        run_command("edit.cursor_prev_selected_edge", &mut s, &mut h).unwrap();
+        assert_eq!(s.cursor, secs(2));
+        run_command("edit.cursor_prev_selected_edge", &mut s, &mut h).unwrap();
+        assert_eq!(s.cursor, Ticks::ZERO);
+        // sem borda antes: o cursor fica
+        run_command("edit.cursor_prev_selected_edge", &mut s, &mut h).unwrap();
+        assert_eq!(s.cursor, Ticks::ZERO);
+        for want in [2, 4, 6] {
+            run_command("edit.cursor_next_selected_edge", &mut s, &mut h).unwrap();
+            assert_eq!(s.cursor, secs(want));
+        }
+
+        // W vai ao início do projeto mesmo com seleção de tempo
+        s.time_sel = Some((secs(4), secs(6)));
+        run_command("transport.rewind_w", &mut s, &mut h).unwrap();
+        assert_eq!(s.cursor, Ticks::ZERO);
+    }
+
+    #[test]
+    fn encaixe_e_cabecalhos_alternam_sem_desfazer() {
+        let mut s = EditorSession::new(Project::new_default());
+        let mut h = HeadlessHost;
+        assert!(s.opts.snap_to_markers && s.opts.snap_to_all_events);
+        assert!(s.opts.show_event_headers);
+        run_command("options.snap_to_markers", &mut s, &mut h).unwrap();
+        run_command("options.snap_to_events", &mut s, &mut h).unwrap();
+        run_command("view.event_headers", &mut s, &mut h).unwrap();
+        assert!(!s.opts.snap_to_markers && !s.opts.snap_to_all_events);
+        assert!(!s.opts.show_event_headers);
+        assert!(s.undo.is_empty());
+        // os comandos de interface recusam o modo headless
+        for id in ["options.dim_master", "tools.rebuild_peaks", "file.close"] {
+            assert!(run_command(id, &mut s, &mut h).is_err(), "{id}");
+        }
+    }
 }
 
 /// As teclas padrão seguem a lista oficial de atalhos do VEGAS Pro (manual
@@ -4865,14 +5389,29 @@ mod vegas_keymap_tests {
         ("Ctrl+Shift+Alt+Q", "insert.track_adjustment"),
         ("Shift+N", "insert.marker_cd_index"),
         ("C", "insert.marker_command"),
+        ("Shift+F8", "options.snap_to_markers"),
+        ("Ctrl+Shift+F8", "options.snap_to_events"),
+        ("Ctrl+Alt+M", "view.event_headers"),
+        ("Backspace", "edit.restore_time_selection"),
+        ("PageUp", "transport.grid_left"),
+        ("PageDown", "transport.grid_right"),
+        ("Ctrl+Shift+F12", "options.dim_master"),
+        ("Shift+F5", "tools.rebuild_peaks"),
+        ("Ctrl+F4", "file.close"),
+        ("Ctrl+B", "edit.paste_repeat"),
+        ("F", "edit.post_ripple_tracks"),
+        ("Ctrl+F", "edit.post_ripple_markers"),
+        ("Ctrl+Shift+F", "edit.post_ripple_all"),
+        ("F2", "edit.rename_event"),
+        ("W", "transport.rewind_w"),
+        ("Ctrl+[", "edit.cursor_prev_selected_edge"),
+        ("Ctrl+]", "edit.cursor_next_selected_edge"),
     ];
 
     /// Teclas de comandos do VEGAS que o Neoveg ainda não tem: ficam livres
-    /// até o comando existir, para não fazerem outra coisa.
-    const VEGAS_RESERVED_UNBOUND: &[(&str, &str)] = &[
-        ("Ctrl+Alt+M", "mostrar/ocultar cabeçalhos dos eventos"),
-        ("Ctrl+B", "colar repetindo"),
-    ];
+    /// até o comando existir, para não fazerem outra coisa. Hoje vazia: os
+    /// comandos de `Ctrl+Alt+M` e `Ctrl+B` já existem (estão em `VEGAS_KEYS`).
+    const VEGAS_RESERVED_UNBOUND: &[(&str, &str)] = &[];
 
     fn bound_to(sc: Shortcut) -> Vec<&'static str> {
         COMMANDS

@@ -121,9 +121,21 @@ Logs, autosave, preferências (`preferencias.json`), layouts (`.neoveglayout`), 
 | Encaixe (`snapping`) / Ripple automático | `F8` / `Ctrl+L` |
 | Zoom horizontal / formas de onda vertical | `↑` / `↓` (`Shift+↑` / `Shift+↓`) |
 | Desfazer / refazer | `Ctrl+Z` / `Ctrl+Y` |
-| Propriedades do evento | `F2` |
+| Renomear evento | `F2` |
 | Neoveg Encoder / Enviar timeline | `Ctrl+Shift+Alt+M` / `Ctrl+Shift+M` |
 | Renderizar para nova trilha | `Ctrl+M` |
+| Encaixar em marcadores / em todos os eventos | `Shift+F8` / `Ctrl+Shift+F8` |
+| Ripple pós-edição: trilhas afetadas / com barramentos, marcadores e regiões / tudo | `F` / `Ctrl+F` / `Ctrl+Shift+F` |
+| Colar repetindo | `Ctrl+B` |
+| Restaurar a seleção de tempo anterior (até 5) | `Backspace` |
+| Mover o cursor pela grade (esquerda / direita) | `PageUp` / `PageDown` |
+| Cursor na borda do evento selecionado anterior / seguinte | `Ctrl+[` / `Ctrl+]` |
+| Ir para o início do projeto | `W` / `Ctrl+Home` |
+| Limpar grupo / mudo e solo só na trilha selecionada | `Ctrl+U` / `Shift+Z` / `Shift+X` |
+| Tom +1 / −1 cent / altura de todas as trilhas | `Ctrl+=` / `Ctrl+-` / `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
+| Mostrar / ocultar cabeçalhos dos eventos | `Ctrl+Alt+M` |
+| Atenuar a saída do Master (Dim) / reconstruir picos de áudio | `Ctrl+Shift+F12` / `Shift+F5` |
+| Fechar projeto | `Ctrl+F4` |
 
 - **Ferramentas e modos de edição (`D` / `Shift+D`):** na barra de transporte e em *Editar → Ferramenta de edição*, alterne entre **Normal** (movimentação e aparo nos modos *Normal* ou *Slip*), **Envelope** (move apenas pontos de envelope), **Seleção** (caixa retangular; `Shift`/`Ctrl` somam) e **Zoom** (caixa aproxima; clique único ajusta o projeto à janela).
 - **Fades, ganho e quadros-chave:** sobrepor eventos na mesma trilha cria crossfade automático; as alças nos cantos superiores ajustam fades, a barra superior em clipes de áudio regula ganho em dB, e as linhas abaixo da trilha editam keyframes de *Track Motion* e efeitos de trilha.

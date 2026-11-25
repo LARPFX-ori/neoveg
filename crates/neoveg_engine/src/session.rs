@@ -11,6 +11,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub const MAX_UNDO: usize = 200;
+/// Seleções de tempo guardadas para o Backspace (lista do VEGAS Pro:
+/// "Restore previous five time selections").
+pub const MAX_TIME_SEL_HISTORY: usize = 5;
+/// Limite de cópias de *Colar repetindo* (Ctrl+B) num único comando.
+pub const MAX_PASTE_REPEAT: u32 = 999;
+
+/// Escopo do ripple pós-edição (Editar → Ripple pós-edição; manual do VEGAS
+/// Pro 21, tabela "Ripple types").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostEditRipple {
+    /// `F`: eventos e envelopes das trilhas editadas.
+    AffectedTracks,
+    /// `Ctrl+F`: trilhas editadas, envelopes dos barramentos, marcadores e regiões.
+    AffectedBusesMarkers,
+    /// `Ctrl+Shift+F`: todas as trilhas, barramentos, marcadores e regiões.
+    All,
+}
+
+/// Próxima marca de uma grade de passo `step` a partir de `t`, na direção
+/// `dir` (negativo = esquerda). Sempre anda pelo menos uma marca e nunca
+/// passa de zero para trás (PageUp/PageDown).
+pub fn grid_neighbor(t: Ticks, step: Ticks, dir: i64) -> Ticks {
+    let step = step.0.max(1);
+    let t = t.0.max(0);
+    let next = if dir < 0 {
+        let floor = (t / step).saturating_mul(step);
+        if floor < t {
+            floor
+        } else {
+            floor.saturating_sub(step)
+        }
+    } else {
+        (t / step).saturating_add(1).saturating_mul(step)
+    };
+    Ticks::from_raw(next.clamp(0, Ticks::MAX.0))
+}
 
 /// Modos de edição suportados pelo motor (§3.2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -312,6 +348,16 @@ pub struct EditorOptions {
     pub ruler_grid: RulerGridSpacing,
     /// Encaixar edições na grade da régua (Snap to Grid, Ctrl+F8).
     pub snap_to_grid: bool,
+    /// Encaixar em marcadores, regiões e marcadores de CD e de comando
+    /// (*Snap to Markers*, Shift+F8). Só vale com o encaixe ligado.
+    pub snap_to_markers: bool,
+    /// Encaixar nas bordas dos eventos das outras trilhas (*Snap to All
+    /// Events*, Ctrl+Shift+F8). Desligado, só os eventos das trilhas que
+    /// estão sendo editadas servem de ponto de encaixe.
+    pub snap_to_all_events: bool,
+    /// Faixa de título (nome, duração) no topo de cada evento (*Toggle
+    /// Event Headers*, Ctrl+Alt+M).
+    pub show_event_headers: bool,
     /// Travar envelopes nos eventos (menu Opções, p. 1014): mover um evento
     /// leva junto os pontos de envelope e os quadros-chave da trilha no
     /// trecho dele.
@@ -422,6 +468,9 @@ impl Default for EditorOptions {
             bypass_all_audio_fx: false,
             ruler_grid: RulerGridSpacing::Auto,
             snap_to_grid: false,
+            snap_to_markers: true,
+            snap_to_all_events: true,
+            show_event_headers: true,
             lock_envelopes: false,
         }
     }
@@ -478,6 +527,14 @@ pub struct EditorSession {
     /// Falso nas sessões de projetos aninhados abertos em aba: a recuperação
     /// guarda sempre o projeto principal.
     pub tracks_recovery: bool,
+    /// Seleções de tempo anteriores, da mais antiga para a mais recente
+    /// (Backspace restaura, até [`MAX_TIME_SEL_HISTORY`]).
+    pub time_sel_history: Vec<(Ticks, Ticks)>,
+    /// Última seleção de tempo já registrada por [`Self::note_time_selection`].
+    pub time_sel_seen: Option<(Ticks, Ticks)>,
+    /// `edit_count` logo depois do último ripple pós-edição: impede aplicar
+    /// o mesmo ripple duas vezes seguidas.
+    pub post_ripple_applied: Option<u64>,
 }
 
 impl EditorSession {
@@ -540,6 +597,9 @@ impl EditorSession {
             prerendered_ranges: Vec::new(),
             edit_count: 0,
             tracks_recovery,
+            time_sel_history: Vec::new(),
+            time_sel_seen: None,
+            post_ripple_applied: None,
         }
     }
 
@@ -664,6 +724,9 @@ impl EditorSession {
         self.play_start = Ticks::ZERO;
         self.sel_events.clear();
         self.time_sel = None;
+        self.time_sel_history.clear();
+        self.time_sel_seen = None;
+        self.post_ripple_applied = None;
         self.prerendered_ranges.clear();
         self.sel_track = if self.project.tracks.is_empty() {
             None
@@ -1216,13 +1279,7 @@ impl EditorSession {
         let mut touched_tracks = Vec::new();
         let base_track = self.sel_track.unwrap_or(0);
         let t0 = self.cursor;
-        let max_end = self
-            .clipboard
-            .iter()
-            .map(|c| c.ev.end())
-            .fold(self.clip_base, Ticks::max);
-        let span = max_end - self.clip_base;
-        let mut group_map: HashMap<Id, Id> = HashMap::new();
+        let span = self.clipboard_span();
         let mut new_sel = HashSet::new();
         let items = self.clipboard.clone();
         if insert {
@@ -1240,6 +1297,34 @@ impl EditorSession {
                 }
             }
         }
+        self.paste_items_at(&items, t0, base_track, &mut new_sel, &mut touched_tracks);
+        self.sync_overlap_crossfades(&touched_tracks, &prev_overlaps);
+        self.sel_events = new_sel;
+        self.cursor = t0 + span;
+        self.changed();
+    }
+
+    /// Duração do conteúdo da área de transferência (do primeiro início ao último fim).
+    fn clipboard_span(&self) -> Ticks {
+        let max_end = self
+            .clipboard
+            .iter()
+            .map(|c| c.ev.end())
+            .fold(self.clip_base, Ticks::max);
+        max_end - self.clip_base
+    }
+
+    /// Cria cópias novas (IDs, grupos e efeitos novos) dos itens da área de
+    /// transferência a partir de `t0`, sem ponto de Desfazer.
+    fn paste_items_at(
+        &mut self,
+        items: &[ClipItem],
+        t0: Ticks,
+        base_track: usize,
+        new_sel: &mut HashSet<Id>,
+        touched_tracks: &mut Vec<usize>,
+    ) {
+        let mut group_map: HashMap<Id, Id> = HashMap::new();
         for c in items {
             let ti = match self.target_track(base_track + c.track_rel, c.kind) {
                 Some(t) => t,
@@ -1256,10 +1341,50 @@ impl EditorSession {
                 touched_tracks.push(ti);
             }
         }
+    }
+
+    /// *Colar repetindo* (Ctrl+B; manual do VEGAS Pro 21, "Pasting the
+    /// contents of the clipboard multiple times"): cola `times` cópias a
+    /// partir do cursor. `every = None` cola uma após a outra (*End to
+    /// end*); `Some(passo)` começa cada cópia `passo` depois da anterior
+    /// (*Even spacing*; passo menor que o conteúdo sobrepõe as cópias).
+    /// Um passo de Desfazer; devolve quantos eventos foram criados.
+    pub fn paste_repeat(&mut self, times: u32, every: Option<Ticks>) -> usize {
+        if self.clipboard.is_empty() || times == 0 {
+            return 0;
+        }
+        let times = times.min(MAX_PASTE_REPEAT);
+        let span = self.clipboard_span();
+        let step = every
+            .filter(|s| *s > Ticks::ZERO)
+            .unwrap_or(span)
+            .max(Ticks::from_raw(1));
+        self.checkpoint();
+        let prev_overlaps = crate::crossfade::overlap_pairs(&self.project.tracks);
+        let mut touched_tracks = Vec::new();
+        let base_track = self.sel_track.unwrap_or(0);
+        let t0 = self.cursor;
+        let items = self.clipboard.clone();
+        let mut new_sel = HashSet::new();
+        let mut last_start = t0;
+        for i in 0..times {
+            last_start = t0 + step.saturating_mul(i64::from(i));
+            self.paste_items_at(
+                &items,
+                last_start,
+                base_track,
+                &mut new_sel,
+                &mut touched_tracks,
+            );
+        }
+        touched_tracks.sort_unstable();
+        touched_tracks.dedup();
         self.sync_overlap_crossfades(&touched_tracks, &prev_overlaps);
+        let n = new_sel.len();
         self.sel_events = new_sel;
-        self.cursor = t0 + span;
+        self.cursor = last_start + span;
         self.changed();
+        n
     }
 
     fn target_track(&self, idx: usize, kind: TrackKind) -> Option<usize> {
@@ -6696,6 +6821,255 @@ pub fn build_move_plan_from_selection(
             })
         })
         .collect()
+}
+
+/// Pontos com tempo na timeline que o ripple pós-edição desloca.
+trait RippleTime {
+    fn ripple_t(&self) -> Ticks;
+    fn ripple_t_mut(&mut self) -> &mut Ticks;
+}
+
+impl RippleTime for EnvPoint {
+    fn ripple_t(&self) -> Ticks {
+        self.t
+    }
+    fn ripple_t_mut(&mut self) -> &mut Ticks {
+        &mut self.t
+    }
+}
+
+impl<T> RippleTime for neoveg_common::Keyframe<T> {
+    fn ripple_t(&self) -> Ticks {
+        self.t
+    }
+    fn ripple_t_mut(&mut self) -> &mut Ticks {
+        &mut self.t
+    }
+}
+
+/// Desloca em `delta` os pontos a partir de `at`. Num ripple para trás, os
+/// pontos do trecho que some (`at + delta .. at`) saem antes, para a curva
+/// não voltar no tempo; o ponto inicial (tempo zero) fica sempre.
+fn ripple_points<P: RippleTime>(points: &mut Vec<P>, at: Ticks, delta: Ticks) {
+    if delta == Ticks::ZERO {
+        return;
+    }
+    if delta < Ticks::ZERO {
+        let gap = at + delta;
+        points.retain(|p| {
+            let t = p.ripple_t();
+            t <= Ticks::ZERO || t < gap || t >= at
+        });
+    }
+    for p in points.iter_mut() {
+        let t = p.ripple_t_mut();
+        if *t >= at && *t > Ticks::ZERO {
+            *t = (*t + delta).max(Ticks::ZERO);
+        }
+    }
+    points.sort_by_key(|p| p.ripple_t());
+}
+
+/// Onde e quanto cada trilha deve andar depois da última edição: compara o
+/// projeto antes da edição (`old`) com o atual. Para cada trilha alterada, o
+/// ponto de ripple é o fim do que mudou antes da edição (ou o início do que
+/// foi colado) e o deslocamento é a diferença até o novo fim (ou até o
+/// início do que foi apagado). Devolve `(trilha, ponto, deslocamento)` só
+/// das trilhas com deslocamento diferente de zero.
+fn post_edit_ripple_changes(old: &Project, new: &Project) -> Vec<(usize, Ticks, Ticks)> {
+    let mut out = Vec::new();
+    for (ti, nt) in new.tracks.iter().enumerate() {
+        let Some(ot) = old.tracks.iter().find(|t| t.id == nt.id) else {
+            continue;
+        };
+        let old_map: HashMap<Id, (Ticks, Ticks)> = ot
+            .events
+            .iter()
+            .map(|e| (e.id, (e.start, e.end())))
+            .collect();
+        let new_map: HashMap<Id, (Ticks, Ticks)> = nt
+            .events
+            .iter()
+            .map(|e| (e.id, (e.start, e.end())))
+            .collect();
+        let mut old_end: Option<Ticks> = None;
+        let mut new_end: Option<Ticks> = None;
+        let mut removed_start: Option<Ticks> = None;
+        let mut added_start: Option<Ticks> = None;
+        for (id, &(s, e)) in &old_map {
+            match new_map.get(id) {
+                Some(&(ns, ne)) if ns == s && ne == e => {}
+                Some(&(_, ne)) => {
+                    old_end = Some(old_end.map_or(e, |v| v.max(e)));
+                    new_end = Some(new_end.map_or(ne, |v| v.max(ne)));
+                }
+                None => {
+                    old_end = Some(old_end.map_or(e, |v| v.max(e)));
+                    removed_start = Some(removed_start.map_or(s, |v| v.min(s)));
+                }
+            }
+        }
+        for (id, &(s, e)) in &new_map {
+            if !old_map.contains_key(id) {
+                new_end = Some(new_end.map_or(e, |v| v.max(e)));
+                added_start = Some(added_start.map_or(s, |v| v.min(s)));
+            }
+        }
+        let (Some(at), Some(to)) = (old_end.or(added_start), new_end.or(removed_start)) else {
+            continue;
+        };
+        let delta = to - at;
+        if delta != Ticks::ZERO {
+            out.push((ti, at, delta));
+        }
+    }
+    out
+}
+
+impl EditorSession {
+    /// Registra a seleção de tempo atual no histórico do Backspace quando
+    /// ela mudou desde a última chamada. A interface chama a cada quadro
+    /// sem botão do mouse apertado, para um arraste virar uma só entrada.
+    pub fn note_time_selection(&mut self) {
+        if self.time_sel == self.time_sel_seen {
+            return;
+        }
+        if let Some(prev) = self.time_sel_seen.filter(|(a, b)| b > a) {
+            self.time_sel_history.retain(|s| *s != prev);
+            self.time_sel_history.push(prev);
+            if self.time_sel_history.len() > MAX_TIME_SEL_HISTORY {
+                let extra = self.time_sel_history.len() - MAX_TIME_SEL_HISTORY;
+                self.time_sel_history.drain(..extra);
+            }
+        }
+        self.time_sel_seen = self.time_sel;
+    }
+
+    /// Backspace (lista do VEGAS Pro: "Restore previous five time
+    /// selections"): volta à seleção de tempo anterior. Não entra no
+    /// Desfazer, como a própria seleção.
+    pub fn restore_previous_time_selection(&mut self) -> bool {
+        self.note_time_selection();
+        let Some(prev) = self.time_sel_history.pop() else {
+            return false;
+        };
+        self.time_sel = Some(prev);
+        self.time_sel_seen = self.time_sel;
+        true
+    }
+
+    /// Borda (início ou fim) de um evento selecionado mais próxima do cursor
+    /// para trás ou para frente (Ctrl+[ / Ctrl+], lista do VEGAS Pro).
+    pub fn selected_edge_time(&self, forward: bool) -> Option<Ticks> {
+        let c = self.cursor;
+        let edges = self.project.tracks.iter().flat_map(|t| {
+            t.events
+                .iter()
+                .filter(|e| self.sel_events.contains(&e.id))
+                .flat_map(|e| [e.start, e.end()])
+        });
+        if forward {
+            edges.filter(|t| *t > c).min()
+        } else {
+            edges.filter(|t| *t < c).max()
+        }
+    }
+
+    /// Trilhas, pontos e deslocamentos que o ripple pós-edição aplicaria
+    /// agora (vazio se não há edição a propagar ou se ela já foi propagada).
+    pub fn post_edit_ripple_plan(&self) -> Vec<(usize, Ticks, Ticks)> {
+        if self.post_ripple_applied == Some(self.edit_count) {
+            return Vec::new();
+        }
+        let Some(old) = self.undo.last() else {
+            return Vec::new();
+        };
+        post_edit_ripple_changes(old, &self.project)
+    }
+
+    /// Ripple pós-edição (F, Ctrl+F, Ctrl+Shift+F; manual do VEGAS Pro 21,
+    /// "Post-edit ripple"): depois de aparar, mover, recortar, colar ou
+    /// apagar sem o Ripple automático, desloca o que vem depois da edição
+    /// como se ele estivesse ligado. Eventos que a edição mudou e eventos
+    /// travados não andam. Um passo de Desfazer; devolve quantos eventos
+    /// andaram.
+    pub fn post_edit_ripple(&mut self, scope: PostEditRipple) -> usize {
+        let plan = self.post_edit_ripple_plan();
+        let Some(&(_, g_at, g_delta)) = plan.iter().min_by_key(|(_, at, _)| *at) else {
+            return 0;
+        };
+        // só andam os eventos que a última edição não tocou
+        let unchanged: HashSet<Id> = match self.undo.last() {
+            Some(old) => old
+                .tracks
+                .iter()
+                .flat_map(|t| t.events.iter())
+                .filter(|oe| {
+                    self.project
+                        .event(oe.id)
+                        .is_some_and(|ne| ne.start == oe.start && ne.length == oe.length)
+                })
+                .map(|e| e.id)
+                .collect(),
+            None => return 0,
+        };
+        let shifts: Vec<(usize, Ticks, Ticks)> = match scope {
+            PostEditRipple::All => (0..self.project.tracks.len())
+                .map(|ti| (ti, g_at, g_delta))
+                .collect(),
+            _ => plan,
+        };
+        self.checkpoint();
+        let prev_overlaps = crate::crossfade::overlap_pairs(&self.project.tracks);
+        let mut moved = 0;
+        let mut touched = Vec::new();
+        for (ti, at, delta) in shifts {
+            let Some(track) = self.project.tracks.get_mut(ti) else {
+                continue;
+            };
+            if track.locked {
+                continue;
+            }
+            for e in &mut track.events {
+                if !e.locked && unchanged.contains(&e.id) && e.start >= at {
+                    e.start = (e.start + delta).max(Ticks::ZERO);
+                    moved += 1;
+                }
+            }
+            for env in &mut track.envelopes {
+                ripple_points(&mut env.points, at, delta);
+            }
+            ripple_points(&mut track.motion.keys, at, delta);
+            ripple_points(&mut track.parent_motion.keys, at, delta);
+            ripple_points(&mut track.shadow_2d.keys, at, delta);
+            ripple_points(&mut track.glow_2d.keys, at, delta);
+            touched.push(ti);
+        }
+        if scope != PostEditRipple::AffectedTracks {
+            for bus in &mut self.project.audio_buses {
+                for env in &mut bus.envelopes {
+                    ripple_points(&mut env.points, g_at, g_delta);
+                }
+            }
+            for m in &mut self.project.markers {
+                if m.t >= g_at {
+                    m.t = (m.t + g_delta).max(Ticks::ZERO);
+                }
+            }
+            for r in &mut self.project.regions {
+                if r.start >= g_at {
+                    r.start = (r.start + g_delta).max(Ticks::ZERO);
+                }
+                if r.end >= g_at {
+                    r.end = (r.end + g_delta).max(r.start);
+                }
+            }
+        }
+        self.sync_overlap_crossfades(&touched, &prev_overlaps);
+        self.changed();
+        self.post_ripple_applied = Some(self.edit_count);
+        moved
+    }
 }
 
 #[cfg(test)]
