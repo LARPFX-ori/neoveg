@@ -2135,9 +2135,7 @@ mod flicker_tests {
     #[test]
     fn imagem_lisa_nao_muda_e_quadros_hostis_nao_travam() {
         let mut f = Frame::new(3, 3);
-        for p in &mut f.px {
-            *p = [0.2, 0.4, 0.6, 1.0];
-        }
+        f.px.fill([0.2, 0.4, 0.6, 1.0]);
         let before = f.px.clone();
         reduce_interlace_flicker(&mut f);
         assert_eq!(f.px, before);
