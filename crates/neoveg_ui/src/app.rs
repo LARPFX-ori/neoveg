@@ -1357,13 +1357,14 @@ impl App {
     /// marks"): próxima marca da grade visível da régua, a mesma que o
     /// Encaixar na grade usa.
     pub(crate) fn grid_step_target(&self, dir: i64) -> Ticks {
-        let (_, minor) = crate::timeline::effective_grid_step(
+        crate::timeline::effective_ruler_grid(
             self.opts.ruler_grid,
+            self.opts.time_format,
             self.tl.px_per_sec,
             &self.project.settings,
             self.tl.width,
-        );
-        neoveg_engine::session::grid_neighbor(self.cursor, minor, dir)
+        )
+        .neighbor(self.cursor, dir)
     }
 
     /// Shift+F5 (*Rebuild audio peaks*): relê do disco o áudio das mídias do
