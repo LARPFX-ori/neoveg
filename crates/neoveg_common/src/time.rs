@@ -820,6 +820,59 @@ fn drop_frame_to_index(h: u64, m: u64, s: u64, mut f: u64, nominal: u64, drop: u
     display.saturating_sub(dropped)
 }
 
+/// Parâmetros `(fps_nominal, quadros_pulados_por_minuto)` de SMPTE ST 12M
+/// Drop-Frame, ou `None` quando a taxa não usa drop-frame.
+pub const fn smpte_drop_params(fps: FrameRate) -> Option<(u64, u64)> {
+    if fps.num == FrameRate::FPS_29_97.num && fps.den == FrameRate::FPS_29_97.den {
+        Some((30, 2))
+    } else if fps.num == FrameRate::FPS_59_94.num && fps.den == FrameRate::FPS_59_94.den {
+        Some((60, 4))
+    } else {
+        None
+    }
+}
+
+/// Converte um contador de quadros nominais de timecode
+/// (`((h * 60 + m) * 60 + s) * nominal + f`) para `Ticks` exatos.
+///
+/// Em SMPTE Drop-Frame (`29,97` / `59,94`), desconta os quadros pulados de
+/// cada minuto que não é múltiplo de 10 (por exemplo, `00:00:18;00` vai ao
+/// quadro real `540`, `00:01:00;00` cai no primeiro quadro válido `00:01:00;02`
+/// e `00:10:00;00` cai no quadro `17982`).
+pub fn smpte_display_frame_to_ticks(display_frames: u64, fps: FrameRate, fmt: TimeFormat) -> Ticks {
+    let idx = if fmt == TimeFormat::SmpteDrop {
+        if let Some((nom, drop)) = smpte_drop_params(fps) {
+            let f = display_frames % nom;
+            let secs = display_frames / nom;
+            drop_frame_to_index(secs / 3600, (secs / 60) % 60, secs % 60, f, nom, drop)
+        } else {
+            display_frames
+        }
+    } else {
+        display_frames
+    };
+    fps.frame_to_ticks(idx.min(i64::MAX as u64) as i64)
+}
+
+/// Converte `Ticks` (arredondando ao quadro mais próximo, como em
+/// [`format_ticks`]) para o contador de quadros nominais do timecode exibido.
+pub fn ticks_to_smpte_display_frame(t: Ticks, fps: FrameRate, fmt: TimeFormat) -> u64 {
+    let idx = fps.ticks_to_frame_round(t.max(Ticks::ZERO)).max(0) as u64;
+    if fmt == TimeFormat::SmpteDrop {
+        if let Some((nom, drop)) = smpte_drop_params(fps) {
+            let (h, m, s, f) = drop_frame_components(idx, nom, drop);
+            return h
+                .saturating_mul(60)
+                .saturating_add(m)
+                .saturating_mul(60)
+                .saturating_add(s)
+                .saturating_mul(nom)
+                .saturating_add(f);
+        }
+    }
+    idx
+}
+
 /// Formata `t` (em ticks exatos) usando `fps`, `sample_rate` e `fmt`.
 pub fn format_ticks(t: Ticks, fps: FrameRate, sample_rate: u32, fmt: TimeFormat) -> String {
     let neg = t.0 < 0;
@@ -1150,6 +1203,47 @@ mod tests {
                 TimeFormat::SmpteDrop
             ),
             "00:10:00;00"
+        );
+
+        // Conversão de quadros nominais de timecode -> Ticks exatos para a régua
+        for sec in (0u64..=58).step_by(2) {
+            let t = smpte_display_frame_to_ticks(sec * 30, fps29, TimeFormat::SmpteDrop);
+            assert_eq!(
+                format_ticks(t, fps29, 48000, TimeFormat::SmpteDrop),
+                format!("00:00:{sec:02};00")
+            );
+            assert_eq!(
+                ticks_to_smpte_display_frame(t, fps29, TimeFormat::SmpteDrop),
+                sec * 30
+            );
+        }
+        // Minuto 1 em 29,97 DF pula ;00 e ;01 -> cai em 00:01:00;02; minuto 10 -> 00:10:00;00
+        let t_min1 = smpte_display_frame_to_ticks(60 * 30, fps29, TimeFormat::SmpteDrop);
+        assert_eq!(
+            format_ticks(t_min1, fps29, 48000, TimeFormat::SmpteDrop),
+            "00:01:00;02"
+        );
+        let t_min1_s2 = smpte_display_frame_to_ticks(62 * 30, fps29, TimeFormat::SmpteDrop);
+        assert_eq!(
+            format_ticks(t_min1_s2, fps29, 48000, TimeFormat::SmpteDrop),
+            "00:01:02;00"
+        );
+        let t_min10 = smpte_display_frame_to_ticks(600 * 30, fps29, TimeFormat::SmpteDrop);
+        assert_eq!(
+            format_ticks(t_min10, fps29, 48000, TimeFormat::SmpteDrop),
+            "00:10:00;00"
+        );
+        // 59,94 DF no minuto 1 -> 00:01:00;04
+        let t59_min1 = smpte_display_frame_to_ticks(60 * 60, fps59, TimeFormat::SmpteDrop);
+        assert_eq!(
+            format_ticks(t59_min1, fps59, 48000, TimeFormat::SmpteDrop),
+            "00:01:00;04"
+        );
+        // Entradas hostis não entram em pânico
+        assert!(smpte_display_frame_to_ticks(u64::MAX, fps29, TimeFormat::SmpteDrop) <= Ticks::MAX);
+        assert_eq!(
+            ticks_to_smpte_display_frame(Ticks::from_secs_i64(-10), fps29, TimeFormat::SmpteDrop),
+            0
         );
     }
 

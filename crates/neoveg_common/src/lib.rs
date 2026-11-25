@@ -30,5 +30,6 @@ pub use prefs::{
     EditLayoutPrefs, IconStyle, LayoutType, Preferences, PreviewQuality, WorkflowMode,
 };
 pub use time::{
-    format_ticks, parse_time, FrameRate, Rate, Ticks, TimeFormat, TICKS_PER_MS, TICKS_PER_SEC,
+    format_ticks, parse_time, smpte_display_frame_to_ticks, smpte_drop_params,
+    ticks_to_smpte_display_frame, FrameRate, Rate, Ticks, TimeFormat, TICKS_PER_MS, TICKS_PER_SEC,
 };

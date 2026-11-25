@@ -523,6 +523,298 @@ pub(crate) fn effective_grid_step(
     nice_step(pps, settings.fps)
 }
 
+fn pick_divisor(df: u64, preferred: &[u64]) -> u64 {
+    preferred
+        .iter()
+        .copied()
+        .find(|&d| d > 0 && df.is_multiple_of(d))
+        .unwrap_or(1)
+}
+
+/// Passo principal e subdivisão da régua em quadros nominais de timecode
+/// (evita que taxas NTSC 29,97 / 59,94 / 23,976 mostrem `;29` ou `:23` nos
+/// segundos inteiros).
+fn smpte_nice_step(pps: f32, fps: FrameRate) -> (u64, u64) {
+    let nom = u64::from(fps.nominal_fps().max(1));
+    let f_secs = fps.ticks_per_frame().as_secs_f64().max(1e-6);
+    let pps = f64::from(pps.max(TimelineState::MIN_PX_PER_SEC));
+    let candidates: [(u64, &[u64]); 16] = [
+        (1, &[1]),
+        (2, &[2]),
+        (5, &[5]),
+        (if nom.is_multiple_of(2) { nom / 2 } else { 0 }, &[5, 3, 2]),
+        (nom, &[5, 4, 2]),
+        (nom.saturating_mul(2), &[4, 2, 5]),
+        (nom.saturating_mul(5), &[5, 2]),
+        (nom.saturating_mul(10), &[5, 2]),
+        (nom.saturating_mul(15), &[3, 5]),
+        (nom.saturating_mul(30), &[6, 3, 2]),
+        (nom.saturating_mul(60), &[6, 4, 2]),
+        (nom.saturating_mul(120), &[4, 6, 2]),
+        (nom.saturating_mul(300), &[5, 3, 2]),
+        (nom.saturating_mul(600), &[5, 6, 2]),
+        (nom.saturating_mul(1800), &[6, 5, 2]),
+        (nom.saturating_mul(3600), &[6, 4, 2]),
+    ];
+    for (df, divs) in candidates {
+        if df > 0 && df as f64 * f_secs * pps >= 90.0 {
+            let d = pick_divisor(df, divs);
+            return (df, (df / d).max(1));
+        }
+    }
+    let mut df = nom.saturating_mul(7200);
+    for _ in 0..48 {
+        if df as f64 * f_secs * pps >= 90.0 {
+            break;
+        }
+        df = df.saturating_mul(2);
+    }
+    let d = pick_divisor(df, &[6, 4, 2]);
+    (df, (df / d).max(1))
+}
+
+/// Grade efetiva da régua e das linhas verticais da timeline: usa marcas por
+/// timecode SMPTE nos formatos SMPTE (drop-frame, non-drop e tempo+quadros) e
+/// passos lineares de tempo nos formatos em segundos/batidas/amostras.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RulerGrid {
+    Linear {
+        major: Ticks,
+        minor: Ticks,
+    },
+    Smpte {
+        major_df: u64,
+        minor_df: u64,
+        fps: FrameRate,
+        fmt: TimeFormat,
+    },
+}
+
+pub(crate) fn effective_ruler_grid(
+    grid: neoveg_engine::session::RulerGridSpacing,
+    fmt: TimeFormat,
+    pps: f32,
+    settings: &ProjectSettings,
+    width_px: f32,
+) -> RulerGrid {
+    use neoveg_engine::session::RulerGridSpacing as G;
+    let is_smpte = matches!(
+        fmt,
+        TimeFormat::SmpteDrop | TimeFormat::SmpteNonDrop | TimeFormat::TimeAndFrames
+    );
+    if is_smpte && grid != G::Beats {
+        let nom = u64::from(settings.fps.nominal_fps().max(1));
+        let fixed_df = match grid {
+            G::Auto => None,
+            G::Frame => Some(1),
+            G::HalfSecond => nom.is_multiple_of(2).then_some(nom / 2),
+            G::OneSecond => Some(nom),
+            G::TwoSeconds => Some(nom.saturating_mul(2)),
+            G::FiveSeconds => Some(nom.saturating_mul(5)),
+            G::TenSeconds => Some(nom.saturating_mul(10)),
+            G::Beats => None,
+        };
+        if let Some(mut step_df) = fixed_df {
+            let view_secs = (f64::from(width_px.max(200.0))
+                / f64::from(pps.max(TimelineState::MIN_PX_PER_SEC)))
+            .min(neoveg_engine::time::MAX_SECONDS as f64);
+            let f_secs = settings.fps.ticks_per_frame().as_secs_f64().max(1e-6);
+            let max_marks = f64::from(MAX_RULER_MARKS / 2);
+            while (view_secs / (step_df as f64 * f_secs)) > max_marks {
+                step_df = step_df.saturating_mul(2);
+                if step_df >= u64::MAX / 4 {
+                    break;
+                }
+            }
+            return RulerGrid::Smpte {
+                major_df: step_df.max(1),
+                minor_df: step_df.max(1),
+                fps: settings.fps,
+                fmt,
+            };
+        }
+        if grid == G::Auto {
+            let (major_df, minor_df) = smpte_nice_step(pps, settings.fps);
+            return RulerGrid::Smpte {
+                major_df: major_df.max(1),
+                minor_df: minor_df.max(1),
+                fps: settings.fps,
+                fmt,
+            };
+        }
+    }
+    let (major, minor) = effective_grid_step(grid, pps, settings, width_px);
+    RulerGrid::Linear { major, minor }
+}
+
+impl RulerGrid {
+    /// Gera as marcas `(tempo, é_principal)` dentro de `[t_start, t_end]`
+    /// limitadas a `MAX_RULER_MARKS` (§0.5).
+    pub(crate) fn marks_in_range(
+        self,
+        t_start: Ticks,
+        t_end: Ticks,
+        major_only: bool,
+    ) -> Vec<(Ticks, bool)> {
+        let mut out: Vec<(Ticks, bool)> = Vec::new();
+        let t_start = t_start.max(Ticks::ZERO);
+        if t_end < t_start {
+            return out;
+        }
+        match self {
+            RulerGrid::Linear { major, minor } => {
+                let step = if major_only { major } else { minor }.0.max(1);
+                let maj = major.0.max(step);
+                let half_minor = step / 4;
+                let mut idx = t_start.0 / step;
+                for _ in 0..MAX_RULER_MARKS {
+                    let t = Ticks::from_raw(idx.saturating_mul(step));
+                    if t > t_end {
+                        break;
+                    }
+                    let is_major = if major_only {
+                        true
+                    } else {
+                        let rem = t.0.rem_euclid(maj);
+                        rem <= half_minor || (maj - rem) <= half_minor
+                    };
+                    out.push((t, is_major));
+                    if idx == i64::MAX {
+                        break;
+                    }
+                    idx = idx.saturating_add(1);
+                }
+            }
+            RulerGrid::Smpte {
+                major_df,
+                minor_df,
+                fps,
+                fmt,
+            } => {
+                let step_df = if major_only { major_df } else { minor_df }.max(1);
+                let maj_df = major_df.max(step_df);
+                let start_df = neoveg_common::ticks_to_smpte_display_frame(t_start, fps, fmt);
+                let mut idx = start_df / step_df;
+                let max_df = (neoveg_engine::time::MAX_SECONDS as u64)
+                    .saturating_mul(u64::from(fps.nominal_fps().max(1)))
+                    .saturating_add(step_df);
+                for _ in 0..MAX_RULER_MARKS {
+                    let df = idx.saturating_mul(step_df);
+                    let t = neoveg_common::smpte_display_frame_to_ticks(df, fps, fmt);
+                    if t > t_end {
+                        break;
+                    }
+                    let is_major = major_only || df.is_multiple_of(maj_df);
+                    if let Some(last) = out.last_mut() {
+                        if last.0 == t {
+                            last.1 |= is_major;
+                        } else {
+                            out.push((t, is_major));
+                        }
+                    } else {
+                        out.push((t, is_major));
+                    }
+                    if df >= max_df || idx == u64::MAX {
+                        break;
+                    }
+                    idx = idx.saturating_add(1);
+                }
+            }
+        }
+        out
+    }
+
+    /// Duas marcas da grade que cercam `t` (para *Encaixar na grade*).
+    pub(crate) fn bracketing(self, t: Ticks) -> (Ticks, Ticks) {
+        let t = t.max(Ticks::ZERO);
+        match self {
+            RulerGrid::Linear { minor, .. } => {
+                let gstep = minor.0.max(1);
+                let g0 = (t.0 / gstep).saturating_mul(gstep);
+                let g1 = g0.saturating_add(gstep);
+                (Ticks::from_raw(g0), Ticks::from_raw(g1))
+            }
+            RulerGrid::Smpte {
+                minor_df, fps, fmt, ..
+            } => {
+                let step = minor_df.max(1);
+                let cur_df = neoveg_common::ticks_to_smpte_display_frame(t, fps, fmt);
+                let k = cur_df / step;
+                let mut lo =
+                    neoveg_common::smpte_display_frame_to_ticks(k.saturating_mul(step), fps, fmt);
+                if lo > t && k > 0 {
+                    lo = neoveg_common::smpte_display_frame_to_ticks(
+                        k.saturating_sub(1).saturating_mul(step),
+                        fps,
+                        fmt,
+                    );
+                }
+                let mut hi = neoveg_common::smpte_display_frame_to_ticks(
+                    k.saturating_add(1).saturating_mul(step),
+                    fps,
+                    fmt,
+                );
+                if hi < t {
+                    hi = neoveg_common::smpte_display_frame_to_ticks(
+                        k.saturating_add(2).saturating_mul(step),
+                        fps,
+                        fmt,
+                    );
+                }
+                (lo, hi)
+            }
+        }
+    }
+
+    /// Próxima marca da grade na direção `dir` (negativo = esquerda; PageUp/PageDown).
+    pub(crate) fn neighbor(self, t: Ticks, dir: i64) -> Ticks {
+        let t = t.max(Ticks::ZERO);
+        match self {
+            RulerGrid::Linear { minor, .. } => neoveg_engine::session::grid_neighbor(t, minor, dir),
+            RulerGrid::Smpte {
+                minor_df, fps, fmt, ..
+            } => {
+                let step = minor_df.max(1);
+                let cur_df = neoveg_common::ticks_to_smpte_display_frame(t, fps, fmt);
+                let mut k = cur_df / step;
+                if dir < 0 {
+                    for _ in 0..8 {
+                        let cand = neoveg_common::smpte_display_frame_to_ticks(
+                            k.saturating_mul(step),
+                            fps,
+                            fmt,
+                        );
+                        if cand < t {
+                            return cand;
+                        }
+                        if k == 0 {
+                            return Ticks::ZERO;
+                        }
+                        k -= 1;
+                    }
+                    Ticks::ZERO
+                } else {
+                    for _ in 0..8 {
+                        k = k.saturating_add(1);
+                        let cand = neoveg_common::smpte_display_frame_to_ticks(
+                            k.saturating_mul(step),
+                            fps,
+                            fmt,
+                        );
+                        if cand > t {
+                            return cand.min(Ticks::MAX);
+                        }
+                        if cand >= Ticks::MAX {
+                            return Ticks::MAX;
+                        }
+                    }
+                    Ticks::MAX
+                }
+            }
+        }
+    }
+}
+
 const BUS_TRACK_H: f32 = 58.0;
 /// Altura mínima de uma trilha (Minimizar, p. 388).
 pub(crate) const TRACK_MIN_H: f32 = 28.0;
@@ -945,17 +1237,16 @@ impl App {
                 }
             }
             if self.opts.snap_to_grid {
-                let (_, gminor) = effective_grid_step(
+                let grid = effective_ruler_grid(
                     self.opts.ruler_grid,
+                    self.opts.time_format,
                     self.tl.px_per_sec,
                     &self.project.settings,
                     self.tl.width,
                 );
-                let gstep = gminor.0.max(1);
-                let g0 = (t.0 / gstep).saturating_mul(gstep);
-                let g1 = g0.saturating_add(gstep);
-                consider(Ticks::from_raw(g0));
-                consider(Ticks::from_raw(g1));
+                let (g0, g1) = grid.bracketing(t);
+                consider(g0);
+                consider(g1);
             }
             if let Some((_, c)) = best {
                 self.tl.snap_line = Some(c);
@@ -2594,32 +2885,17 @@ impl App {
                 self.theme.accent,
             );
         }
-        let (major, minor) = effective_grid_step(
+        let grid = effective_ruler_grid(
             self.opts.ruler_grid,
+            self.opts.time_format,
             self.tl.px_per_sec,
             &self.project.settings,
             r.width(),
         );
-        let step = minor.0.max(1);
-        let maj = major.0.max(step);
-        let half_minor = step / 4;
         let t_start = self.tl.scroll_x;
         let t_end = self.tl.x2t(r.right(), left);
-        let mut idx = t_start.0 / step;
-        // teto por quadro: nenhum zoom desenha marcas sem fim (§0.5)
-        let mut marks = 0u32;
-        loop {
-            marks += 1;
-            if marks > MAX_RULER_MARKS {
-                break;
-            }
-            let t = Ticks::from_raw(idx.saturating_mul(step));
-            if t > t_end {
-                break;
-            }
+        for (t, is_major) in grid.marks_in_range(t_start, t_end, false) {
             let x = self.tl.t2x(t, left);
-            let rem = t.0.rem_euclid(maj);
-            let is_major = rem <= half_minor || (maj - rem) <= half_minor;
             let h = if is_major { 10.0 } else { 4.0 };
             painter.line_segment(
                 [pos2(x, ruler_r.bottom() - h), pos2(x, ruler_r.bottom())],
@@ -2635,7 +2911,6 @@ impl App {
                     self.theme.text_primary,
                 );
             }
-            idx = idx.saturating_add(1);
         }
         // regiões e marcadores
         for reg in &self.project.regions {
@@ -7227,31 +7502,20 @@ impl App {
         let pps = self.tl.px_per_sec;
         let ctx = ui.ctx().clone();
         // grade
-        let (major, _) = effective_grid_step(
+        let grid = effective_ruler_grid(
             self.opts.ruler_grid,
+            self.opts.time_format,
             pps,
             &self.project.settings,
             lanes.width(),
         );
-        let step = major.0.max(1);
         let t_end = self.tl.x2t(lanes.right(), left);
-        let mut idx = self.tl.scroll_x.0 / step;
-        let mut marks = 0u32;
-        loop {
-            marks += 1;
-            if marks > MAX_RULER_MARKS {
-                break;
-            }
-            let gt = Ticks::from_raw(idx.saturating_mul(step));
-            if gt > t_end {
-                break;
-            }
+        for (gt, _) in grid.marks_in_range(self.tl.scroll_x, t_end, true) {
             let x = self.tl.t2x(gt, left);
             painter.line_segment(
                 [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
                 Stroke::new(1.0_f32, self.theme.tl_grid_line),
             );
-            idx = idx.saturating_add(1);
         }
         // seleção de tempo
         if let Some((a, b)) = self.time_sel {
@@ -8750,6 +9014,100 @@ mod zoom_tests {
                     (2000.0 / f64::from(pps)).min(neoveg_engine::time::MAX_SECONDS as f64);
                 let marks = view_secs / min.as_secs_f64();
                 assert!(marks <= f64::from(MAX_RULER_MARKS), "{g:?} {pps}: {marks}");
+            }
+        }
+    }
+
+    /// Regressão da varredura: a régua em SMPTE Drop-Frame (29,97 / 59,94) não
+    /// pode exibir `;29` nos segundos inteiros (`00:00:17;29`, `00:00:19;29`...)
+    /// e deve cair em `;02`/`;04` nos minutos que não são múltiplos de 10.
+    #[test]
+    fn regua_drop_frame_marca_segundos_inteiros_sem_29() {
+        use neoveg_engine::session::RulerGridSpacing as G;
+        let mut settings = ProjectSettings {
+            fps: FrameRate::FPS_29_97,
+            ..ProjectSettings::default()
+        };
+        let grid = effective_ruler_grid(G::Auto, TimeFormat::SmpteDrop, 60.0, &settings, 1440.0);
+        let marks = grid.marks_in_range(Ticks::ZERO, Ticks::from_secs_i64(25), true);
+        let labels: Vec<String> = marks
+            .iter()
+            .map(|(t, _)| {
+                neoveg_common::format_ticks(*t, settings.fps, 48000, TimeFormat::SmpteDrop)
+            })
+            .collect();
+        assert!(labels.contains(&"00:00:18;00".to_string()), "{labels:?}");
+        assert!(labels.contains(&"00:00:20;00".to_string()), "{labels:?}");
+        assert!(
+            labels.iter().all(|l| !l.ends_with(";29")),
+            "rótulo ;29 na régua DF: {labels:?}"
+        );
+
+        // Perto do minuto 1 (29,97 DF): 00:00:58;00 -> 00:01:00;02 -> 00:01:02;00
+        let around_min1 =
+            grid.marks_in_range(Ticks::from_secs_i64(57), Ticks::from_secs_i64(64), true);
+        let labels_min1: Vec<String> = around_min1
+            .iter()
+            .map(|(t, _)| {
+                neoveg_common::format_ticks(*t, settings.fps, 48000, TimeFormat::SmpteDrop)
+            })
+            .collect();
+        assert!(
+            labels_min1.contains(&"00:00:58;00".to_string()),
+            "{labels_min1:?}"
+        );
+        assert!(
+            labels_min1.contains(&"00:01:00;02".to_string()),
+            "{labels_min1:?}"
+        );
+        assert!(
+            labels_min1.contains(&"00:01:02;00".to_string()),
+            "{labels_min1:?}"
+        );
+
+        // Minuto 10 não pula quadros: 00:10:00;00
+        let around_min10 =
+            grid.marks_in_range(Ticks::from_secs_i64(598), Ticks::from_secs_i64(603), true);
+        let labels_min10: Vec<String> = around_min10
+            .iter()
+            .map(|(t, _)| {
+                neoveg_common::format_ticks(*t, settings.fps, 48000, TimeFormat::SmpteDrop)
+            })
+            .collect();
+        assert!(
+            labels_min10.contains(&"00:10:00;00".to_string()),
+            "{labels_min10:?}"
+        );
+
+        // PageDown / PageUp e bracketing acompanham a grade SMPTE sem voltar ou travar
+        let step1 = grid.neighbor(Ticks::ZERO, 1);
+        assert!(step1 > Ticks::ZERO);
+        let back = grid.neighbor(step1, -1);
+        assert_eq!(back, Ticks::ZERO);
+        let (lo, hi) = grid.bracketing(Ticks::from_secs_i64(18));
+        assert!(lo <= Ticks::from_secs_i64(18) && hi >= Ticks::from_secs_i64(18));
+
+        // 59,94 DF no minuto 1 -> 00:01:00;04; teto de marcas respeitado em qualquer zoom
+        settings.fps = FrameRate::FPS_59_94;
+        let grid59 = effective_ruler_grid(G::Auto, TimeFormat::SmpteDrop, 60.0, &settings, 1440.0);
+        let labels59: Vec<String> = grid59
+            .marks_in_range(Ticks::from_secs_i64(59), Ticks::from_secs_i64(62), true)
+            .iter()
+            .map(|(t, _)| {
+                neoveg_common::format_ticks(*t, settings.fps, 48000, TimeFormat::SmpteDrop)
+            })
+            .collect();
+        assert!(
+            labels59.contains(&"00:01:00;04".to_string()),
+            "{labels59:?}"
+        );
+
+        for g in G::ALL {
+            for pps in [TimelineState::MIN_PX_PER_SEC, 0.5, 60.0, 5000.0] {
+                let gr = effective_ruler_grid(g, TimeFormat::SmpteDrop, pps, &settings, 2000.0);
+                let end = Ticks::from_secs_f64_clamped(2000.0 / f64::from(pps));
+                let m = gr.marks_in_range(Ticks::ZERO, end, false);
+                assert!(m.len() <= MAX_RULER_MARKS as usize, "{g:?} {pps}");
             }
         }
     }
