@@ -248,12 +248,11 @@ impl App {
         ui.separator();
         match (has_curve, key) {
             (true, Some(k)) => {
-                let current = self
-                    .project
-                    .tracks
-                    .iter()
-                    .find(|x| x.id == track)
-                    .and_then(|tr| tkf::key_curve(tr, &row, k, tol));
+                let track_ref = self.project.tracks.iter().find(|x| x.id == track);
+                let current_ease = track_ref.and_then(|tr| tkf::key_ease(tr, &row, k, tol));
+                let current = track_ref
+                    .and_then(|tr| tkf::key_curve(tr, &row, k, tol))
+                    .filter(|_| current_ease.is_none());
                 ui.label(egui::RichText::new(tr(lang, "Interpolação até o próximo")).small());
                 for c in Curve::ALL {
                     if ui.radio(current == Some(c), c.name_in(lang)).clicked() {
@@ -263,6 +262,14 @@ impl App {
                         });
                         ui.close_menu();
                     }
+                }
+                ui.separator();
+                if let Some(e) = crate::velocity_graph::bezier_menu_items(ui, current_ease, lang) {
+                    let r = row.clone();
+                    self.edit_track_keyframes(track, |tr| {
+                        tkf::set_key_ease(tr, &r, k, Some(e), tol)
+                    });
+                    ui.close_menu();
                 }
             }
             (true, None) => {

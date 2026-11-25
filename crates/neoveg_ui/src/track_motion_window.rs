@@ -192,6 +192,8 @@ enum TmAction {
     MoveKey(usize, usize, Ticks),
     DeleteKey(usize, usize),
     SetCurve(usize, usize, Curve),
+    /// Bézier de um quadro-chave (linha, índice, Bézier, alça de saída mexida).
+    SetEase(usize, usize, neoveg_common::ease::KeyEase, bool),
     Blend(BlendMode),
     /// *Alfa da origem 3D* ligado/desligado (vale para trilha e para Pai/Filho 3D).
     Mode3d(bool),
@@ -433,18 +435,24 @@ impl App {
                 KfRow {
                     label: tr(lang, "Posição"),
                     keys: motion.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: motion.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: None,
                     selected: st.active_row == 0,
                 },
                 KfRow {
                     label: tr(lang, "Sombra 2D"),
                     keys: shadow_kf.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: shadow_kf.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: Some(shadow_enabled),
                     selected: st.active_row == 1,
                 },
                 KfRow {
                     label: tr(lang, "Brilho 2D"),
                     keys: glow_kf.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: glow_kf.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: Some(glow_enabled),
                     selected: st.active_row == 2,
                 },
@@ -489,6 +497,9 @@ impl App {
             }
             if let Some((ri, ki, c)) = out.set_curve {
                 actions.push(TmAction::SetCurve(ri, ki, c));
+            }
+            if let Some((ri, ki, e, edited_out)) = out.set_ease {
+                actions.push(TmAction::SetEase(ri, ki, e, edited_out));
             }
             if let Some((ri, ki)) = out.delete_key {
                 actions.push(TmAction::DeleteKey(ri, ki));
@@ -993,20 +1004,32 @@ impl App {
             );
         }
         kf_window::prop_section(ui, sec("kf"), tr(lang, "Quadro-chave"), true, th, |ui| {
+            let current = motion.keys.get(key_idx).map(|k| k.curve);
+            let cur_ease = motion.keys.get(key_idx).and_then(|k| k.ease);
             kf_window::prop_row(ui, tr(lang, "Tipo:"), |ui| {
-                let current = motion.keys.get(key_idx).map(|k| k.curve);
-                let mut c = current.unwrap_or_default();
-                egui::ComboBox::from_id_salt("tm_curve")
-                    .selected_text(c.name_in(lang))
-                    .show_ui(ui, |ui| {
-                        for k in Curve::ALL.iter().take(6) {
-                            ui.selectable_value(&mut c, *k, k.name_in(lang));
+                let choice = kf_window::interp_combo(ui, "tm_curve", current, cur_ease, lang);
+                if current.is_some() {
+                    match choice {
+                        Some(kf_window::InterpChoice::Curve(c)) => {
+                            actions.push(TmAction::SetCurve(0, key_idx, c));
                         }
-                    });
-                if current.is_some() && Some(c) != current {
-                    actions.push(TmAction::SetCurve(0, key_idx, c));
+                        Some(kf_window::InterpChoice::Ease(e)) => {
+                            actions.push(TmAction::SetEase(0, key_idx, e, true));
+                        }
+                        None => {}
+                    }
                 }
             });
+            if let Some(e) = cur_ease {
+                if let Some((ne, edited_out)) = kf_window::ease_fields(ui, e, lang) {
+                    actions.push(TmAction::SetEase(0, key_idx, ne, edited_out));
+                }
+                let sides = neoveg_common::ease::segment_sides(&motion.ease_keys(), key_idx);
+                kf_window::paint_progress_preview(ui, th, |u| match sides {
+                    Some((o, i)) => neoveg_common::ease::bezier_progress(o, i, u),
+                    None => u,
+                });
+            }
         });
         kf_window::prop_section(
             ui,
@@ -1621,6 +1644,24 @@ impl App {
                     }
                     continue;
                 }
+                TmAction::SetEase(ri, ki, e, edited_out) => {
+                    let ok = match *ri {
+                        1 => set_kf_ease(&mut track.shadow_2d, *ki, *e, *edited_out),
+                        2 => set_kf_ease(&mut track.glow_2d, *ki, *e, *edited_out),
+                        _ => {
+                            let m = if parent {
+                                &mut track.parent_motion
+                            } else {
+                                &mut track.motion
+                            };
+                            set_kf_ease(m, *ki, *e, *edited_out)
+                        }
+                    };
+                    if ok {
+                        changed = true;
+                    }
+                    continue;
+                }
                 TmAction::SetCurve(ri, ki, c) => {
                     let ok = match *ri {
                         1 => set_kf_curve(&mut track.shadow_2d, *ki, *c),
@@ -1768,7 +1809,23 @@ fn set_kf_curve<T>(kf: &mut Keyframes<T>, ki: usize, c: Curve) -> bool {
         return false;
     };
     k.curve = c;
+    // escolher uma curva do VEGAS desliga o Bézier
+    k.ease = None;
     true
+}
+
+/// Grava o Bézier do quadro-chave `ki`. `false` se o índice não existe ou
+/// nada mudou (não cria passo de Desfazer à toa).
+fn set_kf_ease<T: neoveg_common::Lerp + Default>(
+    kf: &mut Keyframes<T>,
+    ki: usize,
+    e: neoveg_common::ease::KeyEase,
+    edited_out: bool,
+) -> bool {
+    if kf.keys.get(ki).is_some_and(|k| k.ease == Some(e)) {
+        return false;
+    }
+    kf.set_ease(ki, Some(e), edited_out)
 }
 
 #[cfg(test)]
