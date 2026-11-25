@@ -4639,9 +4639,12 @@ mod safe_guide_tests {
 
     #[test]
     fn proporcao_da_previa_simula_o_pixel_do_dispositivo() {
-        // DV NTSC 720x480 com PAR 0,9091 aparece em 4:3 só com a simulação
-        let sim = preview_display_aspect(720, 480, 0.9091, true);
-        assert!((sim - 4.0 / 3.0).abs() < 0.01, "{sim}");
+        // DV NTSC com PAR 0,9091: a área ativa de 704x480 fica em 4:3 só com
+        // a simulação (os 720 pixels incluem 16 de margem analógica)
+        let sim = preview_display_aspect(704, 480, 0.9091, true);
+        assert!((sim - 4.0 / 3.0).abs() < 0.001, "{sim}");
+        let full = preview_display_aspect(720, 480, 0.9091, true);
+        assert!((full - 1.5 * 0.9091).abs() < 1e-4, "{full}");
         assert!((preview_display_aspect(720, 480, 0.9091, false) - 1.5).abs() < 1e-6);
         // pixels quadrados não mudam; valores hostis caem para quadrado
         assert_eq!(
