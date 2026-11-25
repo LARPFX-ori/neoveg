@@ -6854,7 +6854,14 @@ impl App {
             ui.close_menu();
         }
         ui.separator();
-        let mut flags = (e.mute, e.locked, e.looped, e.reverse, e.maintain_aspect);
+        let mut flags = (
+            e.mute,
+            e.locked,
+            e.looped,
+            e.reverse,
+            e.maintain_aspect,
+            e.reduce_flicker,
+        );
         let before = flags;
         ui.checkbox(&mut flags.0, tr(lang, "Mudo"));
         ui.checkbox(&mut flags.1, tr(lang, "Travado"));
@@ -6862,6 +6869,10 @@ impl App {
         ui.checkbox(&mut flags.3, tr(lang, "Inverter (reverse)"));
         if is_video {
             ui.checkbox(&mut flags.4, tr(lang, "Manter proporção"));
+            ui.checkbox(
+                &mut flags.5,
+                tr(lang, "Reduzir cintilação de entrelaçamento"),
+            );
         }
         if flags != before {
             self.checkpoint();
@@ -6881,6 +6892,9 @@ impl App {
                     }
                     if flags.4 != before.4 {
                         ev.maintain_aspect = flags.4;
+                    }
+                    if flags.5 != before.5 {
+                        ev.reduce_flicker = flags.5;
                     }
                 }
             }
