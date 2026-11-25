@@ -4430,6 +4430,10 @@ pub struct Event {
     /// Manter proporção da mídia (letterbox) em eventos de vídeo.
     #[serde(default = "yes")]
     pub maintain_aspect: bool,
+    /// Chave *Reduzir cintilação de entrelaçamento* do evento de vídeo:
+    /// suaviza linhas finas horizontais que piscam em saída entrelaçada.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reduce_flicker: bool,
     /// *Esticar para preencher o quadro* no Pan/Crop (`true` = padrão; `false` mantém
     /// tamanho nativo sem esticar a origem para o quadro de saída, manual p. 251).
     #[serde(default = "yes")]
@@ -4530,6 +4534,7 @@ impl Event {
             gain_db: 0.0,
             opacity: 1.0,
             maintain_aspect: true,
+            reduce_flicker: false,
             pan_crop_stretch_to_fill: true,
             pan_crop: Keyframes::default(),
             pan_crop_mask_enabled: false,
@@ -4573,6 +4578,7 @@ impl Event {
             gain_db: 0.0,
             opacity: 1.0,
             maintain_aspect: true,
+            reduce_flicker: false,
             pan_crop_stretch_to_fill: true,
             pan_crop: Keyframes::default(),
             pan_crop_mask_enabled: false,
