@@ -1027,6 +1027,7 @@
   "Exibição: {w}x{h}; {fps} qps": "Display: {w}x{h}; {fps} fps",
   "Expandido: +1 quadro": "Expanded: +1 frame",
   "Expandido: -1 quadro": "Expanded: -1 frame",
+  "Expandir camadas da trilha": "Expand Track Layers",
   "Expandir/recolher os quadros-chave da trilha": "Expand/collapse track keyframes",
   "Expansão:": "Expansion:",
   "Explorer": "Explorer",
