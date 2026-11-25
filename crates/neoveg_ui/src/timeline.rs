@@ -4851,9 +4851,12 @@ impl App {
                 }
             }
         }
-        let suppress_ctx = self.tl.suppress_ctx_menu
-            || ui.input(|i| i.pointer.primary_down())
-            || matches!(self.tl.drag, Drag::Box { .. });
+        let suppress_ctx = lane_ctx_menu_suppressed(
+            resp.context_menu_opened(),
+            self.tl.suppress_ctx_menu,
+            ui.input(|i| i.pointer.primary_down()),
+            matches!(self.tl.drag, Drag::Box { .. }),
+        );
         if resp.secondary_clicked() && !suppress_ctx {
             if let Some(p) = resp.interact_pointer_pos() {
                 let t = self.tl.x2t(p.x, left);
@@ -8393,6 +8396,42 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
         let x0 = r.left() + i as f32 * (w + 1.0);
         let ch_r = Rect::from_min_max(pos2(x0, r.top()), pos2((x0 + w).min(r.right()), r.bottom()));
         draw_meter_channel(painter, ch_r, *v);
+    }
+}
+
+/// O menu de contexto das trilhas deixa de ser desenhado neste quadro?
+///
+/// Segurar o botão esquerdo (ou a caixa de seleção) impede **abrir** o menu,
+/// para que esquerdo + direito vire a Ferramenta de Seleção (manual do VEGAS
+/// Pro 21, p. 238). Um menu que já está aberto continua sendo desenhado: o
+/// clique num item segura o botão esquerdo, e parar de desenhar o menu nesse
+/// momento fazia ele sumir, o item não executar e o menu voltar ao soltar.
+fn lane_ctx_menu_suppressed(
+    menu_open: bool,
+    suppress_flag: bool,
+    primary_down: bool,
+    box_drag: bool,
+) -> bool {
+    !menu_open && (suppress_flag || primary_down || box_drag)
+}
+
+#[cfg(test)]
+mod ctx_menu_tests {
+    use super::lane_ctx_menu_suppressed;
+
+    #[test]
+    fn menu_aberto_continua_desenhado_ao_clicar_num_item() {
+        // menu aberto + botão esquerdo pressionado sobre "Inserir texto aqui"
+        assert!(!lane_ctx_menu_suppressed(true, false, true, false));
+        assert!(!lane_ctx_menu_suppressed(true, true, true, true));
+    }
+
+    #[test]
+    fn esquerdo_mais_direito_ainda_nao_abre_menu_novo() {
+        assert!(lane_ctx_menu_suppressed(false, false, true, false));
+        assert!(lane_ctx_menu_suppressed(false, true, false, false));
+        assert!(lane_ctx_menu_suppressed(false, false, false, true));
+        assert!(!lane_ctx_menu_suppressed(false, false, false, false));
     }
 }
 
