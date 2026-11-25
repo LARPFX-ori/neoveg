@@ -421,6 +421,8 @@ pub struct App {
     pub project_media: crate::project_media::ProjectMediaState,
     /// Painel em uso (último clicado): recebe o contorno de destaque.
     pub(crate) focused_pane: Option<crate::dock::DockPane>,
+    /// Loja de scripts e extensões (aba Loja de scripts).
+    pub(crate) store: crate::store_panel::StoreState,
 }
 
 impl Deref for App {
@@ -657,6 +659,7 @@ impl App {
             recording_peaks: HashMap::new(),
             project_media: crate::project_media::ProjectMediaState::default(),
             focused_pane: None,
+            store: crate::store_panel::StoreState::default(),
         };
         app.sync_floating_docks();
         app.ram_preview =
@@ -5162,6 +5165,16 @@ impl App {
         else {
             return;
         };
+        self.run_script_path(p);
+    }
+
+    /// Executa um script `.cs`/`.dll` (do diálogo ou da Loja de scripts).
+    pub(crate) fn run_script_path(&mut self, p: PathBuf) {
+        let lang = self.lang();
+        if self.script_job.is_some() {
+            self.set_status(tr(lang, "Já há um script em execução."));
+            return;
+        }
         // o script trabalha sobre uma cópia: a reprodução não pode mexer no cursor
         if self.is_playing() {
             self.stop(true);

@@ -1138,6 +1138,7 @@ impl App {
             DockTab::Notes => self.project_notes_tab(ui),
             DockTab::Encoder => self.encoder_tab(ui),
             DockTab::Transcript => self.transcript_tab(ui),
+            DockTab::Store => self.store_tab(ui),
         }
     }
 
