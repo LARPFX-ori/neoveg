@@ -7,10 +7,17 @@
 use crate::app::{App, DndPayload};
 use eframe::egui;
 use neoveg_common::{tr, tr_args, Language};
-use neoveg_engine::engine::fx_preview::{render_preview, render_preview_at, THUMB_H, THUMB_W};
-use neoveg_engine::model::{FrameRate, FxCategory, FxInstance, FxKind, Ticks};
+use neoveg_engine::engine::fx_preview::{
+    frame_from_rgba, render_preview, render_preview_at, render_preview_on_frame, FX_PRESET_THUMB_H,
+    FX_PRESET_THUMB_W, THUMB_H, THUMB_W,
+};
+use neoveg_engine::model::{FrameRate, FxCategory, FxInstance, FxKind, Id, Ticks, TrackKind};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+
+type EventPreviewKey = (Id, Id, i64);
+const MAX_EVENT_FX_THUMBS: usize = 64;
 
 /// Categoria escolhida no alto da janela (Efeitos de Vídeo e Geradores
 /// de Mídia): as três especiais do manual e as categorias de cada janela.
@@ -59,6 +66,11 @@ pub(crate) struct FxBrowser {
     /// Miniaturas já carregadas (uma textura por efeito, criada uma vez).
     thumbs: HashMap<FxKind, egui::TextureHandle>,
     user_thumbs: HashMap<(String, String), egui::TextureHandle>,
+    /// Quadro do evento de vídeo selecionado (ou sob o cursor) usado como base
+    /// das prévias de presets em *Efeitos de Vídeo*.
+    event_base_key: Option<EventPreviewKey>,
+    event_base: Option<Arc<neoveg_engine::engine::Frame>>,
+    event_thumbs: HashMap<(FxKind, String), egui::TextureHandle>,
     hover_anim: Option<FxHoverAnim>,
     rx: Option<Receiver<(FxKind, egui::ColorImage)>>,
     started: bool,
@@ -423,10 +435,98 @@ impl FxBrowser {
 }
 
 impl App {
+    /// Atualiza o quadro-base das prévias de presets usando o evento de vídeo
+    /// selecionado (ou o evento de vídeo sob o cursor). Quando não há evento de
+    /// vídeo disponível, limpa a base para cair de volta na amostra sintética.
+    fn sync_fx_event_base(&mut self) {
+        let mut target: Option<(Id, Id, Ticks, Ticks, neoveg_engine::model::Event)> = None;
+        for tr in &self.project.tracks {
+            if tr.kind != TrackKind::Video {
+                continue;
+            }
+            for e in &tr.events {
+                if self.sel_events.contains(&e.id)
+                    && self.project.media(e.media_id).is_some_and(|m| m.has_video)
+                {
+                    let better = target
+                        .as_ref()
+                        .is_none_or(|(_, _, prev_start, _, _)| e.start < *prev_start);
+                    if better {
+                        target = Some((e.id, e.media_id, e.start, e.length, e.clone()));
+                    }
+                }
+            }
+        }
+        if target.is_none() {
+            let c = self.cursor;
+            for tr in &self.project.tracks {
+                if tr.kind != TrackKind::Video || tr.mute {
+                    continue;
+                }
+                if let Some(e) = tr.events.iter().find(|e| {
+                    !e.mute
+                        && e.start <= c
+                        && c < e.end()
+                        && self.project.media(e.media_id).is_some_and(|m| m.has_video)
+                }) {
+                    target = Some((e.id, e.media_id, e.start, e.length, e.clone()));
+                    break;
+                }
+            }
+        }
+        let Some((ev_id, media_id, ev_start, ev_len, ev)) = target else {
+            if self.fx_browser.event_base.is_some() || self.fx_browser.event_base_key.is_some() {
+                self.fx_browser.event_base = None;
+                self.fx_browser.event_base_key = None;
+                self.fx_browser.event_thumbs.clear();
+                self.fx_browser.hover_anim = None;
+            }
+            return;
+        };
+        let Some(m) = self.project.media(media_id).cloned() else {
+            return;
+        };
+        let tl_t = if self.cursor >= ev_start && self.cursor < ev_start + ev_len {
+            self.cursor
+        } else {
+            ev_start + ev_len.div_i64(2)
+        };
+        let media_t = ev.media_time(tl_t, m.duration).unwrap_or(Ticks::ZERO);
+        let fps = m.fps.unwrap_or(self.project.settings.fps);
+        let frame_idx = fps.ticks_to_frame_floor(media_t);
+        let key: EventPreviewKey = (ev_id, media_id, frame_idx);
+        if self.fx_browser.event_base_key == Some(key) && self.fx_browser.event_base.is_some() {
+            return;
+        }
+        if let Some(img) = self.media.video_frame_for_quality(
+            &m,
+            media_t,
+            FX_PRESET_THUMB_W as u32,
+            FX_PRESET_THUMB_H as u32,
+            true,
+        ) {
+            let base = frame_from_rgba(&img, FX_PRESET_THUMB_W, FX_PRESET_THUMB_H);
+            self.fx_browser.event_base = Some(Arc::new(base));
+            self.fx_browser.event_base_key = Some(key);
+            self.fx_browser.event_thumbs.clear();
+            self.fx_browser.hover_anim = None;
+        } else if self
+            .fx_browser
+            .event_base_key
+            .is_some_and(|(_, prev_mid, _)| prev_mid != media_id)
+        {
+            self.fx_browser.event_base = None;
+            self.fx_browser.event_base_key = None;
+            self.fx_browser.event_thumbs.clear();
+            self.fx_browser.hover_anim = None;
+        }
+    }
+
     pub(crate) fn video_fx_browser(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         self.fx_browser.start_thumbs();
         self.fx_browser.poll(ui.ctx());
+        self.sync_fx_event_base();
 
         let cats: Vec<(FxCategory, &str)> = FxCategory::ALL
             .iter()
@@ -477,7 +577,7 @@ impl App {
         // de linha (a aba fica numa área com rolagem horizontal, onde a
         // largura disponível não tem limite)
         let visible_w = (ui.clip_rect().right() - ui.cursor().left()).min(ui.available_width());
-        let right_w = (visible_w - left_w - 24.0).max(THUMB_W as f32 + 8.0);
+        let right_w = (visible_w - left_w - 24.0).max(FX_PRESET_THUMB_W as f32 + 8.0);
         let mut toggle_fav: Option<FxKind> = None;
         let mut select: Option<FxKind> = None;
         ui.horizontal_top(|ui| {
@@ -532,7 +632,11 @@ impl App {
                     "Presets: {name}",
                     &[("name", &k.name_in(lang))],
                 ));
-                let per_row = ((right_w + 8.0) / (THUMB_W as f32 + 24.0)).floor().max(1.0) as usize;
+                let event_base = self.fx_browser.event_base.clone();
+                let fps = self.project.settings.fps;
+                let per_row = ((right_w + 8.0) / (FX_PRESET_THUMB_W as f32 + 24.0))
+                    .floor()
+                    .max(1.0) as usize;
                 let idxs: Vec<usize> = (0..all_presets.len()).collect();
                 for row in idxs.chunks(per_row) {
                     ui.horizontal(|ui| {
@@ -541,8 +645,36 @@ impl App {
                                 continue;
                             };
                             let cache_key = (k.id().to_string(), name.clone());
-                            if *is_user && !self.fx_browser.user_thumbs.contains_key(&cache_key) {
-                                let f = render_preview(fx, THUMB_W, THUMB_H);
+                            let ev_cache_key = (k, name.clone());
+                            if let Some(base) = event_base.as_ref() {
+                                if !self.fx_browser.event_thumbs.contains_key(&ev_cache_key) {
+                                    if self.fx_browser.event_thumbs.len() >= MAX_EVENT_FX_THUMBS {
+                                        self.fx_browser.event_thumbs.clear();
+                                    }
+                                    if let Ok(img) =
+                                        crate::util::guard("miniatura de efeito no evento", || {
+                                            let f =
+                                                render_preview_on_frame(base, fx, Ticks::ZERO, fps);
+                                            egui::ColorImage::from_rgba_unmultiplied(
+                                                [f.w, f.h],
+                                                &f.to_rgba8(),
+                                            )
+                                        })
+                                    {
+                                        let tex = ui.ctx().load_texture(
+                                            format!("fx_ev_thumb_{}_{}", k.id(), name),
+                                            img,
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        self.fx_browser
+                                            .event_thumbs
+                                            .insert(ev_cache_key.clone(), tex);
+                                    }
+                                }
+                            } else if *is_user
+                                && !self.fx_browser.user_thumbs.contains_key(&cache_key)
+                            {
+                                let f = render_preview(fx, FX_PRESET_THUMB_W, FX_PRESET_THUMB_H);
                                 let img = egui::ColorImage::from_rgba_unmultiplied(
                                     [f.w, f.h],
                                     &f.to_rgba8(),
@@ -560,7 +692,10 @@ impl App {
                                 DndPayload::FxPreset(fx.clone()),
                                 |ui| {
                                     ui.vertical(|ui| {
-                                        let size = egui::vec2(THUMB_W as f32, THUMB_H as f32);
+                                        let size = egui::vec2(
+                                            FX_PRESET_THUMB_W as f32,
+                                            FX_PRESET_THUMB_H as f32,
+                                        );
                                         let (rect, _) =
                                             ui.allocate_exact_size(size, egui::Sense::hover());
                                         let hovered = ui.rect_contains_pointer(rect);
@@ -575,13 +710,21 @@ impl App {
                                                     |h| h.kind != k || h.preset_idx != i,
                                                 );
                                             if needs_new {
-                                                let f = render_preview_at(
-                                                    fx,
-                                                    Ticks::ZERO,
-                                                    FrameRate::FPS_30,
-                                                    THUMB_W,
-                                                    THUMB_H,
-                                                );
+                                                let f = match event_base.as_ref() {
+                                                    Some(base) => render_preview_on_frame(
+                                                        base,
+                                                        fx,
+                                                        Ticks::ZERO,
+                                                        fps,
+                                                    ),
+                                                    None => render_preview_at(
+                                                        fx,
+                                                        Ticks::ZERO,
+                                                        FrameRate::FPS_30,
+                                                        FX_PRESET_THUMB_W,
+                                                        FX_PRESET_THUMB_H,
+                                                    ),
+                                                };
                                                 let img = egui::ColorImage::from_rgba_unmultiplied(
                                                     [f.w, f.h],
                                                     &f.to_rgba8(),
@@ -605,13 +748,21 @@ impl App {
                                                 if bucket != h.bucket {
                                                     h.bucket = bucket;
                                                     let ms = ((bucket % 50) * 80) as i64;
-                                                    let f = render_preview_at(
-                                                        fx,
-                                                        Ticks::from_millis_i64(ms),
-                                                        FrameRate::FPS_30,
-                                                        THUMB_W,
-                                                        THUMB_H,
-                                                    );
+                                                    let f = match event_base.as_ref() {
+                                                        Some(base) => render_preview_on_frame(
+                                                            base,
+                                                            fx,
+                                                            Ticks::from_millis_i64(ms),
+                                                            fps,
+                                                        ),
+                                                        None => render_preview_at(
+                                                            fx,
+                                                            Ticks::from_millis_i64(ms),
+                                                            FrameRate::FPS_30,
+                                                            FX_PRESET_THUMB_W,
+                                                            FX_PRESET_THUMB_H,
+                                                        ),
+                                                    };
                                                     let img =
                                                         egui::ColorImage::from_rgba_unmultiplied(
                                                             [f.w, f.h],
@@ -626,6 +777,8 @@ impl App {
                                             } else {
                                                 None
                                             }
+                                        } else if event_base.is_some() {
+                                            self.fx_browser.event_thumbs.get(&ev_cache_key).cloned()
                                         } else if *is_user {
                                             self.fx_browser.user_thumbs.get(&cache_key).cloned()
                                         } else {
@@ -690,7 +843,8 @@ impl App {
                         .retain(|p| !(p.fx_kind == kind_id && p.name == del_name));
                     self.fx_browser
                         .user_thumbs
-                        .remove(&(kind_id.to_string(), del_name));
+                        .remove(&(kind_id.to_string(), del_name.clone()));
+                    self.fx_browser.event_thumbs.remove(&(k, del_name));
                     self.fx_browser.selected_preset = Some(0);
                     let _ = self.prefs.save();
                 }
@@ -803,5 +957,45 @@ impl App {
                     });
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod fx_event_preview_tests {
+    use super::*;
+    use crate::model::GenSpec;
+
+    #[test]
+    fn previa_de_efeitos_usa_quadro_do_evento_selecionado_e_limpa_sem_evento() {
+        let _lock = crate::kittest_tests::lock_test_prefs();
+        let ctx = egui::Context::default();
+        let mut app = {
+            let _r = crate::tests::PREFS_LOCK
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            App::with_context(&ctx, None)
+        };
+        app.sync_fx_event_base();
+        assert!(app.fx_browser.event_base.is_none());
+
+        app.insert_generated(GenSpec::SolidColor {
+            color: [0.85, 0.20, 0.15, 1.0],
+        });
+        app.sync_fx_event_base();
+        let base = app
+            .fx_browser
+            .event_base
+            .as_ref()
+            .expect("evento de vídeo selecionado deve preencher a base da prévia");
+        assert_eq!((base.w, base.h), (FX_PRESET_THUMB_W, FX_PRESET_THUMB_H));
+        // O pixel central reflete o vermelho sólido do evento, não o céu azul da amostra
+        let mid = base.px[(FX_PRESET_THUMB_H / 2) * FX_PRESET_THUMB_W + (FX_PRESET_THUMB_W / 2)];
+        assert!(mid[0] > 0.7 && mid[1] < 0.35 && mid[2] < 0.35, "{mid:?}");
+
+        // Remover o evento limpa a base e volta à amostra padrão
+        app.project.tracks[0].events.clear();
+        app.sel_events.clear();
+        app.sync_fx_event_base();
+        assert!(app.fx_browser.event_base.is_none());
     }
 }
