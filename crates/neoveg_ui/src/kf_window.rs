@@ -17,8 +17,9 @@ use neoveg_common::ease::{EaseMode, KeyEase};
 use neoveg_common::i18n::{tr, Language};
 use neoveg_common::time::Ticks;
 
-/// Largura da coluna de nomes na grade de propriedades.
-const PROP_LABEL_W: f32 = 122.0;
+/// Largura da coluna de nomes na grade de propriedades (comporta rótulos como
+/// "Espaçamento da grade:" sem truncamento).
+const PROP_LABEL_W: f32 = 152.0;
 
 /// Cabeçalho de seção da grade de propriedades, com o quadradinho `+`/`−`.
 /// O estado aberto/fechado fica na memória do egui, por `id`.
@@ -119,7 +120,8 @@ pub(crate) fn prop_row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) ->
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.set_min_width(PROP_LABEL_W - 12.0 - ui.spacing().item_spacing.x);
-                ui.add(egui::Label::new(egui::RichText::new(label).size(12.0)).truncate());
+                ui.add(egui::Label::new(egui::RichText::new(label).size(12.0)).truncate())
+                    .on_hover_text(label);
             },
         );
         add(ui)

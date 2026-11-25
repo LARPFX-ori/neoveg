@@ -1717,9 +1717,7 @@ impl App {
                 }
             });
             ui.separator();
-            if m.has_video
-                && !matches!(m.source, MediaSource::Generated(_))
-                && ui.button("Gerar proxy de vídeo").clicked()
+            if m.can_build_proxy() && ui.button(tr(self.lang(), "Gerar proxy de vídeo")).clicked()
             {
                 actions.push(MediaRowAction::BuildProxy(m.id));
                 ui.close_menu();

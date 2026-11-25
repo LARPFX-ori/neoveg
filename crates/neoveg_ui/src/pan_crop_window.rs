@@ -354,10 +354,10 @@ impl App {
                         // coluna das propriedades: layout vertical explícito; herdando o
                         // horizontal do pai, as seções saíam lado a lado e se sobrepunham
                         ui.allocate_ui_with_layout(
-                            vec2(256.0, top_h),
+                            vec2(272.0, top_h),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                ui.set_width(256.0);
+                                ui.set_width(272.0);
                                 egui::ScrollArea::vertical()
                                     .id_salt("pc_props")
                                     .auto_shrink([false, false])

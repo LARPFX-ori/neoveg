@@ -2415,3 +2415,71 @@ fn agulha_preservada_ao_alternar_sequencias_e_projetos_abertos() {
     app.request_close_doc_tab(1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Confirmação do achado #2 da varredura: adicionar uma mídia A/V (duplo clique
+/// na Mídia do Projeto) insere o evento de vídeo e o evento de áudio agrupados,
+/// mesmo quando já existe outro evento de áudio no mesmo instante.
+#[test]
+fn adicionar_midia_av_coloca_video_e_audio_agrupados_mesmo_com_audio_no_cursor() {
+    let _lock = crate::kittest_tests::lock_test_prefs();
+    let ctx = egui::Context::default();
+    let mut app = {
+        let _r = PREFS_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        App::with_context(&ctx, None)
+    };
+    let audio_only = MediaItem {
+        id: new_id(),
+        name: "tom.wav".into(),
+        source: MediaSource::File {
+            path: "tom.wav".into(),
+        },
+        duration: Some(Ticks::from_secs_i64(8)),
+        has_video: false,
+        has_audio: true,
+        width: 0,
+        height: 0,
+        fps: None,
+        info: String::new(),
+        proxy_path: None,
+    };
+    let av = MediaItem {
+        id: new_id(),
+        name: "barras.mp4".into(),
+        source: MediaSource::File {
+            path: "barras.mp4".into(),
+        },
+        duration: Some(Ticks::from_secs_i64(6)),
+        has_video: true,
+        has_audio: true,
+        width: 1920,
+        height: 1080,
+        fps: Some(FrameRate::FPS_29_97),
+        info: String::new(),
+        proxy_path: None,
+    };
+    let (id_a, id_av) = (audio_only.id, av.id);
+    app.project.media.push(audio_only);
+    app.project.media.push(av);
+
+    app.add_media_to_timeline(id_a, Ticks::ZERO, None);
+    let created = app.add_media_to_timeline(id_av, Ticks::ZERO, app.sel_track);
+    assert_eq!(
+        created.len(),
+        2,
+        "mídia A/V deve criar evento de vídeo e de áudio"
+    );
+    let v_ev = app.project.tracks[0]
+        .events
+        .iter()
+        .find(|e| e.media_id == id_av)
+        .expect("evento de vídeo na trilha de vídeo");
+    let a_ev = app.project.tracks[1]
+        .events
+        .iter()
+        .find(|e| e.media_id == id_av)
+        .expect("evento de áudio na trilha de áudio");
+    assert!(v_ev.group.is_some() && v_ev.group == a_ev.group);
+    assert_eq!(app.project.tracks[1].events.len(), 2);
+}
