@@ -1191,8 +1191,8 @@ impl NeovegTileBehavior<'_> {
         if self.app.focused_pane == Some(pane) {
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
-                3.0,
-                egui::Stroke::new(1.5, self.app.theme.accent),
+                3.0_f32,
+                egui::Stroke::new(1.5_f32, self.app.theme.accent),
                 egui::StrokeKind::Inside,
             );
         }
