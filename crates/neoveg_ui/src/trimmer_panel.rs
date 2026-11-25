@@ -3594,7 +3594,7 @@ impl App {
         };
         let mut open = true;
         let mut done: Option<bool> = None;
-        crate::dialog_window::DialogWindow::new(tr(lang, "Editar conjunto de botões visíveis..."))
+        crate::dialog_window::DialogWindow::new(tr(lang, "Editar conjunto de botões visíveis"))
             .id(egui::Id::new("trimmer_buttons_dialog"))
             .collapsible(false)
             .resizable(false)
