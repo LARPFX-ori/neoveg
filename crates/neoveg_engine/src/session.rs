@@ -1762,6 +1762,28 @@ impl EditorSession {
         self.opts.ignore_grouping = saved;
     }
 
+    /// Selecionar eventos até o fim (VEGAS Pro 21, "Selecting all events to
+    /// the end of a track"): em cada trilha com evento selecionado, seleciona
+    /// também todos os eventos que começam a partir do primeiro selecionado.
+    /// Devolve quantos eventos entraram na seleção.
+    pub fn select_events_to_end(&mut self) -> usize {
+        let mut add: Vec<Id> = Vec::new();
+        for t in &self.project.tracks {
+            let first = t
+                .events
+                .iter()
+                .filter(|e| self.sel_events.contains(&e.id))
+                .map(|e| e.start)
+                .min();
+            if let Some(start) = first {
+                add.extend(t.events.iter().filter(|e| e.start >= start).map(|e| e.id));
+            }
+        }
+        let before = self.sel_events.len();
+        self.sel_events.extend(add);
+        self.sel_events.len().saturating_sub(before)
+    }
+
     pub fn select_all(&mut self) {
         self.sel_events = self
             .project
@@ -6641,6 +6663,44 @@ mod tests {
             info: String::new(),
             proxy_path: None,
         }
+    }
+
+    #[test]
+    fn selecionar_eventos_ate_o_fim_por_trilha() {
+        let mut p = Project::default();
+        p.tracks.push(Track::new(TrackKind::Video, "V1"));
+        p.tracks.push(Track::new(TrackKind::Audio, "A1"));
+        let m = sample_media(new_id(), 640, 360, Some(FrameRate::FPS_30));
+        let secs = Ticks::from_secs_i64;
+        let v: Vec<Event> = (0..4)
+            .map(|i| Event::new(&m, secs(i * 2), secs(1)))
+            .collect();
+        let a: Vec<Event> = (0..3)
+            .map(|i| Event::new(&m, secs(i * 2), secs(1)))
+            .collect();
+        let vid: Vec<Id> = v.iter().map(|e| e.id).collect();
+        let aid: Vec<Id> = a.iter().map(|e| e.id).collect();
+        p.media.push(m);
+        p.tracks[0].events = v;
+        p.tracks[1].events = a;
+        let mut s = EditorSession::new(p);
+        // sem seleção, nada entra
+        assert_eq!(s.select_events_to_end(), 0);
+        // o segundo da trilha de vídeo: ele e os dois seguintes; a trilha de
+        // áudio não é tocada
+        s.sel_events.insert(vid[1]);
+        assert_eq!(s.select_events_to_end(), 2);
+        assert!(vid[1..].iter().all(|id| s.sel_events.contains(id)));
+        assert!(!s.sel_events.contains(&vid[0]));
+        assert!(aid.iter().all(|id| !s.sel_events.contains(id)));
+        // com seleção em várias trilhas, vale para cada uma
+        s.sel_events.insert(aid[2]);
+        assert_eq!(s.select_events_to_end(), 0);
+        s.sel_events.insert(aid[0]);
+        assert_eq!(s.select_events_to_end(), 1);
+        assert!(aid.iter().all(|id| s.sel_events.contains(id)));
+        // não cria passo de Desfazer: é só seleção
+        assert!(s.undo.is_empty());
     }
 
     #[test]

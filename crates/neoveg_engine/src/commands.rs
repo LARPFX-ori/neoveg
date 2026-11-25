@@ -1833,6 +1833,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.select_events_to_end",
+        label: "Selecionar eventos até o fim",
+        menu_path: "Editar/Selecionar eventos até o fim",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: has_selected_events,
+        run: |s, h| {
+            s.select_events_to_end();
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "edit.select_all",
         label: "Selecionar todos",
         menu_path: "Editar/Selecionar todos",

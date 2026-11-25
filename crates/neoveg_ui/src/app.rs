@@ -3713,6 +3713,7 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.group");
                 self.cmd_menu_btn(ui, "edit.ungroup");
                 self.cmd_menu_btn(ui, "edit.select_all");
+                self.cmd_menu_btn(ui, "edit.select_events_to_end");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.goto");
                 ui.separator();
