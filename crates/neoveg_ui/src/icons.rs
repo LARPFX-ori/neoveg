@@ -155,11 +155,12 @@ pub enum Icon {
     AdjustmentEvent,
     CreditRoll,
     LiveSave,
+    HandPan,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 146] = [
+    pub const ALL: [Icon; 147] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -306,6 +307,7 @@ impl Icon {
         Icon::AdjustmentEvent,
         Icon::CreditRoll,
         Icon::LiveSave,
+        Icon::HandPan,
     ];
 }
 
@@ -948,6 +950,46 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             );
             c.line(0.50, 0.74, 0.74, 0.38, pal.amber, 0.10);
             c.p.circle_filled(c.pt(0.50, 0.74), c.u(0.10), pal.ink);
+        }
+        Icon::HandPan => {
+            // mão aberta desenhada em código: quatro dedos, polegar e palma
+            let fill = pal.paper;
+            let edge = Some((0.05, pal.ink));
+            for (x0, x1, top) in [
+                (0.26, 0.38, 0.22),
+                (0.39, 0.51, 0.12),
+                (0.52, 0.64, 0.14),
+                (0.65, 0.77, 0.24),
+            ] {
+                c.poly(
+                    &[
+                        (x0, 0.58),
+                        (x0, top + 0.05),
+                        (x0 + 0.06, top),
+                        (x1, top + 0.05),
+                        (x1, 0.58),
+                    ],
+                    fill,
+                    edge,
+                );
+            }
+            c.poly(
+                &[(0.27, 0.66), (0.10, 0.50), (0.15, 0.44), (0.30, 0.54)],
+                fill,
+                edge,
+            );
+            c.poly(
+                &[
+                    (0.26, 0.52),
+                    (0.77, 0.52),
+                    (0.77, 0.72),
+                    (0.66, 0.88),
+                    (0.36, 0.88),
+                    (0.26, 0.72),
+                ],
+                fill,
+                edge,
+            );
         }
         Icon::ZoomGlass => {
             c.p.circle_filled(c.pt(0.42, 0.42), c.u(0.28), pal.cyan.gamma_multiply(0.35));

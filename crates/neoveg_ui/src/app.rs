@@ -419,6 +419,8 @@ pub struct App {
     pub(crate) recorder_tracks: Vec<Id>,
     pub(crate) recording_peaks: HashMap<Id, [f32; 2]>,
     pub project_media: crate::project_media::ProjectMediaState,
+    /// Painel em uso (último clicado): recebe o contorno de destaque.
+    pub(crate) focused_pane: Option<crate::dock::DockPane>,
     /// Loja de scripts e extensões (aba Loja de scripts).
     pub(crate) store: crate::store_panel::StoreState,
 }
@@ -656,6 +658,7 @@ impl App {
             recorder_tracks: Vec::new(),
             recording_peaks: HashMap::new(),
             project_media: crate::project_media::ProjectMediaState::default(),
+            focused_pane: None,
             store: crate::store_panel::StoreState::default(),
         };
         app.sync_floating_docks();
@@ -3551,6 +3554,27 @@ impl App {
             if pressed(Key::ArrowRight) {
                 let t = self.arrow_step_target(1);
                 self.set_cursor(t);
+                return;
+            }
+        }
+
+        // Espaço sobre uma vista com a mão (Prévia com zoom, Pan/Crop,
+        // Movimento da Trilha): segurar e arrastar desloca a vista; soltar sem
+        // arrastar executa o atalho do Espaço (Reproduzir / Pausar)
+        match crate::hand::space_shortcut(ctx, !ctrl && !shift && !alt) {
+            crate::hand::SpaceDecision::Normal => {}
+            crate::hand::SpaceDecision::Consumed => return,
+            crate::hand::SpaceDecision::Release => {
+                let space_cmd = COMMANDS.iter().find(|cmd| {
+                    resolved_shortcut(cmd, &self.prefs.shortcuts).is_some_and(|sc| {
+                        !sc.ctrl && !sc.shift && !sc.alt && sc.key == ShortcutKey::Space
+                    })
+                });
+                if let Some(cmd) = space_cmd {
+                    if self.cmd_enabled(cmd.id) {
+                        self.exec_cmd(Some(ctx), cmd.id);
+                    }
+                }
                 return;
             }
         }

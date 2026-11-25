@@ -352,6 +352,43 @@ pub(crate) fn handle_workspace_wheel_and_zoom(
     }
 }
 
+/// Ferramenta mão da área de trabalho (Pan/Crop, Movimento da Trilha): com a
+/// ferramenta escolhida ou com Espaço segurado, arrastar com o botão esquerdo
+/// desloca a vista. Devolve `true` quando a mão está ativa, para a área não
+/// tratar o arrasto como edição.
+pub(crate) fn workspace_hand(
+    ui: &Ui,
+    resp: &egui::Response,
+    ws: &mut Workspace,
+    tool: bool,
+    theme: &ThemeColors,
+    custom_cursors: bool,
+) -> bool {
+    if !crate::hand::hand_active(ui, resp, tool) {
+        return false;
+    }
+    let grabbing = resp.dragged_by(egui::PointerButton::Primary);
+    if grabbing {
+        let d = resp.drag_delta();
+        ws.offset -= vec2(ws.frame_len(d.x), ws.frame_len(d.y));
+        crate::hand::note_drag(ui.ctx());
+    }
+    if resp.hovered() || grabbing {
+        let icon = if grabbing {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        };
+        crate::cursors::render_cursor(
+            ui.ctx(),
+            crate::cursors::NeovegCursor::System(icon),
+            theme,
+            custom_cursors,
+        );
+    }
+    true
+}
+
 /// Barra flutuante de zoom no canto inferior direito da área de trabalho
 /// (`-`, `XX%`, `+`, `Ajustar`). Devolve o retângulo ocupado pela barra.
 pub(crate) fn workspace_zoom_bar(
