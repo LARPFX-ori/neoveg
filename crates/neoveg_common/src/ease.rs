@@ -219,6 +219,11 @@ pub fn segment_delta(keys: &[EaseKey], i: usize) -> f32 {
     }
 }
 
+/// O trecho `i → i+1` existe (os dois quadros-chave estão no vetor).
+fn has_segment(keys: &[EaseKey], i: usize) -> bool {
+    i.checked_add(1).is_some_and(|j| j < keys.len())
+}
+
 /// Duração do trecho `i → i+1` em ticks (nunca menor que 1).
 fn segment_ticks(keys: &[EaseKey], i: usize) -> f64 {
     match (keys.get(i), keys.get(i.saturating_add(1))) {
@@ -341,7 +346,7 @@ pub fn segment_speed_per_sec(
     curve: crate::curve::Curve,
     u: f32,
 ) -> f32 {
-    if curve == crate::curve::Curve::Hold {
+    if curve == crate::curve::Curve::Hold || !has_segment(keys, i) {
         return 0.0;
     }
     let h = 1e-3_f32;
@@ -362,6 +367,9 @@ pub fn segment_speed_per_sec(
 /// Converte uma velocidade real (variação por segundo) do lado de saída do
 /// trecho `i` em velocidade normalizada. Usado ao arrastar uma alça.
 pub fn normalize_speed(keys: &[EaseKey], i: usize, real_per_sec: f32) -> f32 {
+    if !has_segment(keys, i) {
+        return 0.0;
+    }
     let secs = segment_ticks(keys, i) / crate::time::TICKS_PER_SEC as f64;
     let avg = f64::from(segment_delta(keys, i)) / secs.max(1e-12);
     if avg.abs() < 1e-12 || !real_per_sec.is_finite() {
@@ -372,6 +380,9 @@ pub fn normalize_speed(keys: &[EaseKey], i: usize, real_per_sec: f32) -> f32 {
 
 /// Velocidade real média (variação por segundo) do trecho `i → i+1`.
 pub fn segment_avg_per_sec(keys: &[EaseKey], i: usize) -> f32 {
+    if !has_segment(keys, i) {
+        return 0.0;
+    }
     let secs = segment_ticks(keys, i) / crate::time::TICKS_PER_SEC as f64;
     let v = f64::from(segment_delta(keys, i)) / secs.max(1e-12);
     if v.is_finite() {
@@ -445,6 +456,11 @@ mod tests {
         assert!(segment_sides(&[], 7).is_none());
         assert_eq!(auto_speeds(&[], 3), (1.0, 1.0));
         assert_eq!(segment_speed_per_sec(&[], 2, Curve::Linear, 0.5), 0.0);
+        let one = [key(0, Some(1.0), Some(KeyEase::easy_ease()))];
+        assert_eq!(segment_speed_per_sec(&one, 0, Curve::Linear, 0.5), 0.0);
+        assert_eq!(segment_avg_per_sec(&one, 0), 0.0);
+        assert_eq!(normalize_speed(&one, 0, 5.0), 0.0);
+        assert_eq!(segment_avg_per_sec(&one, usize::MAX), 0.0);
     }
 
     #[test]
