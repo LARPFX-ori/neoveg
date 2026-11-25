@@ -3779,6 +3779,7 @@ impl App {
                     let am = t.automation_mode;
                     if kind == TrackKind::Audio {
                         ui.label(egui::RichText::new(tr(lang, "Vol")).small());
+                        let before_db = t.volume_db;
                         let r = ui.add(
                             egui::Slider::new(&mut t.volume_db, -60.0..=12.0)
                                 .show_value(true)
@@ -3786,6 +3787,9 @@ impl App {
                                 .fixed_decimals(1)
                                 .trailing_fill(true),
                         );
+                        if slider_moved_by_other_button(ui, &r) {
+                            t.volume_db = before_db;
+                        }
                         if r.drag_started() {
                             want_checkpoint = true;
                         }
@@ -3805,12 +3809,16 @@ impl App {
                     } else {
                         ui.label(egui::RichText::new(tr(lang, "Nível")).small());
                         let mut pct = t.opacity * 100.0;
+                        let before_pct = pct;
                         let r = ui.add(
                             egui::Slider::new(&mut pct, 0.0..=100.0)
                                 .suffix(" %")
                                 .fixed_decimals(0)
                                 .trailing_fill(true),
                         );
+                        if slider_moved_by_other_button(ui, &r) {
+                            pct = before_pct;
+                        }
                         if r.drag_started() {
                             want_checkpoint = true;
                         }
@@ -3833,7 +3841,11 @@ impl App {
                         let t = &mut self.project.tracks[ti];
                         let am = t.automation_mode;
                         ui.label(egui::RichText::new(tr(lang, "Pan")).small());
+                        let before_pan = t.pan;
                         let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
+                        if slider_moved_by_other_button(ui, &r) {
+                            t.pan = before_pan;
+                        }
                         if r.drag_started() {
                             want_checkpoint = true;
                         }
@@ -6478,7 +6490,7 @@ impl App {
                     self.insert_generated(GenSpec::Text(TextSpec::default()));
                     ui.close_menu();
                 }
-                if ui.button("Inserir evento vazio aqui").clicked() {
+                if ui.button(tr(lang, "Inserir evento vazio aqui")).clicked() {
                     self.cursor = t;
                     self.sel_track = Some(ti);
                     self.session.insert_empty_event();
@@ -6487,7 +6499,7 @@ impl App {
                 }
                 if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
                     ui.separator();
-                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                    ui.menu_button(tr(lang, "Eixo da seleção/zoom"), |ui| {
                         for axis in BoxAxisMode::ALL {
                             if ui
                                 .radio(self.session.box_axis == axis, axis.name())
@@ -6503,8 +6515,16 @@ impl App {
                 self.track_menu(ui, ti);
             }
             _ => {
+                // área vazia, fora das trilhas: como no VEGAS, inserir trilhas,
+                // colar e selecionar (antes mostrava só "—")
+                self.cmd_menu_btn(ui, "insert.track_video");
+                self.cmd_menu_btn(ui, "insert.track_audio");
+                ui.separator();
+                self.cmd_menu_btn(ui, "edit.paste");
+                self.cmd_menu_btn(ui, "edit.select_all");
                 if matches!(self.session.edit_tool, EditTool::Selection | EditTool::Zoom) {
-                    ui.menu_button("Eixo da seleção/zoom", |ui| {
+                    ui.separator();
+                    ui.menu_button(tr(lang, "Eixo da seleção/zoom"), |ui| {
                         for axis in BoxAxisMode::ALL {
                             if ui
                                 .radio(self.session.box_axis == axis, axis.name())
@@ -6515,8 +6535,6 @@ impl App {
                             }
                         }
                     });
-                } else {
-                    ui.label("—");
                 }
             }
         }
@@ -9054,4 +9072,85 @@ enum HeaderAction {
     SetAutomation(AutomationMode),
     CycleAutomation,
     EditButtons,
+}
+
+/// O `egui::Slider` responde a qualquer botão do mouse: o clique direito no
+/// cabeçalho da trilha mudava o Nível, o Vol ou o Pan (achado da varredura:
+/// 100% virou 8%). Só o botão esquerdo ajusta; com o direito ou o do meio
+/// pressionado (ou recém-solto) sobre o controle, o valor anterior volta.
+fn slider_moved_by_other_button(ui: &egui::Ui, r: &egui::Response) -> bool {
+    use egui::PointerButton::{Middle, Secondary};
+    r.contains_pointer()
+        && ui.input(|i| {
+            [Secondary, Middle].into_iter().any(|b| {
+                i.pointer.button_down(b)
+                    || i.pointer.button_pressed(b)
+                    || i.pointer.button_released(b)
+            })
+        })
+}
+
+#[cfg(test)]
+mod slider_button_tests {
+    use super::slider_moved_by_other_button;
+    use eframe::egui;
+
+    fn run(button: egui::PointerButton) -> (f32, bool) {
+        let ctx = egui::Context::default();
+        let mut value = 100.0_f32;
+        let mut blocked = false;
+        let pos = egui::pos2(60.0, 20.0);
+        let frames = [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ];
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 100.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let before = value;
+                    let r = ui.add(egui::Slider::new(&mut value, 0.0..=100.0));
+                    if slider_moved_by_other_button(ui, &r) {
+                        value = before;
+                        blocked = true;
+                    }
+                });
+            });
+        }
+        (value, blocked)
+    }
+
+    #[test]
+    fn botao_direito_nao_muda_o_controle_da_trilha() {
+        let (v, blocked) = run(egui::PointerButton::Secondary);
+        assert!(blocked);
+        assert!(
+            (v - 100.0).abs() < 1e-3,
+            "o botão direito mudou o valor para {v}"
+        );
+        let (_, blocked) = run(egui::PointerButton::Middle);
+        assert!(blocked);
+        // o esquerdo continua ajustando
+        let (v, blocked) = run(egui::PointerButton::Primary);
+        assert!(!blocked);
+        assert!(v < 100.0, "o botão esquerdo deveria ajustar o valor");
+    }
 }
