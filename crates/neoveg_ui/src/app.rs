@@ -376,6 +376,8 @@ pub struct App {
     pub trimmer: crate::trimmer_panel::TrimmerState,
     pub edit_details: crate::edit_details::EditDetailsState,
     pub(crate) confirm_close: bool,
+    /// Ctrl+F4 no projeto principal com alterações: pergunta antes de fechar.
+    pub(crate) confirm_close_project: bool,
     pub(crate) allow_close: bool,
     /// Ocultar automaticamente a área de janelas: aberta agora, onde estava
     /// no último quadro e desde quando o ponteiro saiu dela.
@@ -622,6 +624,7 @@ impl App {
             trimmer: crate::trimmer_panel::TrimmerState::default(),
             edit_details: crate::edit_details::EditDetailsState::default(),
             confirm_close: false,
+            confirm_close_project: false,
             allow_close: false,
             dock_auto_open: false,
             dock_auto_rect: None,
@@ -1342,6 +1345,95 @@ impl App {
             raw_f.max(cur_f.saturating_add(1))
         };
         fps.frame_to_ticks(f.max(0)).max(Ticks::ZERO)
+    }
+
+    /// PageUp/PageDown (lista do VEGAS Pro: "Move left/right by grid
+    /// marks"): próxima marca da grade visível da régua, a mesma que o
+    /// Encaixar na grade usa.
+    pub(crate) fn grid_step_target(&self, dir: i64) -> Ticks {
+        let (_, minor) = crate::timeline::effective_grid_step(
+            self.opts.ruler_grid,
+            self.tl.px_per_sec,
+            &self.project.settings,
+            self.tl.width,
+        );
+        neoveg_engine::session::grid_neighbor(self.cursor, minor, dir)
+    }
+
+    /// Shift+F5 (*Rebuild audio peaks*): relê do disco o áudio das mídias do
+    /// projeto; as formas de onda são refeitas quando cada uma termina.
+    pub(crate) fn rebuild_audio_peaks(&mut self) {
+        let lang = self.lang();
+        let items: Vec<MediaItem> = self
+            .project
+            .media
+            .iter()
+            .filter(|m| m.has_audio && matches!(m.source, MediaSource::File { .. }))
+            .cloned()
+            .collect();
+        let n = items.len();
+        for m in items {
+            self.spawn_media_load(m);
+        }
+        self.set_status(tr_args(
+            lang,
+            "Relendo o áudio de {n} mídia(s) para refazer as formas de onda.",
+            &[("n", &n)],
+        ));
+    }
+
+    /// Ctrl+F4 (*Close the current project*): uma aba de projeto aninhado
+    /// fecha como no × da aba; o projeto principal vira um projeto novo,
+    /// perguntando antes se há alterações não salvas.
+    pub(crate) fn close_active_project(&mut self) {
+        if self.active_doc > 0 {
+            self.request_close_doc_tab(self.active_doc);
+        } else if self.session.dirty {
+            self.confirm_close_project = true;
+        } else {
+            self.new_project();
+            self.set_status(tr(self.lang(), "Projeto fechado"));
+        }
+    }
+
+    /// Confirmação do Ctrl+F4 no projeto principal com alterações não salvas.
+    pub(crate) fn close_project_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_close_project {
+            return;
+        }
+        let lang = self.lang();
+        let mut keep = true;
+        let mut close = false;
+        crate::dialog_window::DialogWindow::new(tr(lang, "Alterações não salvas"))
+            .id(egui::Id::new("confirm_close_project_win"))
+            .open(&mut keep)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(tr(
+                    lang,
+                    "O projeto tem alterações não salvas. Deseja salvar antes de fechar?",
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button(tr(lang, "Salvar")).clicked() && self.save_project(false) {
+                        close = true;
+                    }
+                    if ui.button(tr(lang, "Descartar")).clicked() {
+                        close = true;
+                    }
+                    if ui.button(tr(lang, "Cancelar")).clicked() {
+                        self.confirm_close_project = false;
+                    }
+                });
+            });
+        if close {
+            self.confirm_close_project = false;
+            self.new_project();
+            self.set_status(tr(lang, "Projeto fechado"));
+        } else if !keep {
+            self.confirm_close_project = false;
+        }
     }
 
     pub fn set_cursor(&mut self, t: Ticks) {
@@ -3085,6 +3177,44 @@ impl App {
                 self.opts.ruler_grid = g;
                 self.set_status(format!("Grade da régua: {}", g.label()));
             }
+            UiAction::MoveByGrid(dir) => {
+                let t = self.grid_step_target(dir);
+                self.set_cursor(t);
+            }
+            UiAction::ToggleMasterDim => {
+                let lang = self.lang();
+                self.master_dim = !self.master_dim;
+                self.set_status(tr(
+                    lang,
+                    if self.master_dim {
+                        "Saída do Master atenuada em 20 dB (Dim)."
+                    } else {
+                        "Atenuação da saída do Master desligada."
+                    },
+                ));
+            }
+            UiAction::RebuildAudioPeaks => self.rebuild_audio_peaks(),
+            UiAction::CloseProject => self.close_active_project(),
+            UiAction::RenameSelectedEvent => {
+                // o primeiro evento selecionado na timeline (o mais à esquerda)
+                let first = self
+                    .project
+                    .tracks
+                    .iter()
+                    .flat_map(|t| t.events.iter())
+                    .filter(|e| self.sel_events.contains(&e.id))
+                    .min_by_key(|e| e.start)
+                    .map(|e| (e.id, e.name.clone()));
+                if let Some(r) = first {
+                    self.tl.rename = Some(r);
+                }
+            }
+            UiAction::OpenPasteRepeatDialog => {
+                if self.dlg.paste_repeat_every <= Ticks::ZERO {
+                    self.dlg.paste_repeat_every = Ticks::from_secs_i64(1);
+                }
+                self.dlg.paste_repeat_open = true;
+            }
             UiAction::OpenGoto => self.dlg.goto_open = true,
             UiAction::OpenNestedProjectTab => self.open_nested_from_selection(),
             UiAction::OpenEditLayoutProps => {
@@ -3606,6 +3736,7 @@ impl App {
             ui.menu_button(tr(lang, "Arquivo"), |ui| {
                 self.cmd_menu_btn(ui, "file.new");
                 self.cmd_menu_btn(ui, "file.open");
+                self.cmd_menu_btn(ui, "file.close");
                 self.cmd_menu_btn(ui, "file.save");
                 self.cmd_menu_btn(ui, "file.save_as");
                 self.cmd_menu_btn(ui, "file.save_version");
@@ -3653,6 +3784,7 @@ impl App {
                 self.cmd_menu_btn(ui, "preview.copy_frame");
                 self.cmd_menu_btn(ui, "edit.paste");
                 self.cmd_menu_btn(ui, "edit.paste_insert");
+                self.cmd_menu_btn(ui, "edit.paste_repeat");
                 self.cmd_menu_btn(ui, "edit.paste_attributes");
                 self.cmd_menu_btn(ui, "edit.paste_attributes_selective");
                 self.cmd_menu_btn(ui, "edit.delete");
@@ -3717,6 +3849,11 @@ impl App {
                 });
                 self.cmd_menu_btn(ui, "edit.trim_to_selection");
                 self.cmd_menu_btn(ui, "edit.delete_range_ripple");
+                ui.menu_button(tr(lang, "Ripple pós-edição"), |ui| {
+                    self.cmd_menu_btn(ui, "edit.post_ripple_tracks");
+                    self.cmd_menu_btn(ui, "edit.post_ripple_markers");
+                    self.cmd_menu_btn(ui, "edit.post_ripple_all");
+                });
                 self.cmd_menu_btn(ui, "edit.insert_time");
                 self.cmd_menu_btn(ui, "edit.close_gaps");
                 ui.separator();
@@ -3724,8 +3861,12 @@ impl App {
                 self.cmd_menu_btn(ui, "edit.ungroup");
                 self.cmd_menu_btn(ui, "edit.select_all");
                 self.cmd_menu_btn(ui, "edit.select_events_to_end");
+                self.cmd_menu_btn(ui, "edit.restore_time_selection");
+                self.cmd_menu_btn(ui, "edit.rename_event");
                 ui.separator();
                 self.cmd_menu_btn(ui, "edit.goto");
+                self.cmd_menu_btn(ui, "edit.cursor_prev_selected_edge");
+                self.cmd_menu_btn(ui, "edit.cursor_next_selected_edge");
                 ui.separator();
                 ui.menu_button(tr(lang, "Propriedades"), |ui| {
                     ui.menu_button(tr(lang, "Layout"), |ui| {
@@ -3949,6 +4090,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_chk(ui, self.opts.show_envelopes, "view.envelopes");
                 self.cmd_menu_chk(ui, self.opts.show_waveforms, "view.waveforms");
+                self.cmd_menu_chk(ui, self.opts.show_event_headers, "view.event_headers");
                 self.cmd_menu_btn(ui, "view.waveform_zoom_in");
                 self.cmd_menu_btn(ui, "view.waveform_zoom_out");
                 self.cmd_menu_chk(ui, self.opts.show_thumbs, "view.thumbs");
@@ -4027,6 +4169,7 @@ impl App {
                 self.cmd_menu_btn(ui, "tools.fx_event");
                 self.cmd_menu_btn(ui, "tools.motion_track");
                 self.cmd_menu_btn(ui, "tools.apply_audio_fx");
+                self.cmd_menu_btn(ui, "tools.rebuild_peaks");
                 self.cmd_menu_btn(ui, "tools.auto_normalize");
                 self.cmd_menu_btn(ui, "tools.auto_ducking");
                 self.cmd_menu_btn(ui, "tools.beat_detection");
@@ -4087,6 +4230,8 @@ impl App {
             ui.menu_button(tr(lang, "Opções"), |ui| {
                 self.cmd_menu_chk(ui, self.opts.snapping, "options.snapping");
                 self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
+                self.cmd_menu_chk(ui, self.opts.snap_to_markers, "options.snap_to_markers");
+                self.cmd_menu_chk(ui, self.opts.snap_to_all_events, "options.snap_to_events");
                 self.cmd_menu_chk(ui, self.opts.auto_crossfades, "options.auto_crossfades");
                 ui.menu_button("Grade da régua", |ui| {
                     for g in neoveg_engine::session::RulerGridSpacing::ALL {
@@ -4110,6 +4255,7 @@ impl App {
                     self.opts.bypass_all_audio_fx,
                     "options.bypass_all_audio_fx",
                 );
+                self.cmd_menu_chk(ui, self.master_dim, "options.dim_master");
                 ui.separator();
                 self.cmd_menu_btn(ui, "options.customize_toolbar");
                 ui.separator();
@@ -5458,6 +5604,10 @@ impl App {
             self.fit_main_window(ctx);
         }
         self.handle_dropped_files(ctx);
+        // histórico do Backspace: só seleções terminadas (sem arraste em curso)
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.session.note_time_selection();
+        }
         self.handle_shortcuts(ctx);
         self.trimmer.visible_this_frame = false;
         self.update_meters(dt as f32);
@@ -5542,6 +5692,7 @@ impl App {
         // confirmação ao fechar com alterações não salvas
         let lang = self.lang();
         self.close_doc_tab_dialog(ctx);
+        self.close_project_dialog(ctx);
         if ctx.input(|i| i.viewport().close_requested())
             && self.any_doc_dirty()
             && !self.allow_close
@@ -6435,6 +6586,12 @@ fn to_egui_key(k: ShortcutKey) -> Key {
         ShortcutKey::Backslash => Key::Backslash,
         ShortcutKey::Equals => Key::Equals,
         ShortcutKey::Minus => Key::Minus,
+        ShortcutKey::Backspace => Key::Backspace,
+        ShortcutKey::PageUp => Key::PageUp,
+        ShortcutKey::PageDown => Key::PageDown,
+        ShortcutKey::F4 => Key::F4,
+        ShortcutKey::F5 => Key::F5,
+        ShortcutKey::F12 => Key::F12,
     }
 }
 

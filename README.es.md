@@ -121,9 +121,21 @@ Los registros, autoguardados, preferencias (`preferencias.json`), diseños (`.ne
 | Ajuste (`snapping`) / Ripple automático | `F8` / `Ctrl+L` |
 | Zoom horizontal / formas de onda vertical | `↑` / `↓` (`Shift+↑` / `Shift+↓`) |
 | Deshacer / rehacer | `Ctrl+Z` / `Ctrl+Y` |
-| Propiedades del evento | `F2` |
+| Cambiar nombre del evento | `F2` |
 | Neoveg Encoder / Enviar línea de tiempo | `Ctrl+Shift+Alt+M` / `Ctrl+Shift+M` |
 | Renderizar en pista nueva | `Ctrl+M` |
+| Ajustar a marcadores / a todos los eventos | `Shift+F8` / `Ctrl+Shift+F8` |
+| Ripple posterior a la edición: pistas afectadas / con buses, marcadores y regiones / todo | `F` / `Ctrl+F` / `Ctrl+Shift+F` |
+| Pegar repitiendo | `Ctrl+B` |
+| Restaurar la selección de tiempo anterior (hasta 5) | `Backspace` |
+| Mover el cursor por la cuadrícula (izquierda / derecha) | `PageUp` / `PageDown` |
+| Cursor al borde del evento seleccionado anterior / siguiente | `Ctrl+[` / `Ctrl+]` |
+| Ir al inicio del proyecto | `W` / `Ctrl+Home` |
+| Borrar grupo / silencio y solo solo en la pista seleccionada | `Ctrl+U` / `Shift+Z` / `Shift+X` |
+| Tono +1 / −1 cent / altura de todas las pistas | `Ctrl+=` / `Ctrl+-` / `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
+| Mostrar / ocultar encabezados de eventos | `Ctrl+Alt+M` |
+| Atenuar la salida del Master (Dim) / reconstruir picos de audio | `Ctrl+Shift+F12` / `Shift+F5` |
+| Cerrar proyecto | `Ctrl+F4` |
 
 - **Herramientas y modos de edición (`D` / `Shift+D`):** en la barra de transporte y en *Editar → Herramienta de edición*, alterna entre **Normal** (movimiento y recorte en modos *Normal* o *Slip*), **Envolvente** (mueve solo puntos de envolvente), **Selección** (marco rectangular; `Shift`/`Ctrl` suman) y **Zoom** (marco acerca; un clic ajusta el proyecto a la ventana).
 - **Fundidos, ganancia y fotogramas clave:** superponer eventos en la misma pista crea fundido cruzado automático; los tiradores en las esquinas superiores ajustan fundidos, la barra superior en clips de audio ajusta ganancia en dB y las filas bajo la pista editan fotogramas clave de *Track Motion* y efectos de pista.

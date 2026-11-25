@@ -273,7 +273,7 @@ pub struct TimelineState {
     pub width: f32,
     drag: Drag,
     ctx_target: CtxTarget,
-    rename: Option<(Id, String)>,
+    pub(crate) rename: Option<(Id, String)>,
     snap_line: Option<Ticks>,
     drop_hint: Option<(usize, Ticks)>,
     /// Menu de contexto aberto ao soltar mídia com botão direito.
@@ -501,7 +501,7 @@ fn nice_step(pps: f32, fps: FrameRate) -> (Ticks, Ticks) {
     (s, s.div_i64(6).max(f1))
 }
 
-fn effective_grid_step(
+pub(crate) fn effective_grid_step(
     grid: neoveg_engine::session::RulerGridSpacing,
     pps: f32,
     settings: &ProjectSettings,
@@ -915,18 +915,28 @@ impl App {
             };
             consider(Ticks::ZERO);
             consider(self.cursor);
-            for m in &self.project.markers {
-                consider(m.t);
-            }
-            for r in &self.project.regions {
-                consider(r.start);
-                consider(r.end);
+            // Encaixar em marcadores (Shift+F8): marcadores de todos os
+            // tipos e regiões
+            if self.opts.snap_to_markers {
+                for m in &self.project.markers {
+                    consider(m.t);
+                }
+                for r in &self.project.regions {
+                    consider(r.start);
+                    consider(r.end);
+                }
             }
             if let Some((a, b)) = self.project.loop_region {
                 consider(a);
                 consider(b);
             }
+            // Encaixar em todos os eventos (Ctrl+Shift+F8); desligado, só as
+            // trilhas dos eventos que estão sendo editados
             for tr in &self.project.tracks {
+                let own_track = tr.events.iter().any(|e| exclude.contains(&e.id));
+                if !self.opts.snap_to_all_events && !own_track {
+                    continue;
+                }
                 for e in &tr.events {
                     if !exclude.contains(&e.id) {
                         consider(e.start);
@@ -7354,7 +7364,12 @@ impl App {
                 } else {
                     shade(tc, k * self.theme.tl_event_body_k)
                 };
-                let hdr_h = 14.0f32.min(r.height() * 0.3);
+                // Ctrl+Alt+M (*Toggle Event Headers*): sem a faixa de título
+                let hdr_h = if self.opts.show_event_headers {
+                    14.0f32.min(r.height() * 0.3)
+                } else {
+                    0.0
+                };
                 let hdr_col = if e.mute || muted {
                     if self.theme.dark_mode {
                         Color32::from_gray(80)

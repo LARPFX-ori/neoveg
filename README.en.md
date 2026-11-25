@@ -121,9 +121,21 @@ Logs, autosave, preferences (`preferencias.json`), layouts (`.neoveglayout`), pr
 | Snapping / Auto Ripple | `F8` / `Ctrl+L` |
 | Horizontal zoom / vertical waveform zoom | `↑` / `↓` (`Shift+↑` / `Shift+↓`) |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` |
-| Event Properties | `F2` |
+| Rename Event | `F2` |
 | Neoveg Encoder / Send timeline | `Ctrl+Shift+Alt+M` / `Ctrl+Shift+M` |
 | Render to New Track | `Ctrl+M` |
+| Snap to markers / to all events | `Shift+F8` / `Ctrl+Shift+F8` |
+| Post-edit ripple: affected tracks / with buses, markers, and regions / everything | `F` / `Ctrl+F` / `Ctrl+Shift+F` |
+| Paste repeat | `Ctrl+B` |
+| Restore the previous time selection (up to 5) | `Backspace` |
+| Move the cursor by grid marks (left / right) | `PageUp` / `PageDown` |
+| Cursor to the edge of the previous / next selected event | `Ctrl+[` / `Ctrl+]` |
+| Go to start of project | `W` / `Ctrl+Home` |
+| Clear group / mute and solo only the selected track | `Ctrl+U` / `Shift+Z` / `Shift+X` |
+| Pitch +1 / −1 cent / height of all tracks | `Ctrl+=` / `Ctrl+-` / `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
+| Show / hide event headers | `Ctrl+Alt+M` |
+| Dim Master output / rebuild audio peaks | `Ctrl+Shift+F12` / `Shift+F5` |
+| Close project | `Ctrl+F4` |
 
 - **Editing tools and modes (`D` / `Shift+D`):** on the transport bar or in *Edit → Editing Tool*, switch between **Normal** (move and trim in *Normal* or *Slip* modes), **Envelope** (moves only envelope points), **Selection** (marquee box; `Shift`/`Ctrl` add), and **Zoom** (marquee zooms in; single click fits the project to the window).
 - **Fades, gain, and keyframes:** overlapping events on the same track automatically creates a crossfade; upper corner handles adjust fades, the top bar on audio clips adjusts gain in dB, and rows below the track edit *Track Motion* and track FX keyframes.

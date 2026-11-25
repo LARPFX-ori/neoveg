@@ -933,6 +933,12 @@ pub struct Dialogs {
     pub gen_editor: Option<Id>,
     pub paste_attrs_open: bool,
     pub paste_attrs_mask: neoveg_engine::session::PasteAttributesMask,
+    /// Diálogo *Colar repetindo* (Ctrl+B): número de cópias, espaçamento
+    /// uniforme (senão uma após a outra) e o passo entre os inícios.
+    pub paste_repeat_open: bool,
+    pub paste_repeat_times: u32,
+    pub paste_repeat_even: bool,
+    pub paste_repeat_every: Ticks,
     pub take_chooser: Option<Id>,
     take_chooser_selected: Option<usize>,
     take_chooser_tex: Option<(egui::TextureHandle, (Id, usize))>,
@@ -1404,6 +1410,7 @@ impl App {
         self.fx_window(ctx);
         self.gen_editor_window(ctx);
         self.paste_attributes_window(ctx);
+        self.paste_repeat_window(ctx);
         self.take_chooser_window(ctx);
         self.scene_detect_window(ctx);
         self.motion_track_window(ctx);
@@ -1865,6 +1872,81 @@ impl App {
             self.dlg.paste_attrs_open = false;
         } else if !open || cancel {
             self.dlg.paste_attrs_open = false;
+        }
+    }
+
+    /// Diálogo **Colar repetindo** (Ctrl+B; manual do VEGAS Pro 21, "Pasting
+    /// the contents of the clipboard multiple times").
+    fn paste_repeat_window(&mut self, ctx: &egui::Context) {
+        if !self.dlg.paste_repeat_open {
+            return;
+        }
+        let lang = self.lang();
+        let (fps, sr) = (self.project.settings.fps, self.project.settings.sample_rate);
+        let fmt = self.opts.time_format;
+        let has_clip = !self.clipboard.is_empty();
+        let mut times = self
+            .dlg
+            .paste_repeat_times
+            .clamp(1, neoveg_engine::session::MAX_PASTE_REPEAT);
+        let mut even = self.dlg.paste_repeat_even;
+        let mut every = self.dlg.paste_repeat_every.max(Ticks::ZERO);
+        let mut open = true;
+        let mut ok = false;
+        let mut cancel = false;
+        crate::dialog_window::DialogWindow::new(tr(lang, "Colar repetindo"))
+            .id(egui::Id::new("paste_repeat_win"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Número de vezes:"));
+                    ui.add(
+                        egui::DragValue::new(&mut times)
+                            .range(1..=neoveg_engine::session::MAX_PASTE_REPEAT),
+                    );
+                });
+                ui.radio_value(&mut even, false, tr(lang, "Uma após a outra"));
+                ui.radio_value(&mut even, true, tr(lang, "Espaçamento uniforme"));
+                ui.add_enabled_ui(even, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "Colar a cada:"));
+                        time_field(ui, &mut every, fps, sr, fmt, "paste_repeat_every");
+                    });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can = has_clip && (!even || every > Ticks::ZERO);
+                    if ui
+                        .add_enabled(can, egui::Button::new(tr(lang, "OK")))
+                        .clicked()
+                    {
+                        ok = true;
+                    }
+                    if ui.button(tr(lang, "Cancelar")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        self.dlg.paste_repeat_times = times;
+        self.dlg.paste_repeat_even = even;
+        self.dlg.paste_repeat_every = every;
+        if ok {
+            let n = self
+                .session
+                .paste_repeat(times, if even { Some(every) } else { None });
+            self.sync_after_session();
+            self.set_status(tr_args(
+                lang,
+                "{n} evento(s) colado(s) por Colar repetindo.",
+                &[("n", &n)],
+            ));
+            self.dlg.paste_repeat_open = false;
+        } else if !open || cancel {
+            self.dlg.paste_repeat_open = false;
         }
     }
 
@@ -6129,6 +6211,12 @@ fn capture_shortcut(ctx: &egui::Context) -> Option<Option<Shortcut>> {
         (Key::Backslash, ShortcutKey::Backslash),
         (Key::Equals, ShortcutKey::Equals),
         (Key::Minus, ShortcutKey::Minus),
+        (Key::Backspace, ShortcutKey::Backspace),
+        (Key::PageUp, ShortcutKey::PageUp),
+        (Key::PageDown, ShortcutKey::PageDown),
+        (Key::F4, ShortcutKey::F4),
+        (Key::F5, ShortcutKey::F5),
+        (Key::F12, ShortcutKey::F12),
     ];
     for &(ek, sk) in KEYS {
         if ctx.input(|i| i.key_pressed(ek)) {

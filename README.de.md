@@ -121,9 +121,21 @@ Logs, Autosave, Einstellungen (`preferencias.json`), Layouts (`.neoveglayout`), 
 | Einrasten (`Snapping`) / Auto-Ripple | `F8` / `Ctrl+L` |
 | Horizontaler Zoom / vertikaler Wellenform-Zoom | `↑` / `↓` (`Shift+↑` / `Shift+↓`) |
 | Rückgängig / Wiederherstellen | `Ctrl+Z` / `Ctrl+Y` |
-| Event-Eigenschaften | `F2` |
+| Event umbenennen | `F2` |
 | Neoveg Encoder / Timeline senden | `Ctrl+Shift+Alt+M` / `Ctrl+Shift+M` |
 | In neue Spur rendern | `Ctrl+M` |
+| An Markern / an allen Events ausrichten | `Shift+F8` / `Ctrl+Shift+F8` |
+| Ripple nach der Bearbeitung: betroffene Spuren / mit Bussen, Markern und Regionen / alles | `F` / `Ctrl+F` / `Ctrl+Shift+F` |
+| Wiederholt einfügen | `Ctrl+B` |
+| Vorherige Zeitauswahl wiederherstellen (bis zu 5) | `Backspace` |
+| Cursor am Raster bewegen (links / rechts) | `PageUp` / `PageDown` |
+| Cursor zum Rand des vorherigen / nächsten ausgewählten Events | `Ctrl+[` / `Ctrl+]` |
+| Zum Projektanfang | `W` / `Ctrl+Home` |
+| Gruppe auflösen / Stumm und Solo nur auf der ausgewählten Spur | `Ctrl+U` / `Shift+Z` / `Shift+X` |
+| Tonhöhe +1 / −1 Cent / Höhe aller Spuren | `Ctrl+=` / `Ctrl+-` / `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
+| Event-Kopfzeilen ein- / ausblenden | `Ctrl+Alt+M` |
+| Master-Ausgang absenken (Dim) / Audio-Peaks neu aufbauen | `Ctrl+Shift+F12` / `Shift+F5` |
+| Projekt schließen | `Ctrl+F4` |
 
 - **Bearbeitungswerkzeuge und Modi (`D` / `Shift+D`):** wechseln Sie in der Transportleiste oder unter *Bearbeiten → Bearbeitungswerkzeug* zwischen **Normal** (Verschieben und Trimmen im *Normal*- oder *Slip*-Modus), **Hüllkurve** (bewegt nur Hüllkurvenpunkte), **Auswahl** (Auswahlrahmen; `Shift`/`Ctrl` erweitern) und **Zoom** (Rahmen vergrößert; Einzelklick passt das Projekt ans Fenster an).
 - **Blenden, Pegel und Keyframes:** überlappende Events derselben Spur erzeugen automatisch ein Crossfade; die oberen Eckanfasser steuern Blenden, die obere Leiste von Audioclips regelt den Pegel in dB, und die Zeilen unterhalb der Spur bearbeiten Keyframes für *Track Motion* und Spureffekte.
