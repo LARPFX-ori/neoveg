@@ -3396,6 +3396,10 @@ impl App {
         if crate::track_motion_window::window_owns_keys(ctx, self.dlg.tm_kb_rect) {
             return;
         }
+        // idem para o Mixer: Q, U, A, T, F, H, M, S, D/N/W e Shift+C
+        if crate::panels::mixer_owns_keys(ctx, self.mixer_ui.kb_rect) {
+            return;
+        }
 
         // Alias clássico Ctrl+Shift+Z para Refazer além do Ctrl+Y da tabela
         if ctrl && shift && !alt && pressed(Key::Z) {

@@ -61,6 +61,11 @@ pub struct MixerConsoleState {
     pub show_meters: bool,
     pub show_faders: bool,
     pub strip_width: f32,
+    /// Área do painel e o quadro (`cumulative_pass_nr`) em que foi
+    /// desenhado na janela principal: com o mouse sobre ela, as teclas do
+    /// Mixer não chegam à timeline. Vale só a do quadro anterior (a aba pode
+    /// ficar escondida atrás de outra).
+    pub kb_rect: Option<(Rect, u64)>,
 }
 
 impl Default for MixerConsoleState {
@@ -78,11 +83,119 @@ impl Default for MixerConsoleState {
             show_meters: true,
             show_faders: true,
             strip_width: 112.0,
+            kb_rect: None,
         }
     }
 }
 
+/// Ação de uma tecla do Console de Mixagem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MixerKey {
+    ChannelList,
+    AllStrips,
+    BusStrips,
+    TrackStrips,
+    MasterStrip,
+    Faders,
+    Io,
+    Meters,
+    Sends,
+    WidthDefault,
+    WidthNarrow,
+    WidthWide,
+}
+
+/// Larguras das tiras para D (padrão), N (estreita) e W (larga).
+const STRIP_DEFAULT: f32 = 112.0;
+const STRIP_NARROW: f32 = 84.0;
+const STRIP_WIDE: f32 = 156.0;
+
+/// Tecla → ação, como na lista de atalhos do VEGAS Pro 21 ("Mixing
+/// Console"): Shift+C, Q, U, A, T, F, H, M, S e D/N/W. Com Ctrl ou Alt não
+/// é tecla do Mixer. As que o Neoveg ainda não tem (E, P, I, Shift+T,
+/// Shift+L, Shift+H) não são tratadas.
+pub(crate) fn mixer_key(ctrl: bool, shift: bool, alt: bool, key: egui::Key) -> Option<MixerKey> {
+    use egui::Key as K;
+    if ctrl || alt {
+        return None;
+    }
+    Some(match (shift, key) {
+        (true, K::C) => MixerKey::ChannelList,
+        (false, K::Q) => MixerKey::AllStrips,
+        (false, K::U) => MixerKey::BusStrips,
+        (false, K::A) => MixerKey::TrackStrips,
+        (false, K::T) => MixerKey::MasterStrip,
+        (false, K::F) => MixerKey::Faders,
+        (false, K::H) => MixerKey::Io,
+        (false, K::M) => MixerKey::Meters,
+        (false, K::S) => MixerKey::Sends,
+        (false, K::D) => MixerKey::WidthDefault,
+        (false, K::N) => MixerKey::WidthNarrow,
+        (false, K::W) => MixerKey::WidthWide,
+        _ => return None,
+    })
+}
+
+/// Com o mouse sobre o Mixer (`rect`), alguma tecla deste quadro é dele.
+pub(crate) fn mixer_owns_keys(ctx: &egui::Context, rect: Option<(Rect, u64)>) -> bool {
+    let Some((rect, pass)) = rect else {
+        return false;
+    };
+    if pass.saturating_add(1) < ctx.cumulative_pass_nr() {
+        return false;
+    }
+    ctx.input(|i| {
+        i.pointer.hover_pos().is_some_and(|p| rect.contains(p))
+            && i.events.iter().any(|e| {
+                matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. }
+                    if mixer_key(modifiers.command || modifiers.ctrl, modifiers.shift, modifiers.alt, *key).is_some())
+            })
+    })
+}
+
+/// Alterna a visibilidade de um grupo de tiras: mostra todas se todas
+/// estão ocultas, senão oculta todas.
+fn toggle_group(hidden: &mut HashSet<Id>, ids: &[Id]) {
+    if !ids.is_empty() && ids.iter().all(|id| hidden.contains(id)) {
+        for id in ids {
+            hidden.remove(id);
+        }
+    } else {
+        hidden.extend(ids.iter().copied());
+    }
+}
+
 impl MixerConsoleState {
+    /// Aplica uma tecla do Mixer. `tracks` e `buses` são os ids das faixas de
+    /// áudio e dos barramentos do projeto.
+    pub(crate) fn apply_key(&mut self, k: MixerKey, tracks: &[Id], buses: &[Id]) {
+        match k {
+            MixerKey::ChannelList => self.sidebar_open = !self.sidebar_open,
+            MixerKey::AllStrips => {
+                let all_hidden = self.hide_master
+                    && tracks.iter().all(|id| self.hidden_tracks.contains(id))
+                    && buses.iter().all(|id| self.hidden_buses.contains(id));
+                if all_hidden {
+                    self.show_all_channels();
+                } else {
+                    self.hidden_tracks.extend(tracks.iter().copied());
+                    self.hidden_buses.extend(buses.iter().copied());
+                    self.hide_master = true;
+                }
+            }
+            MixerKey::BusStrips => toggle_group(&mut self.hidden_buses, buses),
+            MixerKey::TrackStrips => toggle_group(&mut self.hidden_tracks, tracks),
+            MixerKey::MasterStrip => self.hide_master = !self.hide_master,
+            MixerKey::Faders => self.show_faders = !self.show_faders,
+            MixerKey::Io => self.show_io = !self.show_io,
+            MixerKey::Meters => self.show_meters = !self.show_meters,
+            MixerKey::Sends => self.show_sends = !self.show_sends,
+            MixerKey::WidthDefault => self.strip_width = STRIP_DEFAULT,
+            MixerKey::WidthNarrow => self.strip_width = STRIP_NARROW,
+            MixerKey::WidthWide => self.strip_width = STRIP_WIDE,
+        }
+    }
+
     pub fn show_all_channels(&mut self) {
         self.hidden_tracks.clear();
         self.hidden_buses.clear();
@@ -2958,6 +3071,56 @@ impl App {
 
     fn mixer_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
+        // teclas do Mixer (lista do VEGAS Pro 21, "Mixing Console") com o
+        // mouse sobre o painel
+        let area = ui.max_rect();
+        self.mixer_ui.kb_rect = (ui.ctx().viewport_id() == egui::ViewportId::ROOT)
+            .then(|| (area, ui.ctx().cumulative_pass_nr()));
+        if !ui.ctx().wants_keyboard_input() && ui.rect_contains_pointer(area) {
+            let keys: Vec<crate::panels::MixerKey> = ui.input_mut(|i| {
+                let presses: Vec<(egui::Modifiers, egui::Key)> = i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                            ..
+                        } => Some((*modifiers, *key)),
+                        _ => None,
+                    })
+                    .collect();
+                presses
+                    .into_iter()
+                    .filter_map(|(m, k)| {
+                        let mk = mixer_key(m.command || m.ctrl, m.shift, m.alt, k)?;
+                        i.consume_key(m, k).then_some(mk)
+                    })
+                    .collect()
+            });
+            if !keys.is_empty() {
+                let tracks: Vec<Id> = self
+                    .session
+                    .project
+                    .tracks
+                    .iter()
+                    .filter(|t| t.kind == TrackKind::Audio)
+                    .map(|t| t.id)
+                    .collect();
+                let buses: Vec<Id> = self
+                    .session
+                    .project
+                    .audio_buses
+                    .iter()
+                    .map(|b| b.id)
+                    .collect();
+                for k in keys {
+                    self.mixer_ui.apply_key(k, &tracks, &buses);
+                }
+            }
+        }
         let sr_s = self.project.settings.sample_rate.to_string();
         let bits_s = self.project.settings.audio_bit_depth.to_string();
         ui.horizontal_wrapped(|ui| {
@@ -4605,6 +4768,43 @@ mod safe_guide_tests {
             preview_footer_scaled_flags((1920, 1080), (960, 540), (640, 360)),
             (true, true)
         );
+    }
+
+    #[test]
+    fn teclas_do_mixer_seguem_o_vegas() {
+        use egui::Key as K;
+        assert_eq!(
+            mixer_key(false, true, false, K::C),
+            Some(MixerKey::ChannelList)
+        );
+        assert_eq!(
+            mixer_key(false, false, false, K::Q),
+            Some(MixerKey::AllStrips)
+        );
+        assert_eq!(
+            mixer_key(false, false, false, K::W),
+            Some(MixerKey::WidthWide)
+        );
+        // Ctrl+Q (nova trilha de áudio) e Alt+... continuam globais
+        assert_eq!(mixer_key(true, false, false, K::Q), None);
+        assert_eq!(mixer_key(false, false, true, K::M), None);
+        assert_eq!(mixer_key(false, false, false, K::E), None);
+
+        let mut st = MixerConsoleState::default();
+        let (tracks, buses) = ([1, 2], [7]);
+        st.apply_key(MixerKey::TrackStrips, &tracks, &buses);
+        assert!(st.hidden_tracks.contains(&1) && st.hidden_tracks.contains(&2));
+        st.apply_key(MixerKey::TrackStrips, &tracks, &buses);
+        assert!(st.hidden_tracks.is_empty());
+        st.apply_key(MixerKey::AllStrips, &tracks, &buses);
+        assert!(st.hide_master && st.hidden_buses.contains(&7) && st.hidden_tracks.len() == 2);
+        st.apply_key(MixerKey::AllStrips, &tracks, &buses);
+        assert!(!st.hide_master && st.hidden_buses.is_empty() && st.hidden_tracks.is_empty());
+        st.apply_key(MixerKey::WidthNarrow, &tracks, &buses);
+        assert_eq!(st.clamped_strip_width(), 84.0);
+        // projeto sem barramentos: U não trava nem muda nada estranho
+        st.apply_key(MixerKey::BusStrips, &tracks, &[]);
+        assert!(st.hidden_buses.is_empty());
     }
 
     #[test]
