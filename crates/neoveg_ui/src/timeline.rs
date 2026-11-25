@@ -280,6 +280,12 @@ pub struct TimelineState {
     pub drop_context_menu: Option<DropContextMenuState>,
     /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
     pub kf_collapsed: HashSet<Id>,
+    /// Trilhas de vídeo com *Expandir camadas da trilha* ligado: rolo A em
+    /// cima, rolo de transição no meio e rolo B embaixo (estado de exibição).
+    pub layers_expanded: HashSet<Id>,
+    /// Rolo de cada evento das trilhas expandidas (0 = A, 1 = B), refeito a
+    /// cada quadro ao desenhar as trilhas.
+    layer_row: HashMap<Id, u8>,
     /// Ponto atual da caixa das ferramentas Seleção e Zoom.
     box_cur: Option<Pos2>,
     /// Origem e seleção de tempo anterior ao arrastar espaço vazio (permite
@@ -321,6 +327,8 @@ impl Default for TimelineState {
             drop_hint: None,
             drop_context_menu: None,
             kf_collapsed: HashSet::new(),
+            layers_expanded: HashSet::new(),
+            layer_row: HashMap::new(),
             box_cur: None,
             time_sel_origin: None,
             suppress_ctx_menu: false,
@@ -608,9 +616,16 @@ impl App {
     }
 
     fn event_rect(&self, e: &Event, left: f32, y0: f32, h: f32) -> Rect {
+        // camadas expandidas: o evento ocupa o terço do rolo A (em cima) ou
+        // do rolo B (embaixo); o terço do meio é o rolo de transição
+        let (top, bottom) = match self.tl.layer_row.get(&e.id) {
+            Some(0) => (y0 + 1.0, y0 + h / 3.0),
+            Some(_) => (y0 + h * 2.0 / 3.0, y0 + h - 1.0),
+            None => (y0 + 1.0, y0 + h - 1.0),
+        };
         Rect::from_min_max(
-            pos2(self.tl.t2x(e.start, left), y0 + 1.0),
-            pos2(self.tl.t2x(e.end(), left), y0 + h - 1.0),
+            pos2(self.tl.t2x(e.start, left), top),
+            pos2(self.tl.t2x(e.end(), left), bottom.max(top + 1.0)),
         )
     }
 
@@ -4135,6 +4150,20 @@ impl App {
             self.dlg.track_motion = Some(tid);
             ui.close_menu();
         }
+        if kind == TrackKind::Video {
+            let mut on = self.tl.layers_expanded.contains(&tid);
+            if ui
+                .checkbox(&mut on, tr(lang, "Expandir camadas da trilha"))
+                .changed()
+            {
+                if on {
+                    self.tl.layers_expanded.insert(tid);
+                } else {
+                    self.tl.layers_expanded.remove(&tid);
+                }
+                ui.close_menu();
+            }
+        }
         ui.separator();
         let envs: &[EnvKind] = if kind == TrackKind::Audio {
             &[EnvKind::Volume, EnvKind::Pan]
@@ -7201,6 +7230,16 @@ impl App {
             painter.rect_filled(r, 0.0, self.theme.tl_sel_band);
         }
         let audio_map = self.media.audio_map();
+        // `project` vem por Deref do App: calcula antes de mexer em `self.tl`
+        let rolls: Vec<(Id, u8)> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video && self.tl.layers_expanded.contains(&t.id))
+            .flat_map(|t| ab_rolls(&t.events))
+            .collect();
+        self.tl.layer_row.clear();
+        self.tl.layer_row.extend(rolls);
         let sync_masters: HashSet<Id> = self
             .project
             .tracks
@@ -7237,6 +7276,32 @@ impl App {
             let track = self.project.tracks[ti].clone();
             let muted = track.mute;
             let xfades = neoveg_engine::crossfade::track_crossfades(&track, true);
+            if track.kind == TrackKind::Video && self.tl.layers_expanded.contains(&track.id) {
+                // rolo de transição: faixa do meio, com as sobreposições
+                let roll = Rect::from_min_max(
+                    pos2(lane.left(), y0 + h / 3.0),
+                    pos2(lane.right(), y0 + h * 2.0 / 3.0),
+                );
+                painter.rect_filled(roll, 0.0, self.theme.tl_lane_even);
+                for xf in &xfades {
+                    let r = Rect::from_min_max(
+                        pos2(self.tl.t2x(xf.start, left), roll.top() + 1.0),
+                        pos2(self.tl.t2x(xf.end, left), roll.bottom() - 1.0),
+                    );
+                    if r.right() < lanes.left() || r.left() > lanes.right() {
+                        continue;
+                    }
+                    painter.rect_filled(r, 2.0, self.theme.tl_crossfade);
+                    painter.line_segment(
+                        [r.left_bottom(), r.right_top()],
+                        Stroke::new(1.0_f32, self.theme.text_primary),
+                    );
+                    painter.line_segment(
+                        [r.left_top(), r.right_bottom()],
+                        Stroke::new(1.0_f32, self.theme.text_primary),
+                    );
+                }
+            }
             for e in &track.events {
                 let r = self.event_rect(e, left, y0, h);
                 if r.right() < lanes.left() || r.left() > lanes.right() {
@@ -8420,6 +8485,19 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
     }
 }
 
+/// Rolos A/B de *Expandir camadas da trilha* (manual do VEGAS Pro 21,
+/// "Expanding or collapsing track layers"): os eventos seguidos, em ordem de
+/// início, se alternam entre o rolo A (0) e o rolo B (1).
+fn ab_rolls(events: &[Event]) -> Vec<(Id, u8)> {
+    let mut order: Vec<(Ticks, Id)> = events.iter().map(|e| (e.start, e.id)).collect();
+    order.sort();
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, id))| (id, (i % 2) as u8))
+        .collect()
+}
+
 /// O menu de contexto das trilhas deixa de ser desenhado neste quadro?
 ///
 /// Segurar o botão esquerdo (ou a caixa de seleção) impede **abrir** o menu,
@@ -8434,6 +8512,42 @@ fn lane_ctx_menu_suppressed(
     box_drag: bool,
 ) -> bool {
     !menu_open && (suppress_flag || primary_down || box_drag)
+}
+
+#[cfg(test)]
+mod layers_tests {
+    use super::*;
+
+    #[test]
+    fn rolos_alternam_pela_ordem_de_inicio() {
+        let m = MediaItem {
+            id: 1,
+            name: "m".into(),
+            source: MediaSource::Generated(GenSpec::SolidColor {
+                color: [0.0, 0.0, 0.0, 1.0],
+            }),
+            duration: Some(Ticks::from_secs_i64(10)),
+            has_video: true,
+            has_audio: false,
+            width: 16,
+            height: 16,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let s = Ticks::from_secs_i64;
+        // fora de ordem no vetor: a ordem que vale é a do início
+        let c = Event::new(&m, s(4), s(2));
+        let a = Event::new(&m, s(0), s(2));
+        let b = Event::new(&m, s(1), s(2));
+        let rolls: HashMap<Id, u8> = ab_rolls(&[c.clone(), a.clone(), b.clone()])
+            .into_iter()
+            .collect();
+        assert_eq!(rolls.get(&a.id), Some(&0));
+        assert_eq!(rolls.get(&b.id), Some(&1));
+        assert_eq!(rolls.get(&c.id), Some(&0));
+        assert!(ab_rolls(&[]).is_empty());
+    }
 }
 
 #[cfg(test)]
