@@ -137,6 +137,8 @@ enum PcAction {
     MoveKey(usize, Ticks),
     DeleteKey(usize),
     SetCurve(usize, Curve),
+    /// Bézier do quadro-chave de posição (índice, Bézier, alça de saída mexida).
+    SetEase(usize, neoveg_common::ease::KeyEase, bool),
     MaintainAspect(bool),
     StretchToFill(bool),
     ToggleMaskEnabled(bool),
@@ -404,12 +406,16 @@ impl App {
                 KfRow {
                     label: tr(lang, "Posição"),
                     keys: ev.pan_crop.keys.iter().map(|k| (k.t, k.curve)).collect(),
+                    eases: ev.pan_crop.keys.iter().map(|k| k.ease).collect(),
+                    bezier: true,
                     checked: None,
                     selected: !st.mask_mode,
                 },
                 KfRow {
                     label: tr(lang, "Máscara"),
                     keys: mask_keys,
+                    eases: Vec::new(),
+                    bezier: false,
                     checked: Some(ev.pan_crop_mask_enabled),
                     selected: st.mask_mode,
                 },
@@ -466,6 +472,11 @@ impl App {
                     actions.push(PcAction::SetMaskCurve(Some(ki), c));
                 } else {
                     actions.push(PcAction::SetCurve(ki, c));
+                }
+            }
+            if let Some((ri, ki, e, edited_out)) = out.set_ease {
+                if ri == 0 {
+                    actions.push(PcAction::SetEase(ki, e, edited_out));
                 }
             }
             if let Some((ri, ki)) = out.delete_key {
@@ -835,28 +846,50 @@ impl App {
                     kf_window::paint_curve_preview(ui, c, sm, th);
                 } else {
                     let current = ev.pan_crop.keys.get(key_idx).map(|k| k.curve);
-                    let mut c = current.unwrap_or_default();
+                    let cur_ease = ev.pan_crop.keys.get(key_idx).and_then(|k| k.ease);
+                    let c = current.unwrap_or_default();
                     kf_window::prop_row(ui, tr(lang, "Tipo:"), |ui| {
-                        egui::ComboBox::from_id_salt("pc_curve")
-                            .selected_text(c.name_in(lang))
-                            .show_ui(ui, |ui| {
-                                for k in Curve::ALL.iter().take(6) {
-                                    ui.selectable_value(&mut c, *k, k.name_in(lang));
-                                }
-                            });
-                        if current.is_some() && Some(c) != current {
-                            actions.push(PcAction::SetCurve(key_idx, c));
+                        let choice =
+                            kf_window::interp_combo(ui, "pc_curve", current, cur_ease, lang);
+                        match choice {
+                            _ if current.is_none() => {}
+                            Some(kf_window::InterpChoice::Curve(nc)) => {
+                                actions.push(PcAction::SetCurve(key_idx, nc));
+                            }
+                            Some(kf_window::InterpChoice::Ease(e)) => {
+                                actions.push(PcAction::SetEase(key_idx, e, true));
+                            }
+                            None => {}
                         }
                     });
-                    let mut sm = cur.smoothness_safe();
-                    if kf_window::prop_num(ui, tr(lang, "Suavidade:"), &mut sm, 1.0, 0, 0.0..=100.0)
-                    {
-                        out = Some(PanCropKey {
-                            smoothness: sm,
-                            ..out.clone().unwrap_or_else(|| cur.clone())
+                    if let Some(e) = cur_ease {
+                        // Bézier: velocidade e influência no lugar da suavidade
+                        if let Some((ne, edited_out)) = kf_window::ease_fields(ui, e, lang) {
+                            actions.push(PcAction::SetEase(key_idx, ne, edited_out));
+                        }
+                        let sides =
+                            neoveg_common::ease::segment_sides(&ev.pan_crop.ease_keys(), key_idx);
+                        kf_window::paint_progress_preview(ui, th, |u| match sides {
+                            Some((o, i)) => neoveg_common::ease::bezier_progress(o, i, u),
+                            None => u,
                         });
+                    } else {
+                        let mut sm = cur.smoothness_safe();
+                        if kf_window::prop_num(
+                            ui,
+                            tr(lang, "Suavidade:"),
+                            &mut sm,
+                            1.0,
+                            0,
+                            0.0..=100.0,
+                        ) {
+                            out = Some(PanCropKey {
+                                smoothness: sm,
+                                ..out.clone().unwrap_or_else(|| cur.clone())
+                            });
+                        }
+                        kf_window::paint_curve_preview(ui, c, sm, th);
                     }
-                    kf_window::paint_curve_preview(ui, c, sm, th);
                 }
             },
         );
@@ -1794,11 +1827,13 @@ impl App {
                                 t: Ticks::ZERO,
                                 value: k0,
                                 curve: Curve::Linear,
+                                ease: None,
                             },
                             Keyframe {
                                 t: len,
                                 value: k1,
                                 curve: Curve::Linear,
+                                ease: None,
                             },
                         ];
                     }
@@ -1842,6 +1877,20 @@ impl App {
                         continue;
                     };
                     k.curve = *c;
+                    // escolher uma curva do VEGAS desliga o Bézier
+                    k.ease = None;
+                }
+                PcAction::SetEase(ki, ease, edited_out) => {
+                    if e.pan_crop
+                        .keys
+                        .get(*ki)
+                        .is_some_and(|k| k.ease == Some(*ease))
+                    {
+                        continue;
+                    }
+                    if !e.pan_crop.set_ease(*ki, Some(*ease), *edited_out) {
+                        continue;
+                    }
                 }
                 PcAction::MaintainAspect(v) => e.maintain_aspect = *v,
                 PcAction::StretchToFill(v) => e.pan_crop_stretch_to_fill = *v,

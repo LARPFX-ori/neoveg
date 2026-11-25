@@ -14,6 +14,7 @@
 )]
 
 pub mod curve;
+pub mod ease;
 pub mod error;
 pub mod i18n;
 pub mod prefs;
