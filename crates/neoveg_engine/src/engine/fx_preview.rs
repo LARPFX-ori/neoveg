@@ -10,6 +10,58 @@ use crate::model::{FrameRate, FxInstance, OfxFxRef, Ticks, TransitionKind};
 pub const THUMB_W: usize = 96;
 pub const THUMB_H: usize = 54;
 
+/// Tamanho das miniaturas de presets na janela *Efeitos de Vídeo* (16:9).
+pub const FX_PRESET_THUMB_W: usize = 144;
+pub const FX_PRESET_THUMB_H: usize = 81;
+
+/// Converte uma imagem RGBA de vídeo/evento em `Frame` pré-multiplicado de
+/// tamanho `w × h`, preservando a proporção sobre fundo neutro escuro.
+pub fn frame_from_rgba(img: &image::RgbaImage, w: usize, h: usize) -> Frame {
+    if w == 0 || h == 0 || img.width() == 0 || img.height() == 0 {
+        return Frame::new(w, h);
+    }
+    let mut out = Frame::filled(w, h, [0.06, 0.06, 0.07, 1.0]);
+    let scale = (w as f32 / img.width() as f32).min(h as f32 / img.height() as f32);
+    let dw = ((img.width() as f32 * scale).round() as u32).clamp(1, w as u32);
+    let dh = ((img.height() as f32 * scale).round() as u32).clamp(1, h as u32);
+    let resized = if img.width() == dw && img.height() == dh {
+        std::borrow::Cow::Borrowed(img)
+    } else {
+        std::borrow::Cow::Owned(image::imageops::resize(
+            img,
+            dw,
+            dh,
+            image::imageops::FilterType::Triangle,
+        ))
+    };
+    let ox = (w.saturating_sub(dw as usize)) / 2;
+    let oy = (h.saturating_sub(dh as usize)) / 2;
+    for y in 0..dh as usize {
+        for x in 0..dw as usize {
+            let p = resized.get_pixel(x as u32, y as u32).0;
+            let a = f32::from(p[3]) / 255.0;
+            let r = (f32::from(p[0]) / 255.0) * a;
+            let g = (f32::from(p[1]) / 255.0) * a;
+            let b = (f32::from(p[2]) / 255.0) * a;
+            if let Some(dst) = out.px.get_mut((oy + y) * w + (ox + x)) {
+                *dst = [r, g, b, a];
+            }
+        }
+    }
+    out
+}
+
+/// Aplica `fx` sobre um quadro-base fornecido (por exemplo, o quadro do evento
+/// selecionado na timeline) no tempo `t`.
+pub fn render_preview_on_frame(base: &Frame, fx: &FxInstance, t: Ticks, fps: FrameRate) -> Frame {
+    if base.w == 0 || base.h == 0 {
+        return Frame::new(0, 0);
+    }
+    let mut f = base.clone();
+    vfx::apply(fx, &mut f, t, fps);
+    f
+}
+
 /// Quadro de amostra: céu em gradiente, uma faixa de cores primárias, um
 /// tom de pele e uma área verde (para o Chroma Key mostrar o recorte).
 pub fn sample_frame(w: usize, h: usize) -> Frame {
@@ -249,5 +301,50 @@ mod tests {
         assert_eq!(b.px.len(), THUMB_W * THUMB_H);
         assert_ne!(a.px, b.px);
         assert!(b.px.iter().all(|p| p.iter().all(|c| c.is_finite())));
+    }
+
+    #[test]
+    fn previa_sobre_quadro_do_evento_preserva_dimensao_e_aplica_efeito() {
+        let mut src = image::RgbaImage::new(160, 120);
+        for (x, y, px) in src.enumerate_pixels_mut() {
+            *px = image::Rgba([
+                (x as u8).wrapping_mul(2),
+                (y as u8).wrapping_mul(2),
+                180,
+                255,
+            ]);
+        }
+        let base = frame_from_rgba(&src, FX_PRESET_THUMB_W, FX_PRESET_THUMB_H);
+        assert_eq!(
+            (base.w, base.h, base.px.len()),
+            (
+                FX_PRESET_THUMB_W,
+                FX_PRESET_THUMB_H,
+                FX_PRESET_THUMB_W * FX_PRESET_THUMB_H
+            )
+        );
+        let inv = render_preview_on_frame(
+            &base,
+            &FxInstance::new(FxKind::Invert),
+            Ticks::ZERO,
+            FrameRate::FPS_30,
+        );
+        assert_ne!(inv.px, base.px);
+        assert!(inv.px.iter().all(|p| p.iter().all(|c| c.is_finite())));
+
+        // Dimensões hostis (0x0) nunca entram em pânico
+        let empty = frame_from_rgba(
+            &image::RgbaImage::new(0, 0),
+            FX_PRESET_THUMB_W,
+            FX_PRESET_THUMB_H,
+        );
+        assert_eq!(empty.px.len(), FX_PRESET_THUMB_W * FX_PRESET_THUMB_H);
+        let zero = render_preview_on_frame(
+            &Frame::new(0, 0),
+            &FxInstance::new(FxKind::GaussianBlur),
+            Ticks::ZERO,
+            FrameRate::FPS_30,
+        );
+        assert!(zero.px.is_empty());
     }
 }
