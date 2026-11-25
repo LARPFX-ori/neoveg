@@ -430,10 +430,11 @@ impl App {
 
     /// A ferramenta como item do menu "⋯". Os itens têm o mesmo nome
     /// acessível do botão da barra.
-    fn preview_tool_menu(&mut self, ui: &mut egui::Ui, tool: PreviewTool) {
+    pub(crate) fn preview_tool_menu(&mut self, ui: &mut egui::Ui, tool: PreviewTool) {
         let lang = self.lang();
         let toggle = |ui: &mut egui::Ui, on: bool, label: &str| {
-            ui.add(egui::Button::new(label).selected(on)).clicked()
+            ui.add(egui::Button::new(tr(lang, label)).selected(on))
+                .clicked()
         };
         match tool {
             PreviewTool::ProjectProps => self.cmd_menu_btn(ui, "file.project_props"),
@@ -484,7 +485,7 @@ impl App {
                 });
             }
             PreviewTool::CopyFrame => {
-                if ui.button("Copiar quadro").clicked() {
+                if ui.button(tr(lang, "Copiar quadro")).clicked() {
                     self.copy_preview_frame_to_clipboard(Some(ui.ctx()));
                     ui.close_menu();
                 }
@@ -558,11 +559,35 @@ impl App {
                 }
             }
             PreviewTool::ClearRam => {
-                if ui.button("Limpar RAM").clicked() {
+                if ui.button(tr(lang, "Limpar RAM")).clicked() {
                     self.clear_ram_preview();
                     ui.close_menu();
                 }
             }
+        }
+    }
+
+    /// Menu de contexto da Prévia de Vídeo (botão direito sobre a imagem),
+    /// com os comandos da barra da prévia agrupados como no VEGAS Pro:
+    /// qualidade e zoom, tela dividida, sobreposições, quadro atual, áudio e
+    /// vídeo da prévia, RAM e saída. Antes tinha só "Simular proporção".
+    pub(crate) fn preview_context_menu(&mut self, ui: &mut egui::Ui, is_floating: bool) {
+        let lang = self.lang();
+        for group in preview_context_groups(!self.ram_preview.frames.is_empty(), is_floating) {
+            for tool in group {
+                self.preview_tool_menu(ui, *tool);
+            }
+            ui.separator();
+        }
+        if ui
+            .checkbox(
+                &mut self.prefs.preview_simulate_device_aspect,
+                tr(lang, "Simular proporção do dispositivo"),
+            )
+            .changed()
+        {
+            let _ = self.prefs.save();
+            ui.close_menu();
         }
     }
 
@@ -578,9 +603,10 @@ impl App {
             }
         }
         ui.separator();
+        let lang = self.lang();
         ui.checkbox(
             &mut self.opts.preview_split_horizontal,
-            "Divisão horizontal",
+            tr(lang, "Divisão horizontal"),
         );
     }
 
@@ -627,5 +653,68 @@ impl App {
             self.exec_cmd(Some(ui.ctx()), "preview.zoom_bypass");
             ui.close_menu();
         }
+    }
+}
+
+/// Grupos do menu de contexto da Prévia. `ram_frames`: há quadros em RAM
+/// (mostra Limpar RAM); `is_floating`: a prévia já está em janela própria.
+pub(crate) fn preview_context_groups(
+    ram_frames: bool,
+    is_floating: bool,
+) -> Vec<&'static [PreviewTool]> {
+    use PreviewTool as T;
+    let mut groups: Vec<&'static [PreviewTool]> = vec![
+        &[T::Quality, T::Zoom],
+        &[T::Split, T::SplitMode, T::Overlays],
+        &[T::CopyFrame, T::SaveFrame],
+        &[T::MuteAudio, T::MuteVideo],
+    ];
+    groups.push(if ram_frames {
+        &[T::RamPreview, T::ClearRam]
+    } else {
+        &[T::RamPreview]
+    });
+    groups.push(if is_floating {
+        &[T::ExternalMonitor, T::OutputFx, T::ProjectProps]
+    } else {
+        &[T::ExternalMonitor, T::OutputFx, T::ProjectProps, T::PopOut]
+    });
+    groups
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+
+    #[test]
+    fn menu_de_contexto_da_previa_tem_os_comandos_da_barra() {
+        let all: Vec<PreviewTool> = preview_context_groups(true, false)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        for t in [
+            PreviewTool::Quality,
+            PreviewTool::Zoom,
+            PreviewTool::Split,
+            PreviewTool::Overlays,
+            PreviewTool::CopyFrame,
+            PreviewTool::SaveFrame,
+            PreviewTool::ClearRam,
+            PreviewTool::PopOut,
+        ] {
+            assert!(all.contains(&t), "{t:?} fora do menu");
+        }
+        // sem quadros em RAM não há Limpar RAM; em janela própria não há Destacar
+        let solto: Vec<PreviewTool> = preview_context_groups(false, true)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        assert!(!solto.contains(&PreviewTool::ClearRam));
+        assert!(!solto.contains(&PreviewTool::PopOut));
+        // nenhum item repetido
+        let mut seen = std::collections::HashSet::new();
+        assert!(all.iter().all(|t| seen.insert(format!("{t:?}"))));
     }
 }

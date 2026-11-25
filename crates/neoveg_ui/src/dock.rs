@@ -101,6 +101,7 @@ pub fn dock_tab_icon(tab: DockTab) -> Icon {
         DockTab::Notes => Icon::NotesPad,
         DockTab::Encoder => Icon::EncoderQueue,
         DockTab::Transcript => Icon::NotesPad,
+        DockTab::Store => Icon::PluginPlug,
     }
 }
 
@@ -1162,6 +1163,41 @@ impl NeovegTileBehavior<'_> {
             DockPane::MasterBus => self.app.master_bus_panel(ui, false),
         }
     }
+
+    /// Contorno do painel em uso, como no Premiere Pro: o último painel
+    /// clicado ganha uma borda na cor de destaque do tema. Clicar fora de
+    /// qualquer painel (timeline, menus) tira o destaque.
+    fn focus_outline(&mut self, ui: &Ui, pane: DockPane) {
+        let rect = ui.max_rect();
+        let layer = ui.layer_id();
+        let press = ui.input(|i| {
+            if i.pointer.any_pressed() {
+                i.pointer.interact_pos()
+            } else {
+                None
+            }
+        });
+        if let Some(p) = press {
+            // um clique numa janela flutuante por cima do painel não conta
+            // clique em janela, menu ou popup por cima não mexe no destaque
+            let covered = ui.ctx().layer_id_at(p).is_some_and(|l| l != layer);
+            if !covered {
+                if rect.contains(p) {
+                    self.app.focused_pane = Some(pane);
+                } else if self.app.focused_pane == Some(pane) {
+                    self.app.focused_pane = None;
+                }
+            }
+        }
+        if self.app.focused_pane == Some(pane) {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                3.0_f32,
+                egui::Stroke::new(1.5_f32, self.app.theme.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
 }
 
 impl Behavior<DockPane> for NeovegTileBehavior<'_> {
@@ -1179,6 +1215,7 @@ impl Behavior<DockPane> for NeovegTileBehavior<'_> {
         } else {
             self.draw_bottom_tab_strip(ui, tile_id, *pane);
         }
+        self.focus_outline(ui, *pane);
         UiResponse::None
     }
 
