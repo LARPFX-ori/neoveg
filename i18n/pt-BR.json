@@ -2861,7 +2861,7 @@
   "trilha \"{name}\"": "trilha \"{name}\"",
   "uso inválido: {msg}\n{help}": "uso inválido: {msg}\n{help}",
   "visual renovado, timeline sempre embaixo (versão 23 em diante)": "visual renovado, timeline sempre embaixo (versão 23 em diante)",
-  "v{ver} • {n} worker(s)": "v{ver} • {n} worker(s)",
+  "v{ver} • {n} worker(s)": "v{ver} • {n} linha(s) de processamento",
   "zoom out": "zoom out",
   "{added} legenda(s) importada(s) de {path}": "{added} legenda(s) importada(s) de {path}",
   "{added} novo(s) arquivo(s) encontrado(s)": "{added} novo(s) arquivo(s) encontrado(s)",
