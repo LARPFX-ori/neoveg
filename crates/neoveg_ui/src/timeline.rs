@@ -9051,8 +9051,10 @@ mod zoom_tests {
     #[test]
     fn regua_drop_frame_marca_segundos_inteiros_sem_29() {
         use neoveg_engine::session::RulerGridSpacing as G;
-        let mut settings = ProjectSettings::default();
-        settings.fps = FrameRate::FPS_29_97;
+        let mut settings = ProjectSettings {
+            fps: FrameRate::FPS_29_97,
+            ..ProjectSettings::default()
+        };
         let grid = effective_ruler_grid(G::Auto, TimeFormat::SmpteDrop, 60.0, &settings, 1440.0);
         let marks = grid.marks_in_range(Ticks::ZERO, Ticks::from_secs_i64(25), true);
         let labels: Vec<String> = marks
