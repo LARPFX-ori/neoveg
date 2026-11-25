@@ -3391,6 +3391,12 @@ impl App {
             return;
         }
 
+        // Movimento da trilha acoplada com o mouse sobre ela: A, C, O, X, Y,
+        // Z, F8 e 1–6 são teclas da janela (lista do VEGAS Pro), não da timeline
+        if crate::track_motion_window::window_owns_keys(ctx, self.dlg.tm_kb_rect) {
+            return;
+        }
+
         // Alias clássico Ctrl+Shift+Z para Refazer além do Ctrl+Y da tabela
         if ctrl && shift && !alt && pressed(Key::Z) {
             self.exec_cmd(Some(ctx), "edit.redo");

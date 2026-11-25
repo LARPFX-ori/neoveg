@@ -919,6 +919,10 @@ pub struct Dialogs {
     pub event_props: Option<Id>,
     pub pan_crop: Option<Id>,
     pub track_motion: Option<Id>,
+    /// Área da janela Movimento da trilha quando acoplada na janela
+    /// principal (quadro anterior): com o mouse sobre ela, as teclas da
+    /// janela não chegam aos atalhos da timeline.
+    pub(crate) tm_kb_rect: Option<egui::Rect>,
     pub fx_target: Option<FxTarget>,
     pub(crate) fx_chooser_open: bool,
     fx_chooser_cat: usize,
