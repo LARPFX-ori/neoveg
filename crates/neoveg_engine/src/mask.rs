@@ -125,6 +125,21 @@ impl Default for MaskPath {
 }
 
 impl MaskPath {
+    /// Caminho sem nenhum vértice: a área da máscara começa limpa e o usuário
+    /// desenha a forma (Pan/Crop do VEGAS Pro).
+    pub fn empty() -> Self {
+        Self {
+            vertices: Vec::new(),
+            closed: true,
+        }
+    }
+
+    /// O caminho cerca alguma área (três ou mais pontos depois de achatado).
+    /// Uma máscara sem área não recorta nada.
+    pub fn has_area(&self) -> bool {
+        self.vertices.len() >= 2 && self.flatten(4).len() >= 3
+    }
+
     /// Cria uma elipse centrada em `center` com raios `radius` usando 4 curvas Bézier cúbicas
     /// ponderadas pelo fator $\kappa \approx 0.55228475$.
     pub fn ellipse(center: [f32; 2], radius: [f32; 2]) -> Self {
@@ -544,6 +559,31 @@ impl Default for BezierMaskData {
 }
 
 impl BezierMaskData {
+    /// Máscara do Pan/Crop recém-ligada: sem forma nenhuma, a área fica limpa
+    /// até o usuário desenhar ou escolher uma forma.
+    pub fn empty() -> Self {
+        Self {
+            default_path: MaskPath::empty(),
+            ..Self::default()
+        }
+    }
+
+    /// Aplica a máscara no instante `t` sobre `f`. Sem área desenhada, o quadro
+    /// fica intacto (devolve `false`): máscara vazia não esconde o evento.
+    pub fn apply_to_frame(&self, f: &mut Frame, t: Ticks) -> bool {
+        let (path, feather, opacity, expansion) = self.evaluate_at(t);
+        if !path.has_area() {
+            return false;
+        }
+        let poly = path.flatten(16);
+        let mut mask = rasterize_mask(&poly, f.w, f.h, expansion);
+        if feather > 0.5 {
+            apply_feather(&mut mask, f.w, f.h, feather);
+        }
+        apply_mask_to_frame(f, &mask, self.mode, opacity, self.invert);
+        true
+    }
+
     /// Aplica curva e suavidade (`0..=100`) sobre o progresso linear `[0, 1]`,
     /// com a mesma matemática de `eval_pan_crop_smooth`.
     pub fn shape_progress(curve: Curve, smoothness: f32, lin: f32) -> f32 {
@@ -979,6 +1019,50 @@ mod tests {
         assert!(frame.px[50 * w + 50][3] > 0.9);
         // Canto exterior foi cortado para 0
         assert!(frame.px[5 * w + 5][3] < 0.01);
+    }
+
+    /// A máscara do Pan/Crop vinha com uma elipse pronta. Ela começa limpa, e
+    /// ligada sem forma não esconde nada do evento.
+    #[test]
+    fn mascara_do_pan_crop_comeca_vazia_e_nao_recorta_sem_area() {
+        let md = BezierMaskData::empty();
+        assert!(md.default_path.vertices.is_empty());
+        assert!(!md.default_path.has_area());
+        assert!(
+            MaskPath::default().has_area(),
+            "o efeito Bézier mantém a forma inicial"
+        );
+
+        let (w, h) = (40, 30);
+        let mut frame = Frame::new(w, h);
+        frame.px.fill([0.5, 0.4, 0.3, 1.0]);
+        let antes = frame.px.clone();
+        assert!(!md.apply_to_frame(&mut frame, Ticks::ZERO));
+        assert_eq!(frame.px, antes, "máscara vazia deixa o quadro intacto");
+
+        // um ou dois pontos ainda não cercam área
+        let mut desenho = md.clone();
+        desenho
+            .default_path
+            .insert_vertex_on_nearest_segment([0.2, 0.2]);
+        assert!(!desenho.apply_to_frame(&mut frame, Ticks::ZERO));
+        desenho
+            .default_path
+            .insert_vertex_on_nearest_segment([0.8, 0.2]);
+        assert!(!desenho.apply_to_frame(&mut frame, Ticks::ZERO));
+        assert_eq!(frame.px, antes);
+
+        // o terceiro ponto fecha a forma e a máscara passa a recortar
+        desenho
+            .default_path
+            .insert_vertex_on_nearest_segment([0.5, 0.9]);
+        assert!(desenho.default_path.has_area());
+        assert!(desenho.apply_to_frame(&mut frame, Ticks::ZERO));
+        assert!(frame.px[1][3] < 0.01, "fora do triângulo foi recortado");
+        assert!(
+            frame.px[(h / 2) * w + w / 2][3] > 0.9,
+            "dentro continua visível"
+        );
     }
 
     #[test]
