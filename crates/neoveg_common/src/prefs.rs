@@ -1069,6 +1069,11 @@ pub struct Preferences {
     /// Preferências do dispositivo de prévia / monitor externo (p. 1061).
     #[serde(default)]
     pub preview_device: PreviewDevicePrefs,
+    /// *Simular proporção do dispositivo* na Prévia de vídeo (menu de
+    /// contexto da prévia no VEGAS Pro): com pixels não quadrados (PAR ≠ 1),
+    /// mostra a imagem como no aparelho. Desligada, mostra pixels quadrados.
+    #[serde(default = "default_true")]
+    pub preview_simulate_device_aspect: bool,
     /// Preferências do dispositivo de áudio / latência / gravação (p. 1075).
     #[serde(default)]
     pub audio_device: AudioDevicePrefs,
@@ -1682,6 +1687,7 @@ impl Default for Preferences {
             fx_chains: Vec::new(),
             toolbar_buttons: default_toolbar_buttons(),
             preview_device: PreviewDevicePrefs::default(),
+            preview_simulate_device_aspect: true,
             audio_device: AudioDevicePrefs::default(),
             midi_sync: MidiSyncPrefs::default(),
             file_io: FileIoPrefs::default(),
