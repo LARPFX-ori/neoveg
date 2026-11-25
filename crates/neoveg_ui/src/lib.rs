@@ -47,6 +47,7 @@ mod project_notes;
 mod script_forms;
 mod scrollbars;
 mod splash;
+mod store_panel;
 mod surround_panel;
 pub mod theme;
 mod timeline;

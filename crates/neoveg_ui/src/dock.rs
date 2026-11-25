@@ -101,6 +101,7 @@ pub fn dock_tab_icon(tab: DockTab) -> Icon {
         DockTab::Notes => Icon::NotesPad,
         DockTab::Encoder => Icon::EncoderQueue,
         DockTab::Transcript => Icon::NotesPad,
+        DockTab::Store => Icon::PluginPlug,
     }
 }
 
