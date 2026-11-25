@@ -1784,9 +1784,23 @@ impl App {
                     self.preview_360.reset_view();
                 }
             } else {
-                if !dragging_split && self.preview_zoom > 1.01 && canvas_resp.dragged() {
-                    self.set_cursor_shape(crate::cursors::NeovegCursor::Move);
+                // com zoom, a prévia aceita a mão: arrastar desloca a imagem e
+                // Espaço segurado mostra a mão (soltar sem arrastar reproduz)
+                let zoomed = self.preview_zoom > 1.01;
+                let space_hand =
+                    zoomed && !dragging_split && crate::hand::hand_active(ui, &canvas_resp, false);
+                if !dragging_split && zoomed && canvas_resp.dragged() {
+                    self.set_cursor_shape(crate::cursors::NeovegCursor::System(
+                        egui::CursorIcon::Grabbing,
+                    ));
                     self.preview_pan += canvas_resp.drag_delta();
+                    if space_hand {
+                        crate::hand::note_drag(ui.ctx());
+                    }
+                } else if space_hand && canvas_resp.hovered() {
+                    self.set_cursor_shape(crate::cursors::NeovegCursor::System(
+                        egui::CursorIcon::Grab,
+                    ));
                 }
                 if canvas_resp.double_clicked() && (self.preview_zoom - 1.0).abs() > 0.02 {
                     self.apply_preview_zoom(0.0);

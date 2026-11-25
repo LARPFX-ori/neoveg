@@ -20,6 +20,8 @@ pub(crate) enum PcTool {
     #[default]
     Normal,
     Zoom,
+    /// Mão: arrastar desloca a vista (também com Espaço segurado).
+    Hand,
 }
 
 /// Ferramenta ativa quando a linha *Máscara* está selecionada.
@@ -618,6 +620,12 @@ impl App {
                     .clicked()
                 {
                     st.tool = PcTool::Zoom;
+                }
+                if icons::icon_button(ui, Icon::HandPan, None, st.tool == PcTool::Hand, true, th)
+                    .on_hover_text(tr(lang, "Ferramenta mão (ou segure Espaço)"))
+                    .clicked()
+                {
+                    st.tool = PcTool::Hand;
                 }
                 if icons::icon_button(ui, Icon::MagnetSnap, None, st.snap, true, th)
                     .on_hover_text(tr(lang, "Encaixar na grade"))
@@ -1274,6 +1282,19 @@ impl App {
 
         // roda = zoom da área; pinça/+/- = zoom; botão do meio = deslocar (em Posição E Máscara)
         kf_window::handle_workspace_wheel_and_zoom(ui, &resp, rect, frame, &mut st.ws);
+
+        if !over_zoom_bar
+            && kf_window::workspace_hand(
+                ui,
+                &resp,
+                &mut st.ws,
+                st.tool == PcTool::Hand,
+                &self.theme,
+                self.prefs.custom_cursors,
+            )
+        {
+            return None;
+        }
 
         if st.tool == PcTool::Zoom && !over_zoom_bar {
             if resp.hovered() {

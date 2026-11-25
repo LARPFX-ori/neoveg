@@ -32,6 +32,7 @@ mod float_dock;
 pub mod fonts;
 mod fx_browser;
 mod gen_browser;
+mod hand;
 mod icons;
 pub mod integrations_ui;
 mod kf_window;

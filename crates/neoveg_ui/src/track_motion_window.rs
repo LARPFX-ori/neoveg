@@ -58,6 +58,8 @@ pub(crate) struct TrackMotionUi {
     pub active_row: usize,
     pub preset: usize,
     pub ws: Workspace,
+    /// Ferramenta mão: arrastar desloca a vista (também com Espaço segurado).
+    pub hand_tool: bool,
     drag: Option<TmDrag>,
 }
 
@@ -86,6 +88,7 @@ impl Default for TrackMotionUi {
                 grid: 10.0,
                 ..Workspace::default()
             },
+            hand_tool: false,
             drag: None,
         }
     }
@@ -667,6 +670,12 @@ impl App {
                 "Impedir dimensionar (Y)",
             );
             ui.separator();
+            toggle(
+                ui,
+                Icon::HandPan,
+                &mut st.hand_tool,
+                "Ferramenta mão (ou segure Espaço)",
+            );
             if ui
                 .small_button("−")
                 .on_hover_text(tr(lang, "Reduzir zoom"))
@@ -1245,6 +1254,22 @@ impl App {
             lang,
         );
         let over_zoom_bar = ptr_screen.is_some_and(|p| zoom_bar_rect.contains(p));
+
+        // mão (ferramenta ou Espaço segurado): só desloca a vista
+        if !over_zoom_bar
+            && st.drag.is_none()
+            && kf_window::workspace_hand(
+                ui,
+                &resp,
+                &mut st.ws,
+                st.hand_tool,
+                &self.theme,
+                self.prefs.custom_cursors,
+            )
+        {
+            kf_window::handle_workspace_wheel_and_zoom(ui, &resp, rect, frame, &mut st.ws);
+            return None;
+        }
 
         // interação
         if let Some(p) =
