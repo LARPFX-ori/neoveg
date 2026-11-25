@@ -921,7 +921,11 @@ impl App {
                             actions.push(PcAction::ToggleMaskEnabled(mask_on));
                         }
                     });
-                    let mut md = ev.pan_crop_mask.as_deref().cloned().unwrap_or_default();
+                    let mut md = ev
+                        .pan_crop_mask
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(neoveg_engine::mask::BezierMaskData::empty);
                     let (mut cur_path, mut cur_feather, mut cur_opacity, mut cur_expansion) =
                         md.evaluate_at(local);
                     let mut m_changed = false;
@@ -1210,7 +1214,11 @@ impl App {
 
         // contorno da máscara Bézier (desenhado quando habilitada ou em modo Máscara)
         if ev.pan_crop_mask_enabled || st.mask_mode {
-            let mask_data = ev.pan_crop_mask.as_deref().cloned().unwrap_or_default();
+            let mask_data = ev
+                .pan_crop_mask
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(neoveg_engine::mask::BezierMaskData::empty);
             let (mpath, _, _, _) = mask_data.evaluate_at(local);
             let poly = mpath.flatten(16);
             if poly.len() >= 2 {
@@ -1302,7 +1310,11 @@ impl App {
         }
 
         if st.mask_mode {
-            let mut md = ev.pan_crop_mask.as_deref().cloned().unwrap_or_default();
+            let mut md = ev
+                .pan_crop_mask
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(neoveg_engine::mask::BezierMaskData::empty);
             let (mut mpath, feather, opacity, expansion) = md.evaluate_at(local);
             let fw = frame.x.max(1.0);
             let fh = frame.y.max(1.0);
@@ -1898,7 +1910,7 @@ impl App {
                     e.pan_crop_mask_enabled = *v;
                     if *v && e.pan_crop_mask.is_none() {
                         e.pan_crop_mask =
-                            Some(Box::new(neoveg_engine::mask::BezierMaskData::default()));
+                            Some(Box::new(neoveg_engine::mask::BezierMaskData::empty()));
                     }
                 }
                 PcAction::UpdateMask(md) => {
@@ -1907,7 +1919,7 @@ impl App {
                 }
                 PcAction::AddMaskKey => {
                     let md = e.pan_crop_mask.get_or_insert_with(|| {
-                        Box::new(neoveg_engine::mask::BezierMaskData::default())
+                        Box::new(neoveg_engine::mask::BezierMaskData::empty())
                     });
                     let (path, feather, opacity, expansion) = md.evaluate_at(local);
                     let (curve, smoothness) = md
@@ -1964,7 +1976,7 @@ impl App {
                 }
                 PcAction::SetMaskCurve(ki, c) => {
                     let md = e.pan_crop_mask.get_or_insert_with(|| {
-                        Box::new(neoveg_engine::mask::BezierMaskData::default())
+                        Box::new(neoveg_engine::mask::BezierMaskData::empty())
                     });
                     let idx = match *ki {
                         Some(i) if i < md.keyframes.len() => i,
@@ -1980,7 +1992,7 @@ impl App {
                 }
                 PcAction::SetMaskSmoothness(sm) => {
                     let md = e.pan_crop_mask.get_or_insert_with(|| {
-                        Box::new(neoveg_engine::mask::BezierMaskData::default())
+                        Box::new(neoveg_engine::mask::BezierMaskData::empty())
                     });
                     let idx = md.ensure_key_at(local, tol);
                     if let Some(k) = md.keyframes.get_mut(idx) {

@@ -634,19 +634,7 @@ fn event_layer_eye(
     }
     if e.pan_crop_mask_enabled {
         if let Some(mask_data) = e.pan_crop_mask.as_deref() {
-            let (path, feather, opacity, expansion) = mask_data.evaluate_at(local);
-            let poly = path.flatten(16);
-            let mut mask = crate::mask::rasterize_mask(&poly, f.w, f.h, expansion);
-            if feather > 0.5 {
-                crate::mask::apply_feather(&mut mask, f.w, f.h, feather);
-            }
-            crate::mask::apply_mask_to_frame(
-                &mut f,
-                &mask,
-                mask_data.mode,
-                opacity,
-                mask_data.invert,
-            );
+            mask_data.apply_to_frame(&mut f, local);
         }
     }
     if eye != StereoEye::Center && e.stereo_3d.horizontal_offset.abs() > 1e-6 {
