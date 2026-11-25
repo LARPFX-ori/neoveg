@@ -1736,7 +1736,8 @@ impl App {
                 Sense::click_and_drag(),
             );
             canvas_resp.context_menu(|ui| {
-                self.preview_context_menu(ui, is_floating);
+                let floating = self.preview_detached;
+                self.preview_context_menu(ui, floating);
             });
             if canvas_resp.hovered() {
                 // roda: 10% por passo; com Ctrl, 1% (manual, p. 209). O egui
