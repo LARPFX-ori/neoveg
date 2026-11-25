@@ -301,9 +301,7 @@ pub fn parse_index(text: &str) -> Result<StoreIndex, NeovegError> {
         }
         index.packages.push(p);
     }
-    index
-        .packages
-        .sort_by(|a, b| a.nome.to_lowercase().cmp(&b.nome.to_lowercase()));
+    index.packages.sort_by_key(|p| p.nome.to_lowercase());
     Ok(index)
 }
 
