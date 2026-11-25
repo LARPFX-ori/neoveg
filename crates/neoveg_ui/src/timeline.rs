@@ -2994,51 +2994,13 @@ impl App {
                 }
             }
             _ => {
-                if ui
-                    .button(tr(lang, "Inserir marcador no cursor (M)"))
-                    .clicked()
-                {
-                    self.insert_marker();
-                    ui.close_menu();
-                }
-                if ui
-                    .button(tr(lang, "Inserir marcador de faixa de CD (N)"))
-                    .clicked()
-                {
-                    self.exec_cmd(Some(ui.ctx()), "insert.marker_cd_track");
-                    ui.close_menu();
-                }
-                if ui
-                    .button(tr(lang, "Inserir marcador de índice de CD"))
-                    .clicked()
-                {
-                    self.exec_cmd(Some(ui.ctx()), "insert.marker_cd_index");
-                    ui.close_menu();
-                }
-                if ui
-                    .button(tr(lang, "Inserir marcador de comando..."))
-                    .clicked()
-                {
-                    self.exec_cmd(Some(ui.ctx()), "insert.marker_command");
-                    ui.close_menu();
-                }
-                if ui
-                    .button(tr(lang, "Inserir região da seleção (R)"))
-                    .clicked()
-                {
-                    self.insert_region();
-                    ui.close_menu();
-                }
+                self.cmd_menu_btn(ui, "insert.marker");
+                self.cmd_menu_btn(ui, "insert.marker_cd_track");
+                self.cmd_menu_btn(ui, "insert.marker_cd_index");
+                self.cmd_menu_btn(ui, "insert.marker_command");
+                self.cmd_menu_btn(ui, "insert.region");
                 ui.separator();
-                if ui
-                    .checkbox(
-                        &mut self.opts.snap_to_grid,
-                        tr(lang, "Encaixar na grade (Ctrl+F8)"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                }
+                self.cmd_menu_chk(ui, self.opts.snap_to_grid, "options.snap_to_grid");
                 ui.menu_button(tr(lang, "Grade da régua"), |ui| {
                     for g in neoveg_engine::session::RulerGridSpacing::ALL {
                         if ui.radio(self.opts.ruler_grid == g, g.label()).clicked() {
@@ -5003,7 +4965,18 @@ impl App {
             }
         }
         if !suppress_ctx {
-            resp.context_menu(|ui| self.lane_context_menu(ui));
+            resp.context_menu(|ui| {
+                let max_h = (ui.ctx().screen_rect().height() - 40.0).max(200.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("lane_ctx_scroll")
+                    .max_height(max_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                            self.lane_context_menu(ui);
+                        });
+                    });
+            });
         } else if !ui.input(|i| i.pointer.primary_down() || i.pointer.secondary_down()) {
             self.tl.suppress_ctx_menu = false;
         }

@@ -6348,7 +6348,7 @@ impl App {
             self.set_status(tr(lang, "Mídia não encontrada no projeto."));
             return;
         };
-        if !item.has_video {
+        if !item.can_build_proxy() {
             self.set_status(tr(lang, "Proxies aplicam-se apenas a clipes de vídeo."));
             return;
         }
@@ -6390,7 +6390,7 @@ impl App {
                 if self
                     .project
                     .media(ev.media_id)
-                    .map(|m| m.has_video)
+                    .map(|m| m.can_build_proxy())
                     .unwrap_or(false)
                     && !media_ids.contains(&ev.media_id)
                 {

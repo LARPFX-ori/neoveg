@@ -738,6 +738,24 @@ fn has_selected_video_events_ui(s: &EditorSession, h: &dyn CommandHost) -> bool 
         })
 }
 
+fn has_selected_proxyable_video_events_ui(s: &EditorSession, h: &dyn CommandHost) -> bool {
+    h.supports_ui()
+        && s.sel_events.iter().any(|&id| {
+            s.project.find_event(id).is_some_and(|(ti, ei)| {
+                let Some(tr) = s.project.tracks.get(ti) else {
+                    return false;
+                };
+                let Some(ev) = tr.events.get(ei) else {
+                    return false;
+                };
+                tr.kind == TrackKind::Video
+                    && s.project
+                        .media(ev.media_id)
+                        .is_some_and(|m| m.can_build_proxy())
+            })
+        })
+}
+
 fn has_selected_audio_track(s: &EditorSession, _h: &dyn CommandHost) -> bool {
     s.sel_track.is_some_and(|ti| {
         s.project
@@ -3464,7 +3482,7 @@ pub static COMMANDS: &[CommandDef] = &[
         menu_path: "Ferramentas/Criar proxy de vídeo para selecionados",
         default_shortcut: None,
         needs_ui: true,
-        enabled: has_selected_events_ui,
+        enabled: has_selected_proxyable_video_events_ui,
         run: |_s, h| ui_action(UiAction::BuildProxySelected, h),
     },
     CommandDef {
@@ -5289,6 +5307,77 @@ mod tests {
         for id in ["options.dim_master", "tools.rebuild_peaks", "file.close"] {
             assert!(run_command(id, &mut s, &mut h).is_err(), "{id}");
         }
+    }
+
+    #[test]
+    fn criar_proxy_desabilita_para_imagem_estatica_e_habilita_para_video() {
+        struct UiHost;
+        impl CommandHost for UiHost {
+            fn supports_ui(&self) -> bool {
+                true
+            }
+            fn dispatch_ui(&mut self, _action: UiAction) -> Result<(), String> {
+                Ok(())
+            }
+            fn insert_generated(
+                &mut self,
+                _session: &mut EditorSession,
+                _spec: GenSpec,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let ui_h = UiHost;
+        let mut p = Project::new_default();
+        let still = MediaItem {
+            id: new_id(),
+            name: "foto.png".into(),
+            source: MediaSource::File {
+                path: "foto.png".into(),
+            },
+            duration: None,
+            has_video: true,
+            has_audio: false,
+            width: 1920,
+            height: 1080,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        };
+        let video = MediaItem {
+            id: new_id(),
+            name: "clipe.mp4".into(),
+            source: MediaSource::File {
+                path: "clipe.mp4".into(),
+            },
+            duration: Some(Ticks::from_secs_i64(10)),
+            has_video: true,
+            has_audio: true,
+            width: 1920,
+            height: 1080,
+            fps: Some(FrameRate::FPS_30),
+            info: String::new(),
+            proxy_path: None,
+        };
+        let ev_still = Event::new(&still, Ticks::ZERO, Ticks::from_secs_i64(5));
+        let ev_video = Event::new(&video, Ticks::from_secs_i64(6), Ticks::from_secs_i64(5));
+        let (id_still, id_video) = (ev_still.id, ev_video.id);
+        p.media.push(still);
+        p.media.push(video);
+        p.tracks[0].events = vec![ev_still, ev_video];
+
+        let mut s = EditorSession::new(p);
+        s.sel_events.insert(id_still);
+        assert!(
+            !is_command_enabled("tools.build_proxy", &s, &ui_h),
+            "imagem estática não deve habilitar Criar proxy"
+        );
+        s.sel_events.clear();
+        s.sel_events.insert(id_video);
+        assert!(
+            is_command_enabled("tools.build_proxy", &s, &ui_h),
+            "vídeo com duração deve habilitar Criar proxy"
+        );
     }
 }
 

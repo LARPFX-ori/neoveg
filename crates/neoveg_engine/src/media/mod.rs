@@ -778,8 +778,11 @@ impl MediaCache {
     /// Gera um arquivo proxy AVI MJPEG em 1/4 da resolução (até 480x270)
     /// em streaming quadro a quadro para edição fluida em hardware fraco (§3.6).
     pub fn create_proxy_avi(&self, item: &MediaItem, out_path: &Path) -> Result<()> {
-        if !item.has_video {
-            bail!("mídia '{}' não contém vídeo para gerar proxy", item.name);
+        if !item.can_build_proxy() {
+            bail!(
+                "mídia '{}' não é um clipe de vídeo elegível para gerar proxy",
+                item.name
+            );
         }
         let dur = item.duration.unwrap_or_else(|| Ticks::from_secs_i64(5));
         let fps = item.fps.unwrap_or(FrameRate::FPS_30);

@@ -2842,6 +2842,17 @@ pub struct MediaItem {
     pub proxy_path: Option<String>,
 }
 
+impl MediaItem {
+    /// Proxies de vídeo só se aplicam a clipes de vídeo com duração finita
+    /// (vídeo, sequência de imagens ou projeto/sequência aninhada) — nunca a
+    /// imagens estáticas (`duration == None`), áudio puro ou mídia gerada.
+    pub fn can_build_proxy(&self) -> bool {
+        self.has_video
+            && self.duration.is_some()
+            && !matches!(self.source, MediaSource::Generated(_))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MediaSource {
     File {
@@ -6935,6 +6946,36 @@ mod tests {
             info: String::new(),
             proxy_path: None,
         }
+    }
+
+    #[test]
+    fn proxy_recusa_imagem_estatica_audio_e_midia_gerada() {
+        let video = media_teste();
+        assert!(video.can_build_proxy());
+
+        let mut still = media_teste();
+        still.name = "foto.png".into();
+        still.source = MediaSource::File {
+            path: "foto.png".into(),
+        };
+        still.duration = None;
+        assert!(!still.can_build_proxy());
+
+        let mut gen = media_teste();
+        gen.source = MediaSource::Generated(GenSpec::ColorBars);
+        assert!(!gen.can_build_proxy());
+
+        let mut audio = media_teste();
+        audio.has_video = false;
+        audio.has_audio = true;
+        assert!(!audio.can_build_proxy());
+
+        let mut seq = media_teste();
+        seq.source = MediaSource::ImageSequence {
+            paths: vec!["001.png".into(), "002.png".into()],
+            fps: FrameRate::FPS_24,
+        };
+        assert!(seq.can_build_proxy());
     }
 
     /// Compositor por evento (extensão do Neoveg; o VEGAS só tem na trilha):
