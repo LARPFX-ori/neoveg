@@ -62,6 +62,8 @@ pub mod recovery;
 #[forbid(unsafe_code)]
 pub mod render;
 #[forbid(unsafe_code)]
+pub mod render_status;
+#[forbid(unsafe_code)]
 pub mod scopes;
 #[forbid(unsafe_code)]
 pub mod session;
