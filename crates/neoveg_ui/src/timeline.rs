@@ -280,6 +280,9 @@ pub struct TimelineState {
     pub drop_context_menu: Option<DropContextMenuState>,
     /// Trilhas com a área de quadros-chave recolhida (estado de exibição).
     pub kf_collapsed: HashSet<Id>,
+    /// Faixa de status de renderização (verde/amarelo/vermelho) calculada
+    /// para a geração do projeto e os trechos pré-renderizados da chave.
+    render_bar: Option<RenderBarCache>,
     /// Ponto atual da caixa das ferramentas Seleção e Zoom.
     box_cur: Option<Pos2>,
     /// Origem e seleção de tempo anterior ao arrastar espaço vazio (permite
@@ -321,6 +324,7 @@ impl Default for TimelineState {
             drop_hint: None,
             drop_context_menu: None,
             kf_collapsed: HashSet::new(),
+            render_bar: None,
             box_cur: None,
             time_sel_origin: None,
             suppress_ctx_menu: false,
@@ -2514,13 +2518,40 @@ impl App {
                 }
             }
         }
-        // barra de status de pré-renderização no topo da timeline (VEGAS Pro 21, p. 215)
-        for &(pa, pb) in &self.session.prerendered_ranges {
-            let pr = Rect::from_min_max(
-                pos2(self.tl.t2x(pa, left), loop_r.bottom() - 4.0),
-                pos2(self.tl.t2x(pb, left), loop_r.bottom()),
+        // faixa de status de renderização no topo da timeline: verde =
+        // pré-renderizado (VEGAS Pro 21, p. 215), amarelo = deve tocar em tempo
+        // real, vermelho = deve precisar pré-renderizar (Shift+M)
+        let generation = self.session.generation;
+        let stale = self.tl.render_bar.as_ref().is_none_or(|c| {
+            c.generation != generation || c.prerendered != self.session.prerendered_ranges
+        });
+        if stale {
+            let segments = neoveg_engine::render_status::render_status(
+                &self.project,
+                &self.session.prerendered_ranges,
             );
-            painter.rect_filled(pr, 0.0, self.theme.tl_marker);
+            self.tl.render_bar = Some(RenderBarCache {
+                generation,
+                prerendered: self.session.prerendered_ranges.clone(),
+                segments,
+            });
+        }
+        if let Some(cache) = &self.tl.render_bar {
+            for &(pa, pb, need) in &cache.segments {
+                let Some(col) = render_need_color(need) else {
+                    continue;
+                };
+                let xa = self.tl.t2x(pa, left).max(r.left());
+                let xb = self.tl.t2x(pb, left).min(r.right());
+                if xb <= xa {
+                    continue;
+                }
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(xa, loop_r.bottom() - 4.0), pos2(xb, loop_r.bottom())),
+                    0.0,
+                    col,
+                );
+            }
         }
         if let Some((pa, pb, prog)) = &self.prerender_job {
             let frac = prog.fraction().clamp(0.0, 1.0);
@@ -8364,6 +8395,21 @@ impl App {
             ph_col,
             Stroke::new(1.0_f32, ph_rim),
         ));
+        // traço à direita da cabeça: marca o quadro inteiro que o cursor
+        // ocupa e ajuda a achar a agulha com zoom afastado
+        let frame_px = (self.project.settings.frame_dur().as_secs_f64() as f32
+            * self.tl.px_per_sec)
+            .clamp(6.0, 40.0);
+        painter.add(Shape::convex_polygon(
+            vec![
+                pos2(x + 5.5, head_y - 4.0),
+                pos2(x + 5.5 + frame_px, head_y - 4.0),
+                pos2(x + 2.5 + frame_px, head_y - 1.0),
+                pos2(x + 5.5, head_y - 1.0),
+            ],
+            ph_col,
+            Stroke::NONE,
+        ));
         if self.is_playing() {
             let px = self.tl.t2x(self.play_pos(), left);
             painter.line_segment(
@@ -8417,6 +8463,26 @@ pub fn draw_meter(painter: &egui::Painter, r: Rect, lv: [f32; 2]) {
         let x0 = r.left() + i as f32 * (w + 1.0);
         let ch_r = Rect::from_min_max(pos2(x0, r.top()), pos2((x0 + w).min(r.right()), r.bottom()));
         draw_meter_channel(painter, ch_r, *v);
+    }
+}
+
+/// Faixa de renderização guardada para não recalcular a cada quadro.
+struct RenderBarCache {
+    generation: u64,
+    prerendered: Vec<(Ticks, Ticks)>,
+    segments: Vec<(Ticks, Ticks, neoveg_engine::render_status::RenderNeed)>,
+}
+
+/// Cor da faixa de renderização: verde (pré-renderizado), amarelo (deve
+/// tocar em tempo real), vermelho (deve precisar pré-renderizar); sem cor
+/// para vídeo simples.
+fn render_need_color(need: neoveg_engine::render_status::RenderNeed) -> Option<Color32> {
+    use neoveg_engine::render_status::RenderNeed as N;
+    match need {
+        N::Realtime => None,
+        N::MayPlay => Some(Color32::from_rgb(232, 204, 52)),
+        N::NeedsRender => Some(Color32::from_rgb(226, 64, 56)),
+        N::Rendered => Some(Color32::from_rgb(64, 186, 96)),
     }
 }
 
