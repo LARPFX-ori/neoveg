@@ -1,6 +1,6 @@
 //! Loja de scripts e extensões: catálogo, instalação e remoção.
 //!
-//! O catálogo é o `index.json` do repositório `LARPFX-ori/neoveg-loja`
+//! O catálogo é o `index.json` do repositório `LARPFX-ori/neoveg-marketplace`
 //! (formato 1). Cada pacote lista os arquivos com tamanho e SHA-256; a
 //! instalação baixa cada arquivo, confere tamanho e hash, monta tudo numa
 //! pasta temporária e só então troca a pasta do pacote em `loja/<id>/`, ao
@@ -18,7 +18,8 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// Endereço base do repositório da loja (arquivos crus do branch `main`).
-pub const STORE_BASE_URL: &str = "https://raw.githubusercontent.com/LARPFX-ori/neoveg-loja/main";
+pub const STORE_BASE_URL: &str =
+    "https://raw.githubusercontent.com/LARPFX-ori/neoveg-marketplace/main";
 /// Versão do formato do `index.json` que este Neoveg entende.
 pub const INDEX_FORMAT: u32 = 1;
 /// Pasta dos pacotes instalados, dentro da pasta de dados do Neoveg.
@@ -104,7 +105,7 @@ impl StorePackage {
     /// Página do pacote no GitHub.
     pub fn page_url(&self) -> String {
         format!(
-            "https://github.com/LARPFX-ori/neoveg-loja/tree/main/pacotes/{}",
+            "https://github.com/LARPFX-ori/neoveg-marketplace/tree/main/pacotes/{}",
             self.id
         )
     }
