@@ -24,3 +24,6 @@ __pycache__/
 *.pyc
 
 .env
+
+# certificados raiz da máquina para as imagens de teste (docker/certs/README.md)
+docker/certs/*.crt
