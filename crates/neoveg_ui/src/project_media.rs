@@ -362,14 +362,25 @@ impl App {
         self.draw_smart_bin_editor(ui);
 
         let visible_w = (ui.clip_rect().right() - ui.cursor().left()).min(ui.available_width());
-        let footer_h = 22.0;
-        let avail_h = (ui.available_height() - footer_h - 6.0).max(110.0);
+        let visible_w = visible_w - ui.spacing().scroll.allocated_width();
+        let avail_h = media_body_height(ui.available_height());
+        // O corpo inteiro (pastas, mídias e as informações abaixo) rola na
+        // vertical: num painel baixo, as informações da mídia ficavam cortadas
+        // sob a borda do painel, sem como alcançá-las.
+        egui::ScrollArea::vertical()
+            .id_salt("pm_body_scroll")
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.project_media_body(ui, visible_w, avail_h));
+    }
+
+    fn project_media_body(&mut self, ui: &mut egui::Ui, visible_w: f32, avail_h: f32) {
         if visible_w < 430.0 {
             self.draw_compact_bin_selector(ui);
             ui.separator();
             ui.vertical(|ui| {
                 ui.set_width(visible_w.max(200.0));
                 ui.set_min_height(avail_h);
+                ui.set_max_height(avail_h);
                 if self.project_media.view_mode == MediaViewMode::Storyboard {
                     self.draw_storyboard_view(ui);
                 } else {
@@ -470,6 +481,21 @@ impl App {
                 );
             });
         });
+        // Origem da mídia selecionada (caminho do arquivo, gerador ou sequência).
+        if let Some(m) = self
+            .session
+            .active_media_id
+            .and_then(|id| self.project.media(id))
+        {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(media_source_label(&m.source))
+                        .small()
+                        .color(self.theme.text_muted),
+                )
+                .wrap(),
+            );
+        }
     }
 
     fn draw_compact_bin_selector(&mut self, ui: &mut egui::Ui) {
@@ -2020,6 +2046,23 @@ impl App {
     }
 }
 
+/// Altura reservada para as informações abaixo das mídias.
+const MEDIA_FOOTER_H: f32 = 22.0;
+/// Altura mínima da área de mídias: num painel mais baixo que isto, o corpo
+/// do painel passa a rolar para mostrar as informações de baixo.
+const MEDIA_BODY_MIN_H: f32 = 110.0;
+
+/// Altura da área de pastas e mídias para um painel com `view_h` de altura
+/// livre, deixando espaço para as informações de baixo.
+fn media_body_height(view_h: f32) -> f32 {
+    let h = view_h - MEDIA_FOOTER_H - 6.0;
+    if h.is_finite() {
+        h.max(MEDIA_BODY_MIN_H)
+    } else {
+        MEDIA_BODY_MIN_H
+    }
+}
+
 fn media_kind_tag(m: &MediaItem) -> &'static str {
     if m.has_video && m.has_audio {
         "A/V"
@@ -2107,6 +2150,31 @@ fn thumb_grid_columns(view_w: f32, card_w: f32) -> usize {
         return 1;
     }
     ((view_w + 8.0) / (card_w + 8.0)).floor().clamp(1.0, 256.0) as usize
+}
+
+#[cfg(test)]
+mod media_body_tests {
+    use super::{media_body_height, MEDIA_BODY_MIN_H, MEDIA_FOOTER_H};
+
+    /// Painel alto: a área de mídias e as informações cabem juntas, sem rolar.
+    #[test]
+    fn painel_alto_cabe_sem_rolar() {
+        let h = media_body_height(500.0);
+        assert!(h + MEDIA_FOOTER_H + 6.0 <= 500.0 + 0.01);
+    }
+
+    /// Painel baixo: a área de mídias mantém a altura mínima e o conteúdo
+    /// passa da altura do painel, por isso o corpo do painel tem de rolar
+    /// para as informações de baixo aparecerem.
+    #[test]
+    fn painel_baixo_mantem_minimo_e_exige_rolagem() {
+        let view = 80.0;
+        let h = media_body_height(view);
+        assert_eq!(h, MEDIA_BODY_MIN_H);
+        assert!(h + MEDIA_FOOTER_H > view);
+        assert_eq!(media_body_height(f32::NAN), MEDIA_BODY_MIN_H);
+        assert_eq!(media_body_height(f32::INFINITY), MEDIA_BODY_MIN_H);
+    }
 }
 
 #[cfg(test)]
