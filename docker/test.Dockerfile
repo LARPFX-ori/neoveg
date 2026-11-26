@@ -24,6 +24,16 @@ RUN apt-get update \
         ffmpeg python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Certificados raiz extras da rede (antivírus/proxy que inspeciona HTTPS); ver
+# docker/certs/README.md. Sem nenhum .crt na pasta, não muda nada.
+COPY certs/ /usr/local/share/ca-certificates/extra/
+RUN find /usr/local/share/ca-certificates/extra -type f ! -name '*.crt' -delete \
+    && update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/opt/venv/bin:$PATH \
