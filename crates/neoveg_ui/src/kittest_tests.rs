@@ -6,7 +6,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use neoveg_common::Ticks;
 
-fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
+pub(crate) fn build_ready_app(cc: &mut eframe::CreationContext<'_>) -> App {
     let _lock = lock_test_prefs();
     let mut app = {
         let _prefs_read = crate::tests::PREFS_LOCK

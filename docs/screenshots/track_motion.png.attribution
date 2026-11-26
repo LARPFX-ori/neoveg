@@ -1,0 +1,9 @@
+asset:        track_motion.png
+title:        Janela Movimento da trilha (Track Motion 2D/3D) do Neoveg com controle de posição, rotação, grade e quadros-chave
+author:       contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-11-26 por blackghoust9
+notes:        Captura da interface do próprio Neoveg, renderizada fora da tela (egui_kittest + wgpu, 1600×900).
+              Só mídia sintética gerada pelo Neoveg; nenhuma imagem, ícone ou tela de outro produto.

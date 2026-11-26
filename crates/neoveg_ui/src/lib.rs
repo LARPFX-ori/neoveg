@@ -62,6 +62,8 @@ mod welcome;
 #[cfg(test)]
 mod kittest_tests;
 #[cfg(test)]
+mod readme_screenshots;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use app::{apply_pref_defaults, rgba_to_color_image};

@@ -1,0 +1,9 @@
+asset:        pan_crop.png
+title:        Janela Pan/Crop do evento no Neoveg com guia de orientação "F", recorte interativo e faixa de quadros-chave
+author:       contribuidores do projeto Neoveg
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-11-26 por blackghoust9
+notes:        Captura da interface do próprio Neoveg, renderizada fora da tela (egui_kittest + wgpu, 1600×900).
+              Só mídia sintética gerada pelo Neoveg; nenhuma imagem, ícone ou tela de outro produto.
