@@ -27,3 +27,4 @@ __pycache__/
 
 # certificados raiz da máquina para as imagens de teste (docker/certs/README.md)
 docker/certs/*.crt
+MELHORIAS.txt
