@@ -61,7 +61,7 @@ mod welcome;
 
 #[cfg(test)]
 mod kittest_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod readme_screenshots;
 #[cfg(test)]
 mod tests;
