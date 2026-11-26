@@ -46,6 +46,25 @@ pub(crate) struct GraphEdit {
     pub edited_out: bool,
 }
 
+/// O que o usuário fez no gráfico.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GraphAction {
+    /// Alça arrastada (no gráfico de valor ou no de velocidade).
+    Ease(GraphEdit),
+    /// Ponto de ancoragem arrastado no gráfico de valor: novo tempo e valor.
+    MoveKey { key: usize, t: Ticks, v: f32 },
+    /// Ctrl+clique no ponto: alterna entre linear e Bézier automático.
+    ToggleBezier { key: usize },
+}
+
+/// O que está sob o ponteiro no gráfico.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GraphHit {
+    Anchor(usize),
+    ValueHandle(usize, bool),
+    SpeedHandle(usize, bool),
+}
+
 fn ease_keys(keys: &[GraphKey]) -> Vec<EaseKey> {
     keys.iter()
         .map(|k| EaseKey {
@@ -111,6 +130,96 @@ pub(crate) fn handle_positions(keys: &[GraphKey]) -> Vec<HandlePos> {
             HandlePos { incoming, outgoing }
         })
         .collect()
+}
+
+/// Pontas das alças no gráfico de valor: `(tempo, valor)` da alça de
+/// entrada e da de saída de cada quadro-chave Bézier. Como na curva de
+/// tempo do trecho, a alça de saída de `k` fica em `t_k + influência·Δt` e
+/// `v_k + velocidade·influência·Δv`; a de entrada, simétrica para trás.
+pub(crate) fn value_handle_positions(keys: &[GraphKey]) -> Vec<HandlePos> {
+    let ek = ease_keys(keys);
+    (0..keys.len())
+        .map(|k| {
+            let (Some(key), Some(e)) = (keys.get(k), ease::resolved_ease(&ek, k)) else {
+                return HandlePos::default();
+            };
+            let Some(v) = key.scalar.filter(|v| v.is_finite()) else {
+                return HandlePos::default();
+            };
+            let outgoing = keys.get(k + 1).and_then(|next| {
+                let nv = next.scalar.filter(|x| x.is_finite())?;
+                let dt = next.t.0.saturating_sub(key.t.0).max(0) as f64;
+                let tip = key
+                    .t
+                    .0
+                    .saturating_add((dt * f64::from(e.outgoing.influence)) as i64);
+                Some((
+                    Ticks::from_raw(tip),
+                    v + e.outgoing.speed * e.outgoing.influence * (nv - v),
+                ))
+            });
+            let incoming = k.checked_sub(1).and_then(|p| keys.get(p)).and_then(|prev| {
+                let pv = prev.scalar.filter(|x| x.is_finite())?;
+                let dt = key.t.0.saturating_sub(prev.t.0).max(0) as f64;
+                let tip = key
+                    .t
+                    .0
+                    .saturating_sub((dt * f64::from(e.incoming.influence)) as i64);
+                Some((
+                    Ticks::from_raw(tip),
+                    v - e.incoming.speed * e.incoming.influence * (v - pv),
+                ))
+            });
+            HandlePos { incoming, outgoing }
+        })
+        .collect()
+}
+
+/// Novo Bézier ao soltar a alça `edited_out` do quadro-chave `k` em
+/// `(tempo, valor)` no gráfico de valor: a distância no tempo dá a
+/// influência e a inclinação dá a velocidade. Num trecho sem variação de
+/// valor só a influência muda. O automático vira contínuo ao ser mexido.
+pub(crate) fn drag_value_handle(
+    keys: &[GraphKey],
+    k: usize,
+    edited_out: bool,
+    t: Ticks,
+    v: f32,
+) -> Option<KeyEase> {
+    if !v.is_finite() {
+        return None;
+    }
+    let ek = ease_keys(keys);
+    let mut e = ease::resolved_ease(&ek, k).unwrap_or_else(|| KeyEase::new(EaseMode::Bezier));
+    if e.mode == EaseMode::Auto {
+        e.mode = EaseMode::Continuous;
+    }
+    let key = keys.get(k)?;
+    let kv = key.scalar.filter(|x| x.is_finite())?;
+    let (other, infl) = if edited_out {
+        let next = keys.get(k + 1)?;
+        let dt = next.t.0.saturating_sub(key.t.0).max(1) as f64;
+        (next, t.0.saturating_sub(key.t.0) as f64 / dt)
+    } else {
+        let prev = keys.get(k.checked_sub(1)?)?;
+        let dt = key.t.0.saturating_sub(prev.t.0).max(1) as f64;
+        (prev, key.t.0.saturating_sub(t.0) as f64 / dt)
+    };
+    let ov = other.scalar.filter(|x| x.is_finite())?;
+    let infl = (infl as f32).clamp(ease::MIN_INFLUENCE, 1.0);
+    let delta = if edited_out { ov - kv } else { kv - ov };
+    let rise = if edited_out { v - kv } else { kv - v };
+    let side = if edited_out {
+        &mut e.outgoing
+    } else {
+        &mut e.incoming
+    };
+    side.influence = infl;
+    if delta.abs() > 1e-6 {
+        side.speed = rise / (delta * infl);
+    }
+    let e = e.sanitized();
+    Some(ease::enforce_continuous(&ek, k, e, edited_out))
 }
 
 /// Novo Bézier ao soltar a alça `edited_out` do quadro-chave `k` em
@@ -204,10 +313,16 @@ pub(crate) fn graph_in_rect(
     cursor: Ticks,
     theme: &ThemeColors,
     lang: Language,
-) -> Option<GraphEdit> {
+) -> Option<GraphAction> {
     if !rect.is_positive() || !rect.width().is_finite() || !rect.height().is_finite() {
         return None;
     }
+    // o que está sendo arrastado e a escala do gráfico de valor no início do
+    // arraste (a escala não pode mudar enquanto o ponto anda)
+    let drag_id = id.with("vg_drag");
+    let range_id = id.with("vg_range");
+    let dragging: Option<GraphHit> = ui.data(|d| d.get_temp(drag_id)).flatten();
+    let frozen_range: Option<(f32, f32)> = ui.data(|d| d.get_temp(range_id));
     let p = ui.painter_at(rect);
     let names = Rect::from_min_max(rect.min, pos2(rect.left() + label_w, rect.bottom()));
     let plot =
@@ -241,6 +356,9 @@ pub(crate) fn graph_in_rect(
         1.5_f32
     };
 
+    let mut hits: Vec<(GraphHit, Pos2)> = Vec::new();
+    let mut value_axis: Option<(Rect, f32, f32)> = None;
+
     // gráfico de valor
     if let Some(vr) = value_rect {
         let vals: Vec<f32> = samples
@@ -251,11 +369,17 @@ pub(crate) fn graph_in_rect(
         let lo = vals.iter().copied().fold(f32::INFINITY, f32::min);
         let hi = vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let (lo, hi) = if lo.is_finite() && hi.is_finite() && hi > lo {
-            (lo, hi)
+            let pad = (hi - lo) * 0.08;
+            (lo - pad, hi + pad)
         } else {
             let c = if lo.is_finite() { lo } else { 0.0 };
             (c - 1.0, c + 1.0)
         };
+        let (lo, hi) = match (dragging, frozen_range) {
+            (Some(GraphHit::Anchor(_) | GraphHit::ValueHandle(..)), Some(r)) => r,
+            _ => (lo, hi),
+        };
+        value_axis = Some((vr, lo, hi));
         let y_of = |v: f32| vr.bottom() - ((v - lo) / (hi - lo)).clamp(-0.1, 1.1) * vr.height();
         p.line_segment([vr.left_top(), vr.right_top()], thin);
         p.line_segment([vr.left_bottom(), vr.right_bottom()], thin);
@@ -270,19 +394,46 @@ pub(crate) fn graph_in_rect(
         if pts.len() >= 2 {
             p.add(Shape::line(pts, Stroke::new(curve_w, theme.accent)));
         }
-        for k in keys {
-            if let Some(v) = k.scalar {
-                let c = pos2(x_of(k.t), y_of(v));
-                p.add(Shape::convex_polygon(
-                    vec![
-                        c + vec2(0.0, -4.0),
-                        c + vec2(4.0, 0.0),
-                        c + vec2(0.0, 4.0),
-                        c + vec2(-4.0, 0.0),
-                    ],
-                    theme.tl_env_primary,
-                    Stroke::new(1.0_f32, theme.text_primary),
-                ));
+        // alças de direção dos pontos Bézier
+        let vhandle_col = if theme.high_contrast {
+            theme.text_primary
+        } else {
+            theme.tl_env_secondary
+        };
+        for (k, h) in value_handle_positions(keys).iter().enumerate() {
+            let Some(key) = keys.get(k) else {
+                continue;
+            };
+            let Some(v) = key.scalar else {
+                continue;
+            };
+            let anchor = pos2(x_of(key.t), y_of(v));
+            for (out, hp) in [(false, h.incoming), (true, h.outgoing)] {
+                let Some((tt, tv)) = hp else {
+                    continue;
+                };
+                let tip = pos2(x_of(tt), y_of(tv));
+                p.line_segment([anchor, tip], Stroke::new(1.0_f32, vhandle_col));
+                p.circle_filled(tip, 3.5, vhandle_col);
+                hits.push((GraphHit::ValueHandle(k, out), tip));
+            }
+        }
+        // pontos de ancoragem (os quadros-chave), com a cor da interpolação
+        for (k, key) in keys.iter().enumerate() {
+            if let Some(v) = key.scalar {
+                let c = pos2(x_of(key.t), y_of(v));
+                let sel = matches!(dragging, Some(GraphHit::Anchor(d)) if d == k);
+                crate::kf_window::paint_keyframe_diamond(
+                    &p,
+                    c,
+                    if sel { 6.0 } else { 5.0 },
+                    key.curve,
+                    theme,
+                );
+                if key.ease.is_some() {
+                    paint_bezier_mark(&p, c, theme.text_primary);
+                }
+                hits.push((GraphHit::Anchor(k), c));
             }
         }
         p.text(
@@ -395,7 +546,6 @@ pub(crate) fn graph_in_rect(
     } else {
         theme.tl_env_secondary
     };
-    let mut tips: Vec<(usize, bool, Pos2)> = Vec::new();
     for (k, h) in handles.iter().enumerate() {
         let Some(key) = keys.get(k) else {
             continue;
@@ -415,7 +565,7 @@ pub(crate) fn graph_in_rect(
                 0.0,
                 theme.text_primary,
             );
-            tips.push((k, side_out, tip));
+            hits.push((GraphHit::SpeedHandle(k, side_out), tip));
         }
     }
 
@@ -427,57 +577,131 @@ pub(crate) fn graph_in_rect(
     );
     p.rect_stroke(rect, 0.0, thin, StrokeKind::Inside);
 
-    // interação: arrastar a ponta de uma alça
+    // interação: arrastar pontos de ancoragem e alças
     let resp = ui.interact(plot, id.with("vg_area"), Sense::click_and_drag());
-    let nearest = |pos: Pos2| -> Option<(usize, bool)> {
-        tips.iter()
-            .map(|(k, o, tp)| (*k, *o, tp.distance(pos)))
-            .filter(|(_, _, d)| *d <= HANDLE_HIT)
-            .min_by(|a, b| a.2.total_cmp(&b.2))
-            .map(|(k, o, _)| (k, o))
+    let nearest = |pos: Pos2| -> Option<GraphHit> {
+        // as alças têm prioridade sobre o ponto que as segura
+        hits.iter()
+            .map(|(h, hp)| {
+                let bias = if matches!(h, GraphHit::Anchor(_)) {
+                    1.5
+                } else {
+                    0.0
+                };
+                (*h, hp.distance(pos) + bias)
+            })
+            .filter(|(_, d)| *d <= HANDLE_HIT + 1.5)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(h, _)| h)
     };
     if resp.hovered() && resp.hover_pos().and_then(nearest).is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    let drag_id = id.with("vg_drag");
-    if resp.drag_started() {
-        let hit = resp.interact_pointer_pos().and_then(nearest);
-        ui.data_mut(|d| d.insert_temp(drag_id, hit));
+    let mut action = None;
+    if resp.clicked() && ui.input(|i| i.modifiers.command) {
+        if let Some(GraphHit::Anchor(k)) = resp.interact_pointer_pos().and_then(nearest) {
+            action = Some(GraphAction::ToggleBezier { key: k });
+        }
     }
-    let dragging: Option<(usize, bool)> = ui.data(|d| d.get_temp(drag_id)).flatten();
-    let mut edit = None;
-    if let (Some((k, out)), true) = (dragging, resp.dragged()) {
+    if resp.drag_started() {
+        // o egui só avisa o arraste depois de alguns pixels: o ponto pego é
+        // o de onde o botão foi apertado, não o da posição atual
+        let origin = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| resp.interact_pointer_pos());
+        let hit = origin.and_then(nearest);
+        let range = value_axis.map(|(_, lo, hi)| (lo, hi));
+        ui.data_mut(|d| {
+            d.insert_temp(drag_id, hit);
+            if let Some(r) = range {
+                d.insert_temp(range_id, r);
+            }
+        });
+    }
+    let dragging: Option<GraphHit> = ui.data(|d| d.get_temp(drag_id)).flatten();
+    let value_at = |y: f32| -> Option<f32> {
+        let (vr, lo, hi) = value_axis?;
+        let v = lo + (vr.bottom() - y) / vr.height().max(1.0) * (hi - lo);
+        v.is_finite().then_some(v)
+    };
+    if let (Some(hit), true) = (dragging, resp.dragged()) {
         if let Some(pos) = resp.interact_pointer_pos() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            let real = speed_from_y(pos.y.clamp(sr.top(), sr.bottom()));
-            if let Some(e) = drag_handle(keys, k, out, t_of(pos.x), real) {
-                let side = if out { e.outgoing } else { e.incoming };
-                let _ = egui::show_tooltip_at_pointer(
-                    ui.ctx(),
-                    ui.layer_id(),
-                    id.with("vg_tip"),
-                    |ui| {
-                        ui.label(format!(
-                            "{}: {}   {}: {:.0} %",
-                            tr(lang, "Velocidade"),
-                            fmt_speed(real, scalar),
-                            tr(lang, "Influência"),
-                            side.influence * 100.0
-                        ));
-                    },
-                );
-                edit = Some(GraphEdit {
-                    key: k,
-                    ease: e,
-                    edited_out: out,
-                });
+            match hit {
+                GraphHit::Anchor(k) => {
+                    if let (Some(key), Some(v)) = (keys.get(k), value_at(pos.y)) {
+                        // o primeiro quadro-chave fica no lugar no tempo
+                        let t = if k == 0 { key.t } else { t_of(pos.x) };
+                        let _ = egui::show_tooltip_at_pointer(
+                            ui.ctx(),
+                            ui.layer_id(),
+                            id.with("vg_tip"),
+                            |ui| {
+                                ui.label(format!("{}: {v:.2}", tr(lang, "Valor")));
+                            },
+                        );
+                        action = Some(GraphAction::MoveKey { key: k, t, v });
+                    }
+                }
+                GraphHit::ValueHandle(k, out) => {
+                    if let Some(v) = value_at(pos.y) {
+                        if let Some(e) = drag_value_handle(keys, k, out, t_of(pos.x), v) {
+                            let side = if out { e.outgoing } else { e.incoming };
+                            let _ = egui::show_tooltip_at_pointer(
+                                ui.ctx(),
+                                ui.layer_id(),
+                                id.with("vg_tip"),
+                                |ui| {
+                                    ui.label(format!(
+                                        "{}: {:.0} %",
+                                        tr(lang, "Influência"),
+                                        side.influence * 100.0
+                                    ));
+                                },
+                            );
+                            action = Some(GraphAction::Ease(GraphEdit {
+                                key: k,
+                                ease: e,
+                                edited_out: out,
+                            }));
+                        }
+                    }
+                }
+                GraphHit::SpeedHandle(k, out) => {
+                    let real = speed_from_y(pos.y.clamp(sr.top(), sr.bottom()));
+                    if let Some(e) = drag_handle(keys, k, out, t_of(pos.x), real) {
+                        let side = if out { e.outgoing } else { e.incoming };
+                        let _ = egui::show_tooltip_at_pointer(
+                            ui.ctx(),
+                            ui.layer_id(),
+                            id.with("vg_tip"),
+                            |ui| {
+                                ui.label(format!(
+                                    "{}: {}   {}: {:.0} %",
+                                    tr(lang, "Velocidade"),
+                                    fmt_speed(real, scalar),
+                                    tr(lang, "Influência"),
+                                    side.influence * 100.0
+                                ));
+                            },
+                        );
+                        action = Some(GraphAction::Ease(GraphEdit {
+                            key: k,
+                            ease: e,
+                            edited_out: out,
+                        }));
+                    }
+                }
             }
         }
     }
     if resp.drag_stopped() {
-        ui.data_mut(|d| d.remove::<Option<(usize, bool)>>(drag_id));
+        ui.data_mut(|d| {
+            d.remove::<Option<GraphHit>>(drag_id);
+            d.remove::<(f32, f32)>(range_id);
+        });
     }
-    edit
+    action
 }
 
 /// Gráfico solto (janela de efeitos): ocupa a largura disponível e `height`.
@@ -491,7 +715,7 @@ pub(crate) fn velocity_graph(
     height: f32,
     theme: &ThemeColors,
     lang: Language,
-) -> Option<GraphEdit> {
+) -> Option<GraphAction> {
     let w = ui.available_width().max(120.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, height.max(60.0)), Sense::hover());
     graph_in_rect(ui, id, rect, 70.0, keys, length, cursor, theme, lang)
@@ -580,7 +804,7 @@ pub(crate) fn fx_param_graphs(
             let pad = Ticks::from_raw(last.0 / 10).max(Ticks::from_secs_i64(1));
             (last + pad).max(local_t)
         });
-        if let Some(edit) = velocity_graph(
+        if let Some(a) = velocity_graph(
             ui,
             egui::Id::new(("fx_vg", fx_id, pi)),
             &gkeys,
@@ -590,12 +814,77 @@ pub(crate) fn fx_param_graphs(
             theme,
             lang,
         ) {
-            if p.ease_index(edit.key) != Some(edit.ease) {
-                changed |= p.set_ease_index(edit.key, Some(edit.ease), edit.edited_out);
-            }
+            changed |= apply_graph_action(p, a, spec.min, spec.max, tol);
         }
     }
     changed
+}
+
+/// Aplica a um parâmetro de efeito o que foi feito no gráfico. O valor fica
+/// entre `min` e `max` do parâmetro; o tempo não cai sobre outro
+/// quadro-chave. Devolve `true` se algo mudou.
+pub(crate) fn apply_graph_action(
+    p: &mut neoveg_engine::model::AnimParam,
+    a: GraphAction,
+    min: f32,
+    max: f32,
+    tol: Ticks,
+) -> bool {
+    match a {
+        GraphAction::Ease(edit) => {
+            p.ease_index(edit.key) != Some(edit.ease)
+                && p.set_ease_index(edit.key, Some(edit.ease), edit.edited_out)
+        }
+        GraphAction::ToggleBezier { key } => {
+            let next = if p.ease_index(key).is_some() {
+                None
+            } else {
+                Some(KeyEase::new(EaseMode::Auto))
+            };
+            p.set_ease_index(key, next, true)
+        }
+        GraphAction::MoveKey { key, t, v } => {
+            let (lo, hi) = if min.is_finite() && max.is_finite() && min <= max {
+                (min, max)
+            } else {
+                (f32::MIN, f32::MAX)
+            };
+            let v = if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                return false;
+            };
+            let Some(slot) = p.keys.get_mut(key) else {
+                return false;
+            };
+            let mut changed = false;
+            if slot.1 != v {
+                slot.1 = v;
+                changed = true;
+            }
+            let from = slot.0;
+            let free = !p
+                .keys
+                .iter()
+                .enumerate()
+                .any(|(i, k)| i != key && k.0.abs_diff(t) <= tol);
+            if t != from && free {
+                let curve = p.curves.get(key).copied();
+                let ease = p.ease_index(key);
+                if p.remove_key_near(from, Ticks::ZERO).is_some() {
+                    p.set_key(t, v, Ticks::ZERO);
+                    if let Some(c) = curve {
+                        p.set_curve(t, c, Ticks::ZERO);
+                    }
+                    if ease.is_some() {
+                        p.set_ease(t, ease, Ticks::ZERO);
+                    }
+                    changed = true;
+                }
+            }
+            changed
+        }
+    }
 }
 
 /// Itens Bézier do menu de interpolação de um quadro-chave, depois das
@@ -637,6 +926,110 @@ pub(crate) fn paint_bezier_mark(p: &egui::Painter, center: Pos2, color: Color32)
         [center + vec2(0.0, -3.0), center + vec2(0.0, 3.0)],
         Stroke::new(1.5_f32, color),
     );
+}
+
+#[cfg(test)]
+mod value_graph_tests {
+    use super::*;
+
+    fn key(secs: i64, v: f32, ease: Option<KeyEase>) -> GraphKey {
+        GraphKey {
+            t: Ticks::from_secs_i64(secs),
+            curve: Curve::Linear,
+            ease,
+            scalar: Some(v),
+        }
+    }
+
+    /// As alças no gráfico de valor ficam na tangente do trecho: no Bézier
+    /// linear (velocidade 1), a um terço do caminho até o vizinho.
+    #[test]
+    fn alcas_de_valor_seguem_a_tangente() {
+        let ks = [
+            key(0, 0.0, Some(KeyEase::new(EaseMode::Bezier))),
+            key(3, 3.0, Some(KeyEase::new(EaseMode::Bezier))),
+        ];
+        let h = value_handle_positions(&ks);
+        let (t, v) = h[0].outgoing.expect("alça de saída");
+        assert_eq!(t, Ticks::from_secs_i64(1));
+        assert!((v - 1.0).abs() < 1e-4);
+        let (t, v) = h[1].incoming.expect("alça de entrada");
+        assert_eq!(t, Ticks::from_secs_i64(2));
+        assert!((v - 2.0).abs() < 1e-4);
+        assert!(h[0].incoming.is_none() && h[1].outgoing.is_none());
+    }
+
+    /// Arrastar a alça de saída para a horizontal para o movimento no
+    /// quadro-chave (velocidade 0) e a distância vira a influência.
+    #[test]
+    fn arrastar_alca_de_valor_muda_velocidade_e_influencia() {
+        let ks = [
+            key(0, 0.0, Some(KeyEase::new(EaseMode::Bezier))),
+            key(4, 4.0, None),
+        ];
+        let e = drag_value_handle(&ks, 0, true, Ticks::from_secs_i64(2), 0.0).expect("Bézier");
+        assert!((e.outgoing.influence - 0.5).abs() < 1e-4);
+        assert!(e.outgoing.speed.abs() < 1e-4);
+        // de volta à tangente: velocidade 1
+        let e = drag_value_handle(&ks, 0, true, Ticks::from_secs_i64(1), 1.0).expect("Bézier");
+        assert!((e.outgoing.speed - 1.0).abs() < 1e-3);
+        // valor inválido ou sem vizinho: nada
+        assert!(drag_value_handle(&ks, 0, true, Ticks::ZERO, f32::NAN).is_none());
+        assert!(drag_value_handle(&ks, 1, true, Ticks::ZERO, 1.0).is_none());
+    }
+
+    fn param(keys: &[(i64, f32)]) -> neoveg_engine::model::AnimParam {
+        let mut p = neoveg_engine::model::AnimParam {
+            value: 0.0,
+            keys: Vec::new(),
+            curves: Vec::new(),
+            eases: Vec::new(),
+        };
+        for &(s, v) in keys {
+            p.set_key(Ticks::from_secs_i64(s), v, Ticks::ZERO);
+        }
+        p
+    }
+
+    /// Arrastar o ponto de ancoragem muda valor e tempo, dentro dos limites
+    /// do parâmetro e sem cair sobre outro quadro-chave.
+    #[test]
+    fn mover_ponto_de_ancoragem() {
+        let tol = Ticks::from_raw(10);
+        let mut p = param(&[(0, 0.0), (2, 1.0)]);
+        let a = GraphAction::MoveKey {
+            key: 1,
+            t: Ticks::from_secs_i64(3),
+            v: 5.0,
+        };
+        assert!(apply_graph_action(&mut p, a, -1.0, 2.0, tol));
+        assert_eq!(p.keys[1], (Ticks::from_secs_i64(3), 2.0));
+        let a = GraphAction::MoveKey {
+            key: 1,
+            t: Ticks::ZERO,
+            v: 1.5,
+        };
+        assert!(apply_graph_action(&mut p, a, -1.0, 2.0, tol));
+        assert_eq!(p.keys[1], (Ticks::from_secs_i64(3), 1.5));
+        let a = GraphAction::MoveKey {
+            key: 1,
+            t: Ticks::from_secs_i64(3),
+            v: f32::NAN,
+        };
+        assert!(!apply_graph_action(&mut p, a, -1.0, 2.0, tol));
+    }
+
+    /// Ctrl+clique alterna entre linear e Bézier automático.
+    #[test]
+    fn ctrl_clique_alterna_bezier() {
+        let tol = Ticks::from_raw(10);
+        let mut p = param(&[(0, 0.0), (2, 1.0)]);
+        let a = GraphAction::ToggleBezier { key: 0 };
+        assert!(apply_graph_action(&mut p, a, -1.0, 2.0, tol));
+        assert_eq!(p.ease_index(0).map(|e| e.mode), Some(EaseMode::Auto));
+        assert!(apply_graph_action(&mut p, a, -1.0, 2.0, tol));
+        assert_eq!(p.ease_index(0), None);
+    }
 }
 
 #[cfg(test)]
