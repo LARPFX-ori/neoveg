@@ -665,6 +665,8 @@ pub struct HeaderButtons {
     pub compositing_child: bool,
     /// Armar para gravação (só áudio, p. 853).
     pub record_arm: bool,
+    /// Inverter a fase da trilha (só áudio, "Invert Track Phase").
+    pub phase: bool,
 }
 
 impl HeaderButtons {
@@ -678,6 +680,7 @@ impl HeaderButtons {
             height: on,
             compositing_child: on,
             record_arm: on,
+            phase: on,
         }
     }
 }

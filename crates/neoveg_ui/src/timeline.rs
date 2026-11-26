@@ -1010,8 +1010,13 @@ impl App {
                     if b.compositing_child {
                         w += 24.0;
                     }
-                } else if b.record_arm {
-                    w += 24.0;
+                } else {
+                    if b.record_arm {
+                        w += 24.0;
+                    }
+                    if b.phase {
+                        w += 24.0;
+                    }
                 }
                 if b.height {
                     w += 46.0;
@@ -3842,6 +3847,9 @@ impl App {
                         if !is_video && !is_folder && btns.record_arm {
                             btns_w += 22.0;
                         }
+                        if !is_video && !is_folder && btns.phase {
+                            btns_w += 22.0;
+                        }
                         if is_video && btns.compositing_child && !is_folder && !is_adjustment {
                             btns_w += 22.0;
                         }
@@ -3946,6 +3954,26 @@ impl App {
                         more = Some(HeaderAction::RecordArm);
                     }
                 }
+                if show_btns && kind == TrackKind::Audio && !is_folder && btns.phase {
+                    let inverted = self.project.tracks[ti].invert_phase;
+                    let ph = ui.selectable_label(inverted, "Ø");
+                    // nome próprio para a acessibilidade: o Console de Mixagem também
+                    // tem um botão "Ø"
+                    ph.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::SelectableLabel,
+                            true,
+                            inverted,
+                            tr(lang, "Inverter a fase da trilha"),
+                        )
+                    });
+                    if ph
+                        .on_hover_text(tr(lang, "Inverter a fase da trilha"))
+                        .clicked()
+                    {
+                        more = Some(HeaderAction::InvertPhase);
+                    }
+                }
                 if show_btns
                     && is_video
                     && btns.compositing_child
@@ -4035,6 +4063,15 @@ impl App {
                 Some(HeaderAction::RecordArm) => {
                     self.session.toggle_record_arm(ti);
                     self.sync_status_from_session();
+                }
+                Some(HeaderAction::InvertPhase) => {
+                    if self.project.tracks.get(ti).is_some_and(|t| !t.locked) {
+                        self.checkpoint();
+                        if let Some(t) = self.project.tracks.get_mut(ti) {
+                            t.invert_phase = !t.invert_phase;
+                        }
+                        self.changed();
+                    }
                 }
                 Some(HeaderAction::SetAutomation(mode)) => {
                     self.session.set_track_automation_mode(ti, mode);
@@ -4138,7 +4175,7 @@ impl App {
                         }
                         changed_track |= r.changed() || r.double_clicked();
                         ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
-                        if !self.project.audio_buses.is_empty() {
+                        {
                             let bus_list: Vec<(Id, String)> = self
                                 .project
                                 .audio_buses
@@ -4192,6 +4229,63 @@ impl App {
                     }
                 });
             }
+            // envio para barramento (como "FX 1 ... Post" no VEGAS Pro): o
+            // primeiro envio da trilha, com nível e antes/depois do fader
+            if kind == TrackKind::Audio
+                && h >= 94.0
+                && show_sliders
+                && !self.project.tracks[ti].sends.is_empty()
+            {
+                let send_name = self.project.tracks[ti]
+                    .sends
+                    .first()
+                    .and_then(|s| self.project.audio_bus(s.bus_id))
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| tr(lang, "Envio").to_string());
+                child.horizontal(|ui| {
+                    let Some(s) = self.project.tracks[ti].sends.first_mut() else {
+                        return;
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(send_name).small()).truncate());
+                    let before = s.level_db;
+                    let r = ui.add(
+                        egui::Slider::new(&mut s.level_db, -60.0..=12.0)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    );
+                    if slider_moved_by_other_button(ui, &r) {
+                        s.level_db = before;
+                    }
+                    if r.drag_started() {
+                        want_checkpoint = true;
+                    }
+                    if r.double_clicked() {
+                        s.level_db = 0.0;
+                    }
+                    changed_track |= r.changed() || r.double_clicked();
+                    ui.label(egui::RichText::new(send_level_label(s.level_db)).small());
+                    let pre = s.pre_fader;
+                    if ui
+                        .selectable_label(
+                            pre,
+                            if pre {
+                                tr(lang, "Pré")
+                            } else {
+                                tr(lang, "Pós")
+                            },
+                        )
+                        .on_hover_text(tr(
+                            lang,
+                            "Envio antes (Pré) ou depois (Pós) do fader da trilha",
+                        ))
+                        .clicked()
+                    {
+                        s.pre_fader = !pre;
+                        want_checkpoint = true;
+                        changed_track = true;
+                    }
+                });
+            }
             if want_checkpoint {
                 // checkpoint com o estado anterior aproximado (antes da mudança atual)
                 let mut snap = self.project.clone();
@@ -4204,6 +4298,7 @@ impl App {
                     t.opacity = old.opacity;
                     t.pan = old.pan;
                     t.output_bus = old.output_bus;
+                    t.sends.clone_from(&old.sends);
                 }
                 self.undo.push(snap);
                 self.redo.clear();
@@ -8305,27 +8400,45 @@ impl App {
                     Stroke::new(1.0_f32, self.theme.tl_event_border)
                 };
                 painter.rect_stroke(r, 2.0, border, StrokeKind::Inside);
-                // Evento de Ajuste (VEGAS Pro 20/2026): faixa violeta + etiqueta FX AJUSTE
+                // Evento de Ajuste (VEGAS Pro 20/2026): corpo amarelo-oliva com
+                // hachura diagonal e o nome do primeiro efeito no canto, como na
+                // ajuda do VEGAS Pro
                 if e.is_adjustment {
-                    let ev_clip = painter.with_clip_rect(r.intersect(lanes));
-                    let adj_col = Color32::from_rgb(154, 92, 224);
-                    ev_clip.rect_filled(
-                        Rect::from_min_max(r.min, pos2(r.right(), (r.top() + 5.0).min(r.bottom()))),
-                        0.0,
-                        adj_col,
-                    );
-                    if r.width() > 54.0 {
-                        let badge_g = ev_clip.layout_no_wrap(
-                            tr(self.lang(), "FX AJUSTE").to_string(),
-                            FontId::proportional(9.5),
-                            Color32::WHITE,
+                    let vis = r.intersect(lanes);
+                    let ev_clip = painter.with_clip_rect(vis);
+                    let (fill, hatch) = adjustment_event_colors(&self.theme);
+                    ev_clip.rect_filled(r.shrink(1.0), 1.5, fill);
+                    paint_diagonal_hatch(&ev_clip, vis.shrink(1.0), hatch, 7.0);
+                    if r.width() > 40.0 {
+                        let label =
+                            e.fx.first()
+                                .map(|fx| {
+                                    if matches!(
+                                        fx.kind,
+                                        neoveg_engine::model::FxKind::Ofx
+                                            | neoveg_engine::model::FxKind::Vst3
+                                    ) {
+                                        fx.display_name()
+                                    } else {
+                                        fx.kind.name_in(self.lang()).to_string()
+                                    }
+                                })
+                                .unwrap_or_else(|| e.name.clone());
+                        let g = ev_clip.layout_no_wrap(
+                            label,
+                            FontId::proportional(10.5),
+                            Color32::from_rgb(250, 248, 230),
                         );
-                        let br = Rect::from_min_size(
-                            pos2(r.left() + 4.0, (r.bottom() - 16.0).max(r.top() + 6.0)),
-                            badge_g.size() + vec2(6.0, 2.0),
+                        let tag = Rect::from_min_size(
+                            pos2(vis.left().max(r.left()) + 2.0, r.top() + 2.0),
+                            g.size() + vec2(6.0, 2.0),
                         );
-                        ev_clip.rect_filled(br, 2.0, adj_col);
-                        ev_clip.galley(br.min + vec2(3.0, 1.0), badge_g, Color32::WHITE);
+                        ev_clip.rect_filled(
+                            tag,
+                            2.0,
+                            Color32::from_rgba_unmultiplied(150, 110, 160, 220),
+                        );
+                        ev_clip.galley(tag.min + vec2(3.0, 1.0), g, Color32::WHITE);
                     }
                 }
                 // Envelope de Velocidade no evento de vídeo (curva verde -100%..+300%)
@@ -9600,9 +9713,32 @@ enum HeaderAction {
     Maximize,
     ToggleCompositingChild,
     RecordArm,
+    InvertPhase,
     SetAutomation(AutomationMode),
     CycleAutomation,
     EditButtons,
+}
+
+/// Nível de um envio para barramento: `-inf` no mínimo do controle.
+fn send_level_label(db: f32) -> String {
+    if !db.is_finite() || db <= -60.0 {
+        "-inf".to_string()
+    } else {
+        format!("{db:+.1} dB")
+    }
+}
+
+#[cfg(test)]
+mod send_label_tests {
+    use super::send_level_label;
+
+    #[test]
+    fn nivel_do_envio() {
+        assert_eq!(send_level_label(-60.0), "-inf");
+        assert_eq!(send_level_label(f32::NAN), "-inf");
+        assert_eq!(send_level_label(0.0), "+0.0 dB");
+        assert_eq!(send_level_label(-6.04), "-6.0 dB");
+    }
 }
 
 /// O `egui::Slider` responde a qualquer botão do mouse: o clique direito no
@@ -9745,6 +9881,67 @@ mod sync_tint_tests {
         assert!(c.a() > 40 && c.a() < 200);
     }
 }
+/// Cores do evento de ajuste: preenchimento amarelo-oliva e hachura mais
+/// escura. No alto contraste, o preenchimento é mais claro e a hachura, a
+/// cor do texto, para continuar legível.
+fn adjustment_event_colors(theme: &crate::theme::ThemeColors) -> (Color32, Color32) {
+    if theme.high_contrast {
+        (
+            Color32::from_rgb(150, 140, 20),
+            theme.text_primary.gamma_multiply(0.6),
+        )
+    } else {
+        (
+            Color32::from_rgb(112, 106, 24),
+            Color32::from_rgb(146, 138, 40),
+        )
+    }
+}
+
+/// Hachura diagonal (de baixo à esquerda para cima à direita) em `rect`, com
+/// linhas a cada `step` px. Limita a quantidade de linhas (retângulo enorme).
+fn paint_diagonal_hatch(p: &egui::Painter, rect: Rect, col: Color32, step: f32) {
+    if !rect.is_positive() || !step.is_finite() || step < 2.0 {
+        return;
+    }
+    let span = rect.width() + rect.height();
+    if !span.is_finite() {
+        return;
+    }
+    let n = ((span / step).ceil() as usize).min(4000);
+    let hp = p.with_clip_rect(rect);
+    for i in 0..=n {
+        let x0 = rect.left() - rect.height() + i as f32 * step;
+        hp.line_segment(
+            [
+                pos2(x0, rect.bottom()),
+                pos2(x0 + rect.height(), rect.top()),
+            ],
+            Stroke::new(1.0_f32, col),
+        );
+    }
+}
+
+#[cfg(test)]
+mod adjustment_color_tests {
+    use super::adjustment_event_colors;
+    use crate::theme::{palette, ThemeId};
+
+    /// O evento de ajuste era violeta; no VEGAS Pro ele é amarelo-oliva.
+    #[test]
+    fn evento_de_ajuste_amarelo_oliva() {
+        let (fill, hatch) = adjustment_event_colors(&palette(ThemeId::VegasEscuro));
+        assert!(
+            fill.r() > fill.b() && fill.g() > fill.b(),
+            "amarelado: {fill:?}"
+        );
+        assert!(fill.b() < 60);
+        assert_ne!(fill, hatch);
+        let (hc, _) = adjustment_event_colors(&palette(ThemeId::AltoContrasteEscuro));
+        assert!(hc.r() > hc.b() && hc.g() > hc.b());
+    }
+}
+
 #[cfg(test)]
 mod slider_button_tests {
     use super::slider_moved_by_other_button;

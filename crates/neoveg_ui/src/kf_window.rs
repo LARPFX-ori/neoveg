@@ -667,6 +667,10 @@ pub(crate) struct KfRow<'a> {
     pub keys: Vec<(Ticks, Curve)>,
     /// Interpolação Bézier de cada quadro-chave (paralelo a `keys`).
     pub eases: Vec<Option<KeyEase>>,
+    /// Valor de cada quadro-chave (paralelo a `keys`) quando a propriedade
+    /// tem um só número: liga o gráfico de valor com pontos de ancoragem.
+    /// Vazio nas propriedades compostas (posição, recorte...).
+    pub values: Vec<f32>,
     /// A linha aceita interpolação temporal Bézier e gráfico de velocidade.
     pub bezier: bool,
     /// Caixa de seleção opcional à esquerda do nome (ex.: Máscara, Sombra 2D, Brilho 2D).
@@ -698,6 +702,12 @@ pub(crate) struct KfStripOut {
     /// Bézier escolhido no menu ou alça arrastada no gráfico de velocidade:
     /// (trilha, índice, Bézier, alça de saída foi a mexida).
     pub set_ease: Option<(usize, usize, KeyEase, bool)>,
+    /// Ponto de ancoragem arrastado no gráfico de valor: (trilha, índice,
+    /// novo tempo, novo valor).
+    pub set_value: Option<(usize, usize, Ticks, f32)>,
+    /// Ctrl+clique no ponto do gráfico de valor: alterna linear e Bézier
+    /// automático (trilha, índice).
+    pub toggle_bezier: Option<(usize, usize)>,
     /// "Excluir" no menu de contexto: (trilha, índice).
     pub delete_key: Option<(usize, usize)>,
     /// Clique no nome da trilha de quadros-chave: seleciona a trilha ativa.
@@ -1014,10 +1024,14 @@ pub(crate) fn keyframe_strip(
                     t,
                     curve,
                     ease: row.eases.get(ki).copied().flatten(),
-                    scalar: None,
+                    scalar: if row.values.len() == row.keys.len() {
+                        row.values.get(ki).copied()
+                    } else {
+                        None
+                    },
                 })
                 .collect();
-            if let Some(edit) = velocity_graph::graph_in_rect(
+            if let Some(action) = velocity_graph::graph_in_rect(
                 ui,
                 id.with("kf_vgraph"),
                 r,
@@ -1028,7 +1042,17 @@ pub(crate) fn keyframe_strip(
                 theme,
                 lang,
             ) {
-                out.set_ease = Some((gr, edit.key, edit.ease, edit.edited_out));
+                match action {
+                    velocity_graph::GraphAction::Ease(edit) => {
+                        out.set_ease = Some((gr, edit.key, edit.ease, edit.edited_out));
+                    }
+                    velocity_graph::GraphAction::MoveKey { key, t, v } => {
+                        out.set_value = Some((gr, key, t, v));
+                    }
+                    velocity_graph::GraphAction::ToggleBezier { key } => {
+                        out.toggle_bezier = Some((gr, key));
+                    }
+                }
             }
         }
     }
@@ -1054,8 +1078,11 @@ pub(crate) fn keyframe_strip(
     };
     let drag_id = id.with("kf_drag");
     if resp.drag_started() {
-        let hit = resp
-            .interact_pointer_pos()
+        // ponto onde o botão foi apertado: o egui só avisa o arraste depois
+        // de alguns pixels, e o losango já ficou para trás
+        let hit = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| resp.interact_pointer_pos())
             .filter(|p| lanes.contains(*p))
             .and_then(key_at);
         ui.data_mut(|d| d.insert_temp(drag_id, hit));

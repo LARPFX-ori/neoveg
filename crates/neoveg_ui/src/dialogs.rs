@@ -1687,6 +1687,7 @@ impl App {
                     );
                 } else {
                     ui.checkbox(&mut draft.record_arm, tr(lang, "Armar para gravação"));
+                    ui.checkbox(&mut draft.phase, tr(lang, "Inverter a fase da trilha"));
                 }
                 ui.checkbox(
                     &mut draft.height,
@@ -4284,6 +4285,7 @@ impl App {
                                         })
                                         .collect(),
                                     eases: (0..p.keys.len()).map(|k| p.ease_index(k)).collect(),
+                                    values: p.keys.iter().map(|k| k.1).collect(),
                                     bezier: true,
                                     checked: None,
                                     selected: ri == active,
@@ -8734,6 +8736,35 @@ fn apply_fx_strip(
     if let Some((ri, ki, e, edited_out)) = out.set_ease {
         if let Some(p) = param(ri, fx.params.len()).and_then(|pi| fx.params.get_mut(pi)) {
             changed |= p.set_ease_index(ki, Some(e), edited_out);
+        }
+    }
+    if let Some((ri, ki, t, v)) = out.set_value {
+        if let Some(pi) = param(ri, fx.params.len()) {
+            let (lo, hi) = fx
+                .kind
+                .params()
+                .get(pi)
+                .map_or((f32::MIN, f32::MAX), |s| (s.min, s.max));
+            if let Some(p) = fx.params.get_mut(pi) {
+                changed |= crate::velocity_graph::apply_graph_action(
+                    p,
+                    crate::velocity_graph::GraphAction::MoveKey { key: ki, t, v },
+                    lo,
+                    hi,
+                    tol,
+                );
+            }
+        }
+    }
+    if let Some((ri, ki)) = out.toggle_bezier {
+        if let Some(p) = param(ri, fx.params.len()).and_then(|pi| fx.params.get_mut(pi)) {
+            changed |= crate::velocity_graph::apply_graph_action(
+                p,
+                crate::velocity_graph::GraphAction::ToggleBezier { key: ki },
+                f32::MIN,
+                f32::MAX,
+                tol,
+            );
         }
     }
     if let Some((ri, ki)) = out.delete_key {

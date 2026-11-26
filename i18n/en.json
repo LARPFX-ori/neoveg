@@ -3156,5 +3156,9 @@
   "Velocidade média:": "Average speed:",
   "Velocidade atual:": "Current speed:",
   "Abrir a pasta ao terminar a renderização": "Open folder when rendering is complete",
-  "Fechar esta janela ao terminar a renderização": "Close this window when rendering is complete"
+  "Fechar esta janela ao terminar a renderização": "Close this window when rendering is complete",
+  "Inverter a fase da trilha": "Invert track phase",
+  "Envio": "Send",
+  "Pós": "Post",
+  "Envio antes (Pré) ou depois (Pós) do fader da trilha": "Send before (Pre) or after (Post) the track fader"
 }

@@ -1466,256 +1466,267 @@ fn draw_source_card(
         .corner_radius(5.0)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            ui.set_width((card_w - 18.0).max(240.0));
-            let inner_w = ui.available_width();
+            // a grade de cartões é horizontal: sem isto, o título e os dados
+            // ficavam ao lado da prévia, espremidos numa coluna de uma letra
+            ui.vertical(|ui| {
+                ui.set_width((card_w - 18.0).max(240.0));
+                let inner_w = ui.available_width();
 
-            if card.is_video() {
-                // Área de prévia 16:9 ao vivo
-                let prev_h = (inner_w * 9.0 / 16.0).clamp(110.0, 210.0);
-                let (rect, _) = ui.allocate_exact_size(vec2(inner_w, prev_h), Sense::hover());
-                ui.painter().rect_filled(rect, 3.0, theme.extreme_bg);
-                if let Some(t) = tex {
-                    let tsz = t.size_vec2();
-                    let sx = rect.width() / tsz.x.max(1.0);
-                    let sy = rect.height() / tsz.y.max(1.0);
-                    let sc = sx.min(sy);
-                    let dw = tsz.x * sc;
-                    let dh = tsz.y * sc;
-                    let img_rect = Rect::from_center_size(rect.center(), vec2(dw, dh));
-                    egui::Image::new((t.id(), img_rect.size())).paint_at(ui, img_rect);
-                } else {
-                    let status_txt = snap
-                        .and_then(|s| s.last_error.as_deref())
-                        .unwrap_or_else(|| tr(lang, "Aguardando prévia..."));
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        status_txt,
-                        egui::FontId::proportional(11.0),
-                        theme.text_muted,
-                    );
-                }
-                // Selo de status no canto superior esquerdo da prévia
-                let badge = match snap.map(|s| s.status) {
-                    Some(SourceRuntimeStatus::Recording) => {
-                        Some((tr(lang, "REC"), Color32::from_rgb(208, 66, 48)))
-                    }
-                    Some(SourceRuntimeStatus::Error) => Some((tr(lang, "Erro"), theme.offline_fg)),
-                    Some(SourceRuntimeStatus::Monitoring) => {
-                        Some((tr(lang, "Ao vivo"), Color32::from_rgb(42, 148, 76)))
-                    }
-                    _ => None,
-                };
-                if let Some((txt, bg)) = badge {
-                    let br = Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(52.0, 17.0));
-                    ui.painter().rect_filled(br, 3.0, bg);
-                    ui.painter().text(
-                        br.center(),
-                        egui::Align2::CENTER_CENTER,
-                        txt,
-                        egui::FontId::proportional(10.0),
-                        Color32::WHITE,
-                    );
-                }
-                ui.add_space(6.0);
-            } else {
-                // Medidor VU estéreo ao vivo com escala em dBFS (VEGAS Capture 21–26)
-                let peaks = snap.map(|s| s.peak_db).unwrap_or([-96.0, -96.0]);
-                draw_stereo_vu_meter(ui, inner_w, peaks, card.muted, theme);
-                ui.add_space(6.0);
-            }
-
-            // Linha do título + controles rápidos (Ativar, Silenciar, Configurações do dispositivo, Remover)
-            ui.horizontal(|ui| {
-                ui.add_enabled(!recording, egui::Checkbox::without_text(&mut card.enabled));
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&card.name).strong());
-                    ui.label(
-                        RichText::new(format!(
-                            "{} · {}",
-                            card.kind.category_label(lang),
-                            card.summary_line(lang)
-                        ))
-                        .small()
-                        .color(theme.text_muted),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!recording, egui::Button::new("×").small())
-                        .on_hover_text(tr(lang, "Remover fonte"))
-                        .clicked()
-                    {
-                        remove_clicked = true;
-                    }
-                    let cfg_btn =
-                        icons::small_icon_button(ui, Icon::GearProps, None, expanded, theme)
-                            .on_hover_text(tr(lang, "Configurações do dispositivo"));
-                    if cfg_btn.clicked() {
-                        expand_clicked = true;
-                    }
-                    if card.is_audio() {
-                        let mute_btn =
-                            icons::small_icon_button(ui, Icon::MuteAudio, None, card.muted, theme)
-                                .on_hover_text(if card.muted {
-                                    tr(lang, "Reativar áudio")
-                                } else {
-                                    tr(lang, "Silenciar fonte")
-                                });
-                        if !recording && mute_btn.clicked() {
-                            card.muted = !card.muted;
+                // Linha do título + controles rápidos (Ativar, Silenciar, Configurações do dispositivo, Remover)
+                ui.horizontal(|ui| {
+                    ui.add_enabled(!recording, egui::Checkbox::without_text(&mut card.enabled));
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&card.name).strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                card.kind.category_label(lang),
+                                card.summary_line(lang)
+                            ))
+                            .small()
+                            .color(theme.text_muted),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(!recording, egui::Button::new("×").small())
+                            .on_hover_text(tr(lang, "Remover fonte"))
+                            .clicked()
+                        {
+                            remove_clicked = true;
                         }
-                    }
-                });
-            });
-
-            if let Some(err) = snap.and_then(|s| s.last_error.as_deref()) {
-                ui.add_space(3.0);
-                ui.label(RichText::new(err).small().color(theme.offline_fg));
-            }
-
-            // Gaveta expansível "Configurações do dispositivo" (espelho de capture-devicesettings.png)
-            if expanded {
-                ui.separator();
-                ui.add_enabled_ui(!recording, |ui| {
-                    if card.is_video() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Resolução")).small());
-                                egui::ComboBox::from_id_salt(("nvcap_res", card.id))
-                                    .width(120.0)
-                                    .selected_text(card.resolution.label_in(lang))
-                                    .show_ui(ui, |ui| {
-                                        for r in CaptureResolution::ALL {
-                                            ui.selectable_value(
-                                                &mut card.resolution,
-                                                r,
-                                                r.label_in(lang),
-                                            );
-                                        }
-                                    });
-                            });
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Taxa de quadros")).small());
-                                let fps_lbl = CAPTURE_FPS_OPTIONS
-                                    .iter()
-                                    .find(|(_, f)| *f == card.fps)
-                                    .map(|(l, _)| *l)
-                                    .unwrap_or("30 fps");
-                                egui::ComboBox::from_id_salt(("nvcap_fps", card.id))
-                                    .width(92.0)
-                                    .selected_text(fps_lbl)
-                                    .show_ui(ui, |ui| {
-                                        for (lbl, f) in CAPTURE_FPS_OPTIONS {
-                                            ui.selectable_value(&mut card.fps, f, lbl);
-                                        }
-                                    });
-                            });
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Codec")).small());
-                                egui::ComboBox::from_id_salt(("nvcap_vc", card.id))
-                                    .width(136.0)
-                                    .selected_text(card.video_codec.short_name())
-                                    .show_ui(ui, |ui| {
-                                        for c in CaptureVideoCodec::ALL {
-                                            if !c.available_on_os() {
-                                                continue;
-                                            }
-                                            ui.selectable_value(
-                                                &mut card.video_codec,
-                                                c,
-                                                c.label_in(lang),
-                                            );
-                                        }
-                                    });
-                            });
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Qualidade")).small());
-                                egui::ComboBox::from_id_salt(("nvcap_vq", card.id))
-                                    .width(96.0)
-                                    .selected_text(card.video_quality.label_in(lang))
-                                    .show_ui(ui, |ui| {
-                                        for q in CaptureQuality::ALL {
-                                            ui.selectable_value(
-                                                &mut card.video_quality,
-                                                q,
-                                                q.label_in(lang),
-                                            );
-                                        }
-                                    });
-                            });
-                        });
-                        if matches!(
-                            card.kind,
-                            CaptureSourceKind::Screen { .. } | CaptureSourceKind::Window { .. }
-                        ) {
-                            ui.checkbox(
-                                &mut card.capture_cursor,
-                                tr(lang, "Capturar cursor do mouse"),
-                            );
+                        let cfg_btn =
+                            icons::small_icon_button(ui, Icon::GearProps, None, expanded, theme)
+                                .on_hover_text(tr(lang, "Configurações do dispositivo"));
+                        if cfg_btn.clicked() {
+                            expand_clicked = true;
                         }
+                        if card.is_audio() {
+                            let mute_btn = icons::small_icon_button(
+                                ui,
+                                Icon::MuteAudio,
+                                None,
+                                card.muted,
+                                theme,
+                            )
+                            .on_hover_text(if card.muted {
+                                tr(lang, "Reativar áudio")
+                            } else {
+                                tr(lang, "Silenciar fonte")
+                            });
+                            if !recording && mute_btn.clicked() {
+                                card.muted = !card.muted;
+                            }
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                if card.is_video() {
+                    // Área de prévia 16:9 ao vivo
+                    let prev_h = (inner_w * 9.0 / 16.0).clamp(110.0, 210.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(inner_w, prev_h), Sense::hover());
+                    ui.painter().rect_filled(rect, 3.0, theme.extreme_bg);
+                    if let Some(t) = tex {
+                        let tsz = t.size_vec2();
+                        let sx = rect.width() / tsz.x.max(1.0);
+                        let sy = rect.height() / tsz.y.max(1.0);
+                        let sc = sx.min(sy);
+                        let dw = tsz.x * sc;
+                        let dh = tsz.y * sc;
+                        let img_rect = Rect::from_center_size(rect.center(), vec2(dw, dh));
+                        egui::Image::new((t.id(), img_rect.size())).paint_at(ui, img_rect);
                     } else {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Codec")).small());
-                                egui::ComboBox::from_id_salt(("nvcap_ac", card.id))
-                                    .width(120.0)
-                                    .selected_text(card.audio_codec.short_name())
-                                    .show_ui(ui, |ui| {
-                                        for c in CaptureAudioCodec::ALL {
-                                            if !c.available_on_os() {
-                                                continue;
-                                            }
-                                            ui.selectable_value(
-                                                &mut card.audio_codec,
-                                                c,
-                                                c.label_in(lang),
-                                            );
-                                        }
-                                    });
-                            });
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Canais")).small());
-                                let ch_lbl = if card.audio_channels <= 1 {
-                                    tr(lang, "Mono")
-                                } else {
-                                    tr(lang, "Estéreo")
-                                };
-                                egui::ComboBox::from_id_salt(("nvcap_ach", card.id))
-                                    .width(90.0)
-                                    .selected_text(ch_lbl)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut card.audio_channels,
-                                            2,
-                                            tr(lang, "Estéreo"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut card.audio_channels,
-                                            1,
-                                            tr(lang, "Mono"),
-                                        );
-                                    });
-                            });
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(tr(lang, "Taxa de amostragem")).small());
-                                egui::ComboBox::from_id_salt(("nvcap_asr", card.id))
-                                    .width(96.0)
-                                    .selected_text(format!("{} Hz", card.audio_sample_rate))
-                                    .show_ui(ui, |ui| {
-                                        for sr in CAPTURE_SAMPLE_RATES {
-                                            ui.selectable_value(
-                                                &mut card.audio_sample_rate,
-                                                sr,
-                                                format!("{sr} Hz"),
-                                            );
-                                        }
-                                    });
-                            });
-                        });
+                        let status_txt = snap
+                            .and_then(|s| s.last_error.as_deref())
+                            .unwrap_or_else(|| tr(lang, "Aguardando prévia..."));
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            status_txt,
+                            egui::FontId::proportional(11.0),
+                            theme.text_muted,
+                        );
                     }
-                });
-            }
+                    // Selo de status no canto superior esquerdo da prévia
+                    let badge = match snap.map(|s| s.status) {
+                        Some(SourceRuntimeStatus::Recording) => {
+                            Some((tr(lang, "REC"), Color32::from_rgb(208, 66, 48)))
+                        }
+                        Some(SourceRuntimeStatus::Error) => {
+                            Some((tr(lang, "Erro"), theme.offline_fg))
+                        }
+                        Some(SourceRuntimeStatus::Monitoring) => {
+                            Some((tr(lang, "Ao vivo"), Color32::from_rgb(42, 148, 76)))
+                        }
+                        _ => None,
+                    };
+                    if let Some((txt, bg)) = badge {
+                        let br = Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(52.0, 17.0));
+                        ui.painter().rect_filled(br, 3.0, bg);
+                        ui.painter().text(
+                            br.center(),
+                            egui::Align2::CENTER_CENTER,
+                            txt,
+                            egui::FontId::proportional(10.0),
+                            Color32::WHITE,
+                        );
+                    }
+                    ui.add_space(6.0);
+                } else {
+                    // Medidor VU estéreo ao vivo com escala em dBFS (VEGAS Capture 21–26)
+                    let peaks = snap.map(|s| s.peak_db).unwrap_or([-96.0, -96.0]);
+                    draw_stereo_vu_meter(ui, inner_w, peaks, card.muted, theme);
+                    ui.add_space(6.0);
+                }
+
+                if let Some(err) = snap.and_then(|s| s.last_error.as_deref()) {
+                    ui.add_space(3.0);
+                    ui.label(RichText::new(err).small().color(theme.offline_fg));
+                }
+
+                // Gaveta expansível "Configurações do dispositivo" (espelho de capture-devicesettings.png)
+                if expanded {
+                    ui.separator();
+                    ui.add_enabled_ui(!recording, |ui| {
+                        if card.is_video() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Resolução")).small());
+                                    egui::ComboBox::from_id_salt(("nvcap_res", card.id))
+                                        .width(120.0)
+                                        .selected_text(card.resolution.label_in(lang))
+                                        .show_ui(ui, |ui| {
+                                            for r in CaptureResolution::ALL {
+                                                ui.selectable_value(
+                                                    &mut card.resolution,
+                                                    r,
+                                                    r.label_in(lang),
+                                                );
+                                            }
+                                        });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Taxa de quadros")).small());
+                                    let fps_lbl = CAPTURE_FPS_OPTIONS
+                                        .iter()
+                                        .find(|(_, f)| *f == card.fps)
+                                        .map(|(l, _)| *l)
+                                        .unwrap_or("30 fps");
+                                    egui::ComboBox::from_id_salt(("nvcap_fps", card.id))
+                                        .width(92.0)
+                                        .selected_text(fps_lbl)
+                                        .show_ui(ui, |ui| {
+                                            for (lbl, f) in CAPTURE_FPS_OPTIONS {
+                                                ui.selectable_value(&mut card.fps, f, lbl);
+                                            }
+                                        });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Codec")).small());
+                                    egui::ComboBox::from_id_salt(("nvcap_vc", card.id))
+                                        .width(136.0)
+                                        .selected_text(card.video_codec.short_name())
+                                        .show_ui(ui, |ui| {
+                                            for c in CaptureVideoCodec::ALL {
+                                                if !c.available_on_os() {
+                                                    continue;
+                                                }
+                                                ui.selectable_value(
+                                                    &mut card.video_codec,
+                                                    c,
+                                                    c.label_in(lang),
+                                                );
+                                            }
+                                        });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Qualidade")).small());
+                                    egui::ComboBox::from_id_salt(("nvcap_vq", card.id))
+                                        .width(96.0)
+                                        .selected_text(card.video_quality.label_in(lang))
+                                        .show_ui(ui, |ui| {
+                                            for q in CaptureQuality::ALL {
+                                                ui.selectable_value(
+                                                    &mut card.video_quality,
+                                                    q,
+                                                    q.label_in(lang),
+                                                );
+                                            }
+                                        });
+                                });
+                            });
+                            if matches!(
+                                card.kind,
+                                CaptureSourceKind::Screen { .. } | CaptureSourceKind::Window { .. }
+                            ) {
+                                ui.checkbox(
+                                    &mut card.capture_cursor,
+                                    tr(lang, "Capturar cursor do mouse"),
+                                );
+                            }
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Codec")).small());
+                                    egui::ComboBox::from_id_salt(("nvcap_ac", card.id))
+                                        .width(120.0)
+                                        .selected_text(card.audio_codec.short_name())
+                                        .show_ui(ui, |ui| {
+                                            for c in CaptureAudioCodec::ALL {
+                                                if !c.available_on_os() {
+                                                    continue;
+                                                }
+                                                ui.selectable_value(
+                                                    &mut card.audio_codec,
+                                                    c,
+                                                    c.label_in(lang),
+                                                );
+                                            }
+                                        });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Canais")).small());
+                                    let ch_lbl = if card.audio_channels <= 1 {
+                                        tr(lang, "Mono")
+                                    } else {
+                                        tr(lang, "Estéreo")
+                                    };
+                                    egui::ComboBox::from_id_salt(("nvcap_ach", card.id))
+                                        .width(90.0)
+                                        .selected_text(ch_lbl)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut card.audio_channels,
+                                                2,
+                                                tr(lang, "Estéreo"),
+                                            );
+                                            ui.selectable_value(
+                                                &mut card.audio_channels,
+                                                1,
+                                                tr(lang, "Mono"),
+                                            );
+                                        });
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr(lang, "Taxa de amostragem")).small());
+                                    egui::ComboBox::from_id_salt(("nvcap_asr", card.id))
+                                        .width(96.0)
+                                        .selected_text(format!("{} Hz", card.audio_sample_rate))
+                                        .show_ui(ui, |ui| {
+                                            for sr in CAPTURE_SAMPLE_RATES {
+                                                ui.selectable_value(
+                                                    &mut card.audio_sample_rate,
+                                                    sr,
+                                                    format!("{sr} Hz"),
+                                                );
+                                            }
+                                        });
+                                });
+                            });
+                        }
+                    });
+                }
+            });
         });
 
     (remove_clicked, expand_clicked)

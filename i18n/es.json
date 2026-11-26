@@ -3156,5 +3156,9 @@
   "Velocidade média:": "Velocidad media:",
   "Velocidade atual:": "Velocidad actual:",
   "Abrir a pasta ao terminar a renderização": "Abrir la carpeta al terminar el renderizado",
-  "Fechar esta janela ao terminar a renderização": "Cerrar esta ventana al terminar el renderizado"
+  "Fechar esta janela ao terminar a renderização": "Cerrar esta ventana al terminar el renderizado",
+  "Inverter a fase da trilha": "Invertir la fase de la pista",
+  "Envio": "Envío",
+  "Pós": "Post",
+  "Envio antes (Pré) ou depois (Pós) do fader da trilha": "Envío antes (Pre) o después (Post) del fader de la pista"
 }
