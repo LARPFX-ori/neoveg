@@ -318,12 +318,13 @@ impl App {
 
     /// Arquivo > Abrir põe o projeto numa aba nova quando o principal já está
     /// em uso (tem arquivo, conteúdo ou alterações) ou já há abas abertas. Um
-    /// projeto principal vazio e sem título é simplesmente substituído, e a
-    /// recuperação automática sempre substitui.
-    pub(crate) fn open_goes_to_new_tab(&self, is_recovery: bool) -> bool {
+    /// projeto principal vazio e sem título é simplesmente substituído.
+    /// `force_replace` (recuperação automática, ou reabrir o arquivo do próprio
+    /// projeto principal) sempre recarrega no lugar.
+    pub(crate) fn open_goes_to_new_tab(&self, force_replace: bool) -> bool {
         let main = self.main_session();
         open_in_new_tab(
-            is_recovery,
+            force_replace,
             self.has_doc_tabs(),
             main.path.is_some(),
             main.dirty,

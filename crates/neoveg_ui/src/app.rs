@@ -1566,7 +1566,13 @@ impl App {
         }
         let is_recovery =
             path == recovery::recovery_path() || path == recovery::legacy_recovery_path();
-        if self.open_goes_to_new_tab(is_recovery) {
+        let reopening_main = self
+            .main_session()
+            .path
+            .as_deref()
+            .map(crate::doc_tabs::canonical)
+            == Some(crate::doc_tabs::canonical(&path));
+        if self.open_goes_to_new_tab(is_recovery || reopening_main) {
             if self.open_project_tab(&path, false) {
                 self.prefs.record_recent_project(&path);
                 let _ = self.prefs.save();
