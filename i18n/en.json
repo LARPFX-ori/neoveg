@@ -2129,6 +2129,8 @@
   "Projeto aberto: {path}": "Opened project: {path}",
   "Projeto aninhado aberto em aba (Ctrl+S salva todos)": "Nested project open in a tab (Ctrl+S saves all)",
   "Projeto aninhado aberto em aba: {name}": "Nested project opened in tab: {name}",
+  "Projeto aberto em nova aba: {name}": "Project opened in a new tab: {name}",
+  "Feche uma aba: no máximo {n} projetos abertos em abas.": "Close a tab: at most {n} projects can be open in tabs.",
   "Projeto arquivado ({n} mídia(s)): {path}": "Project archived ({n} media file(s)): {path}",
   "Projeto de captura salvo em {path}": "Capture project saved to {path}",
   "Projeto e projetos aninhados salvos.": "Project and nested projects saved.",

@@ -2129,6 +2129,8 @@
   "Projeto aberto: {path}": "Projekt geöffnet: {path}",
   "Projeto aninhado aberto em aba (Ctrl+S salva todos)": "Verschachteltes Projekt im Tab (Strg+S speichert alle)",
   "Projeto aninhado aberto em aba: {name}": "Verschachteltes Projekt im Tab geöffnet: {name}",
+  "Projeto aberto em nova aba: {name}": "Projekt in neuem Tab geöffnet: {name}",
+  "Feche uma aba: no máximo {n} projetos abertos em abas.": "Schließen Sie einen Tab: höchstens {n} Projekte in Tabs geöffnet.",
   "Projeto arquivado ({n} mídia(s)): {path}": "Projekt archiviert ({n} Mediendatei(en)): {path}",
   "Projeto de captura salvo em {path}": "Aufnahmeprojekt gespeichert unter {path}",
   "Projeto e projetos aninhados salvos.": "Projekt und verschachtelte Projekte gespeichert.",

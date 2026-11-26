@@ -2129,6 +2129,8 @@
   "Projeto aberto: {path}": "プロジェクトを開きました: {path}",
   "Projeto aninhado aberto em aba (Ctrl+S salva todos)": "タブで開いているネストされたプロジェクト（Ctrl+S ですべて保存）",
   "Projeto aninhado aberto em aba: {name}": "ネストされたプロジェクトをタブで開きました: {name}",
+  "Projeto aberto em nova aba: {name}": "プロジェクトを新しいタブで開きました: {name}",
+  "Feche uma aba: no máximo {n} projetos abertos em abas.": "タブを閉じてください: タブで開けるプロジェクトは最大 {n} 個です。",
   "Projeto arquivado ({n} mídia(s)): {path}": "プロジェクトをアーカイブしました（メディア {n} 件）: {path}",
   "Projeto de captura salvo em {path}": "キャプチャプロジェクトを {path} に保存しました",
   "Projeto e projetos aninhados salvos.": "プロジェクトとネストされたプロジェクトを保存しました。",
