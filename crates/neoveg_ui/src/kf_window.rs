@@ -726,6 +726,48 @@ fn ruler_step_secs(len_secs: f64, width: f32) -> f64 {
         .unwrap_or(1800.0)
 }
 
+/// Cor de preenchimento do quadro-chave conforme a interpolação até o
+/// próximo, como no VEGAS Pro: linear cinza, rápida verde, lenta amarela,
+/// suave azul, aguda rosa e manter (hold) vermelha.
+pub(crate) fn keyframe_fill(curve: Curve) -> Color32 {
+    match curve {
+        Curve::Linear => Color32::from_rgb(200, 198, 200),
+        Curve::Fast => Color32::from_rgb(150, 236, 150),
+        Curve::Slow => Color32::from_rgb(214, 206, 130),
+        Curve::Smooth => Color32::from_rgb(160, 164, 250),
+        Curve::Sharp => Color32::from_rgb(240, 140, 200),
+        Curve::Hold => Color32::from_rgb(176, 24, 24),
+    }
+}
+
+/// Desenha um quadro-chave (losango de meia-largura `half`) com a cor da
+/// interpolação e contorno escuro; no alto contraste, contorno grosso na cor
+/// do texto. Devolve a cor do contorno, usada por marcas desenhadas por cima.
+pub(crate) fn paint_keyframe_diamond(
+    p: &egui::Painter,
+    c: Pos2,
+    half: f32,
+    curve: Curve,
+    theme: &ThemeColors,
+) -> Color32 {
+    let (stroke_col, stroke_w) = if theme.high_contrast {
+        (theme.text_primary, 1.5_f32)
+    } else {
+        (Color32::from_rgb(28, 28, 30), 1.0_f32)
+    };
+    p.add(Shape::convex_polygon(
+        vec![
+            pos2(c.x, c.y - half),
+            pos2(c.x + half, c.y),
+            pos2(c.x, c.y + half),
+            pos2(c.x - half, c.y),
+        ],
+        keyframe_fill(curve),
+        Stroke::new(stroke_w, stroke_col),
+    ));
+    stroke_col
+}
+
 /// Linha do tempo de quadros-chave com a barra de navegação embaixo.
 /// `cursor` e os tempos são locais (0 = início do evento ou da trilha).
 #[allow(clippy::too_many_arguments)]
@@ -901,21 +943,8 @@ pub(crate) fn keyframe_strip(
             let x = x_of(t);
             let cy = lane.center().y;
             let is_bezier = row.eases.get(ki).copied().flatten().is_some();
-            let (fill, stroke_col, stroke_w) = if theme.high_contrast {
-                (theme.accent, theme.text_primary, 1.5_f32)
-            } else {
-                (theme.tl_env_primary, theme.text_primary, 1.0_f32)
-            };
-            p.add(Shape::convex_polygon(
-                vec![
-                    pos2(x, cy - 5.0),
-                    pos2(x + 5.0, cy),
-                    pos2(x, cy + 5.0),
-                    pos2(x - 5.0, cy),
-                ],
-                fill,
-                Stroke::new(stroke_w, stroke_col),
-            ));
+            let curve = row.keys.get(ki).map_or(Curve::Linear, |k| k.1);
+            let stroke_col = paint_keyframe_diamond(&p, pos2(x, cy), 5.0, curve, theme);
             if is_bezier {
                 velocity_graph::paint_bezier_mark(&p, pos2(x, cy), stroke_col);
             }
@@ -1137,6 +1166,24 @@ pub(crate) fn nav_target(times: &[Ticks], cursor: Ticks, nav: KfNav) -> Option<T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cada interpolação tem a sua cor (antes todos os quadros-chave tinham a
+    /// mesma cor do envelope, qualquer que fosse a curva).
+    #[test]
+    fn quadro_chave_tem_cor_por_interpolacao() {
+        let cores: Vec<Color32> = Curve::ALL.iter().map(|c| keyframe_fill(*c)).collect();
+        for (i, a) in cores.iter().enumerate() {
+            for b in cores.iter().skip(i + 1) {
+                assert_ne!(a, b, "duas interpolações com a mesma cor");
+            }
+        }
+        let f = keyframe_fill(Curve::Fast);
+        assert!(f.g() > f.r() && f.g() > f.b(), "rápida é verde");
+        let h = keyframe_fill(Curve::Hold);
+        assert!(h.r() > h.g() && h.r() > h.b(), "manter é vermelha");
+        let s = keyframe_fill(Curve::Smooth);
+        assert!(s.b() > s.r() && s.b() > s.g(), "suave é azul");
+    }
 
     #[test]
     fn navegacao_entre_quadros_chave() {
