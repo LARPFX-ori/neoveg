@@ -5972,8 +5972,19 @@ impl App {
             egui::TopBottomPanel::bottom("dock_bot")
         };
         let screen_h = ctx.screen_rect().height();
-        let max_h = (screen_h * 0.56).max(160.0);
+        let max_h = (screen_h * 0.62).max(160.0);
         let eff_h = self.dock_height.min(max_h);
+        // O egui grava a altura do painel na memória persistente e, depois da
+        // primeira execução, ignora `default_height`: uma altura pequena salva
+        // uma vez ficava para sempre e trocar de layout não mudava o dock.
+        // A altura do Neoveg (`dock_height`) manda.
+        let panel_id = egui::Id::new(if at_top { "dock_top" } else { "dock_bot" });
+        if let Some(mut st) = egui::containers::panel::PanelState::load(ctx, panel_id) {
+            if (st.rect.height() - eff_h).abs() > 0.5 {
+                st.rect.max.y = st.rect.min.y + eff_h;
+                ctx.data_mut(|d| d.insert_persisted(panel_id, st));
+            }
+        }
         let resp = panel
             .resizable(true)
             .default_height(eff_h)
