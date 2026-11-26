@@ -3161,7 +3161,37 @@ fn kittest_paridade_color_grading_e_trimmer_historico() {
         .state_mut()
         .exec_cmd(Some(&ctx), "view.tab.color_grading");
     harness.run_steps(2);
-    harness.get_by_label("Ativar Color Grading").click();
+    // Como no VEGAS Pro, o painel abre completo, sem aviso de ativação, e o
+    // efeito só entra na cadeia na primeira edição (um passo de Desfazer).
+    let count_cc = |app: &App| {
+        let p = &app.session.project;
+        p.master
+            .video_fx
+            .iter()
+            .chain(p.tracks.iter().flat_map(|t| t.fx.iter()))
+            .chain(
+                p.tracks
+                    .iter()
+                    .flat_map(|t| t.events.iter().flat_map(|e| e.fx.iter())),
+            )
+            .filter(|f| f.kind == crate::model::FxKind::ColorCorrector)
+            .count()
+    };
+    assert!(harness.query_by_label("Ativar Color Grading").is_none());
+    assert_eq!(
+        count_cc(harness.state()),
+        0,
+        "abrir o painel não muda o projeto"
+    );
+    harness.get_by_label("Cinema Quente").click();
+    harness.run_steps(2);
+    assert_eq!(
+        count_cc(harness.state()),
+        1,
+        "a primeira edição insere o efeito"
+    );
+    assert!(harness.state_mut().session.undo());
+    assert_eq!(count_cc(harness.state()), 0, "um Desfazer tira o efeito");
     harness.run_steps(2);
 
     // Barra lateral de categorias e todas as seções visíveis em "Tudo"
