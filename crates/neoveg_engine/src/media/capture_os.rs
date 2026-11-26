@@ -146,6 +146,7 @@ impl VideoGrabber for SyntheticVideoGrabber {
 }
 
 /// Converte buffer BGRA top-down em `RgbaImage` opaco (alfa = 255).
+#[cfg(any(windows, test))]
 pub(crate) fn bgra_top_down_to_rgba(bgra: &[u8], w: u32, h: u32) -> Result<RgbaImage> {
     if w == 0 || h == 0 || w > MAX_CAPTURE_DIM || h > MAX_CAPTURE_DIM {
         bail!("dimensões de captura inválidas: {w}x{h}");

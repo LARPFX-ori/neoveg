@@ -5503,6 +5503,7 @@ impl eframe::App for App {
             let _ = rec.stop();
         }
         self.encoder.save_to_disk();
+        self.capture.save_settings();
         self.capture.shutdown();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");

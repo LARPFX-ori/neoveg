@@ -75,10 +75,17 @@ pub struct CaptureSessionResult {
     pub warnings: Vec<String>,
 }
 
+type TrackWorkerHandle = JoinHandle<Result<CapturedTrackEntry, String>>;
+type AudioWorkerStart = (TrackWorkerHandle, Option<cpal::Stream>);
+
+struct ActiveWorker {
+    name: String,
+    handle: TrackWorkerHandle,
+}
+
 struct MonitorSlot {
     key: String,
     stop: Arc<AtomicBool>,
-    state: Arc<Mutex<SharedSourceState>>,
     worker: Option<JoinHandle<()>>,
     _audio_stream: Option<cpal::Stream>,
 }
@@ -98,7 +105,7 @@ struct ActiveRecording {
     started_at: Instant,
     created_at_iso: String,
     stop: Arc<AtomicBool>,
-    workers: Vec<(u64, String, JoinHandle<Result<CapturedTrackEntry, String>>)>,
+    workers: Vec<ActiveWorker>,
     /// Fluxos `cpal` mantidos vivos até o encerramento da gravação.
     audio_streams: Vec<cpal::Stream>,
 }
@@ -285,14 +292,20 @@ impl CaptureRuntime {
                         }
                     })
                     .map_err(|e| anyhow!("falha ao iniciar worker de vídeo: {e}"))?;
-                workers.push((card.id, card.name.clone(), handle));
+                workers.push(ActiveWorker {
+                    name: card.name.clone(),
+                    handle,
+                });
             } else {
                 match start_audio_worker(&card, &session_dir, &stem, stop.clone(), state.clone()) {
                     Ok((handle, opt_stream)) => {
                         if let Some(stream) = opt_stream {
                             audio_streams.push(stream);
                         }
-                        workers.push((card.id, card.name.clone(), handle));
+                        workers.push(ActiveWorker {
+                            name: card.name.clone(),
+                            handle,
+                        });
                     }
                     Err(e) => {
                         let msg = format!("{e:#}");
@@ -302,7 +315,10 @@ impl CaptureRuntime {
                         // Mesmo se uma fonte falhar ao abrir, continua se houver outras,
                         // registrando o erro via worker imediato.
                         let handle = std::thread::spawn(move || Err(msg));
-                        workers.push((card.id, card.name.clone(), handle));
+                        workers.push(ActiveWorker {
+                            name: card.name.clone(),
+                            handle,
+                        });
                     }
                 }
             }
@@ -333,12 +349,13 @@ impl CaptureRuntime {
 
         let mut tracks = Vec::new();
         let mut warnings = Vec::new();
-        for (_id, name, handle) in rec.workers {
-            match handle.join() {
+        for w in rec.workers {
+            match w.handle.join() {
                 Ok(Ok(entry)) => tracks.push(entry),
-                Ok(Err(msg)) => warnings.push(format!("{name}: {msg}")),
+                Ok(Err(msg)) => warnings.push(format!("{}: {msg}", w.name)),
                 Err(_) => warnings.push(format!(
-                    "{name}: thread de captura encerrada inesperadamente."
+                    "{}: thread de captura encerrada inesperadamente.",
+                    w.name
                 )),
             }
         }
@@ -523,7 +540,6 @@ fn spawn_monitor_slot(
         return MonitorSlot {
             key,
             stop,
-            state,
             worker,
             _audio_stream: None,
         };
@@ -562,7 +578,6 @@ fn spawn_monitor_slot(
     MonitorSlot {
         key,
         stop,
-        state,
         worker: None,
         _audio_stream: audio_stream,
     }
@@ -954,10 +969,7 @@ fn start_audio_worker(
     stem: &str,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<SharedSourceState>>,
-) -> Result<(
-    JoinHandle<Result<CapturedTrackEntry, String>>,
-    Option<cpal::Stream>,
-)> {
+) -> Result<AudioWorkerStart> {
     let target_ch = card.audio_channels.clamp(1, 2);
     let wav_bits = match card.audio_codec {
         CaptureAudioCodec::WavPcm24 => WavBits::Pcm24,
@@ -1378,7 +1390,7 @@ mod tests {
         let reloaded = load_manifest(&res.manifest_path).expect("recarregar export.json");
         let mut session = EditorSession::new(Project::new_default());
         let tracks_before = session.project.tracks.len();
-        let cache = MediaCache::new();
+        let cache = MediaCache::default();
         let report = apply_manifest_to_session(
             &mut session,
             &cache,

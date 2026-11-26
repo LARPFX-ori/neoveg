@@ -175,8 +175,11 @@ impl CapturePanelState {
     pub fn shutdown(&mut self) {
         self.countdown_until = None;
         self.countdown_dir = None;
-        let _ = self.settings.save_to_disk();
         self.runtime.shutdown();
+    }
+
+    pub fn save_settings(&self) {
+        let _ = self.settings.save_to_disk();
     }
 
     fn refresh_free_disk(&mut self, dir: &std::path::Path, force: bool) {

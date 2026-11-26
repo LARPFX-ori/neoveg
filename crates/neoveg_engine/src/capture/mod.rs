@@ -708,7 +708,10 @@ pub fn discover_sources() -> DiscoveredSources {
     // Loopback de áudio do sistema: no Windows o backend WASAPI do `cpal`
     // habilita automaticamente `AUDCLNT_STREAMFLAGS_LOOPBACK` em dispositivos
     // de saída abertos com `build_input_stream`.
+    #[cfg(windows)]
     let mut audio_outputs = Vec::new();
+    #[cfg(not(windows))]
+    let audio_outputs = Vec::new();
     #[cfg(windows)]
     {
         let default_out = host.default_output_device().and_then(|d| d.name().ok());

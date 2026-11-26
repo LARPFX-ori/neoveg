@@ -291,10 +291,8 @@ pub fn apply_manifest_to_session(
         .iter()
         .position(|t| t.kind == TrackKind::Audio)
         .unwrap_or(session.project.tracks.len());
-    let mut insert_at = first_audio;
-    for vt in video_tracks {
+    for (insert_at, vt) in (first_audio..).zip(video_tracks) {
         session.project.tracks.insert(insert_at, vt);
-        insert_at += 1;
     }
     session.project.tracks.extend(audio_tracks);
     session.dirty = true;
