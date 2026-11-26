@@ -3156,5 +3156,9 @@
   "Velocidade média:": "Durchschnittliche Geschwindigkeit:",
   "Velocidade atual:": "Aktuelle Geschwindigkeit:",
   "Abrir a pasta ao terminar a renderização": "Ordner nach dem Rendern öffnen",
-  "Fechar esta janela ao terminar a renderização": "Dieses Fenster nach dem Rendern schließen"
+  "Fechar esta janela ao terminar a renderização": "Dieses Fenster nach dem Rendern schließen",
+  "Inverter a fase da trilha": "Spurphase umkehren",
+  "Envio": "Send",
+  "Pós": "Post",
+  "Envio antes (Pré) ou depois (Pós) do fader da trilha": "Send vor (Pre) oder nach (Post) dem Spur-Fader"
 }

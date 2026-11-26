@@ -1010,8 +1010,13 @@ impl App {
                     if b.compositing_child {
                         w += 24.0;
                     }
-                } else if b.record_arm {
-                    w += 24.0;
+                } else {
+                    if b.record_arm {
+                        w += 24.0;
+                    }
+                    if b.phase {
+                        w += 24.0;
+                    }
                 }
                 if b.height {
                     w += 46.0;
@@ -3842,6 +3847,9 @@ impl App {
                         if !is_video && !is_folder && btns.record_arm {
                             btns_w += 22.0;
                         }
+                        if !is_video && !is_folder && btns.phase {
+                            btns_w += 22.0;
+                        }
                         if is_video && btns.compositing_child && !is_folder && !is_adjustment {
                             btns_w += 22.0;
                         }
@@ -3946,6 +3954,16 @@ impl App {
                         more = Some(HeaderAction::RecordArm);
                     }
                 }
+                if show_btns && kind == TrackKind::Audio && !is_folder && btns.phase {
+                    let inverted = self.project.tracks[ti].invert_phase;
+                    if ui
+                        .selectable_label(inverted, "Ø")
+                        .on_hover_text(tr(lang, "Inverter a fase da trilha"))
+                        .clicked()
+                    {
+                        more = Some(HeaderAction::InvertPhase);
+                    }
+                }
                 if show_btns
                     && is_video
                     && btns.compositing_child
@@ -4035,6 +4053,15 @@ impl App {
                 Some(HeaderAction::RecordArm) => {
                     self.session.toggle_record_arm(ti);
                     self.sync_status_from_session();
+                }
+                Some(HeaderAction::InvertPhase) => {
+                    if self.project.tracks.get(ti).is_some_and(|t| !t.locked) {
+                        self.checkpoint();
+                        if let Some(t) = self.project.tracks.get_mut(ti) {
+                            t.invert_phase = !t.invert_phase;
+                        }
+                        self.changed();
+                    }
                 }
                 Some(HeaderAction::SetAutomation(mode)) => {
                     self.session.set_track_automation_mode(ti, mode);
@@ -4138,7 +4165,7 @@ impl App {
                         }
                         changed_track |= r.changed() || r.double_clicked();
                         ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
-                        if !self.project.audio_buses.is_empty() {
+                        {
                             let bus_list: Vec<(Id, String)> = self
                                 .project
                                 .audio_buses
@@ -4192,6 +4219,63 @@ impl App {
                     }
                 });
             }
+            // envio para barramento (como "FX 1 ... Post" no VEGAS Pro): o
+            // primeiro envio da trilha, com nível e antes/depois do fader
+            if kind == TrackKind::Audio
+                && h >= 94.0
+                && show_sliders
+                && !self.project.tracks[ti].sends.is_empty()
+            {
+                let send_name = self.project.tracks[ti]
+                    .sends
+                    .first()
+                    .and_then(|s| self.project.audio_bus(s.bus_id))
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| tr(lang, "Envio").to_string());
+                child.horizontal(|ui| {
+                    let Some(s) = self.project.tracks[ti].sends.first_mut() else {
+                        return;
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(send_name).small()).truncate());
+                    let before = s.level_db;
+                    let r = ui.add(
+                        egui::Slider::new(&mut s.level_db, -60.0..=12.0)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    );
+                    if slider_moved_by_other_button(ui, &r) {
+                        s.level_db = before;
+                    }
+                    if r.drag_started() {
+                        want_checkpoint = true;
+                    }
+                    if r.double_clicked() {
+                        s.level_db = 0.0;
+                    }
+                    changed_track |= r.changed() || r.double_clicked();
+                    ui.label(egui::RichText::new(send_level_label(s.level_db)).small());
+                    let pre = s.pre_fader;
+                    if ui
+                        .selectable_label(
+                            pre,
+                            if pre {
+                                tr(lang, "Pré")
+                            } else {
+                                tr(lang, "Pós")
+                            },
+                        )
+                        .on_hover_text(tr(
+                            lang,
+                            "Envio antes (Pré) ou depois (Pós) do fader da trilha",
+                        ))
+                        .clicked()
+                    {
+                        s.pre_fader = !pre;
+                        want_checkpoint = true;
+                        changed_track = true;
+                    }
+                });
+            }
             if want_checkpoint {
                 // checkpoint com o estado anterior aproximado (antes da mudança atual)
                 let mut snap = self.project.clone();
@@ -4204,6 +4288,7 @@ impl App {
                     t.opacity = old.opacity;
                     t.pan = old.pan;
                     t.output_bus = old.output_bus;
+                    t.sends.clone_from(&old.sends);
                 }
                 self.undo.push(snap);
                 self.redo.clear();
@@ -9600,9 +9685,32 @@ enum HeaderAction {
     Maximize,
     ToggleCompositingChild,
     RecordArm,
+    InvertPhase,
     SetAutomation(AutomationMode),
     CycleAutomation,
     EditButtons,
+}
+
+/// Nível de um envio para barramento: `-inf` no mínimo do controle.
+fn send_level_label(db: f32) -> String {
+    if !db.is_finite() || db <= -60.0 {
+        "-inf".to_string()
+    } else {
+        format!("{db:+.1} dB")
+    }
+}
+
+#[cfg(test)]
+mod send_label_tests {
+    use super::send_level_label;
+
+    #[test]
+    fn nivel_do_envio() {
+        assert_eq!(send_level_label(-60.0), "-inf");
+        assert_eq!(send_level_label(f32::NAN), "-inf");
+        assert_eq!(send_level_label(0.0), "+0.0 dB");
+        assert_eq!(send_level_label(-6.04), "-6.0 dB");
+    }
 }
 
 /// O `egui::Slider` responde a qualquer botão do mouse: o clique direito no

@@ -3156,5 +3156,9 @@
   "Velocidade média:": "平均速度:",
   "Velocidade atual:": "現在の速度:",
   "Abrir a pasta ao terminar a renderização": "レンダリング完了時にフォルダーを開く",
-  "Fechar esta janela ao terminar a renderização": "レンダリング完了時にこのウィンドウを閉じる"
+  "Fechar esta janela ao terminar a renderização": "レンダリング完了時にこのウィンドウを閉じる",
+  "Inverter a fase da trilha": "トラックの位相を反転",
+  "Envio": "センド",
+  "Pós": "ポスト",
+  "Envio antes (Pré) ou depois (Pós) do fader da trilha": "トラックフェーダーの前 (プリ) または後 (ポスト) に送る"
 }
