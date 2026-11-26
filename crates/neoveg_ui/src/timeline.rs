@@ -2956,7 +2956,7 @@ impl App {
         for reg in &self.project.regions {
             let xa = self.tl.t2x(reg.start, left);
             let xb = self.tl.t2x(reg.end, left);
-            let col = self.theme.tl_marker;
+            let col = self.theme.tl_region;
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(xa, marker_r.top() + 1.0),
@@ -2990,20 +2990,21 @@ impl App {
         let mut cd_ix_n = 0usize;
         for m in &sorted {
             let x = self.tl.t2x(m.t, left);
-            let (col, badge, tag_w) = match m.kind {
+            let col = marker_tag_color(&self.theme, m.kind);
+            let (badge, tag_w) = match m.kind {
                 MarkerKind::Standard => {
                     std_n += 1;
-                    (self.theme.tl_region, format!("{}", std_n % 10), 14.0)
+                    (format!("{}", std_n % 10), 14.0)
                 }
                 MarkerKind::CdTrack => {
                     cd_tr_n += 1;
-                    (Color32::from_rgb(56, 152, 226), format!("T{cd_tr_n}"), 22.0)
+                    (format!("T{cd_tr_n}"), 22.0)
                 }
                 MarkerKind::CdIndex => {
                     cd_ix_n += 1;
-                    (Color32::from_rgb(76, 176, 108), format!("I{cd_ix_n}"), 20.0)
+                    (format!("I{cd_ix_n}"), 20.0)
                 }
-                MarkerKind::Command => (Color32::from_rgb(168, 92, 212), "CMD".to_string(), 28.0),
+                MarkerKind::Command => ("CMD".to_string(), 28.0),
             };
             painter.rect_filled(
                 Rect::from_min_size(pos2(x, marker_r.top()), vec2(tag_w, MARKER_H - 2.0)),
@@ -3027,7 +3028,7 @@ impl App {
                 Align2::LEFT_TOP,
                 display_lbl,
                 FontId::proportional(11.0),
-                self.theme.tl_region_band,
+                self.theme.text_primary,
             );
         }
 
@@ -8741,7 +8742,7 @@ impl App {
                 while y < area.bottom() {
                     painter.line_segment(
                         [pos2(x, y), pos2(x, (y + 4.0).min(area.bottom()))],
-                        Stroke::new(1.0_f32, self.theme.tl_region),
+                        Stroke::new(1.0_f32, self.theme.tl_marker),
                     );
                     y += 8.0;
                 }
@@ -9310,6 +9311,17 @@ fn fade_curve_points(rect: Rect, curve: Curve, fade_in: bool) -> Vec<Pos2> {
     pts
 }
 
+/// Cor da etiqueta de um marcador na barra de marcadores. O marcador comum
+/// usa a cor de marcador do tema (alaranjada); a verde fica para as regiões.
+fn marker_tag_color(theme: &crate::theme::ThemeColors, kind: MarkerKind) -> Color32 {
+    match kind {
+        MarkerKind::Standard => theme.tl_marker,
+        MarkerKind::CdTrack => Color32::from_rgb(56, 152, 226),
+        MarkerKind::CdIndex => Color32::from_rgb(76, 176, 108),
+        MarkerKind::Command => Color32::from_rgb(168, 92, 212),
+    }
+}
+
 /// Desenha a miniatura vetorial da curva de fade (entrada ou saída),
 /// seguindo o submenu *Fade Type* do VEGAS Pro (desenhado do zero em código).
 fn paint_fade_curve_icon(
@@ -9540,6 +9552,23 @@ fn slider_moved_by_other_button(ui: &egui::Ui, r: &egui::Response) -> bool {
                     || i.pointer.button_released(b)
             })
         })
+}
+
+#[cfg(test)]
+mod marker_color_tests {
+    use super::marker_tag_color;
+    use crate::model::MarkerKind;
+    use crate::theme::{palette, ThemeId};
+
+    /// O marcador comum usava a cor de região (verde) na barra de marcadores.
+    #[test]
+    fn marcador_comum_usa_a_cor_de_marcador_do_tema() {
+        for id in ThemeId::ALL {
+            let p = palette(id);
+            assert_eq!(marker_tag_color(&p, MarkerKind::Standard), p.tl_marker);
+            assert_ne!(marker_tag_color(&p, MarkerKind::Standard), p.tl_region);
+        }
+    }
 }
 
 #[cfg(test)]
