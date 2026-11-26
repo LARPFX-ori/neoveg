@@ -236,6 +236,18 @@ pub fn local_date_time_strings() -> (String, String) {
     )
 }
 
+/// Hora local (`HH:MM:SS`) daqui a `secs` segundos, via `chrono` (Regra Rust
+/// 5). Valores inválidos, negativos ou absurdos (mais de um ano) não têm hora.
+pub fn local_time_after_secs(secs: f64) -> Option<String> {
+    if !secs.is_finite() || !(0.0..=31_536_000.0).contains(&secs) {
+        return None;
+    }
+    let d = chrono::Duration::milliseconds((secs * 1000.0).round() as i64);
+    chrono::Local::now()
+        .checked_add_signed(d)
+        .map(|t| t.format("%H:%M:%S").to_string())
+}
+
 fn append(file: &str, line: &str) {
     if let Ok(mut f) = OpenOptions::new()
         .create(true)

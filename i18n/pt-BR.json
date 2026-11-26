@@ -3138,5 +3138,19 @@
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "＋ Barramento",
   "＋ Marcador no Cursor": "＋ Marcador no Cursor",
-  "＋ Áudio": "＋ Áudio"
+  "＋ Áudio": "＋ Áudio",
+  "Renderizando: {pct}%": "Renderizando: {pct}%",
+  "{pct}% de {size}": "{pct}% de {size}",
+  "Restante: {t}": "Restante: {t}",
+  "Renderizado: {size}": "Renderizado: {size}",
+  "Decorrido: {t}": "Decorrido: {t}",
+  "Propriedades estimadas": "Propriedades estimadas",
+  "Espaço livre em disco:": "Espaço livre em disco:",
+  "Duração da renderização:": "Duração da renderização:",
+  "Horário de término:": "Horário de término:",
+  "Desempenho": "Desempenho",
+  "Velocidade média:": "Velocidade média:",
+  "Velocidade atual:": "Velocidade atual:",
+  "Abrir a pasta ao terminar a renderização": "Abrir a pasta ao terminar a renderização",
+  "Fechar esta janela ao terminar a renderização": "Fechar esta janela ao terminar a renderização"
 }
