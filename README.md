@@ -93,6 +93,8 @@ Logs, autosave, preferências (`preferencias.json`), layouts (`.neoveglayout`), 
 
 ## Como usar
 
+> Para o guia detalhado de todas as janelas, ferramentas, efeitos, captura, renderização, atalhos e solução de problemas, consulte o **[Manual do Usuário](docs/manual_do_usuario.md)**.
+
 ### Primeiros passos
 
 1. Abra o Neoveg (`cargo run -p neoveg` ou o executável do pacote portátil). Na **Tela de boas-vindas**, escolha uma das 5 proporções (*Widescreen 16:9*, *Fullscreen 4:3*, *Portrait 9:16*, *Square 1:1* ou *Scope 2.4:1*), ajuste resolução, taxa de quadros e *Drop-Frame*, ou reabra projetos em *Abrir Projeto*. A tela pode ser reaberta em *Ajuda → Tela de boas-vindas*.
@@ -250,6 +252,7 @@ O Neoveg suporta **português do Brasil (`pt-BR`, padrão)**, **inglês (`en`)**
 
 ## Acompanhamento de Paridade
 
+- [Manual do Usuário](docs/manual_do_usuario.md)
 - [Roadmap](ROADMAP.md)
 - [Matriz de Paridade VEGAS Pro](docs_obsidian/ui_references/matriz_de_paridade.md)
 - [Atribuição e Licenças de Assets](ATTRIBUTION.md)
