@@ -1687,6 +1687,7 @@ impl App {
                     );
                 } else {
                     ui.checkbox(&mut draft.record_arm, tr(lang, "Armar para gravação"));
+                    ui.checkbox(&mut draft.phase, tr(lang, "Inverter a fase da trilha"));
                 }
                 ui.checkbox(
                     &mut draft.height,

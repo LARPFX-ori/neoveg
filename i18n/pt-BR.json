@@ -3156,5 +3156,9 @@
   "Velocidade média:": "Velocidade média:",
   "Velocidade atual:": "Velocidade atual:",
   "Abrir a pasta ao terminar a renderização": "Abrir a pasta ao terminar a renderização",
-  "Fechar esta janela ao terminar a renderização": "Fechar esta janela ao terminar a renderização"
+  "Fechar esta janela ao terminar a renderização": "Fechar esta janela ao terminar a renderização",
+  "Inverter a fase da trilha": "Inverter a fase da trilha",
+  "Envio": "Envio",
+  "Pós": "Pós",
+  "Envio antes (Pré) ou depois (Pós) do fader da trilha": "Envio antes (Pré) ou depois (Pós) do fader da trilha"
 }
