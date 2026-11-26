@@ -858,6 +858,19 @@ impl RulerGrid {
 const BUS_TRACK_H: f32 = 58.0;
 /// Altura mínima de uma trilha (Minimizar, p. 388).
 pub(crate) const TRACK_MIN_H: f32 = 28.0;
+/// Altura da barra de um grupo de trilhas (pasta): como no VEGAS Pro, o
+/// grupo é uma barra fina com o nome, não uma trilha de altura cheia.
+pub(crate) const FOLDER_BAR_H: f32 = 24.0;
+
+/// Altura desenhada de uma trilha: a barra fina nos grupos, a altura da
+/// trilha nas demais.
+pub(crate) fn drawn_track_height(t: &Track) -> f32 {
+    if t.is_folder {
+        FOLDER_BAR_H
+    } else {
+        t.height
+    }
+}
 /// Teto de Maximizar: a área das faixas, limitada para não gerar camadas
 /// gigantes em monitores muito altos.
 const TRACK_MAX_FILL_H: f32 = 2000.0;
@@ -885,17 +898,18 @@ impl App {
             }
             let kf = self.kf_visible_rows(t);
             let kf_h = kf.len() as f32 * KF_ROW_H;
-            track_rects.push((y, t.height));
-            track_spans.push((y, t.height + kf_h));
+            let th = drawn_track_height(t);
+            track_rects.push((y, th));
+            track_spans.push((y, th + kf_h));
             kf_areas.push(if kf.is_empty() {
                 None
             } else {
                 Some(KfArea {
-                    top: y + t.height,
+                    top: y + th,
                     rows: kf,
                 })
             });
-            y += t.height + kf_h;
+            y += th + kf_h;
         }
         let bus_rects = if self.opts.show_bus_tracks {
             self.project
@@ -1056,6 +1070,26 @@ impl App {
 
     /// Ajusta a largura horizontal do cabeçalho das faixas para acomodar os
     /// botões atualmente visíveis.
+    /// Cor do grupo de trilhas (pasta) mais próximo acima de `tid`, se houver.
+    fn group_color_of(&self, tid: Id) -> Option<Color32> {
+        let mut cur = self
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.id == tid)?
+            .parent_track_id;
+        // a hierarquia é validada na inserção; o limite só protege de ciclos
+        for _ in 0..64 {
+            let pid = cur?;
+            let p = self.project.tracks.iter().find(|t| t.id == pid)?;
+            if p.is_folder {
+                return Some(shade(self.track_rgb(p.color), 1.0));
+            }
+            cur = p.parent_track_id;
+        }
+        None
+    }
+
     pub fn sync_header_width_to_buttons(&mut self) {
         self.tl.header_auto_fit = true;
         if !self.tl.header_collapsed() {
@@ -3551,6 +3585,17 @@ impl App {
                         Stroke::new(1.0_f32, self.theme.accent.gamma_multiply(0.7)),
                     );
                 }
+            }
+            if let Some(gc) = self.group_color_of(tid) {
+                // faixa vertical na cor do grupo, como no VEGAS Pro
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        pos2(r.left() + (indent - 7.0).max(0.0), r.top()),
+                        vec2(4.0, h),
+                    ),
+                    0.0,
+                    gc,
+                );
             }
             painter.line_segment(
                 [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
@@ -9863,6 +9908,25 @@ mod sync_tint_tests {
         assert!(c.a() > 40 && c.a() < 200);
     }
 }
+#[cfg(test)]
+mod folder_bar_tests {
+    use super::{drawn_track_height, FOLDER_BAR_H};
+    use crate::model::{Track, TrackKind};
+
+    /// O grupo de trilhas ocupava uma trilha de altura cheia (44 px ou mais);
+    /// no VEGAS Pro ele é uma barra fina.
+    #[test]
+    fn grupo_e_uma_barra_fina() {
+        let mut g = Track::new(TrackKind::Video, "Grupo");
+        g.is_folder = true;
+        g.height = 120.0;
+        assert_eq!(drawn_track_height(&g), FOLDER_BAR_H);
+        let mut v = Track::new(TrackKind::Video, "Vídeo");
+        v.height = 90.0;
+        assert_eq!(drawn_track_height(&v), 90.0);
+    }
+}
+
 #[cfg(test)]
 mod slider_button_tests {
     use super::slider_moved_by_other_button;
