@@ -712,6 +712,34 @@ const KF_ROW_H: f32 = 16.0;
 const KF_HIT: f32 = 6.0;
 /// Altura mínima do gráfico de velocidade abaixo das trilhas.
 const KF_GRAPH_MIN_H: f32 = 110.0;
+/// Altura reservada para o gráfico de velocidade quando ele está ligado.
+const KF_GRAPH_H: f32 = 170.0;
+/// Barra de navegação de quadros-chave, abaixo da faixa.
+const KF_NAV_H: f32 = 28.0;
+
+/// Altura que a faixa de quadros-chave `id` precisa: régua, `rows` trilhas,
+/// o gráfico de velocidade se estiver ligado (e houver linha Bézier) e a
+/// barra de navegação; nunca menos que `base`. As janelas reservam essa
+/// altura antes de desenhar a área de trabalho, para o gráfico não empurrar
+/// a barra de navegação para fora da janela.
+pub(crate) fn keyframe_strip_height(
+    ctx: &egui::Context,
+    id: egui::Id,
+    rows: usize,
+    any_bezier: bool,
+    base: f32,
+) -> f32 {
+    let graph_on: bool = ctx
+        .data(|d| d.get_temp(id.with("kf_graph_on")))
+        .unwrap_or(false);
+    strip_height_for(rows, graph_on && any_bezier, base)
+}
+
+fn strip_height_for(rows: usize, graph: bool, base: f32) -> f32 {
+    let rows_h = KF_RULER_H + KF_ROW_H * rows.min(64) as f32 + KF_NAV_H;
+    let need = if graph { rows_h + KF_GRAPH_H } else { rows_h };
+    need.max(base)
+}
 
 /// Escolhe o passo da régua (em segundos) para dar ~90 px entre rótulos.
 fn ruler_step_secs(len_secs: f64, width: f32) -> f64 {
@@ -799,7 +827,7 @@ pub(crate) fn keyframe_strip(
     } else {
         rows_h
     };
-    let area_h = (ui.available_height() - 28.0).max(min_h);
+    let area_h = (ui.available_height() - KF_NAV_H).max(min_h);
     let (rect, resp) = ui.allocate_exact_size(vec2(full_w, area_h), Sense::click_and_drag());
     let p = ui.painter_at(rect);
     let names = Rect::from_min_max(rect.min, pos2(rect.left() + KF_LABEL_W, rect.bottom()));
@@ -1166,6 +1194,19 @@ pub(crate) fn nav_target(times: &[Ticks], cursor: Ticks, nav: KfNav) -> Option<T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ligar o gráfico de velocidade empurrava a barra de navegação para
+    /// fora da janela: a faixa tem de pedir espaço para o gráfico.
+    #[test]
+    fn faixa_reserva_altura_para_o_grafico() {
+        let sem = strip_height_for(2, false, 156.0);
+        let com = strip_height_for(2, true, 156.0);
+        assert_eq!(sem, 156.0);
+        assert!(com >= KF_RULER_H + 2.0 * KF_ROW_H + KF_GRAPH_MIN_H + KF_NAV_H);
+        assert!(com > sem);
+        // muitas linhas não estouram a conta
+        assert!(strip_height_for(usize::MAX, true, 0.0).is_finite());
+    }
 
     /// Cada interpolação tem a sua cor (antes todos os quadros-chave tinham a
     /// mesma cor do envelope, qualquer que fosse a curva).
