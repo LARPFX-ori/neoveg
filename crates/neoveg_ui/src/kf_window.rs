@@ -726,9 +726,6 @@ fn ruler_step_secs(len_secs: f64, width: f32) -> f64 {
         .unwrap_or(1800.0)
 }
 
-/// Linha do tempo de quadros-chave com a barra de navegação embaixo.
-/// `cursor` e os tempos são locais (0 = início do evento ou da trilha).
-#[allow(clippy::too_many_arguments)]
 /// Cor de preenchimento do quadro-chave conforme a interpolação até o
 /// próximo, como no VEGAS Pro: linear cinza, rápida verde, lenta amarela,
 /// suave azul, aguda rosa e manter (hold) vermelha.
@@ -771,6 +768,9 @@ pub(crate) fn paint_keyframe_diamond(
     stroke_col
 }
 
+/// Linha do tempo de quadros-chave com a barra de navegação embaixo.
+/// `cursor` e os tempos são locais (0 = início do evento ou da trilha).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn keyframe_strip(
     ui: &mut Ui,
     id: egui::Id,
