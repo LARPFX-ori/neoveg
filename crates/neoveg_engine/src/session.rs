@@ -4401,9 +4401,12 @@ impl EditorSession {
     /// (manual do VEGAS Pro 21: `Insert > Empty Event`).
     /// Insere um *Evento de Ajuste* (*Adjustment Event*, VEGAS Pro 20/2026) no cursor
     /// na trilha de vídeo selecionada (ou na primeira trilha de vídeo livre).
+    /// Se a trilha já tem evento no trecho, o evento de ajuste vai para uma
+    /// trilha de vídeo nova logo acima dela: sobreposto na mesma trilha, ele
+    /// virava um crossfade automático com o vídeo em vez de ajustá-lo.
     pub fn insert_adjustment_event(&mut self) -> Id {
         self.checkpoint();
-        let target_track = self
+        let mut target_track = self
             .sel_track
             .filter(|&i| {
                 self.project.tracks.get(i).is_some_and(|t| {
@@ -4428,6 +4431,18 @@ impl EditorSession {
             .filter(|(a, b)| b > a)
             .map(|(a, b)| b - a)
             .unwrap_or_else(|| Ticks::from_secs_i64(5));
+        let end = Ticks::from_raw(start.0.saturating_add(len.0));
+        let occupied = self.project.tracks.get(target_track).is_some_and(|t| {
+            t.events
+                .iter()
+                .any(|e| e.start < end && e.start.0.saturating_add(e.length.0) > start.0)
+        });
+        if occupied {
+            // `insert_track` põe a trilha de vídeo nova no lugar da selecionada,
+            // empurrando-a para baixo
+            self.sel_track = Some(target_track);
+            target_track = self.insert_track(TrackKind::Video);
+        }
         let ev = Event::new_adjustment(tr(self.lang, "Evento de ajuste"), start, len);
         let id = ev.id;
         self.project.tracks[target_track].events.push(ev);
@@ -7074,6 +7089,59 @@ impl EditorSession {
         self.changed();
         self.post_ripple_applied = Some(self.edit_count);
         moved
+    }
+}
+
+#[cfg(test)]
+mod adjustment_event_tests {
+    use super::*;
+
+    /// O evento de ajuste caía em cima do vídeo, na mesma trilha, e virava um
+    /// crossfade automático com ele.
+    #[test]
+    fn evento_de_ajuste_vai_para_trilha_nova_acima_do_video() {
+        let mut s = EditorSession::new(Project::new_default());
+        let vt = s
+            .project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .expect("trilha de vídeo padrão");
+        let mut ev =
+            Event::new_adjustment("clipe".to_string(), Ticks::ZERO, Ticks::from_secs_i64(10));
+        ev.is_adjustment = false;
+        let clip_id = ev.id;
+        s.project.tracks[vt].events.push(ev);
+        s.sel_track = Some(vt);
+        s.cursor = Ticks::from_secs_i64(2);
+        let n_tracks = s.project.tracks.len();
+
+        let id = s.insert_adjustment_event();
+
+        assert_eq!(s.project.tracks.len(), n_tracks + 1);
+        let (ti, _) = s.project.find_event(id).expect("evento de ajuste");
+        let (ci, _) = s.project.find_event(clip_id).expect("clipe");
+        assert_ne!(ti, ci, "o ajuste não pode ficar na trilha do clipe");
+        assert!(ti < ci, "a trilha do ajuste fica acima da do clipe");
+        assert_eq!(s.project.tracks[ti].kind, TrackKind::Video);
+        assert_eq!(s.project.tracks[ti].events.len(), 1);
+    }
+
+    #[test]
+    fn evento_de_ajuste_usa_a_trilha_livre() {
+        let mut s = EditorSession::new(Project::new_default());
+        let vt = s
+            .project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .expect("trilha de vídeo padrão");
+        s.project.tracks[vt].events.clear();
+        s.sel_track = Some(vt);
+        let n_tracks = s.project.tracks.len();
+        let id = s.insert_adjustment_event();
+        assert_eq!(s.project.tracks.len(), n_tracks);
+        assert_eq!(s.project.find_event(id).map(|x| x.0), Some(vt));
     }
 }
 
