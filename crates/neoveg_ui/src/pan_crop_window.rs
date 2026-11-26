@@ -344,7 +344,13 @@ impl App {
                 });
             }
             ui.separator();
-            let strip_h = 156.0;
+            let strip_h = kf_window::keyframe_strip_height(
+                ui.ctx(),
+                egui::Id::new("pc_strip"),
+                2,
+                true,
+                156.0,
+            );
             let top_h = (ui.available_height() - strip_h).max(200.0);
             let top_w = ui.available_width();
             ui.allocate_ui(vec2(top_w, top_h), |ui| {

@@ -401,7 +401,13 @@ impl App {
             });
             self.tm_toolbar(ui, &mut st, blend, is_3d, has_children, &mut actions);
             ui.separator();
-            let strip_h = 150.0;
+            let strip_h = kf_window::keyframe_strip_height(
+                ui.ctx(),
+                egui::Id::new("tm_strip"),
+                3,
+                true,
+                150.0,
+            );
             let top_h = (ui.available_height() - strip_h).max(200.0);
             let top_w = ui.available_width();
             ui.allocate_ui(vec2(top_w, top_h), |ui| {
