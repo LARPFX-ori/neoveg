@@ -785,6 +785,10 @@ impl App {
                 .panes
                 .iter()
                 .any(|p| matches!(p, crate::dock::DockPane::Tab(DockTab::Encoder)));
+            let has_capture = grp
+                .panes
+                .iter()
+                .any(|p| matches!(p, crate::dock::DockPane::Tab(DockTab::Capture)));
             let has_preview = grp
                 .panes
                 .iter()
@@ -797,6 +801,8 @@ impl App {
 
             let (inner_size, min_size) = if has_encoder {
                 ([1120.0, 680.0], [740.0, 440.0])
+            } else if has_capture {
+                ([980.0, 640.0], [620.0, 420.0])
             } else if has_preview {
                 ([560.0, 400.0], [280.0, 220.0])
             } else if is_single_master {
@@ -1137,6 +1143,7 @@ impl App {
             DockTab::Scopes => self.scopes_tab(ui),
             DockTab::Notes => self.project_notes_tab(ui),
             DockTab::Encoder => self.encoder_tab(ui),
+            DockTab::Capture => self.capture_tab(ui),
             DockTab::Transcript => self.transcript_tab(ui),
             DockTab::Store => self.store_tab(ui),
         }

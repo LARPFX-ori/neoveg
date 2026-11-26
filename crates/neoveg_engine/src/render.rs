@@ -555,7 +555,7 @@ impl WavWriter {
         Self::create_with_channels(path, sr, bits, 2)
     }
 
-    /// Cria um WAV com `channels` canais (2 ou 6). Acima de 2 canais usa
+    /// Cria um WAV com `channels` canais (1, 2 ou 6). Acima de 2 canais usa
     /// WAVE_FORMAT_EXTENSIBLE com máscara 5.1, como pede a especificação
     /// pública do formato para mais de dois canais.
     pub fn create_with_channels(
@@ -564,8 +564,8 @@ impl WavWriter {
         bits: WavBits,
         channels: u16,
     ) -> Result<Self> {
-        if channels != 2 && channels != 6 {
-            bail!("WAV com {channels} canais não suportado (use 2 ou 6)");
+        if channels != 1 && channels != 2 && channels != 6 {
+            bail!("WAV com {channels} canais não suportado (use 1, 2 ou 6)");
         }
         let mut out = BufWriter::new(
             File::create(path).with_context(|| format!("criando {}", path.display()))?,

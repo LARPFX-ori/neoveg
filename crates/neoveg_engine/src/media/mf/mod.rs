@@ -43,13 +43,13 @@ pub(super) fn ticks_to_hns(t: Ticks) -> i64 {
 }
 
 /// Garante ciclo de vida RAII de COM MTA e Media Foundation na thread atual.
-pub(super) struct MfGuard {
+pub(crate) struct MfGuard {
     uninit_com: bool,
     shutdown_mf: bool,
 }
 
 impl MfGuard {
-    pub(super) fn enter() -> Result<Self> {
+    pub(crate) fn enter() -> Result<Self> {
         // SAFETY: `CoInitializeEx` com `COINIT_MULTITHREADED` e `pvReserved = None`
         // segue a especificação Win32; se a thread já estiver inicializada com outro
         // apartamento (`RPC_E_CHANGED_MODE`), não devemos chamar `CoUninitialize`.
@@ -158,14 +158,14 @@ fn read_duration(reader: &IMFSourceReader) -> Option<Ticks> {
     (hns > 0).then(|| hns_to_ticks(hns))
 }
 
-struct MfVideoInfo {
-    width: u32,
-    height: u32,
-    fps: FrameRate,
-    stride: i32,
+pub(crate) struct MfVideoInfo {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps: FrameRate,
+    pub(crate) stride: i32,
 }
 
-fn configure_video_stream(reader: &IMFSourceReader) -> Option<MfVideoInfo> {
+pub(crate) fn configure_video_stream(reader: &IMFSourceReader) -> Option<MfVideoInfo> {
     let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
     // SAFETY: consulta o tipo nativo apenas para verificar se existe faixa de vídeo.
     let native = unsafe { reader.GetNativeMediaType(stream, 0) }.ok()?;
@@ -214,7 +214,12 @@ fn configure_video_stream(reader: &IMFSourceReader) -> Option<MfVideoInfo> {
     })
 }
 
-fn decode_rgb32_sample(sample: &IMFSample, w: u32, h: u32, stride: i32) -> Result<RgbaImage> {
+pub(crate) fn decode_rgb32_sample(
+    sample: &IMFSample,
+    w: u32,
+    h: u32,
+    stride: i32,
+) -> Result<RgbaImage> {
     // SAFETY: `sample` é uma amostra válida retornada por `ReadSample`.
     let buffer = unsafe { sample.ConvertToContiguousBuffer() }
         .map_err(|e| anyhow!("ConvertToContiguousBuffer falhou: {e}"))?;

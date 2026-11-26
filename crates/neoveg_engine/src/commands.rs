@@ -374,12 +374,13 @@ pub enum DockPanel {
     Scopes,
     Notes,
     Encoder,
+    Capture,
     Transcript,
     Store,
 }
 
 impl DockPanel {
-    pub const ALL: [DockPanel; 19] = [
+    pub const ALL: [DockPanel; 20] = [
         DockPanel::ProjectMedia,
         DockPanel::Explorer,
         DockPanel::Trimmer,
@@ -397,6 +398,7 @@ impl DockPanel {
         DockPanel::Scopes,
         DockPanel::Notes,
         DockPanel::Encoder,
+        DockPanel::Capture,
         DockPanel::Transcript,
         DockPanel::Store,
     ];
@@ -420,6 +422,7 @@ impl DockPanel {
             DockPanel::Scopes => "Escopos",
             DockPanel::Notes => "Notas",
             DockPanel::Encoder => "Neoveg Encoder",
+            DockPanel::Capture => "Neoveg Capture",
             DockPanel::Transcript => "Transcrição de fala",
             DockPanel::Store => "Loja de scripts",
         };
@@ -449,6 +452,7 @@ impl DockPanel {
             DockPanel::Scopes => "view.tab.scopes",
             DockPanel::Notes => "view.tab.notes",
             DockPanel::Encoder => "view.tab.encoder",
+            DockPanel::Capture => "view.tab.capture",
             DockPanel::Transcript => "view.tab.transcript",
             DockPanel::Store => "view.tab.store",
         }
@@ -488,6 +492,10 @@ pub enum UiAction {
     EncoderPauseQueue,
     EncoderStopCurrent,
     EncoderStopQueue,
+    OpenCapture,
+    ImportCaptureProjectDialog,
+    CaptureToggleRecord,
+    CaptureExportToProject,
     SnapshotDialog,
     OpenWorkFolders,
     OpenAdvancedSaveDialog,
@@ -1446,6 +1454,24 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::SendToEncoder, h),
+    },
+    CommandDef {
+        id: "file.capture",
+        label: "Neoveg Capture...",
+        menu_path: "Arquivo/Neoveg Capture...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::OpenCapture, h),
+    },
+    CommandDef {
+        id: "file.import_nvcap",
+        label: "Importar projeto Neoveg Capture (.nvcap)...",
+        menu_path: "Arquivo/Importar projeto Neoveg Capture (.nvcap)...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::ImportCaptureProjectDialog, h),
     },
     CommandDef {
         id: "file.snapshot",
@@ -2530,6 +2556,15 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Encoder), h),
     },
     CommandDef {
+        id: "view.tab.capture",
+        label: "Neoveg Capture",
+        menu_path: "Exibir/Neoveg Capture",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::SelectDock(DockPanel::Capture), h),
+    },
+    CommandDef {
         id: "view.tab.transcript",
         label: "Transcrição de fala",
         menu_path: "Exibir/Transcrição de fala",
@@ -3529,6 +3564,24 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::EncoderStopQueue, h),
+    },
+    CommandDef {
+        id: "tools.capture_toggle_record",
+        label: "Capture: Iniciar / Parar gravação",
+        menu_path: "Ferramentas/Neoveg Capture/Iniciar ou parar gravação",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::CaptureToggleRecord, h),
+    },
+    CommandDef {
+        id: "tools.capture_export",
+        label: "Capture: Exportar para a timeline",
+        menu_path: "Ferramentas/Neoveg Capture/Exportar para a timeline",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::CaptureExportToProject, h),
     },
     CommandDef {
         id: "tools.run_script",

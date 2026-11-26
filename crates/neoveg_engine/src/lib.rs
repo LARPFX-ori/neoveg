@@ -22,6 +22,8 @@ mod aaf_metadict;
 #[forbid(unsafe_code)]
 pub mod archive;
 #[forbid(unsafe_code)]
+pub mod capture;
+#[forbid(unsafe_code)]
 pub mod color;
 #[forbid(unsafe_code)]
 pub mod commands;

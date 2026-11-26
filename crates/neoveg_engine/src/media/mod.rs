@@ -6,6 +6,8 @@ pub mod audio;
 pub mod audio_extra;
 #[forbid(unsafe_code)]
 pub mod avi;
+/// Fronteira FFI isolada para captura de tela, janelas, câmeras e espaço em disco (`AGENTS.md` §0.3).
+pub(crate) mod capture_os;
 #[forbid(unsafe_code)]
 pub mod convert;
 #[forbid(unsafe_code)]

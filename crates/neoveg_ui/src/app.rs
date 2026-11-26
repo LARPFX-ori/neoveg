@@ -415,6 +415,7 @@ pub struct App {
     pub(crate) pending_welcome_after_splash: bool,
     pub(crate) integrations: crate::integrations_ui::IntegrationsState,
     pub(crate) encoder: crate::encoder_panel::EncoderPanelState,
+    pub(crate) capture: crate::capture_panel::CapturePanelState,
     pub(crate) recorder: Option<neoveg_engine::playback::AudioRecorder>,
     pub(crate) recorder_tracks: Vec<Id>,
     pub(crate) recording_peaks: HashMap<Id, [f32; 2]>,
@@ -654,6 +655,7 @@ impl App {
             pending_welcome_after_splash,
             integrations: crate::integrations_ui::IntegrationsState::default(),
             encoder: crate::encoder_panel::EncoderPanelState::load_from_disk(),
+            capture: crate::capture_panel::CapturePanelState::load_from_disk(),
             recorder: None,
             recorder_tracks: Vec::new(),
             recording_peaks: HashMap::new(),
@@ -3071,6 +3073,10 @@ impl App {
             UiAction::EncoderStopQueue => {
                 self.encoder.runtime.stop_queue();
             }
+            UiAction::OpenCapture => self.open_capture_window(ctx),
+            UiAction::ImportCaptureProjectDialog => self.capture_import_project_dialog(),
+            UiAction::CaptureToggleRecord => self.capture_toggle_record(),
+            UiAction::CaptureExportToProject => self.capture_export_last_session(),
             UiAction::SnapshotDialog => self.snapshot_dialog(),
             UiAction::OpenProjectProps => self.dlg.project_props = true,
             UiAction::OpenWorkFolders => {
@@ -3773,6 +3779,8 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.import_media");
                 self.cmd_menu_btn(ui, "file.import_sequence");
+                self.cmd_menu_btn(ui, "file.capture");
+                self.cmd_menu_btn(ui, "file.import_nvcap");
                 self.cmd_menu_btn(ui, "sequence.import_nvegseq");
                 self.cmd_menu_btn(ui, "sequence.export_nvegseq");
                 self.cmd_menu_btn(ui, "file.convert_media");
@@ -4238,6 +4246,13 @@ impl App {
                     self.cmd_menu_btn(ui, "tools.encoder_stop_current");
                     self.cmd_menu_btn(ui, "tools.encoder_stop_queue");
                 });
+                ui.menu_button(tr(lang, "Neoveg Capture"), |ui| {
+                    self.cmd_menu_btn(ui, "file.capture");
+                    self.cmd_menu_btn(ui, "file.import_nvcap");
+                    ui.separator();
+                    self.cmd_menu_btn(ui, "tools.capture_toggle_record");
+                    self.cmd_menu_btn(ui, "tools.capture_export");
+                });
                 ui.separator();
                 self.cmd_menu_btn(ui, "tools.run_script");
                 ui.separator();
@@ -4380,6 +4395,11 @@ impl App {
             "file.save" => (Icon::SaveDisk, None, None),
             "file.render" => (Icon::RenderClapper, None, None),
             "view.tab.encoder" => (Icon::EncoderQueue, Some("Encoder"), None),
+            "view.tab.capture" | "file.capture" => (
+                Icon::ScreenCapture,
+                Some("Capture"),
+                Some(self.capture.is_recording()),
+            ),
             "file.project_props" => (Icon::GearProps, None, None),
             "file.work_folders" => (Icon::FolderItem, None, None),
             "file.import_media" => (Icon::ImportMedia, None, None),
@@ -5483,6 +5503,7 @@ impl eframe::App for App {
             let _ = rec.stop();
         }
         self.encoder.save_to_disk();
+        self.capture.shutdown();
         recovery::clear_recovery();
         util::log_info("Neoveg encerrado normalmente");
     }
@@ -5630,6 +5651,7 @@ impl App {
         if let Some(msg) = self.encoder.tick(ctx, dt, &self.media, lang) {
             self.set_status(msg);
         }
+        self.tick_capture(ctx);
         if self.startup_window {
             // tela de abertura na própria janela: a interface só aparece depois
             self.show_splash_overlay(ctx);
