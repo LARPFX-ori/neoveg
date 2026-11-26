@@ -4783,12 +4783,13 @@ impl App {
         self.tl.last_rows.clone_from(layout);
         let tool = self.session.edit_tool;
         let resp = ui.interact(lanes, ui.id().with("lanes"), Sense::click_and_drag());
-        let (mods, scroll, zoom_delta, middle_down, pointer) = ui.input(|i| {
+        let (mods, scroll, zoom_delta, middle_down, primary_down, pointer) = ui.input(|i| {
             (
                 i.modifiers,
                 i.raw_scroll_delta,
                 i.zoom_delta(),
                 i.pointer.middle_down(),
+                i.pointer.primary_down(),
                 i.pointer.hover_pos(),
             )
         });
@@ -4823,8 +4824,11 @@ impl App {
                         .zoom_around_playhead((1.0 + d * 0.0025).clamp(0.5, 2.0), c);
                 }
             }
-            // botão do meio: pan
-            if middle_down {
+            // botão do meio, ou o esquerdo com a ferramenta Mão: pan
+            let hand_drag = tool == EditTool::Hand
+                && primary_down
+                && matches!(self.tl.drag, Drag::None | Drag::Pan { .. });
+            if pans_view(middle_down, hand_drag) {
                 if let Drag::Pan { last } = self.tl.drag {
                     let d = p - last;
                     self.tl.scroll_x =
@@ -4897,6 +4901,9 @@ impl App {
                     match tool {
                         EditTool::Selection => {
                             self.set_cursor_shape(crate::cursors::NeovegCursor::SelectBox);
+                        }
+                        EditTool::Hand => {
+                            ui.ctx().set_cursor_icon(CursorIcon::Grab);
                         }
                         EditTool::Zoom => {
                             self.set_cursor_shape(if mods.shift || mods.alt {
@@ -5129,7 +5136,9 @@ impl App {
         }
 
         if resp.clicked() {
-            if tool == EditTool::Zoom {
+            if tool == EditTool::Hand {
+                // a Mão só move a vista
+            } else if tool == EditTool::Zoom {
                 // ferramenta Zoom: um clique mostra o projeto inteiro
                 self.fit_project_to_timeline(lanes.width());
             } else if let Some(p) = resp.interact_pointer_pos() {
@@ -5417,6 +5426,10 @@ impl App {
         let layout = &rows.track_rects;
         let ot = self.tl.x2t(origin.x, left);
         let tool = self.session.edit_tool;
+        // a Mão só move a vista (o pan é feito em `lanes_interact`)
+        if tool == EditTool::Hand {
+            return;
+        }
         // Seleção e Zoom desenham uma caixa e não mexem em nada (p. 239)
         if matches!(tool, EditTool::Selection | EditTool::Zoom) {
             self.tl.drag = Drag::Box {
@@ -9568,6 +9581,34 @@ mod marker_color_tests {
             assert_eq!(marker_tag_color(&p, MarkerKind::Standard), p.tl_marker);
             assert_ne!(marker_tag_color(&p, MarkerKind::Standard), p.tl_region);
         }
+    }
+}
+
+/// A vista da linha do tempo é arrastada com o botão do meio ou, com a
+/// ferramenta Mão, com o botão esquerdo.
+fn pans_view(middle_down: bool, hand_drag: bool) -> bool {
+    middle_down || hand_drag
+}
+
+#[cfg(test)]
+mod hand_tool_tests {
+    use super::pans_view;
+    use neoveg_engine::session::EditTool;
+
+    /// Não havia ferramenta Mão: o botão esquerdo nunca movia a vista.
+    #[test]
+    fn mao_e_uma_ferramenta_do_ciclo() {
+        assert!(EditTool::ALL.contains(&EditTool::Hand));
+        assert_eq!(EditTool::Zoom.next(), EditTool::Hand);
+        assert_eq!(EditTool::Hand.next(), EditTool::Normal);
+        assert_eq!(EditTool::Normal.prev(), EditTool::Hand);
+    }
+
+    #[test]
+    fn botao_do_meio_ou_mao_movem_a_vista() {
+        assert!(pans_view(true, false));
+        assert!(pans_view(false, true));
+        assert!(!pans_view(false, false));
     }
 }
 
