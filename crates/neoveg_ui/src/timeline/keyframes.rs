@@ -136,7 +136,12 @@ impl App {
     pub(super) fn draw_keyframe_rows(&self, ui: &egui::Ui, lanes: Rect, rows: &TimelineRows) {
         let painter = ui.painter_at(lanes);
         let left = lanes.left();
-        for area in rows.kf_areas.iter().flatten() {
+        let tol = self.kf_tol();
+        for (ti, area) in rows.kf_areas.iter().enumerate() {
+            let Some(area) = area else {
+                continue;
+            };
+            let track = self.project.tracks.get(ti);
             for (ri, row) in area.rows.iter().enumerate() {
                 let y0 = area.top + ri as f32 * KF_ROW_H;
                 let r =
@@ -164,8 +169,17 @@ impl App {
                     if x < lanes.left() - 8.0 || x > lanes.right() + 8.0 {
                         continue;
                     }
-                    let kr = Rect::from_center_size(pos2(x, cy), vec2(11.0, 11.0));
-                    icons::paint(&painter, kr, Icon::KeyframeFilled, &self.theme, true);
+                    let curve = track
+                        .filter(|_| row.has_curve)
+                        .and_then(|t| tkf::key_curve(t, &row.kind, *k, tol))
+                        .unwrap_or(Curve::Linear);
+                    crate::kf_window::paint_keyframe_diamond(
+                        &painter,
+                        pos2(x, cy),
+                        5.5,
+                        curve,
+                        &self.theme,
+                    );
                 }
             }
         }
