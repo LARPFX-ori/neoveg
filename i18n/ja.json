@@ -3140,5 +3140,19 @@
   "★ Favoritos": "★ お気に入り",
   "＋ Barramento": "+ バス",
   "＋ Marcador no Cursor": "+ カーソル位置にマーカー",
-  "＋ Áudio": "＋ オーディオ"
+  "＋ Áudio": "＋ オーディオ",
+  "Renderizando: {pct}%": "レンダリング中: {pct}%",
+  "{pct}% de {size}": "{size} の {pct}%",
+  "Restante: {t}": "残り: {t}",
+  "Renderizado: {size}": "レンダリング済み: {size}",
+  "Decorrido: {t}": "経過: {t}",
+  "Propriedades estimadas": "推定プロパティ",
+  "Espaço livre em disco:": "ディスクの空き容量:",
+  "Duração da renderização:": "レンダリング時間:",
+  "Horário de término:": "完了予定時刻:",
+  "Desempenho": "パフォーマンス",
+  "Velocidade média:": "平均速度:",
+  "Velocidade atual:": "現在の速度:",
+  "Abrir a pasta ao terminar a renderização": "レンダリング完了時にフォルダーを開く",
+  "Fechar esta janela ao terminar a renderização": "レンダリング完了時にこのウィンドウを閉じる"
 }

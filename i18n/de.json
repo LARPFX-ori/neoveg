@@ -3140,5 +3140,19 @@
   "★ Favoritos": "★ Favoriten",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker am Cursor",
-  "＋ Áudio": "+ Audio"
+  "＋ Áudio": "+ Audio",
+  "Renderizando: {pct}%": "Rendern: {pct} %",
+  "{pct}% de {size}": "{pct} % von {size}",
+  "Restante: {t}": "Verbleibend: {t}",
+  "Renderizado: {size}": "Gerendert: {size}",
+  "Decorrido: {t}": "Vergangen: {t}",
+  "Propriedades estimadas": "Geschätzte Eigenschaften",
+  "Espaço livre em disco:": "Freier Speicherplatz:",
+  "Duração da renderização:": "Renderdauer:",
+  "Horário de término:": "Fertigstellung um:",
+  "Desempenho": "Leistung",
+  "Velocidade média:": "Durchschnittliche Geschwindigkeit:",
+  "Velocidade atual:": "Aktuelle Geschwindigkeit:",
+  "Abrir a pasta ao terminar a renderização": "Ordner nach dem Rendern öffnen",
+  "Fechar esta janela ao terminar a renderização": "Dieses Fenster nach dem Rendern schließen"
 }
