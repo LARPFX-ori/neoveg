@@ -21,6 +21,7 @@ mod dialog_window;
 mod dialogs;
 mod dlg_advanced_save;
 mod dlg_audio_tools;
+mod dlg_relink;
 mod dlg_slideshow;
 mod dlg_work_folders;
 mod doc_tabs;
