@@ -618,6 +618,22 @@ impl App {
             }
             if icons::icon_button(
                 ui,
+                Icon::ScreenCapture,
+                Some(tr(lang, "Neoveg Capture...")),
+                self.detached_tabs.contains(&crate::DockTab::Capture),
+                true,
+                &self.theme,
+            )
+            .on_hover_text(tr(
+                lang,
+                "Gravar tela, janelas, câmeras e áudio (Neoveg Capture)",
+            ))
+            .clicked()
+            {
+                self.exec_cmd(Some(ui.ctx()), "file.capture");
+            }
+            if icons::icon_button(
+                ui,
                 Icon::DeleteTrash,
                 Some(tr(lang, "Remover não usadas")),
                 false,

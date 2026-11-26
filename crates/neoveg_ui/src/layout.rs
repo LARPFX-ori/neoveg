@@ -28,6 +28,7 @@ pub fn panel_key(tab: DockTab) -> &'static str {
         DockTab::Scopes => "scopes",
         DockTab::Notes => "notes",
         DockTab::Encoder => "encoder",
+        DockTab::Capture => "capture",
         DockTab::Transcript => "transcript",
         DockTab::Store => "store",
     }
@@ -151,7 +152,7 @@ pub const DEFAULT_DOCK_TABS: [DockTab; 5] = [
 /// Painéis que só abrem em janela própria, fora da área de janelas: o
 /// Neoveg Encoder é uma ferramenta à parte, como um programa separado.
 pub fn window_only(tab: DockTab) -> bool {
-    matches!(tab, DockTab::Encoder)
+    matches!(tab, DockTab::Encoder | DockTab::Capture)
 }
 
 pub fn default_closed_tabs() -> HashSet<DockTab> {

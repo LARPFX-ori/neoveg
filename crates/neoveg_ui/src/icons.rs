@@ -156,11 +156,12 @@ pub enum Icon {
     CreditRoll,
     LiveSave,
     HandPan,
+    ScreenCapture,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 147] = [
+    pub const ALL: [Icon; 148] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -308,6 +309,7 @@ impl Icon {
         Icon::CreditRoll,
         Icon::LiveSave,
         Icon::HandPan,
+        Icon::ScreenCapture,
     ];
 }
 
@@ -2199,6 +2201,18 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
                 pal.amber,
                 None,
             );
+        }
+        Icon::ScreenCapture => {
+            // Monitor com base e ponto vermelho de gravação no canto superior direito.
+            c.p.rect_stroke(
+                c.rect(0.10, 0.16, 0.90, 0.70),
+                c.u(0.06),
+                c.stroke(0.08, pal.ink),
+                StrokeKind::Inside,
+            );
+            c.line(0.50, 0.70, 0.50, 0.86, pal.ink, 0.08);
+            c.line(0.32, 0.86, 0.68, 0.86, pal.ink, 0.08);
+            c.p.circle_filled(c.pt(0.72, 0.34), c.u(0.11), pal.red);
         }
     }
 }

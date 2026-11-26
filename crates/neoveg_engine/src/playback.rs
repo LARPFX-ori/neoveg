@@ -94,7 +94,7 @@ pub struct AudioOut {
 /// vivo e esconde o problema). Esta thread faz a primeira consulta e nunca
 /// termina. Não remova sem resolver o enumerador do `cpal` de outro jeito.
 #[cfg(windows)]
-fn ensure_audio_com_keeper() {
+pub(crate) fn ensure_audio_com_keeper() {
     use std::sync::OnceLock;
     use std::time::Duration;
     static KEEPER: OnceLock<()> = OnceLock::new();
@@ -116,7 +116,7 @@ fn ensure_audio_com_keeper() {
 }
 
 #[cfg(not(windows))]
-fn ensure_audio_com_keeper() {}
+pub(crate) fn ensure_audio_com_keeper() {}
 
 impl AudioOut {
     pub fn new(project: Arc<Project>) -> Self {

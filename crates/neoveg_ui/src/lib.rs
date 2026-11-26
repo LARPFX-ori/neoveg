@@ -12,6 +12,7 @@
 )]
 
 pub mod app;
+mod capture_panel;
 mod color_grading;
 mod convert_dialog;
 mod crash_report;
