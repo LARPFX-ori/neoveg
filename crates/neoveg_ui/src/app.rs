@@ -1564,6 +1564,21 @@ impl App {
                 _ => {}
             }
         }
+        let is_recovery =
+            path == recovery::recovery_path() || path == recovery::legacy_recovery_path();
+        let reopening_main = self
+            .main_session()
+            .path
+            .as_deref()
+            .map(crate::doc_tabs::canonical)
+            == Some(crate::doc_tabs::canonical(&path));
+        if self.open_goes_to_new_tab(is_recovery || reopening_main) {
+            if self.open_project_tab(&path, false) {
+                self.prefs.record_recent_project(&path);
+                let _ = self.prefs.save();
+            }
+            return;
+        }
         if !self.close_nested_tabs_for_reset() {
             return;
         }
@@ -5474,6 +5489,8 @@ impl App {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let lang = self.lang();
                 let p_s = job.settings.path.display().to_string();
+                let ok_path = job.settings.path.clone();
+                let failed = err.is_some();
                 let secs_s = format!("{secs:.1}");
                 match err {
                     Some(e) => {
@@ -5485,8 +5502,20 @@ impl App {
                         &[("secs", &secs_s), ("path", &p_s)],
                     )),
                 }
-                self.dlg.render_done = Some(self.status.clone());
                 self.render_job = None;
+                if !failed && self.dlg.render_open_folder_when_done {
+                    if let Some(dir) = ok_path.parent() {
+                        if let Err(e) = crate::crash_report::open_folder(dir) {
+                            util::log_warn(&format!("abrir pasta da renderização: {e}"));
+                        }
+                    }
+                }
+                // "Fechar ao terminar" só dispensa o aviso de sucesso; um erro
+                // sempre aparece.
+                if failed || !self.dlg.render_close_when_done {
+                    self.dlg.render_done = Some(self.status.clone());
+                    self.dlg.render_done_path = (!failed).then_some(ok_path);
+                }
             }
         }
     }

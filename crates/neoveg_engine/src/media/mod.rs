@@ -8,6 +8,9 @@ pub mod audio_extra;
 pub mod avi;
 /// Fronteira FFI isolada para captura de tela, janelas, câmeras e espaço em disco (`AGENTS.md` §0.3).
 pub(crate) mod capture_os;
+/// Espaço livre e tamanho legível, usados também fora da captura (ex.: janela
+/// de progresso da renderização).
+pub use capture_os::{format_bytes_human, free_disk_bytes};
 #[forbid(unsafe_code)]
 pub mod convert;
 #[forbid(unsafe_code)]
