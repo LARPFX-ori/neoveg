@@ -5369,6 +5369,20 @@ impl EditorSession {
     }
 
     /// Substitui a mídia `target_id` in-loco por `replacement` mantendo IDs e propriedades dos eventos.
+    /// Aponta mídias ausentes para os arquivos encontrados pela pesquisa de
+    /// mídia (*Localizar mídia ausente*), num único passo de Desfazer.
+    /// Devolve quantas mídias mudaram (0 = nada a desfazer).
+    pub fn relink_media(&mut self, choices: &[(Id, std::path::PathBuf)]) -> usize {
+        let mut media = self.project.media.clone();
+        let n = crate::relink::apply_relinks(&mut media, choices);
+        if n > 0 {
+            self.checkpoint();
+            self.project.media = media;
+            self.changed();
+        }
+        n
+    }
+
     pub fn replace_media_item(&mut self, target_id: Id, replacement: MediaItem) -> bool {
         let Some(pos) = self.project.media.iter().position(|m| m.id == target_id) else {
             return false;

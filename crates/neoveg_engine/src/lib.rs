@@ -62,6 +62,8 @@ pub mod plugins;
 #[forbid(unsafe_code)]
 pub mod recovery;
 #[forbid(unsafe_code)]
+pub mod relink;
+#[forbid(unsafe_code)]
 pub mod render;
 #[forbid(unsafe_code)]
 pub mod render_status;
