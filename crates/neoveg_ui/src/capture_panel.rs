@@ -485,7 +485,7 @@ impl App {
     /// Corpo principal da janela **Neoveg Capture**.
     pub(crate) fn capture_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        let theme = self.theme;
+        let theme = self.theme.clone();
         let rec_dir = self
             .capture
             .settings
@@ -1408,7 +1408,7 @@ fn draw_picker_row(
     egui::Frame::NONE
         .fill(theme.widget_bg)
         .stroke(Stroke::new(
-            1.0,
+            1.0_f32,
             if present { theme.accent } else { theme.border },
         ))
         .corner_radius(4.0)
@@ -1462,7 +1462,7 @@ fn draw_source_card(
 
     egui::Frame::NONE
         .fill(theme.widget_bg)
-        .stroke(Stroke::new(1.0, border_col))
+        .stroke(Stroke::new(1.0_f32, border_col))
         .corner_radius(5.0)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
@@ -1737,7 +1737,7 @@ fn draw_stereo_vu_meter(
     p.rect_stroke(
         rect,
         3.0,
-        Stroke::new(1.0, theme.border),
+        Stroke::new(1.0_f32, theme.border),
         StrokeKind::Inside,
     );
 
@@ -1748,7 +1748,7 @@ fn draw_stereo_vu_meter(
     for (ch, &db) in peaks_db.iter().enumerate() {
         let y0 = rect.top() + 4.0 + (ch as f32) * (bar_h + 3.0);
         let bg_r = Rect::from_min_size(pos2(bar_x0, y0), vec2(bar_w, bar_h));
-        p.rect_filled(bg_r, 1.5, theme.panel_bg);
+        p.rect_filled(bg_r, 1.5, theme.widget_bg);
 
         let norm = if muted {
             0.0

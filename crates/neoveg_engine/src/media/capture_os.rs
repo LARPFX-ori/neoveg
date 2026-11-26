@@ -16,7 +16,7 @@
 
 #![allow(unsafe_code)]
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use image::RgbaImage;
 use std::path::Path;
 
@@ -149,14 +149,14 @@ impl VideoGrabber for SyntheticVideoGrabber {
 #[cfg(any(windows, test))]
 pub(crate) fn bgra_top_down_to_rgba(bgra: &[u8], w: u32, h: u32) -> Result<RgbaImage> {
     if w == 0 || h == 0 || w > MAX_CAPTURE_DIM || h > MAX_CAPTURE_DIM {
-        bail!("dimensões de captura inválidas: {w}x{h}");
+        anyhow::bail!("dimensões de captura inválidas: {w}x{h}");
     }
     let expected = (w as usize)
         .checked_mul(h as usize)
         .and_then(|n| n.checked_mul(4))
         .ok_or_else(|| anyhow!("estouro de dimensões na captura {w}x{h}"))?;
     if bgra.len() < expected {
-        bail!(
+        anyhow::bail!(
             "buffer BGRA incompleto: {} bytes para {w}x{h} (esperado {expected})",
             bgra.len()
         );
