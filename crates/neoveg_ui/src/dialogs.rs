@@ -5238,8 +5238,8 @@ impl App {
         let avg_fps = if el > 0.05 { done_n as f64 / el } else { 0.0 };
         let free = out_path
             .parent()
-            .and_then(neoveg_engine::media::capture_os::free_disk_bytes);
-        let human = neoveg_engine::media::capture_os::format_bytes_human;
+            .and_then(neoveg_engine::media::free_disk_bytes);
+        let human = neoveg_engine::media::format_bytes_human;
         let pct_s = format!("{:.0}", (frac * 100.0).clamp(0.0, 100.0));
         let mut cancel = false;
         let theme = self.theme.clone();
