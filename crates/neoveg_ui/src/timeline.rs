@@ -9698,6 +9698,9 @@ mod seq_marks_tests {
         for r in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert_eq!(source_to_event_offset(t(0), t(500), r, t(10)), None);
         }
+    }
+}
+
 /// A vista da linha do tempo é arrastada com o botão do meio ou, com a
 /// ferramenta Mão, com o botão esquerdo.
 fn pans_view(middle_down: bool, hand_drag: bool) -> bool {
