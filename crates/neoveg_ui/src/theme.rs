@@ -134,7 +134,6 @@ pub struct ThemeColors {
     pub tl_loop_inactive: Color32,
     pub tl_marker: Color32,
     pub tl_region: Color32,
-    pub tl_region_band: Color32,
     pub tl_sel_band: Color32,
     pub tl_fade: Color32,
     pub tl_crossfade: Color32,
@@ -187,7 +186,6 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_loop_inactive: Color32::from_rgb(74, 76, 88),
             tl_marker: Color32::from_rgb(232, 140, 44),
             tl_region: Color32::from_rgb(66, 178, 92),
-            tl_region_band: Color32::from_rgb(160, 232, 175),
             tl_sel_band: Color32::from_rgba_unmultiplied(76, 136, 224, 42),
             tl_fade: Color32::from_rgb(250, 246, 150),
             tl_crossfade: Color32::from_rgb(90, 175, 255),
@@ -233,7 +231,6 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_loop_inactive: Color32::from_rgb(72, 74, 82),
             tl_marker: Color32::from_rgb(242, 144, 36),
             tl_region: Color32::from_rgb(56, 194, 102),
-            tl_region_band: Color32::from_rgb(154, 238, 176),
             tl_sel_band: Color32::from_rgba_unmultiplied(56, 146, 238, 42),
             tl_fade: Color32::from_rgb(252, 244, 142),
             tl_crossfade: Color32::from_rgb(74, 174, 255),
@@ -278,7 +275,6 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_loop_inactive: Color32::from_rgb(96, 100, 110),
             tl_marker: Color32::from_rgb(184, 86, 12),
             tl_region: Color32::from_rgb(20, 112, 46),
-            tl_region_band: Color32::from_rgb(16, 98, 40),
             tl_sel_band: Color32::from_rgba_unmultiplied(44, 92, 168, 48),
             tl_fade: Color32::from_rgb(122, 82, 0),
             tl_crossfade: Color32::from_rgb(18, 62, 178),
@@ -323,7 +319,6 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_loop_inactive: Color32::from_rgb(112, 110, 106),
             tl_marker: Color32::from_rgb(192, 38, 28),
             tl_region: Color32::from_rgb(22, 118, 48),
-            tl_region_band: Color32::from_rgb(20, 104, 44),
             tl_sel_band: Color32::from_rgba_unmultiplied(32, 88, 176, 44),
             tl_fade: Color32::from_rgb(142, 92, 0),
             tl_crossfade: Color32::from_rgb(18, 66, 202),
@@ -368,7 +363,6 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_loop_inactive: Color32::from_rgb(148, 154, 168),
             tl_marker: Color32::from_rgb(196, 98, 10),
             tl_region: Color32::from_rgb(20, 128, 54),
-            tl_region_band: Color32::from_rgb(16, 108, 46),
             tl_sel_band: Color32::from_rgba_unmultiplied(32, 102, 196, 38),
             tl_fade: Color32::from_rgb(154, 104, 0),
             tl_crossfade: Color32::from_rgb(18, 76, 214),
@@ -410,9 +404,8 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_playhead_live: Color32::from_rgb(255, 110, 55),
             tl_loop_active: Color32::from_rgb(80, 138, 225),
             tl_loop_inactive: Color32::from_rgb(68, 70, 82),
-            tl_marker: Color32::from_rgb(70, 185, 100),
-            tl_region: Color32::from_rgb(235, 155, 45),
-            tl_region_band: Color32::from_rgb(255, 210, 145),
+            tl_marker: Color32::from_rgb(235, 155, 45),
+            tl_region: Color32::from_rgb(70, 185, 100),
             tl_sel_band: Color32::from_rgba_unmultiplied(80, 130, 215, 45),
             tl_fade: Color32::from_rgb(255, 245, 150),
             tl_crossfade: Color32::from_rgb(85, 175, 255),
@@ -454,9 +447,8 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_playhead_live: Color32::from_rgb(255, 125, 65),
             tl_loop_active: Color32::from_rgb(95, 150, 230),
             tl_loop_inactive: Color32::from_rgb(110, 112, 125),
-            tl_marker: Color32::from_rgb(80, 195, 105),
-            tl_region: Color32::from_rgb(245, 165, 55),
-            tl_region_band: Color32::from_rgb(255, 220, 165),
+            tl_marker: Color32::from_rgb(245, 165, 55),
+            tl_region: Color32::from_rgb(80, 195, 105),
             tl_sel_band: Color32::from_rgba_unmultiplied(100, 145, 220, 50),
             tl_fade: Color32::from_rgb(255, 250, 165),
             tl_crossfade: Color32::from_rgb(100, 185, 255),
@@ -498,9 +490,8 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_playhead_live: Color32::from_rgb(205, 38, 20),
             tl_loop_active: Color32::from_rgb(40, 98, 188),
             tl_loop_inactive: Color32::from_rgb(124, 130, 146),
-            tl_marker: Color32::from_rgb(20, 120, 48),
-            tl_region: Color32::from_rgb(180, 92, 10),
-            tl_region_band: Color32::from_rgb(142, 66, 0),
+            tl_marker: Color32::from_rgb(180, 92, 10),
+            tl_region: Color32::from_rgb(20, 120, 48),
             tl_sel_band: Color32::from_rgba_unmultiplied(45, 105, 200, 42),
             tl_fade: Color32::from_rgb(155, 110, 0),
             tl_crossfade: Color32::from_rgb(18, 72, 210),
@@ -542,9 +533,8 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_playhead_live: Color32::from_rgb(255, 120, 68),
             tl_loop_active: Color32::from_rgb(76, 152, 232),
             tl_loop_inactive: Color32::from_rgb(76, 90, 114),
-            tl_marker: Color32::from_rgb(72, 188, 130),
-            tl_region: Color32::from_rgb(238, 162, 52),
-            tl_region_band: Color32::from_rgb(255, 215, 155),
+            tl_marker: Color32::from_rgb(238, 162, 52),
+            tl_region: Color32::from_rgb(72, 188, 130),
             tl_sel_band: Color32::from_rgba_unmultiplied(80, 150, 230, 42),
             tl_fade: Color32::from_rgb(250, 248, 165),
             tl_crossfade: Color32::from_rgb(95, 190, 255),
@@ -587,9 +577,8 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_playhead_live: Color32::from_rgb(0, 240, 255),
             tl_loop_active: Color32::from_rgb(0, 220, 255),
             tl_loop_inactive: Color32::from_rgb(170, 170, 170),
-            tl_marker: Color32::from_rgb(110, 255, 120),
-            tl_region: Color32::from_rgb(255, 215, 0),
-            tl_region_band: Color32::from_rgb(255, 235, 130),
+            tl_marker: Color32::from_rgb(255, 215, 0),
+            tl_region: Color32::from_rgb(110, 255, 120),
             tl_sel_band: Color32::from_rgba_unmultiplied(0, 220, 255, 55),
             tl_fade: Color32::from_rgb(255, 240, 0),
             tl_crossfade: Color32::from_rgb(0, 235, 255),
@@ -632,9 +621,8 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_playhead_live: Color32::from_rgb(0, 45, 150),
             tl_loop_active: Color32::from_rgb(0, 52, 148),
             tl_loop_inactive: Color32::from_rgb(75, 75, 75),
-            tl_marker: Color32::from_rgb(0, 92, 24),
-            tl_region: Color32::from_rgb(130, 52, 0),
-            tl_region_band: Color32::from_rgb(145, 65, 0),
+            tl_marker: Color32::from_rgb(130, 52, 0),
+            tl_region: Color32::from_rgb(0, 92, 24),
             tl_sel_band: Color32::from_rgba_unmultiplied(0, 52, 148, 45),
             tl_fade: Color32::from_rgb(120, 62, 0),
             tl_crossfade: Color32::from_rgb(0, 38, 160),
@@ -814,5 +802,26 @@ mod tests {
             );
         }
         assert_eq!(ThemeId::from_pref("invalido"), ThemeId::VegasEscuro);
+    }
+
+    /// Marcadores são alaranjados e regiões, verdes, em todos os temas. Antes,
+    /// seis temas tinham as duas cores trocadas.
+    #[test]
+    fn marcador_laranja_e_regiao_verde_em_todos_os_temas() {
+        for id in ThemeId::ALL {
+            let p = palette(id);
+            assert!(
+                p.tl_marker.r() > p.tl_marker.g() && p.tl_marker.r() > p.tl_marker.b(),
+                "marcador de {:?} precisa ser alaranjado: {:?}",
+                id,
+                p.tl_marker
+            );
+            assert!(
+                p.tl_region.g() > p.tl_region.r() && p.tl_region.g() > p.tl_region.b(),
+                "região de {:?} precisa ser verde: {:?}",
+                id,
+                p.tl_region
+            );
+        }
     }
 }
