@@ -3378,6 +3378,7 @@ impl App {
         let mut chooser_filter = self.dlg.fx_chooser_filter.clone();
         let mut chooser_selected = self.dlg.fx_chooser_selected.clone();
         let mut sel_slot = self.dlg.fx_selected_slot;
+        let mut fx_seek: Option<Ticks> = None;
         let win_title = if chooser_open {
             tr_args(lang, "Escolha de Plug-in — {title}", &[("title", &title)])
         } else {
@@ -3975,8 +3976,28 @@ impl App {
                 if chain_copy.is_empty() {
                     ui.label(tr(lang, "Nenhum efeito na cadeia."));
                 }
+                // a faixa de quadros-chave do efeito selecionado fica embaixo,
+                // com a altura que ela precisa (gráfico incluído)
+                let strip_slot = fx_strip_slot(sel_slot, chain_copy.len());
+                let strip_h = strip_slot
+                    .and_then(|s| chain_copy.get(s))
+                    .map(|fx| {
+                        let rows = fx_animatable_params(fx).len();
+                        if rows == 0 {
+                            0.0
+                        } else {
+                            crate::kf_window::keyframe_strip_height(
+                                ui.ctx(),
+                                egui::Id::new(("fx_strip", fx.id)),
+                                rows,
+                                true,
+                                120.0,
+                            )
+                        }
+                    })
+                    .unwrap_or(0.0);
                 egui::ScrollArea::vertical()
-                    .max_height(520.0)
+                    .max_height((ui.available_height() - strip_h - 8.0).max(120.0))
                     .show(ui, |ui| {
                         let n = chain_copy.len();
                         for (i, fx) in chain_copy.iter_mut().enumerate() {
@@ -4228,12 +4249,95 @@ impl App {
                             });
                         }
                     });
+                if let Some(fx) = strip_slot.and_then(|s| chain_copy.get_mut(s)) {
+                    let idx = fx_animatable_params(fx);
+                    if !idx.is_empty() {
+                        ui.separator();
+                        let specs = fx.kind.params();
+                        let row_id = egui::Id::new(("fx_strip_row", fx.id));
+                        let active: usize = ui
+                            .data(|d| d.get_temp(row_id))
+                            .unwrap_or(0usize)
+                            .min(idx.len() - 1);
+                        let names: Vec<String> = idx
+                            .iter()
+                            .map(|&pi| {
+                                specs
+                                    .get(pi)
+                                    .map(|s| s.name_in(lang).to_string())
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        let rows: Vec<crate::kf_window::KfRow<'_>> = idx
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(ri, &pi)| {
+                                let p = fx.params.get(pi)?;
+                                Some(crate::kf_window::KfRow {
+                                    label: names.get(ri).map_or("", String::as_str),
+                                    keys: p
+                                        .keys
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(k, (kt, _))| {
+                                            (*kt, p.curves.get(k).copied().unwrap_or_default())
+                                        })
+                                        .collect(),
+                                    eases: (0..p.keys.len()).map(|k| p.ease_index(k)).collect(),
+                                    bezier: true,
+                                    checked: None,
+                                    selected: ri == active,
+                                })
+                            })
+                            .collect();
+                        let last_key = fx
+                            .params
+                            .iter()
+                            .flat_map(|p| p.keys.iter().map(|k| k.0))
+                            .max()
+                            .unwrap_or(Ticks::ZERO);
+                        let len = span.unwrap_or_else(|| {
+                            (last_key + Ticks::from_secs_f64_clamped(10.0))
+                                .max(local_t + Ticks::from_secs_f64_clamped(10.0))
+                                .max(Ticks::from_secs_f64_clamped(30.0))
+                        });
+                        let mut sync = true;
+                        let fmt = |x: Ticks| self.fmt_time(x);
+                        let out = crate::kf_window::keyframe_strip(
+                            ui,
+                            egui::Id::new(("fx_strip", fx.id)),
+                            &rows,
+                            len,
+                            local_t.clamp_safe(Ticks::ZERO, len),
+                            &mut sync,
+                            &fmt,
+                            &self.theme,
+                            lang,
+                        );
+                        let active = out.select_row.unwrap_or(active).min(idx.len() - 1);
+                        ui.data_mut(|d| d.insert_temp(row_id, active));
+                        if let Some(s) = out.seek {
+                            fx_seek = Some(s);
+                        }
+                        changed |= apply_fx_strip(fx, &idx, active, &out, local_t, tol, &mut fx_seek);
+                    }
+                }
             });
         self.dlg.fx_chooser_open = chooser_open;
         self.dlg.fx_chooser_cat = chooser_cat;
         self.dlg.fx_chooser_filter = chooser_filter;
         self.dlg.fx_chooser_selected = chooser_selected;
         self.dlg.fx_selected_slot = sel_slot;
+        if let Some(lt) = fx_seek {
+            // o tempo da faixa é local ao evento; nos outros alvos, o da linha do tempo
+            let at = match target {
+                FxTarget::Event(id) => self.project.event(id).map(|e| e.start + lt),
+                _ => Some(lt),
+            };
+            if let Some(at) = at {
+                self.set_cursor(at);
+            }
+        }
         let make_instances = |item: FxChooserItem| -> Vec<FxInstance> {
             match item {
                 FxChooserItem::Native(k) => vec![FxInstance::new(k)],
@@ -8554,5 +8658,171 @@ mod render_progress_tests {
         assert!((fps - 30.0).abs() < 1e-9);
         // contador recomeçou (outra renderização): não fica negativo
         assert_eq!(s.sample(t0 + Duration::from_secs(3), 5), 30.0);
+    }
+}
+
+/// Efeito cuja faixa de quadros-chave aparece embaixo da janela de efeitos:
+/// o selecionado ou, sem seleção, o primeiro da cadeia.
+fn fx_strip_slot(sel: Option<usize>, len: usize) -> Option<usize> {
+    match sel {
+        Some(s) if s < len => Some(s),
+        _ if len > 0 => Some(0),
+        _ => None,
+    }
+}
+
+/// Parâmetros animáveis (que não são liga/desliga) de um efeito, na ordem.
+fn fx_animatable_params(fx: &FxInstance) -> Vec<usize> {
+    let specs = fx.kind.params();
+    (0..fx.params.len().min(specs.len()))
+        .filter(|&pi| specs.get(pi).is_some_and(|s| !s.toggle))
+        .collect()
+}
+
+/// Aplica ao efeito o que foi feito na faixa de quadros-chave. `idx` liga
+/// cada linha da faixa ao parâmetro; `active` é a linha ativa (navegação,
+/// adicionar e excluir). Devolve `true` se algo mudou.
+fn apply_fx_strip(
+    fx: &mut FxInstance,
+    idx: &[usize],
+    active: usize,
+    out: &crate::kf_window::KfStripOut,
+    local_t: Ticks,
+    tol: Ticks,
+    seek: &mut Option<Ticks>,
+) -> bool {
+    use crate::kf_window::KfNav;
+    let mut changed = false;
+    let param = |ri: usize, n: usize| idx.get(ri).copied().filter(|&pi| pi < n);
+    if let Some(n) = out.nav {
+        if let Some(pi) = param(active, fx.params.len()) {
+            if let Some(p) = fx.params.get_mut(pi) {
+                match n {
+                    KfNav::Add => {
+                        let v = p.eval(local_t);
+                        if p.keys.is_empty() && local_t > tol {
+                            p.keys.push((Ticks::ZERO, p.value));
+                        }
+                        p.set_key(local_t, v, tol);
+                        changed = true;
+                    }
+                    KfNav::Delete => {
+                        changed |= p.remove_key_near(local_t, tol).is_some();
+                    }
+                    other => {
+                        let times: Vec<Ticks> = p.keys.iter().map(|k| k.0).collect();
+                        if let Some(t) = crate::kf_window::nav_target(&times, local_t, other) {
+                            *seek = Some(t);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((ri, ki, to)) = out.move_key {
+        if let Some(p) = param(ri, fx.params.len()).and_then(|pi| fx.params.get_mut(pi)) {
+            changed |= move_anim_key(p, ki, to, tol);
+        }
+    }
+    if let Some((ri, ki, c)) = out.set_curve {
+        if let Some(p) = param(ri, fx.params.len()).and_then(|pi| fx.params.get_mut(pi)) {
+            if let Some(&(kt, _)) = p.keys.get(ki) {
+                changed |= p.set_curve(kt, c, tol);
+            }
+        }
+    }
+    if let Some((ri, ki, e, edited_out)) = out.set_ease {
+        if let Some(p) = param(ri, fx.params.len()).and_then(|pi| fx.params.get_mut(pi)) {
+            changed |= p.set_ease_index(ki, Some(e), edited_out);
+        }
+    }
+    if let Some((ri, ki)) = out.delete_key {
+        if let Some(p) = param(ri, fx.params.len()).and_then(|pi| fx.params.get_mut(pi)) {
+            if let Some(&(kt, _)) = p.keys.get(ki) {
+                changed |= p.remove_key_near(kt, tol).is_some();
+            }
+        }
+    }
+    changed
+}
+
+/// Move o quadro-chave `ki` para `to`, levando valor, curva e Bézier. Não
+/// move para cima de outro quadro-chave (a menos de `tol`).
+fn move_anim_key(p: &mut AnimParam, ki: usize, to: Ticks, tol: Ticks) -> bool {
+    let Some(&(from, v)) = p.keys.get(ki) else {
+        return false;
+    };
+    if from == to
+        || p.keys
+            .iter()
+            .enumerate()
+            .any(|(i, k)| i != ki && k.0.abs_diff(to) <= tol)
+    {
+        return false;
+    }
+    let curve = p.curves.get(ki).copied();
+    let ease = p.ease_index(ki);
+    if p.remove_key_near(from, Ticks::ZERO).is_none() {
+        return false;
+    }
+    p.set_key(to, v, Ticks::ZERO);
+    if let Some(c) = curve {
+        p.set_curve(to, c, Ticks::ZERO);
+    }
+    if ease.is_some() {
+        p.set_ease(to, ease, Ticks::ZERO);
+    }
+    true
+}
+
+#[cfg(test)]
+mod fx_strip_tests {
+    use super::*;
+
+    fn param(keys: &[(i64, f32)]) -> AnimParam {
+        let mut p = AnimParam {
+            value: 0.0,
+            keys: Vec::new(),
+            curves: Vec::new(),
+            eases: Vec::new(),
+        };
+        for &(t, v) in keys {
+            p.set_key(Ticks::from_raw(t), v, Ticks::ZERO);
+        }
+        p
+    }
+
+    #[test]
+    fn slot_da_faixa_e_o_selecionado_ou_o_primeiro() {
+        assert_eq!(fx_strip_slot(Some(2), 3), Some(2));
+        assert_eq!(fx_strip_slot(Some(5), 3), Some(0));
+        assert_eq!(fx_strip_slot(None, 3), Some(0));
+        assert_eq!(fx_strip_slot(None, 0), None);
+    }
+
+    /// A janela de efeitos não tinha faixa de quadros-chave: arrastar um
+    /// quadro-chave tem de levar o valor e a curva junto.
+    #[test]
+    fn mover_quadro_chave_leva_valor_e_curva() {
+        let mut p = param(&[(0, 1.0), (100, 2.0)]);
+        p.set_curve(Ticks::from_raw(100), Curve::Hold, Ticks::ZERO);
+        assert!(move_anim_key(&mut p, 1, Ticks::from_raw(250), Ticks::ZERO));
+        let k = p.keys.iter().position(|k| k.0 == Ticks::from_raw(250));
+        let k = k.expect("quadro-chave movido");
+        assert_eq!(p.keys[k].1, 2.0);
+        assert_eq!(p.curves.get(k).copied(), Some(Curve::Hold));
+    }
+
+    #[test]
+    fn nao_move_para_cima_de_outro_quadro_chave() {
+        let mut p = param(&[(0, 1.0), (100, 2.0)]);
+        assert!(!move_anim_key(
+            &mut p,
+            1,
+            Ticks::from_raw(0),
+            Ticks::from_raw(5)
+        ));
+        assert!(!move_anim_key(&mut p, 9, Ticks::from_raw(50), Ticks::ZERO));
+        assert_eq!(p.keys.len(), 2);
     }
 }
