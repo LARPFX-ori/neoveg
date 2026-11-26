@@ -1960,6 +1960,18 @@ pub static COMMANDS: &[CommandDef] = &[
         },
     },
     CommandDef {
+        id: "edit.tool.hand",
+        label: "Ferramenta Mão",
+        menu_path: "Editar/Ferramenta de edição/Mão",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: always_enabled,
+        run: |s, _| {
+            s.edit_tool = crate::session::EditTool::Hand;
+            Ok(CommandOutcome::Executed)
+        },
+    },
+    CommandDef {
         id: "edit.tool.next",
         label: "Próxima ferramenta",
         menu_path: "Editar/Ferramenta de edição/Próxima ferramenta",
@@ -4695,13 +4707,15 @@ mod tests {
             EditTool::Envelope,
             EditTool::Selection,
             EditTool::Zoom,
+            EditTool::Hand,
             EditTool::Normal,
         ] {
             run_command("edit.tool.next", &mut s, &mut h).unwrap();
             assert_eq!(s.edit_tool, want);
         }
         run_command("edit.tool.prev", &mut s, &mut h).unwrap();
-        assert_eq!(s.edit_tool, EditTool::Zoom);
+        assert_eq!(s.edit_tool, EditTool::Hand);
+        run_command("edit.tool.zoom", &mut s, &mut h).unwrap();
         run_command("edit.tool.mode.slip", &mut s, &mut h).unwrap();
         assert_eq!(
             (s.edit_tool, s.edit_mode),

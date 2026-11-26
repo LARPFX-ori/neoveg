@@ -4734,6 +4734,13 @@ impl App {
                 None,
                 "edit.tool.zoom",
             );
+            self.cmd_tool_toggle(
+                ui,
+                tool == neoveg_engine::session::EditTool::Hand,
+                Icon::HandPan,
+                None,
+                "edit.tool.hand",
+            );
             if matches!(
                 tool,
                 neoveg_engine::session::EditTool::Selection

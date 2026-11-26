@@ -3141,6 +3141,8 @@
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker at Cursor",
   "＋ Áudio": "+ Audio",
+  "Ferramenta Mão": "Hand Tool",
+  "Mão": "Hand",
   "Renderizando: {pct}%": "Rendering: {pct}%",
   "{pct}% de {size}": "{pct}% of {size}",
   "Restante: {t}": "Remaining: {t}",

@@ -262,14 +262,18 @@ pub enum EditTool {
     Selection,
     /// Caixa de zoom; um clique ajusta o projeto à linha do tempo.
     Zoom,
+    /// Mão: arrastar move a vista da linha do tempo (tempo e trilhas), sem
+    /// editar nada.
+    Hand,
 }
 
 impl EditTool {
-    pub const ALL: [EditTool; 4] = [
+    pub const ALL: [EditTool; 5] = [
         EditTool::Normal,
         EditTool::Envelope,
         EditTool::Selection,
         EditTool::Zoom,
+        EditTool::Hand,
     ];
 
     pub fn name(self) -> &'static str {
@@ -278,6 +282,7 @@ impl EditTool {
             EditTool::Envelope => "Envelope",
             EditTool::Selection => "Seleção",
             EditTool::Zoom => "Zoom",
+            EditTool::Hand => "Mão",
         }
     }
 
