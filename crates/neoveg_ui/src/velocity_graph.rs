@@ -950,11 +950,13 @@ mod value_graph_tests {
             key(3, 3.0, Some(KeyEase::new(EaseMode::Bezier))),
         ];
         let h = value_handle_positions(&ks);
+        // a influência de 1/3 em f32 erra o tempo em poucos ticks
+        let perto = |a: Ticks, b: Ticks| a.abs_diff(b) <= Ticks::from_millis_i64(1);
         let (t, v) = h[0].outgoing.expect("alça de saída");
-        assert_eq!(t, Ticks::from_secs_i64(1));
+        assert!(perto(t, Ticks::from_secs_i64(1)), "{t:?}");
         assert!((v - 1.0).abs() < 1e-4);
         let (t, v) = h[1].incoming.expect("alça de entrada");
-        assert_eq!(t, Ticks::from_secs_i64(2));
+        assert!(perto(t, Ticks::from_secs_i64(2)), "{t:?}");
         assert!((v - 2.0).abs() < 1e-4);
         assert!(h[0].incoming.is_none() && h[1].outgoing.is_none());
     }
