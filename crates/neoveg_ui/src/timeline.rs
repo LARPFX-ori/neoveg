@@ -585,9 +585,29 @@ pub(crate) enum RulerGrid {
     Smpte {
         major_df: u64,
         minor_df: u64,
+        /// Divisor do passo: a marca `i` cai no quadro `⌊i·passo/step_den⌋`.
+        /// É 1 em quase tudo; 2 no *meio segundo* de taxas com quadros por
+        /// segundo ímpares (25, 15...), que alterna 12 e 13 quadros e mantém
+        /// toda marca em um quadro inteiro e no segundo cheio.
+        step_den: u64,
         fps: FrameRate,
         fmt: TimeFormat,
     },
+}
+
+/// Quadro de exibição da marca `i` de uma grade SMPTE com passo
+/// `step / den` quadros.
+fn smpte_mark_df(i: u64, step: u64, den: u64) -> u64 {
+    i.saturating_mul(step) / den.max(1)
+}
+
+/// Índice da última marca em ou antes do quadro de exibição `df`
+/// (inversa de [`smpte_mark_df`]).
+fn smpte_mark_index(df: u64, step: u64, den: u64) -> u64 {
+    df.saturating_add(1)
+        .saturating_mul(den.max(1))
+        .saturating_sub(1)
+        / step.max(1)
 }
 
 pub(crate) fn effective_ruler_grid(
@@ -598,16 +618,26 @@ pub(crate) fn effective_ruler_grid(
     width_px: f32,
 ) -> RulerGrid {
     use neoveg_engine::session::RulerGridSpacing as G;
+    // Mesmo formato que os rótulos da régua: com drop-frame desligado nas
+    // propriedades do projeto, "SMPTE Drop" é exibido como non-drop, e as
+    // marcas têm de cair nos mesmos quadros que os rótulos.
+    let fmt = settings.effective_time_format(fmt);
     let is_smpte = matches!(
         fmt,
         TimeFormat::SmpteDrop | TimeFormat::SmpteNonDrop | TimeFormat::TimeAndFrames
     );
     if is_smpte && grid != G::Beats {
         let nom = u64::from(settings.fps.nominal_fps().max(1));
+        // Meio segundo em taxa ímpar: passo de `nom / 2` quadros (ver `step_den`).
+        let mut step_den = 1;
         let fixed_df = match grid {
             G::Auto => None,
             G::Frame => Some(1),
-            G::HalfSecond => nom.is_multiple_of(2).then_some(nom / 2),
+            G::HalfSecond if nom.is_multiple_of(2) => Some(nom / 2),
+            G::HalfSecond => {
+                step_den = 2;
+                Some(nom)
+            }
             G::OneSecond => Some(nom),
             G::TwoSeconds => Some(nom.saturating_mul(2)),
             G::FiveSeconds => Some(nom.saturating_mul(5)),
@@ -620,15 +650,21 @@ pub(crate) fn effective_ruler_grid(
             .min(neoveg_engine::time::MAX_SECONDS as f64);
             let f_secs = settings.fps.ticks_per_frame().as_secs_f64().max(1e-6);
             let max_marks = f64::from(MAX_RULER_MARKS / 2);
-            while (view_secs / (step_df as f64 * f_secs)) > max_marks {
+            while (view_secs * step_den as f64 / (step_df as f64 * f_secs)) > max_marks {
                 step_df = step_df.saturating_mul(2);
                 if step_df >= u64::MAX / 4 {
                     break;
                 }
             }
+            // Passo par com divisor 2 volta a ser um passo inteiro.
+            if step_den == 2 && step_df.is_multiple_of(2) {
+                step_df /= 2;
+                step_den = 1;
+            }
             return RulerGrid::Smpte {
                 major_df: step_df.max(1),
                 minor_df: step_df.max(1),
+                step_den,
                 fps: settings.fps,
                 fmt,
             };
@@ -638,6 +674,7 @@ pub(crate) fn effective_ruler_grid(
             return RulerGrid::Smpte {
                 major_df: major_df.max(1),
                 minor_df: minor_df.max(1),
+                step_den: 1,
                 fps: settings.fps,
                 fmt,
             };
@@ -688,23 +725,25 @@ impl RulerGrid {
             RulerGrid::Smpte {
                 major_df,
                 minor_df,
+                step_den,
                 fps,
                 fmt,
             } => {
                 let step_df = if major_only { major_df } else { minor_df }.max(1);
                 let maj_df = major_df.max(step_df);
                 let start_df = neoveg_common::ticks_to_smpte_display_frame(t_start, fps, fmt);
-                let mut idx = start_df / step_df;
+                let mut idx = smpte_mark_index(start_df, step_df, step_den);
                 let max_df = (neoveg_engine::time::MAX_SECONDS as u64)
                     .saturating_mul(u64::from(fps.nominal_fps().max(1)))
                     .saturating_add(step_df);
                 for _ in 0..MAX_RULER_MARKS {
-                    let df = idx.saturating_mul(step_df);
+                    let df = smpte_mark_df(idx, step_df, step_den);
                     let t = neoveg_common::smpte_display_frame_to_ticks(df, fps, fmt);
                     if t > t_end {
                         break;
                     }
-                    let is_major = major_only || df.is_multiple_of(maj_df);
+                    // Grade fixa (passo principal = subdivisão): toda marca é principal.
+                    let is_major = major_only || major_df == minor_df || df.is_multiple_of(maj_df);
                     if let Some(last) = out.last_mut() {
                         if last.0 == t {
                             last.1 |= is_major;
@@ -735,31 +774,29 @@ impl RulerGrid {
                 (Ticks::from_raw(g0), Ticks::from_raw(g1))
             }
             RulerGrid::Smpte {
-                minor_df, fps, fmt, ..
+                minor_df,
+                step_den,
+                fps,
+                fmt,
+                ..
             } => {
                 let step = minor_df.max(1);
+                let at = |i: u64| {
+                    neoveg_common::smpte_display_frame_to_ticks(
+                        smpte_mark_df(i, step, step_den),
+                        fps,
+                        fmt,
+                    )
+                };
                 let cur_df = neoveg_common::ticks_to_smpte_display_frame(t, fps, fmt);
-                let k = cur_df / step;
-                let mut lo =
-                    neoveg_common::smpte_display_frame_to_ticks(k.saturating_mul(step), fps, fmt);
+                let k = smpte_mark_index(cur_df, step, step_den);
+                let mut lo = at(k);
                 if lo > t && k > 0 {
-                    lo = neoveg_common::smpte_display_frame_to_ticks(
-                        k.saturating_sub(1).saturating_mul(step),
-                        fps,
-                        fmt,
-                    );
+                    lo = at(k.saturating_sub(1));
                 }
-                let mut hi = neoveg_common::smpte_display_frame_to_ticks(
-                    k.saturating_add(1).saturating_mul(step),
-                    fps,
-                    fmt,
-                );
+                let mut hi = at(k.saturating_add(1));
                 if hi < t {
-                    hi = neoveg_common::smpte_display_frame_to_ticks(
-                        k.saturating_add(2).saturating_mul(step),
-                        fps,
-                        fmt,
-                    );
+                    hi = at(k.saturating_add(2));
                 }
                 (lo, hi)
             }
@@ -772,18 +809,25 @@ impl RulerGrid {
         match self {
             RulerGrid::Linear { minor, .. } => neoveg_engine::session::grid_neighbor(t, minor, dir),
             RulerGrid::Smpte {
-                minor_df, fps, fmt, ..
+                minor_df,
+                step_den,
+                fps,
+                fmt,
+                ..
             } => {
                 let step = minor_df.max(1);
+                let at = |i: u64| {
+                    neoveg_common::smpte_display_frame_to_ticks(
+                        smpte_mark_df(i, step, step_den),
+                        fps,
+                        fmt,
+                    )
+                };
                 let cur_df = neoveg_common::ticks_to_smpte_display_frame(t, fps, fmt);
-                let mut k = cur_df / step;
+                let mut k = smpte_mark_index(cur_df, step, step_den);
                 if dir < 0 {
                     for _ in 0..8 {
-                        let cand = neoveg_common::smpte_display_frame_to_ticks(
-                            k.saturating_mul(step),
-                            fps,
-                            fmt,
-                        );
+                        let cand = at(k);
                         if cand < t {
                             return cand;
                         }
@@ -796,11 +840,7 @@ impl RulerGrid {
                 } else {
                     for _ in 0..8 {
                         k = k.saturating_add(1);
-                        let cand = neoveg_common::smpte_display_frame_to_ticks(
-                            k.saturating_mul(step),
-                            fps,
-                            fmt,
-                        );
+                        let cand = at(k);
                         if cand > t {
                             return cand.min(Ticks::MAX);
                         }
@@ -9109,6 +9149,87 @@ mod zoom_tests {
                 let m = gr.marks_in_range(Ticks::ZERO, end, false);
                 assert!(m.len() <= MAX_RULER_MARKS as usize, "{g:?} {pps}");
             }
+        }
+    }
+
+    /// Com drop-frame desligado nas propriedades do projeto, "SMPTE Drop" é
+    /// exibido como non-drop: as marcas da régua (e o snap/PageUp/PageDown que
+    /// usam a mesma grade) têm de cair nos mesmos quadros que os rótulos, e
+    /// não em posições drop-frame rotuladas como `00:09:59:12`.
+    #[test]
+    fn regua_segue_formato_efetivo_sem_drop_frame() {
+        use neoveg_engine::session::RulerGridSpacing as G;
+        let settings = ProjectSettings {
+            fps: FrameRate::FPS_29_97,
+            drop_frame: false,
+            ..ProjectSettings::default()
+        };
+        let shown = settings.effective_time_format(TimeFormat::SmpteDrop);
+        assert_eq!(shown, TimeFormat::SmpteNonDrop);
+        for g in [G::Auto, G::OneSecond, G::TenSeconds] {
+            let grid = effective_ruler_grid(g, TimeFormat::SmpteDrop, 60.0, &settings, 1440.0);
+            let marks =
+                grid.marks_in_range(Ticks::from_secs_i64(590), Ticks::from_secs_i64(610), true);
+            assert!(!marks.is_empty(), "{g:?}");
+            for (t, _) in &marks {
+                let label = neoveg_common::format_ticks(*t, settings.fps, 48000, shown);
+                assert!(
+                    label.ends_with(":00"),
+                    "{g:?}: marca fora do segundo: {label}"
+                );
+            }
+        }
+    }
+
+    /// Meio segundo em taxa com quadros por segundo ímpares (25 fps PAL): as
+    /// marcas ficam em quadros inteiros (alternando 12 e 13 quadros) e em todo
+    /// segundo cheio, em vez de uma grade linear de 0,5 s (12,5 quadros).
+    #[test]
+    fn regua_meio_segundo_em_25_fps_fica_em_quadros_inteiros() {
+        use neoveg_engine::session::RulerGridSpacing as G;
+        let settings = ProjectSettings {
+            fps: FrameRate::FPS_25,
+            ..ProjectSettings::default()
+        };
+        let fmt = TimeFormat::SmpteNonDrop;
+        let grid = effective_ruler_grid(G::HalfSecond, fmt, 60.0, &settings, 1440.0);
+        let marks = grid.marks_in_range(Ticks::ZERO, Ticks::from_secs_i64(2), false);
+        let label = |t: Ticks| neoveg_common::format_ticks(t, settings.fps, 48000, fmt);
+        let labels: Vec<String> = marks.iter().map(|(t, _)| label(*t)).collect();
+        assert_eq!(
+            labels,
+            [
+                "00:00:00:00",
+                "00:00:00:12",
+                "00:00:01:00",
+                "00:00:01:12",
+                "00:00:02:00"
+            ],
+        );
+        for (t, is_major) in &marks {
+            assert_eq!(
+                *t,
+                settings.quantize(*t),
+                "marca fora de quadro: {}",
+                label(*t)
+            );
+            assert!(*is_major);
+        }
+        // Snap e PageUp/PageDown andam pelas mesmas marcas.
+        let half = grid.neighbor(Ticks::ZERO, 1);
+        assert_eq!(label(half), "00:00:00:12");
+        let one = grid.neighbor(half, 1);
+        assert_eq!(label(one), "00:00:01:00");
+        assert_eq!(grid.neighbor(one, -1), half);
+        let (lo, hi) = grid.bracketing(Ticks::from_secs_i64(1));
+        assert!(lo <= Ticks::from_secs_i64(1) && hi > Ticks::from_secs_i64(1));
+        assert_eq!(label(hi), "00:00:01:12");
+        // Zoom muito afastado não passa do teto de marcas.
+        for pps in [TimelineState::MIN_PX_PER_SEC, 0.5, 5000.0] {
+            let g = effective_ruler_grid(G::HalfSecond, fmt, pps, &settings, 2000.0);
+            let end = Ticks::from_secs_f64_clamped(2000.0 / f64::from(pps));
+            let m = g.marks_in_range(Ticks::ZERO, end, false);
+            assert!(m.len() <= MAX_RULER_MARKS as usize, "{pps}");
         }
     }
 
