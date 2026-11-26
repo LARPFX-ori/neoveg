@@ -2227,53 +2227,23 @@ impl App {
         if monitor_changed {
             self.sync_master_monitor_audio();
         }
-        // Leituras individuais de pico L / R clicáveis para zerar retenção (VEGAS Pro 21, p. 50 / v23)
-        let pk_l = lin_to_db(self.master_hold[0]);
-        let pk_r = lin_to_db(self.master_hold[1]);
-        let fmt_pk = |v: f32| {
-            if !v.is_finite() || v < -100.0 {
-                "-inf".to_string()
-            } else {
-                format!("{v:+.1}")
-            }
-        };
-        let peak_resp = ui
-            .horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(egui::RichText::new(fmt_pk(pk_l)).monospace().small().color(
-                    if pk_l > -0.1 {
-                        self.theme.offline_fg
-                    } else {
-                        self.theme.text_muted
-                    },
-                ));
-                ui.label(egui::RichText::new(fmt_pk(pk_r)).monospace().small().color(
-                    if pk_r > -0.1 {
-                        self.theme.offline_fg
-                    } else {
-                        self.theme.text_muted
-                    },
-                ));
-            })
-            .response
-            .interact(Sense::click())
-            .on_hover_text(tr(lang, "Clique para zerar os picos retidos"));
-        if peak_resp.clicked() {
-            self.master_hold = [0.0; 2];
-        }
-
+        // Medidores: fader, canal L, escala e canal R formam um grupo centrado
+        // na largura do painel e com a altura do painel, como no console do
+        // VEGAS Pro. Antes o grupo ficava colado à esquerda e, num painel alto,
+        // parava em 240 px e deixava o resto do painel vazio.
         let meter_h = if tall_dock {
-            (ui.available_height() - 44.0).clamp(36.0, 240.0)
+            (ui.available_height() - MASTER_BOTTOM_ROWS_H).max(36.0)
         } else {
             110.0
         };
         let show_preview_strip =
             tall_dock && self.master_show_preview_bus && ui.available_width() >= 118.0;
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            if show_preview_strip {
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), meter_h), Sense::hover());
+        let lay = master_strip_layout(row, show_preview_strip, tall_dock && meter_h >= 78.0);
+
+        if let Some(pr) = lay.preview {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(pr), |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(34.0);
                     ui.label(
                         egui::RichText::new(tr(lang, "Prévia"))
                             .small()
@@ -2311,52 +2281,90 @@ impl App {
                             .color(self.theme.text_muted),
                     );
                 });
-                ui.separator();
-            }
-
-            let slider = ui.add_sized(
-                [22.0, meter_h],
-                egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
-                    .vertical()
-                    .show_value(false),
+            });
+            let sep_x = pr.right() + MASTER_GAP;
+            ui.painter().vline(
+                sep_x,
+                row.y_range(),
+                egui::Stroke::new(1.0_f32, self.theme.text_muted.gamma_multiply(0.4)),
             );
-            if slider.drag_started() {
-                self.checkpoint();
+        }
+
+        let slider = ui.put(
+            lay.fader,
+            egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
+                .vertical()
+                .show_value(false),
+        );
+        if slider.drag_started() {
+            self.checkpoint();
+        }
+        if slider.double_clicked() {
+            self.checkpoint();
+            self.project.master.volume_db = 0.0;
+            changed = true;
+        }
+        changed |= slider
+            .on_hover_text(tr(lang, "Volume do Master Bus (duplo clique para 0,0 dB)"))
+            .changed();
+        if let Some(sr) = lay.scale {
+            crate::timeline::draw_meter_channel(ui.painter(), lay.left, self.master_hold[0]);
+            crate::timeline::draw_meter_channel(ui.painter(), lay.right, self.master_hold[1]);
+            let sp = ui.painter_at(sr.expand2(vec2(0.0, 6.0)));
+            let font = egui::FontId::monospace(8.0);
+            for db in [0, -3, -6, -12, -18, -24, -36, -48, -57] {
+                let n = ((db as f32 + 60.0) / 66.0).clamp(0.0, 1.0);
+                let y = sr.bottom() - n * sr.height();
+                sp.text(
+                    pos2(sr.center().x, y),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{db}"),
+                    font.clone(),
+                    self.theme.text_muted,
+                );
             }
-            if slider.double_clicked() {
-                self.checkpoint();
-                self.project.master.volume_db = 0.0;
-                changed = true;
-            }
-            changed |= slider
-                .on_hover_text(tr(lang, "Volume do Master Bus (duplo clique para 0,0 dB)"))
-                .changed();
-            if tall_dock && meter_h >= 78.0 {
-                let (ml, _) = ui.allocate_exact_size(vec2(8.0, meter_h), Sense::hover());
-                crate::timeline::draw_meter_channel(ui.painter(), ml, self.master_hold[0]);
-                let (sr, _) = ui.allocate_exact_size(vec2(22.0, meter_h), Sense::hover());
-                let sp = ui.painter_at(sr);
-                let font = egui::FontId::monospace(8.0);
-                for db in [0, -3, -6, -12, -18, -24, -36, -48, -57] {
-                    let n = ((db as f32 + 60.0) / 66.0).clamp(0.0, 1.0);
-                    let y = sr.bottom() - n * sr.height();
-                    sp.text(
-                        pos2(sr.center().x, y),
-                        egui::Align2::CENTER_CENTER,
-                        format!("{db}"),
-                        font.clone(),
-                        self.theme.text_muted,
-                    );
-                }
-                let (mr, _) = ui.allocate_exact_size(vec2(8.0, meter_h), Sense::hover());
-                crate::timeline::draw_meter_channel(ui.painter(), mr, self.master_hold[1]);
+        } else {
+            draw_meter(ui.painter(), lay.left.union(lay.right), self.master_hold);
+        }
+
+        // Leituras de pico L / R logo abaixo de cada canal, clicáveis para zerar
+        // a retenção (VEGAS Pro 21, p. 50 / v23).
+        let pk_l = lin_to_db(self.master_hold[0]);
+        let pk_r = lin_to_db(self.master_hold[1]);
+        let fmt_pk = |v: f32| {
+            if !v.is_finite() || v < -100.0 {
+                "-inf".to_string()
             } else {
-                let (mr, _) = ui.allocate_exact_size(vec2(18.0, meter_h), Sense::hover());
-                draw_meter(ui.painter(), mr, self.master_hold);
+                format!("{v:+.1}")
             }
-        });
+        };
+        let (pk_row, peak_resp) = ui.allocate_exact_size(
+            vec2(ui.available_width(), MASTER_PEAK_ROW_H),
+            Sense::click(),
+        );
+        let pk_font = egui::FontId::monospace(9.0);
+        for (v, x) in [(pk_l, lay.left.center().x), (pk_r, lay.right.center().x)] {
+            ui.painter().text(
+                pos2(x, pk_row.center().y),
+                egui::Align2::CENTER_CENTER,
+                fmt_pk(v),
+                pk_font.clone(),
+                if v > -0.1 {
+                    self.theme.offline_fg
+                } else {
+                    self.theme.text_muted
+                },
+            );
+        }
+        if peak_resp
+            .on_hover_text(tr(lang, "Clique para zerar os picos retidos"))
+            .clicked()
+        {
+            self.master_hold = [0.0; 2];
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space((lay.fader.left() - ui.cursor().left()).max(0.0));
             let lock_tip = if self.master_channels_locked {
                 tr(lang, "Travar canais L/R juntos")
             } else {
@@ -4787,6 +4795,125 @@ fn centered_aspect_rect(r: Rect, aspect: f32) -> Option<Rect> {
         (r.width(), r.width() / aspect)
     };
     Some(Rect::from_center_size(r.center(), vec2(w, h)))
+}
+
+// Medidas do grupo de medidores do Master Bus (fader, canal L, escala, canal R).
+const MASTER_GAP: f32 = 4.0;
+const MASTER_FADER_W: f32 = 22.0;
+const MASTER_CHANNEL_W: f32 = 8.0;
+const MASTER_SCALE_W: f32 = 22.0;
+const MASTER_COMPACT_W: f32 = 18.0;
+const MASTER_PREVIEW_W: f32 = 34.0;
+const MASTER_PEAK_ROW_H: f32 = 14.0;
+/// Altura reservada abaixo dos medidores: leituras de pico e a linha do cadeado.
+const MASTER_BOTTOM_ROWS_H: f32 = MASTER_PEAK_ROW_H + 30.0;
+
+/// Retângulos do grupo de medidores do Master Bus dentro de `row`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MasterStripRects {
+    pub preview: Option<Rect>,
+    pub fader: Rect,
+    pub left: Rect,
+    pub scale: Option<Rect>,
+    pub right: Rect,
+}
+
+/// Distribui o barramento Preview (opcional), o fader e os medidores L/R
+/// centrados na largura de `row`, todos com a altura de `row`. Sem escala
+/// (painel baixo), os dois canais ficam juntos numa barra estreita.
+pub(crate) fn master_strip_layout(
+    row: Rect,
+    with_preview: bool,
+    with_scale: bool,
+) -> MasterStripRects {
+    let preview_w = if with_preview {
+        MASTER_PREVIEW_W + 2.0 * MASTER_GAP + 1.0
+    } else {
+        0.0
+    };
+    let meters_w = if with_scale {
+        2.0 * MASTER_CHANNEL_W + MASTER_SCALE_W + 2.0 * MASTER_GAP
+    } else {
+        MASTER_COMPACT_W
+    };
+    let total = preview_w + MASTER_FADER_W + MASTER_GAP + meters_w;
+    let x0 = row.left() + ((row.width() - total) * 0.5).max(0.0);
+    let col = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
+    let preview = with_preview.then(|| col(x0, MASTER_PREVIEW_W));
+    let mut x = x0 + preview_w;
+    let fader = col(x, MASTER_FADER_W);
+    x += MASTER_FADER_W + MASTER_GAP;
+    if with_scale {
+        let left = col(x, MASTER_CHANNEL_W);
+        x += MASTER_CHANNEL_W + MASTER_GAP;
+        let scale = col(x, MASTER_SCALE_W);
+        x += MASTER_SCALE_W + MASTER_GAP;
+        let right = col(x, MASTER_CHANNEL_W);
+        MasterStripRects {
+            preview,
+            fader,
+            left,
+            scale: Some(scale),
+            right,
+        }
+    } else {
+        let half = MASTER_COMPACT_W * 0.5;
+        MasterStripRects {
+            preview,
+            fader,
+            left: col(x, half),
+            scale: None,
+            right: col(x + half, half),
+        }
+    }
+}
+
+#[cfg(test)]
+mod master_strip_tests {
+    use super::*;
+
+    fn group_center(l: &MasterStripRects) -> f32 {
+        let left = l.preview.map_or(l.fader.left(), |p| p.left());
+        (left + l.right.right()) * 0.5
+    }
+
+    /// O grupo de medidores ficava colado à esquerda do painel.
+    #[test]
+    fn grupo_de_medidores_fica_centrado_no_painel() {
+        let row = Rect::from_min_size(pos2(10.0, 50.0), vec2(150.0, 400.0));
+        for (pv, sc) in [(false, true), (true, true), (false, false)] {
+            let l = master_strip_layout(row, pv, sc);
+            assert!(
+                (group_center(&l) - row.center().x).abs() < 1.0,
+                "grupo fora do centro (prévia {pv}, escala {sc})"
+            );
+        }
+    }
+
+    /// Fader e canais ocupam a altura inteira e não se sobrepõem.
+    #[test]
+    fn medidores_ocupam_a_altura_toda_e_em_ordem() {
+        let row = Rect::from_min_size(pos2(0.0, 0.0), vec2(150.0, 600.0));
+        let l = master_strip_layout(row, true, true);
+        for r in [l.fader, l.left, l.right] {
+            assert_eq!(r.height(), 600.0);
+        }
+        let s = l.scale.expect("escala no painel alto");
+        let pv = l.preview.expect("barramento Preview");
+        assert!(pv.right() < l.fader.left());
+        assert!(l.fader.right() <= l.left.left());
+        assert!(l.left.right() <= s.left());
+        assert!(s.right() <= l.right.left());
+    }
+
+    /// Painel mais estreito que o grupo: o grupo começa na borda, sem sair por
+    /// ela com deslocamento negativo.
+    #[test]
+    fn painel_estreito_nao_desloca_para_fora() {
+        let row = Rect::from_min_size(pos2(5.0, 0.0), vec2(20.0, 100.0));
+        let l = master_strip_layout(row, false, true);
+        assert_eq!(l.fader.left(), 5.0);
+    }
 }
 
 #[cfg(test)]

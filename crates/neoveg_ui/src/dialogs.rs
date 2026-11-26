@@ -973,6 +973,13 @@ pub struct Dialogs {
     pub render: Option<RenderDialogState>,
     pub render_use_loop: bool,
     pub render_done: Option<String>,
+    /// Arquivo da última renderização concluída sem erro (botões Abrir e
+    /// Abrir pasta da janela de conclusão).
+    pub render_done_path: Option<PathBuf>,
+    /// Opções da janela de progresso da renderização.
+    pub render_open_folder_when_done: bool,
+    pub render_close_when_done: bool,
+    pub(crate) render_speed: RenderSpeed,
     pub(crate) pc_tex: Option<(egui::TextureHandle, (Id, i64))>,
     /// Estado da janela Pan/Crop (ferramentas, área de trabalho, cursor).
     pub(crate) pc: crate::pan_crop_window::PanCropUi,
@@ -5207,59 +5214,168 @@ impl App {
 
     fn render_progress_window(&mut self, ctx: &egui::Context) {
         let lang = self.lang();
-        if let Some(job) = &self.render_job {
-            let p = &job.progress;
-            let frac = p.fraction();
-            let started = p
-                .started
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .unwrap_or_else(std::time::Instant::now);
-            let el = started.elapsed().as_secs_f64();
-            let eta = if frac > 0.001 {
-                el / frac as f64 - el
-            } else {
-                0.0
-            };
-            let mut cancel = false;
-            let theme = self.theme.clone();
-            crate::dialog_window::DialogWindow::new(tr(lang, "Renderizando..."))
-                .id(egui::Id::new("render_prog_win"))
-                .collapsible(true)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        crate::splash::spinner_inline(ui, 20.0, el, &theme);
-                        ui.label(job.settings.path.display().to_string());
-                    });
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .show_percentage()
-                            .desired_width(360.0),
+        let Some(job) = &self.render_job else {
+            self.dlg.render_speed = RenderSpeed::default();
+            return;
+        };
+        let p = &job.progress;
+        let frac = p.fraction();
+        let started = p
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::time::Instant::now);
+        let el = started.elapsed().as_secs_f64();
+        let done_n = p.done.load(std::sync::atomic::Ordering::Relaxed);
+        let out_path = job.settings.path.clone();
+        let video = !job.settings.format.is_audio_only();
+        let written = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+        let est = render_estimates(frac, el, written);
+        let cur_fps = self
+            .dlg
+            .render_speed
+            .sample(std::time::Instant::now(), done_n);
+        let avg_fps = if el > 0.05 { done_n as f64 / el } else { 0.0 };
+        let free = out_path
+            .parent()
+            .and_then(neoveg_engine::media::free_disk_bytes);
+        let human = neoveg_engine::media::format_bytes_human;
+        let pct_s = format!("{:.0}", (frac * 100.0).clamp(0.0, 100.0));
+        let mut cancel = false;
+        let theme = self.theme.clone();
+        let mut open_folder = self.dlg.render_open_folder_when_done;
+        let mut close_when_done = self.dlg.render_close_when_done;
+        crate::dialog_window::DialogWindow::new(tr_args(
+            lang,
+            "Renderizando: {pct}%",
+            &[("pct", &pct_s)],
+        ))
+        .id(egui::Id::new("render_prog_win"))
+        .collapsible(true)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.horizontal(|ui| {
+                crate::splash::spinner_inline(ui, 20.0, el, &theme);
+                ui.add(egui::Label::new(out_path.display().to_string()).truncate());
+            });
+            ui.add(egui::ProgressBar::new(frac).desired_width(380.0));
+            let muted = theme.text_muted;
+            egui::Grid::new("render_prog_head")
+                .num_columns(2)
+                .spacing([24.0, 2.0])
+                .show(ui, |ui| {
+                    let total_s = est
+                        .final_bytes
+                        .map(human)
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.label(
+                        egui::RichText::new(tr_args(
+                            lang,
+                            "{pct}% de {size}",
+                            &[("pct", &pct_s), ("size", &total_s)],
+                        ))
+                        .color(muted),
                     );
-                    let done_n = p.done.load(std::sync::atomic::Ordering::Relaxed);
-                    let total_n = p.total.load(std::sync::atomic::Ordering::Relaxed);
-                    let el_s = format!("{el:.0}");
-                    let eta_s = format!("{eta:.0}");
-                    ui.label(tr_args(
-                        lang,
-                        "{done} / {total}   •   decorrido {elapsed} s   •   restante ~{rem} s",
-                        &[
-                            ("done", &done_n),
-                            ("total", &total_n),
-                            ("elapsed", &el_s),
-                            ("rem", &eta_s),
-                        ],
-                    ));
-                    if ui.button(tr(lang, "Cancelar")).clicked() {
-                        cancel = true;
-                    }
+                    let rem_s = est
+                        .remaining_secs
+                        .map(fmt_clock)
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.label(
+                        egui::RichText::new(tr_args(lang, "Restante: {t}", &[("t", &rem_s)]))
+                            .color(muted),
+                    );
+                    ui.end_row();
+                    let w_s = human(written);
+                    ui.label(
+                        egui::RichText::new(tr_args(
+                            lang,
+                            "Renderizado: {size}",
+                            &[("size", &w_s)],
+                        ))
+                        .color(muted),
+                    );
+                    let el_s = fmt_clock(el);
+                    ui.label(
+                        egui::RichText::new(tr_args(lang, "Decorrido: {t}", &[("t", &el_s)]))
+                            .color(muted),
+                    );
+                    ui.end_row();
                 });
-            if cancel {
-                p.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(tr(lang, "Propriedades estimadas"))
+                .id_salt("render_prog_est")
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::Grid::new("render_prog_est_grid")
+                        .num_columns(2)
+                        .spacing([24.0, 2.0])
+                        .show(ui, |ui| {
+                            ui.label(tr(lang, "Espaço livre em disco:"));
+                            ui.label(free.map(human).unwrap_or_else(|| "—".to_string()));
+                            ui.end_row();
+                            ui.label(tr(lang, "Duração da renderização:"));
+                            ui.label(
+                                est.total_secs
+                                    .map(fmt_clock)
+                                    .unwrap_or_else(|| "—".to_string()),
+                            );
+                            ui.end_row();
+                            ui.label(tr(lang, "Horário de término:"));
+                            ui.label(
+                                est.remaining_secs
+                                    .and_then(neoveg_common::util::local_time_after_secs)
+                                    .unwrap_or_else(|| "—".to_string()),
+                            );
+                            ui.end_row();
+                        });
+                });
+            if video {
+                egui::CollapsingHeader::new(tr(lang, "Desempenho"))
+                    .id_salt("render_prog_perf")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        egui::Grid::new("render_prog_perf_grid")
+                            .num_columns(2)
+                            .spacing([24.0, 2.0])
+                            .show(ui, |ui| {
+                                ui.label(tr(lang, "Velocidade média:"));
+                                ui.label(format!("{avg_fps:.2} fps"));
+                                ui.end_row();
+                                ui.label(tr(lang, "Velocidade atual:"));
+                                ui.label(format!("{cur_fps:.2} fps"));
+                                ui.end_row();
+                            });
+                    });
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            egui::CollapsingHeader::new(tr(lang, "Opções"))
+                .id_salt("render_prog_opts")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.checkbox(
+                        &mut open_folder,
+                        tr(lang, "Abrir a pasta ao terminar a renderização"),
+                    );
+                    ui.checkbox(
+                        &mut close_when_done,
+                        tr(lang, "Fechar esta janela ao terminar a renderização"),
+                    );
+                });
+            ui.add_space(4.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(tr(lang, "Cancelar")).clicked() {
+                    cancel = true;
+                }
+                let _ = ui.add_enabled(false, egui::Button::new(tr(lang, "Abrir")));
+                let _ = ui.add_enabled(false, egui::Button::new(tr(lang, "Abrir pasta")));
+            });
+        });
+        self.dlg.render_open_folder_when_done = open_folder;
+        self.dlg.render_close_when_done = close_when_done;
+        if cancel {
+            p.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     fn misc_windows(&mut self, ctx: &egui::Context) {
@@ -5268,6 +5384,8 @@ impl App {
             let mut close = false;
             // o fechar da janela é o mesmo que OK
             let mut keep = true;
+            let done_path = self.dlg.render_done_path.clone();
+            let mut open_err: Option<String> = None;
             crate::dialog_window::DialogWindow::new(tr(lang, "Renderização"))
                 .id(egui::Id::new("render_done_win"))
                 .open(&mut keep)
@@ -5275,12 +5393,28 @@ impl App {
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label(msg);
-                    if ui.button(tr(lang, "OK")).clicked() {
-                        close = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if let Some(path) = &done_path {
+                            if ui.button(tr(lang, "Abrir pasta")).clicked() {
+                                if let Some(dir) = path.parent() {
+                                    open_err = crate::crash_report::open_folder(dir).err();
+                                }
+                            }
+                            if ui.button(tr(lang, "Abrir")).clicked() {
+                                open_err = crate::crash_report::open_folder(path).err();
+                            }
+                        }
+                        if ui.button(tr(lang, "OK")).clicked() {
+                            close = true;
+                        }
+                    });
                 });
+            if let Some(e) = open_err {
+                self.set_status(e);
+            }
             if close || !keep {
                 self.dlg.render_done = None;
+                self.dlg.render_done_path = None;
             }
         }
         if self.dlg.goto_open {
@@ -8293,5 +8427,132 @@ mod render_list_height_tests {
         assert_eq!(render_template_list_height(100.0), 180.0);
         assert_eq!(render_template_list_height(f32::INFINITY), 280.0);
         assert_eq!(render_template_list_height(f32::NAN), 280.0);
+    }
+}
+
+/// Velocidade atual da renderização: quadros por segundo medidos numa janela
+/// de cerca de um segundo.
+#[derive(Default)]
+pub(crate) struct RenderSpeed {
+    last: Option<(std::time::Instant, u64)>,
+    fps: f64,
+}
+
+impl RenderSpeed {
+    /// Registra que `done` quadros estavam prontos em `now` e devolve a
+    /// velocidade atual.
+    pub(crate) fn sample(&mut self, now: std::time::Instant, done: u64) -> f64 {
+        match self.last {
+            Some((t0, d0)) => {
+                let dt = now.saturating_duration_since(t0).as_secs_f64();
+                if done < d0 {
+                    self.last = Some((now, done));
+                } else if dt >= 1.0 {
+                    self.fps = (done - d0) as f64 / dt;
+                    self.last = Some((now, done));
+                }
+            }
+            None => self.last = Some((now, done)),
+        }
+        self.fps
+    }
+}
+
+/// Estimativas da janela de progresso da renderização.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RenderEstimates {
+    /// Segundos que faltam.
+    pub remaining_secs: Option<f64>,
+    /// Duração total estimada da renderização, em segundos.
+    pub total_secs: Option<f64>,
+    /// Tamanho final estimado do arquivo, em bytes.
+    pub final_bytes: Option<u64>,
+}
+
+/// Estima tempo restante, duração total e tamanho final a partir da fração
+/// concluída `frac`, dos segundos decorridos e dos bytes já gravados. Sem
+/// progresso suficiente (menos de 0,1%) ou com valores inválidos, não estima.
+pub(crate) fn render_estimates(frac: f32, elapsed: f64, written: u64) -> RenderEstimates {
+    let none = RenderEstimates {
+        remaining_secs: None,
+        total_secs: None,
+        final_bytes: None,
+    };
+    let f = f64::from(frac);
+    if !f.is_finite() || !elapsed.is_finite() || f <= 0.001 || elapsed < 0.0 {
+        return none;
+    }
+    let f = f.min(1.0);
+    let total = elapsed / f;
+    let final_bytes = if written > 0 {
+        let b = written as f64 / f;
+        (b.is_finite() && b < u64::MAX as f64).then_some(b as u64)
+    } else {
+        None
+    };
+    RenderEstimates {
+        remaining_secs: Some((total - elapsed).max(0.0)),
+        total_secs: Some(total),
+        final_bytes,
+    }
+}
+
+/// Segundos como `hh:mm:ss` (valores inválidos ou negativos viram zero).
+pub(crate) fn fmt_clock(secs: f64) -> String {
+    let s = if secs.is_finite() && secs > 0.0 {
+        secs.min(359_999.0).round() as u64
+    } else {
+        0
+    };
+    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+}
+
+#[cfg(test)]
+mod render_progress_tests {
+    use super::{fmt_clock, render_estimates, RenderSpeed};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn estimativas_a_partir_do_progresso() {
+        let e = render_estimates(0.25, 60.0, 50_000_000);
+        assert_eq!(e.total_secs, Some(240.0));
+        assert_eq!(e.remaining_secs, Some(180.0));
+        assert_eq!(e.final_bytes, Some(200_000_000));
+    }
+
+    #[test]
+    fn sem_progresso_ou_entrada_invalida_nao_estima() {
+        for (f, el) in [
+            (0.0, 10.0),
+            (f32::NAN, 10.0),
+            (0.5, f64::INFINITY),
+            (0.5, -1.0),
+        ] {
+            let e = render_estimates(f, el, 10);
+            assert_eq!(e.total_secs, None);
+            assert_eq!(e.final_bytes, None);
+        }
+        assert_eq!(render_estimates(0.5, 10.0, 0).final_bytes, None);
+    }
+
+    #[test]
+    fn relogio_formatado() {
+        assert_eq!(fmt_clock(0.0), "00:00:00");
+        assert_eq!(fmt_clock(3725.4), "01:02:05");
+        assert_eq!(fmt_clock(f64::NAN), "00:00:00");
+        assert_eq!(fmt_clock(-5.0), "00:00:00");
+        assert_eq!(fmt_clock(1e12), "99:59:59");
+    }
+
+    #[test]
+    fn velocidade_atual_em_janela_de_um_segundo() {
+        let mut s = RenderSpeed::default();
+        let t0 = Instant::now();
+        assert_eq!(s.sample(t0, 0), 0.0);
+        assert_eq!(s.sample(t0 + Duration::from_millis(500), 10), 0.0);
+        let fps = s.sample(t0 + Duration::from_secs(2), 60);
+        assert!((fps - 30.0).abs() < 1e-9);
+        // contador recomeçou (outra renderização): não fica negativo
+        assert_eq!(s.sample(t0 + Duration::from_secs(3), 5), 30.0);
     }
 }
