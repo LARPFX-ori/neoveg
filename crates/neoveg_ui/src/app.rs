@@ -1564,6 +1564,15 @@ impl App {
                 _ => {}
             }
         }
+        let is_recovery =
+            path == recovery::recovery_path() || path == recovery::legacy_recovery_path();
+        if self.open_goes_to_new_tab(is_recovery) {
+            if self.open_project_tab(&path, false) {
+                self.prefs.record_recent_project(&path);
+                let _ = self.prefs.save();
+            }
+            return;
+        }
         if !self.close_nested_tabs_for_reset() {
             return;
         }

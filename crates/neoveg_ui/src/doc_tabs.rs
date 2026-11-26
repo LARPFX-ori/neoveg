@@ -235,6 +235,14 @@ impl App {
     /// Abre o projeto `.neoveg` aninhado `path` numa aba (ou mostra a aba
     /// dele, se já estiver aberto).
     pub(crate) fn open_nested_project_tab(&mut self, path: &Path) {
+        self.open_project_tab(path, true);
+    }
+
+    /// Abre o projeto `path` numa aba nova (ou mostra a aba dele, se já
+    /// estiver aberto). `nested` só muda as mensagens: um projeto aberto por
+    /// Arquivo > Abrir também vira aba, ao lado do principal. Devolve `true`
+    /// quando o projeto ficou aberto numa aba.
+    pub(crate) fn open_project_tab(&mut self, path: &Path, nested: bool) -> bool {
         self.ensure_doc_tabs();
         let lang = self.lang();
         let key = canonical(path);
@@ -244,30 +252,33 @@ impl App {
             .position(|t| t.key.as_ref() == Some(&key))
         {
             self.switch_doc_tab(i);
-            return;
+            return true;
         }
         if self.main_session().path.as_deref().map(canonical).as_ref() == Some(&key) {
+            self.switch_doc_tab(0);
             self.set_status(tr(lang, "Este é o projeto principal: ele já está aberto."));
-            return;
+            return true;
         }
         if self.doc_tabs.len() >= MAX_DOC_TABS {
             let n = MAX_DOC_TABS.saturating_sub(1).to_string();
-            self.set_status(tr_args(
-                lang,
-                "Feche uma aba: no máximo {n} projetos aninhados abertos.",
-                &[("n", &n)],
-            ));
-            return;
+            let msg = if nested {
+                "Feche uma aba: no máximo {n} projetos aninhados abertos."
+            } else {
+                "Feche uma aba: no máximo {n} projetos abertos em abas."
+            };
+            self.set_status(tr_args(lang, msg, &[("n", &n)]));
+            return false;
         }
         let (project, fixes) = match Project::load_file(path) {
             Ok(r) => r,
             Err(e) => {
-                self.set_status(tr_args(
-                    lang,
-                    "Não foi possível abrir o projeto aninhado: {err}",
-                    &[("err", &e)],
-                ));
-                return;
+                let msg = if nested {
+                    "Não foi possível abrir o projeto aninhado: {err}"
+                } else {
+                    "Erro ao abrir projeto: {err}"
+                };
+                self.set_status(tr_args(lang, msg, &[("err", &e)]));
+                return false;
             }
         };
         for f in &fixes {
@@ -296,11 +307,28 @@ impl App {
         self.switch_doc_tab(i);
         self.reload_all_media();
         let name = file_label(Some(path)).unwrap_or_default();
-        self.set_status(tr_args(
-            lang,
-            "Projeto aninhado aberto em aba: {name}",
-            &[("name", &name)],
-        ));
+        let msg = if nested {
+            "Projeto aninhado aberto em aba: {name}"
+        } else {
+            "Projeto aberto em nova aba: {name}"
+        };
+        self.set_status(tr_args(lang, msg, &[("name", &name)]));
+        true
+    }
+
+    /// Arquivo > Abrir põe o projeto numa aba nova quando o principal já está
+    /// em uso (tem arquivo, conteúdo ou alterações) ou já há abas abertas. Um
+    /// projeto principal vazio e sem título é simplesmente substituído, e a
+    /// recuperação automática sempre substitui.
+    pub(crate) fn open_goes_to_new_tab(&self, is_recovery: bool) -> bool {
+        let main = self.main_session();
+        open_in_new_tab(
+            is_recovery,
+            self.has_doc_tabs(),
+            main.path.is_some(),
+            main.dirty,
+            main.project.tracks.is_empty() && main.project.media.is_empty(),
+        )
     }
 
     /// Abre em aba o projeto aninhado da mídia `media_id` do documento ativo.
@@ -792,5 +820,40 @@ fn save_stashed(s: &mut EditorSession, prefs: &neoveg_common::prefs::Preferences
             util::log_warn(&format!("erro ao salvar {}: {e}", path.display()));
             false
         }
+    }
+}
+
+/// Regra de Arquivo > Abrir: aba nova ou substituir o projeto principal.
+fn open_in_new_tab(
+    is_recovery: bool,
+    has_tabs: bool,
+    main_has_path: bool,
+    main_dirty: bool,
+    main_empty: bool,
+) -> bool {
+    !is_recovery && (has_tabs || main_has_path || main_dirty || !main_empty)
+}
+
+#[cfg(test)]
+mod open_tab_rule_tests {
+    use super::open_in_new_tab;
+
+    /// Abrir outro projeto substituía o principal em vez de abrir uma aba.
+    #[test]
+    fn projeto_em_uso_abre_o_outro_em_aba_nova() {
+        // principal salvo
+        assert!(open_in_new_tab(false, false, true, false, false));
+        // principal sem título, mas com conteúdo
+        assert!(open_in_new_tab(false, false, false, false, false));
+        // principal sem título e vazio, mas com alterações
+        assert!(open_in_new_tab(false, false, false, true, true));
+        // já há abas abertas
+        assert!(open_in_new_tab(false, true, false, false, true));
+    }
+
+    #[test]
+    fn principal_vazio_ou_recuperacao_substituem() {
+        assert!(!open_in_new_tab(false, false, false, false, true));
+        assert!(!open_in_new_tab(true, true, true, true, false));
     }
 }

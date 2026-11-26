@@ -2129,6 +2129,8 @@
   "Projeto aberto: {path}": "Projeto aberto: {path}",
   "Projeto aninhado aberto em aba (Ctrl+S salva todos)": "Projeto aninhado aberto em aba (Ctrl+S salva todos)",
   "Projeto aninhado aberto em aba: {name}": "Projeto aninhado aberto em aba: {name}",
+  "Projeto aberto em nova aba: {name}": "Projeto aberto em nova aba: {name}",
+  "Feche uma aba: no máximo {n} projetos abertos em abas.": "Feche uma aba: no máximo {n} projetos abertos em abas.",
   "Projeto arquivado ({n} mídia(s)): {path}": "Projeto arquivado ({n} mídia(s)): {path}",
   "Projeto de captura salvo em {path}": "Projeto de captura salvo em {path}",
   "Projeto e projetos aninhados salvos.": "Projeto e projetos aninhados salvos.",
