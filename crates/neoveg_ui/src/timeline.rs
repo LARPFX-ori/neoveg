@@ -8352,6 +8352,52 @@ impl App {
                         }
                     }
                 }
+                // Marcadores e regiões da sequência aninhada, alinhados dentro do
+                // evento (como os marcadores de mídia no VEGAS Pro)
+                if let Some(seq) = self
+                    .project
+                    .media(e.media_id)
+                    .and_then(|m| match m.source {
+                        MediaSource::Sequence { id } => Some(id),
+                        _ => None,
+                    })
+                    .and_then(|sid| self.project.sequences.iter().find(|s| s.id == sid))
+                {
+                    let vis_r = r.intersect(lanes);
+                    let mp = painter.with_clip_rect(vis_r);
+                    let rate = e.rate.as_f64();
+                    let y_top = (r.top() + 15.0).min(r.bottom() - 12.0);
+                    let x_of = |src: Ticks| {
+                        source_to_event_offset(e.offset, e.length, rate, src)
+                            .map(|d| self.tl.t2x(e.start + d, left))
+                    };
+                    for reg in &seq.regions {
+                        let (Some(xa), Some(xb)) = (x_of(reg.start), x_of(reg.end)) else {
+                            continue;
+                        };
+                        let col = self.theme.tl_region;
+                        mp.line_segment(
+                            [pos2(xa, y_top), pos2(xa, r.bottom())],
+                            Stroke::new(1.0_f32, col),
+                        );
+                        mp.line_segment(
+                            [pos2(xb, y_top), pos2(xb, r.bottom())],
+                            Stroke::new(1.0_f32, col),
+                        );
+                        seq_mark_tag(&mp, pos2(xa, y_top), &reg.label, col);
+                    }
+                    for m in &seq.markers {
+                        let Some(x) = x_of(m.t) else {
+                            continue;
+                        };
+                        let col = marker_tag_color(&self.theme, m.kind);
+                        mp.line_segment(
+                            [pos2(x, y_top), pos2(x, r.bottom())],
+                            Stroke::new(1.0_f32, col),
+                        );
+                        seq_mark_tag(&mp, pos2(x, y_top), &m.label, col);
+                    }
+                }
                 // Alerta de dessincronia A/V entre eventos agrupados (pílula vermelha VEGAS Pro)
                 if let Some(sync_off) = neoveg_engine::engine::audio_tools::event_sync_offset(
                     &self.project,
@@ -9567,6 +9613,69 @@ mod marker_color_tests {
             let p = palette(id);
             assert_eq!(marker_tag_color(&p, MarkerKind::Standard), p.tl_marker);
             assert_ne!(marker_tag_color(&p, MarkerKind::Standard), p.tl_region);
+        }
+    }
+}
+
+/// Posição, a partir do início do evento, de um instante `src` da mídia
+/// (ou sequência) de origem, para um evento que começa em `offset` na
+/// origem, dura `length` na linha do tempo e toca a `rate`. Fora do trecho
+/// usado pelo evento, ou com taxa inválida, não há posição.
+fn source_to_event_offset(offset: Ticks, length: Ticks, rate: f64, src: Ticks) -> Option<Ticks> {
+    if !rate.is_finite() || rate <= 1e-6 || src < offset {
+        return None;
+    }
+    let d = (src - offset).0 as f64 / rate;
+    if !d.is_finite() || d > length.0 as f64 {
+        return None;
+    }
+    Some(Ticks::from_raw(d.round() as i64))
+}
+
+/// Etiqueta de um marcador ou região da sequência dentro de um evento.
+fn seq_mark_tag(p: &egui::Painter, at: Pos2, label: &str, col: Color32) {
+    let text = if label.is_empty() { " " } else { label };
+    let g = p.layout_no_wrap(
+        text.to_string(),
+        FontId::proportional(9.5),
+        crate::theme::contrast_on(col),
+    );
+    let tag = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
+    p.rect_filled(tag, 1.0, col);
+    p.galley(tag.min + vec2(3.0, 1.0), g, crate::theme::contrast_on(col));
+}
+
+#[cfg(test)]
+mod seq_marks_tests {
+    use super::source_to_event_offset;
+    use neoveg_common::Ticks;
+
+    fn t(v: i64) -> Ticks {
+        Ticks::from_raw(v)
+    }
+
+    /// Os marcadores da sequência não apareciam no evento que a usa.
+    #[test]
+    fn marcador_da_sequencia_alinha_no_evento() {
+        // evento usa a sequência a partir de 100, por 500 na linha do tempo
+        assert_eq!(
+            source_to_event_offset(t(100), t(500), 1.0, t(300)),
+            Some(t(200))
+        );
+        // em dobro da velocidade, a distância cai à metade
+        assert_eq!(
+            source_to_event_offset(t(100), t(500), 2.0, t(300)),
+            Some(t(100))
+        );
+        // antes do início usado ou depois do fim: fora do evento
+        assert_eq!(source_to_event_offset(t(100), t(500), 1.0, t(50)), None);
+        assert_eq!(source_to_event_offset(t(100), t(500), 1.0, t(700)), None);
+    }
+
+    #[test]
+    fn taxa_invalida_nao_posiciona() {
+        for r in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(source_to_event_offset(t(0), t(500), r, t(10)), None);
         }
     }
 }
