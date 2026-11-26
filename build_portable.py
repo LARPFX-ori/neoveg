@@ -542,6 +542,25 @@ def extract_portable_tar_gz(tar_path: Path, dest_dir: Path) -> int:
     return count
 
 
+def extract_audited_portable(archive: Path, dest_dir: Path, staging_root: Path) -> int:
+    """Extrai o pacote portátil baixado (ZIP ou tar.gz) em `dest_dir` só depois
+    de auditar o conteúdo dele (§1.3, §1.4, §2.3).
+
+    A auditoria roda numa cópia extraída em `staging_root`, e não em `dest_dir`.
+    Por quê: `dest_dir` (ex.: `dist/`) guarda arquivos que o usuário gerou ao
+    usar o programa (pré-renders `.avi`, renders, projetos), que a extração
+    preserva e que não fazem parte do pacote. Auditar `dest_dir` inteiro os
+    acusaria como "mídia proibida no pacote" (issue #175). Um pacote reprovado
+    não chega a tocar `dest_dir`."""
+    extract = extract_portable_zip if archive.name.endswith(".zip") else extract_portable_tar_gz
+    stage = staging_root / "auditoria-pacote"
+    if stage.exists():
+        shutil.rmtree(stage)
+    extract(archive, stage)
+    ensure_no_forbidden_files(stage)
+    return extract(archive, dest_dir)
+
+
 def build_via_github_actions(
     repo_root: Path,
     portable_out: Path | None,
@@ -598,13 +617,9 @@ def build_via_github_actions(
             if portable_out is not None:
                 zips = [p for p in copied_artifacts if p.name.endswith("-portable.zip")]
                 tars = [p for p in copied_artifacts if p.name.endswith(".tar.gz")]
-                if zips:
-                    n = extract_portable_zip(zips[0], portable_out)
-                    ensure_no_forbidden_files(portable_out)
-                    print(f"Pacote portátil atualizado em: {portable_out} ({n} arquivos)")
-                elif tars:
-                    n = extract_portable_tar_gz(tars[0], portable_out)
-                    ensure_no_forbidden_files(portable_out)
+                archive = zips[0] if zips else (tars[0] if tars else None)
+                if archive is not None:
+                    n = extract_audited_portable(archive, portable_out, tmp_dir)
                     print(f"Pacote portátil atualizado em: {portable_out} ({n} arquivos)")
     except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError) as e:
         print(f"ERRO no fallback do GitHub Actions: {e}", file=sys.stderr)
