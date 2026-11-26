@@ -3956,8 +3956,18 @@ impl App {
                 }
                 if show_btns && kind == TrackKind::Audio && !is_folder && btns.phase {
                     let inverted = self.project.tracks[ti].invert_phase;
-                    if ui
-                        .selectable_label(inverted, "Ø")
+                    let ph = ui.selectable_label(inverted, "Ø");
+                    // nome próprio para a acessibilidade: o Console de Mixagem também
+                    // tem um botão "Ø"
+                    ph.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::SelectableLabel,
+                            true,
+                            inverted,
+                            tr(lang, "Inverter a fase da trilha"),
+                        )
+                    });
+                    if ph
                         .on_hover_text(tr(lang, "Inverter a fase da trilha"))
                         .clicked()
                     {
