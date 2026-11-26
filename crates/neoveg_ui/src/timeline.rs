@@ -8359,13 +8359,21 @@ impl App {
                     e,
                 ) {
                     let vis_r = r.intersect(lanes);
+                    // o evento inteiro fica avermelhado, como no VEGAS Pro
+                    painter
+                        .with_clip_rect(vis_r)
+                        .rect_filled(r, 0.0, SYNC_OFFSET_TINT);
                     if vis_r.width() > 38.0 {
                         let sp = painter.with_clip_rect(vis_r);
                         let secs = sync_off.delta_ticks.as_secs_f64();
                         let txt = format!("{secs:+.2}s ({:+}q)", sync_off.delta_frames);
                         let g = sp.layout_no_wrap(txt, FontId::monospace(9.5), Color32::WHITE);
+                        // logo abaixo do nome do evento
                         let pr = Rect::from_min_size(
-                            pos2(vis_r.left() + 3.0, (r.bottom() - 16.0).max(r.top() + 2.0)),
+                            pos2(
+                                vis_r.left() + 3.0,
+                                (r.top() + 17.0).min(r.bottom() - g.size().y - 2.0),
+                            ),
                             g.size() + vec2(6.0, 2.0),
                         );
                         sp.rect_filled(pr, 2.0, Color32::from_rgb(198, 42, 42));
@@ -9571,6 +9579,22 @@ mod marker_color_tests {
     }
 }
 
+/// Véu vermelho sobre um evento fora de sincronia com o seu par A/V.
+const SYNC_OFFSET_TINT: Color32 = Color32::from_rgba_premultiplied(100, 18, 18, 110);
+
+#[cfg(test)]
+mod sync_tint_tests {
+    use super::SYNC_OFFSET_TINT;
+
+    /// O evento fora de sincronia só tinha uma etiqueta pequena; o véu
+    /// vermelho tem de ser visível e deixar o conteúdo aparecer por baixo.
+    #[test]
+    fn veu_de_dessincronia_e_vermelho_e_translucido() {
+        let c = SYNC_OFFSET_TINT;
+        assert!(c.r() > c.g() && c.r() > c.b());
+        assert!(c.a() > 40 && c.a() < 200);
+    }
+}
 #[cfg(test)]
 mod slider_button_tests {
     use super::slider_moved_by_other_button;
