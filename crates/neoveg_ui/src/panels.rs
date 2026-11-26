@@ -2286,7 +2286,7 @@ impl App {
             ui.painter().vline(
                 sep_x,
                 row.y_range(),
-                egui::Stroke::new(1.0, self.theme.text_muted.gamma_multiply(0.4)),
+                egui::Stroke::new(1.0_f32, self.theme.text_muted.gamma_multiply(0.4)),
             );
         }
 
