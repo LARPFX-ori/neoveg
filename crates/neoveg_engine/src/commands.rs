@@ -3029,6 +3029,20 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::InsertNestedTimelineDialog, h),
     },
     CommandDef {
+        id: "insert.input_bus",
+        label: "Barramento de entrada",
+        menu_path: "Inserir/Barramento de entrada",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.input_buses.len() < crate::model::MAX_INPUT_BUSES,
+        run: |s, h| {
+            if s.add_input_bus().is_none() {
+                return Err(tr(s.lang, "limite de barramentos de entrada atingido").into());
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.assignable_fx",
         label: "FX atribuível",
         menu_path: "Inserir/FX atribuível",

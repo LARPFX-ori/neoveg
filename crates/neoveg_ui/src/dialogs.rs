@@ -3259,6 +3259,7 @@ impl App {
                 .find(|t| t.id == id)
                 .map(|t| &mut t.fx),
             FxTarget::AudioBus(id) => self.project.audio_bus_mut(id).map(|b| &mut b.fx),
+            FxTarget::InputBus(id) => self.project.input_bus_mut(id).map(|b| &mut b.fx),
             FxTarget::MasterAudio => Some(&mut self.project.master.fx),
             FxTarget::MasterVideo => Some(&mut self.project.master.video_fx),
         }
@@ -3328,6 +3329,22 @@ impl App {
                 };
                 (
                     tr_args(lang, "Efeitos do barramento — {name}", &[("name", &b.name)]),
+                    true,
+                    self.cursor,
+                    None,
+                )
+            }
+            FxTarget::InputBus(id) => {
+                let Some(b) = self.project.input_bus(id) else {
+                    self.dlg.fx_target = None;
+                    return;
+                };
+                (
+                    tr_args(
+                        lang,
+                        "Efeitos do barramento de entrada — {name}",
+                        &[("name", &b.name)],
+                    ),
                     true,
                     self.cursor,
                     None,
