@@ -198,6 +198,8 @@ impl App {
         let Some(mut incoming) = self.doc_tabs.get_mut(i).and_then(|t| t.stash.take()) else {
             return;
         };
+        // a busca de mídia ausente é do documento que está saindo
+        self.dlg.relink.close();
         self.leave_document();
         // opções da aplicação (barra de ferramentas) seguem de uma aba para outra
         let opts = self.session.opts.clone();
@@ -307,6 +309,9 @@ impl App {
         let i = self.doc_tabs.len() - 1;
         self.switch_doc_tab(i);
         self.reload_all_media();
+        // arquivos que sumiram: abre a pesquisa de mídia ausente, como ao
+        // abrir no lugar do projeto principal
+        crate::dlg_relink::open_if_missing(self);
         let name = file_label(Some(path)).unwrap_or_default();
         let msg = if nested {
             "Projeto aninhado aberto em aba: {name}"
