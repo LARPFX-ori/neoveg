@@ -386,6 +386,9 @@ pub struct App {
     pub(crate) confirm_close: bool,
     /// Ctrl+F4 no projeto principal com alterações: pergunta antes de fechar.
     pub(crate) confirm_close_project: bool,
+    /// A confirmação de alterações não salvas veio de *Novo projeto* (e não
+    /// do Ctrl+F4): muda só a mensagem da barra de status.
+    pub(crate) confirm_close_for_new: bool,
     pub(crate) allow_close: bool,
     /// Ocultar automaticamente a área de janelas: aberta agora, onde estava
     /// no último quadro e desde quando o ponteiro saiu dela.
@@ -642,6 +645,7 @@ impl App {
             edit_details: crate::edit_details::EditDetailsState::default(),
             confirm_close: false,
             confirm_close_project: false,
+            confirm_close_for_new: false,
             allow_close: false,
             dock_auto_open: false,
             dock_auto_rect: None,
@@ -1411,10 +1415,28 @@ impl App {
         if self.active_doc > 0 {
             self.request_close_doc_tab(self.active_doc);
         } else if self.session.dirty {
+            self.confirm_close_for_new = false;
             self.confirm_close_project = true;
         } else {
             self.new_project();
             self.set_status(tr(self.lang(), "Projeto fechado"));
+        }
+    }
+
+    /// *Arquivo → Novo projeto* (Ctrl+N): com alterações não salvas no projeto
+    /// principal, pergunta antes (Salvar, Descartar ou Cancelar), como o
+    /// VEGAS Pro. Antes, o projeto era trocado sem perguntar e as alterações
+    /// se perdiam.
+    pub(crate) fn request_new_project(&mut self) {
+        if self.main_session().dirty {
+            // o Salvar da confirmação grava o documento ativo: mostra o principal
+            if self.active_doc != 0 {
+                self.switch_doc_tab(0);
+            }
+            self.confirm_close_for_new = true;
+            self.confirm_close_project = true;
+        } else {
+            self.new_project();
         }
     }
 
@@ -1452,7 +1474,9 @@ impl App {
         if close {
             self.confirm_close_project = false;
             self.new_project();
-            self.set_status(tr(lang, "Projeto fechado"));
+            if !std::mem::take(&mut self.confirm_close_for_new) {
+                self.set_status(tr(lang, "Projeto fechado"));
+            }
         } else if !keep {
             self.confirm_close_project = false;
         }
@@ -3090,7 +3114,7 @@ impl App {
 
     fn dispatch_ui_action(&mut self, ctx: Option<&egui::Context>, action: UiAction) {
         match action {
-            UiAction::NewProject => self.new_project(),
+            UiAction::NewProject => self.request_new_project(),
             UiAction::OpenProjectDialog => self.open_project_dialog(),
             UiAction::SaveProject { save_as } => {
                 self.save_project(save_as);

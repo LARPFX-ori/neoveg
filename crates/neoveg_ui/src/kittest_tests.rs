@@ -1044,6 +1044,54 @@ fn kittest_navegador_de_geradores_de_midia() {
     assert!(radial, "inseriu o preset Gradiente radial");
 }
 
+/// *Novo projeto* (Ctrl+N) com alterações não salvas pergunta antes de
+/// trocar o projeto, como o VEGAS Pro. Antes, o projeto era descartado sem
+/// aviso. Cancelar mantém tudo; Descartar abre o projeto novo.
+#[test]
+fn kittest_novo_projeto_pergunta_antes_de_descartar_alteracoes() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut();
+        app.project.tracks.push(crate::model::Track::new(
+            crate::model::TrackKind::Audio,
+            "Trilha que não pode sumir",
+        ));
+        app.session.dirty = true;
+    }
+    let trilhas = harness.state().project.tracks.len();
+    harness.state_mut().exec_cmd(Some(&ctx), "file.new");
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().project.tracks.len(),
+        trilhas,
+        "o projeto não foi trocado antes da resposta"
+    );
+    harness.get_by_label("Alterações não salvas");
+
+    harness.get_by_label("Cancelar").click();
+    harness.run_steps(3);
+    assert!(harness.state().session.dirty);
+    assert_eq!(harness.state().project.tracks.len(), trilhas);
+
+    harness.state_mut().exec_cmd(Some(&ctx), "file.new");
+    harness.run_steps(3);
+    harness.get_by_label("Descartar").click();
+    harness.run_steps(3);
+    let app = harness.state();
+    assert!(!app.session.dirty);
+    assert!(
+        !app.project
+            .tracks
+            .iter()
+            .any(|t| t.name == "Trilha que não pode sumir"),
+        "Descartar abriu o projeto novo"
+    );
+}
+
 static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn lock_test_prefs() -> std::sync::MutexGuard<'static, ()> {
