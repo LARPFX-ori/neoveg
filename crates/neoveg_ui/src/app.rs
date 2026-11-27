@@ -370,6 +370,8 @@ pub struct App {
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
     pub(crate) meters_hold: HashMap<Id, [f32; 2]>,
+    /// Nível VU (RMS com balística de ~300 ms) por trilha e barramento.
+    pub(crate) vu_levels: HashMap<Id, [f32; 2]>,
     pub(crate) master_hold: [f32; 2],
     pub loudness_target: LoudnessTarget,
     pub loudness_live: LoudnessSnapshot,
@@ -624,6 +626,7 @@ impl App {
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
             meters_hold: HashMap::new(),
+            vu_levels: HashMap::new(),
             master_hold: [0.0; 2],
             loudness_target: LoudnessTarget::default(),
             loudness_live: LoudnessSnapshot::default(),
@@ -5482,6 +5485,13 @@ impl App {
         }
         for k in 0..2 {
             self.master_hold[k] = (self.master_hold[k] * decay).max(m.master[k]);
+        }
+        let a = crate::panels::vu_smoothing(dt);
+        for (id, v) in m.track_rms.into_iter().chain(m.bus_rms) {
+            let e = self.vu_levels.entry(id).or_insert([0.0; 2]);
+            for k in 0..2 {
+                e[k] += (v[k] - e[k]) * a;
+            }
         }
         self.loudness_live = self.audio.loudness_snapshot();
     }

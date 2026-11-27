@@ -88,6 +88,9 @@ pub struct MixerConsoleState {
     pub show_pan: bool,
     pub show_meters: bool,
     pub show_faders: bool,
+    /// Seção *VU* (medidor de nível médio), como os botões VU / Medidores /
+    /// Faders da lateral do console do VEGAS Pro.
+    pub show_vu: bool,
     pub strip_width: f32,
     /// Área do painel e o quadro (`cumulative_pass_nr`) em que foi
     /// desenhado na janela principal: com o mouse sobre ela, as teclas do
@@ -111,6 +114,7 @@ impl Default for MixerConsoleState {
             show_pan: true,
             show_meters: true,
             show_faders: true,
+            show_vu: false,
             strip_width: 112.0,
             kb_rect: None,
         }
@@ -3377,6 +3381,17 @@ impl App {
         }
     }
 
+    /// Linha do medidor VU de um canal do console (trilha ou barramento).
+    fn mixer_vu_row(&self, ui: &mut egui::Ui, id: Id, strip_w: f32) {
+        let lv = self.vu_levels.get(&id).copied().unwrap_or([0.0; 2]);
+        let (r, resp) =
+            ui.allocate_exact_size(vec2((strip_w - 8.0).max(40.0), VU_ROW_H), Sense::hover());
+        draw_vu_meter(ui.painter(), r, lv, &self.theme);
+        let vu_l = vu_from_rms(lv[0]);
+        let vu_r = vu_from_rms(lv[1]);
+        resp.on_hover_text(format!("VU  L {vu_l:+.1}  R {vu_r:+.1}  (0 VU = -18 dBFS)"));
+    }
+
     fn mixer_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         // teclas do Mixer (lista do VEGAS Pro 21, "Mixing Console") com o
@@ -3625,6 +3640,7 @@ impl App {
                             (&mut st.show_io, "I/O"),
                             (&mut st.show_automation, tr(lang, "Automação")),
                             (&mut st.show_pan, "Pan"),
+                            (&mut st.show_vu, "VU"),
                             (&mut st.show_meters, tr(lang, "Medidores")),
                             (&mut st.show_faders, tr(lang, "Faders")),
                         ] {
@@ -3670,6 +3686,7 @@ impl App {
             let show_pan = self.mixer_ui.show_pan;
             let show_meters = self.mixer_ui.show_meters;
             let show_faders = self.mixer_ui.show_faders;
+            let show_vu = self.mixer_ui.show_vu;
             let show_insert_fx = self.mixer_ui.show_insert_fx;
             let filter = self.mixer_ui.channel_filter;
             // o fader e o medidor ocupam a altura visível que sobra no painel
@@ -3682,6 +3699,7 @@ impl App {
                     sends: show_sends && !bus_choices.is_empty(),
                     automation: show_automation,
                     pan: show_pan,
+                    vu: show_vu,
                 },
             );
 
@@ -3900,6 +3918,9 @@ impl App {
                                             }
                                         }
 
+                                        if show_vu {
+                                            self.mixer_vu_row(ui, tid, strip_w);
+                                        }
                                         let mut vol = self.project.tracks[ti].volume_db;
                                         let mut vol_new: Option<f32> = None;
                                         if show_insert_fx {
@@ -4299,6 +4320,9 @@ impl App {
                                             if pk_resp.clicked() {
                                                 self.meters_hold.insert(bid, [0.0; 2]);
                                             }
+                                        }
+                                        if show_vu {
+                                            self.mixer_vu_row(ui, bid, strip_w);
                                         }
                                         let mut vol =
                                             self.session.project.audio_buses[bi].volume_db;
@@ -5153,6 +5177,7 @@ pub(crate) struct MixerSections {
     pub(crate) sends: bool,
     pub(crate) automation: bool,
     pub(crate) pan: bool,
+    pub(crate) vu: bool,
 }
 
 /// Altura do fader e do medidor de um canal: o que sobra da altura do
@@ -5172,6 +5197,9 @@ pub(crate) fn mixer_fader_height(avail_h: f32, s: MixerSections) -> f32 {
     if s.sends {
         used += 24.0;
     }
+    if s.vu {
+        used += VU_ROW_H + 4.0;
+    }
     if s.insert_fx {
         used += 18.0 * (MIXER_FX_ROWS as f32 + 1.0) + 6.0;
     }
@@ -5179,6 +5207,76 @@ pub(crate) fn mixer_fader_height(avail_h: f32, s: MixerSections) -> f32 {
         return 102.0;
     }
     (avail_h - used).clamp(102.0, 640.0)
+}
+
+/// Altura da linha do medidor VU num canal do console.
+const VU_ROW_H: f32 = 22.0;
+/// Referência do medidor VU: 0 VU = −18 dBFS.
+const VU_REF_DBFS: f32 = -18.0;
+/// Faixa do medidor VU, em VU.
+const VU_MIN: f32 = -20.0;
+const VU_MAX: f32 = 3.0;
+
+/// Coeficiente de suavização do medidor VU para um quadro de `dt`
+/// segundos: tempo de integração de ~300 ms, como num VU analógico.
+pub(crate) fn vu_smoothing(dt: f32) -> f32 {
+    if !dt.is_finite() || dt <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - (-dt / 0.3).exp()).clamp(0.0, 1.0)
+}
+
+/// Leitura VU de um nível RMS linear (0 VU = −18 dBFS), limitada à escala.
+pub(crate) fn vu_from_rms(rms: f32) -> f32 {
+    if !rms.is_finite() || rms <= 0.0 {
+        return VU_MIN;
+    }
+    (20.0 * rms.log10() - VU_REF_DBFS).clamp(VU_MIN, VU_MAX)
+}
+
+/// Posição (0..1) de uma leitura VU na régua do medidor.
+pub(crate) fn vu_norm(vu: f32) -> f32 {
+    ((vu - VU_MIN) / (VU_MAX - VU_MIN)).clamp(0.0, 1.0)
+}
+
+/// Medidor VU de um canal: duas barras finas (L e R) com a zona acima de 0
+/// VU em vermelho e traços em −20, −10, −7, −5, −3, 0 e +3 VU.
+pub(crate) fn draw_vu_meter(
+    p: &egui::Painter,
+    r: Rect,
+    rms: [f32; 2],
+    theme: &crate::theme::ThemeColors,
+) {
+    if !r.is_finite() || r.width() < 20.0 || r.height() < 8.0 {
+        return;
+    }
+    p.rect_filled(r, 2.0, theme.extreme_bg);
+    let bars = r.shrink2(vec2(2.0, 3.0));
+    let zero_x = bars.left() + vu_norm(0.0) * bars.width();
+    let bar_h = ((bars.height() - 6.0) / 2.0).max(2.0);
+    for (k, v) in rms.iter().enumerate() {
+        let y = bars.top() + k as f32 * (bar_h + 1.0);
+        let x = bars.left() + vu_norm(vu_from_rms(*v)) * bars.width();
+        let green = Rect::from_min_max(pos2(bars.left(), y), pos2(x.min(zero_x), y + bar_h));
+        p.rect_filled(green, 0.0, Color32::from_rgb(62, 194, 88));
+        if x > zero_x {
+            let red = Rect::from_min_max(pos2(zero_x, y), pos2(x, y + bar_h));
+            p.rect_filled(red, 0.0, Color32::from_rgb(236, 62, 54));
+        }
+    }
+    let tick_y = bars.top() + 2.0 * bar_h + 2.0;
+    for vu in [-20.0_f32, -10.0, -7.0, -5.0, -3.0, 0.0, 3.0] {
+        let x = bars.left() + vu_norm(vu) * bars.width();
+        let col = if vu > 0.0 {
+            Color32::from_rgb(236, 62, 54)
+        } else {
+            theme.text_muted
+        };
+        p.line_segment(
+            [pos2(x, tick_y), pos2(x, bars.bottom())],
+            Stroke::new(1.0_f32, col),
+        );
+    }
 }
 
 /// Escala em dB ao lado do medidor (de +6 a -60, mesma escala de
@@ -5482,6 +5580,34 @@ mod master_strip_tests {
         let row = Rect::from_min_size(pos2(5.0, 0.0), vec2(20.0, 100.0));
         let l = master_strip_layout(row, false, true);
         assert_eq!(l.fader.left(), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod vu_tests {
+    use super::{vu_from_rms, vu_norm, vu_smoothing};
+
+    /// 0 VU fica em −18 dBFS e a escala vai de −20 a +3 VU.
+    #[test]
+    fn leitura_vu() {
+        let ref_rms = 10f32.powf(-18.0 / 20.0);
+        assert!(vu_from_rms(ref_rms).abs() < 1e-3);
+        assert_eq!(vu_from_rms(0.0), -20.0);
+        assert_eq!(vu_from_rms(f32::NAN), -20.0);
+        assert_eq!(vu_from_rms(1.0), 3.0);
+        assert_eq!(vu_norm(-20.0), 0.0);
+        assert_eq!(vu_norm(3.0), 1.0);
+        assert!(vu_norm(0.0) > 0.8 && vu_norm(0.0) < 0.9);
+    }
+
+    #[test]
+    fn balistica_de_300_ms() {
+        assert_eq!(vu_smoothing(0.0), 0.0);
+        assert_eq!(vu_smoothing(f32::NAN), 0.0);
+        // em 300 ms o ponteiro anda ~63% do caminho
+        let a = vu_smoothing(0.3);
+        assert!((a - 0.632).abs() < 0.01);
+        assert!(vu_smoothing(10.0) <= 1.0);
     }
 }
 
