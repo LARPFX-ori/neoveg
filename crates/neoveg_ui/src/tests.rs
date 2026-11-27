@@ -2480,3 +2480,19 @@ fn adicionar_midia_av_coloca_video_e_audio_agrupados_mesmo_com_audio_no_cursor()
     assert!(v_ev.group.is_some() && v_ev.group == a_ev.group);
     assert_eq!(app.project.tracks[1].events.len(), 2);
 }
+
+/// Faders com alça retangular (VEGAS Pro) em todos os temas.
+#[test]
+fn faders_com_alca_retangular_em_todos_os_temas() {
+    let ctx = egui::Context::default();
+    for id in crate::theme::ThemeId::ALL {
+        crate::theme::apply_theme(&ctx, id);
+        assert!(
+            matches!(
+                ctx.style().visuals.handle_shape,
+                egui::style::HandleShape::Rect { .. }
+            ),
+            "{id:?}"
+        );
+    }
+}

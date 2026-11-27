@@ -375,6 +375,8 @@ Insira mídia sintética diretamente pela aba **Geradores de Mídia** ou pelo me
 
 ### 6.4 Pan/Crop e Máscara Bézier
 
+![Janela Pan/Crop do evento](screenshots/pan_crop.png)
+
 Abra clicando no ícone de **Pan/Crop** no evento ou em **Ferramentas → Pan/Crop do evento...**:
 - Ajuste enquadramento, posição X/Y, largura/altura, rotação e ponto de pivô diretamente sobre o quadro interativo.
 - A letra **"F"** desenhada no centro do quadro de recorte serve como guia visual de orientação e espelhamento.
@@ -382,6 +384,8 @@ Abra clicando no ícone de **Pan/Crop** no evento ou em **Ferramentas → Pan/Cr
 - **Máscara Bézier:** ative a faixa de máscara no rodapé da janela para criar recortes retangulares, elípticos ou poligonais com curvas Bézier animáveis, controle de pena (*feather*), inversão e opacidade.
 
 ### 6.5 Track Motion 2D/3D, Composição Pai/Filho e 3D Estereoscópico
+
+![Janela Movimento da trilha (Track Motion)](screenshots/track_motion.png)
 
 Clique no botão **Track Motion** no cabeçalho de uma trilha de vídeo:
 - **Modo 2D:** posicionamento, escala, rotação, pivô, **Sombra** e **Brilho** aplicados a toda a trilha.
@@ -598,6 +602,8 @@ Acesse **Ferramentas → Integrações (ArtCraft & Blender)...** ou o submenu **
 ---
 
 ## 14. Preferências e Personalização
+
+![Janela Preferências do Neoveg](screenshots/preferencias.png)
 
 Abra **Opções → Preferências...** para configurar o editor em **13 categorias**:
 

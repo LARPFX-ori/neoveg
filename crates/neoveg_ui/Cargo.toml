@@ -21,5 +21,12 @@ ab_glyph.workspace = true
 [dev-dependencies]
 egui_kittest = { version = "0.31", features = ["eframe"] }
 
+# A feature `wgpu` do `egui_kittest` 0.31 ativa `gpu-allocator` (`windows` 0.54)
+# em conflito com `wgpu-hal` 24 (`windows` 0.58) no Windows; fica restrita a
+# alvos Unix (Linux/macOS e contêiner `neoveg-test`), usados para gerar as
+# capturas offscreen em `readme_screenshots.rs`.
+[target.'cfg(unix)'.dev-dependencies]
+egui_kittest = { version = "0.31", features = ["eframe", "wgpu"] }
+
 [lints]
 workspace = true
