@@ -137,10 +137,11 @@ fn floating_key_ok(k: &str) -> bool {
         || k.starts_with("float_")
 }
 
-/// Painéis do grupo à esquerda da Prévia num layout novo. O Trimmer fica no
-/// grupo da Prévia de Vídeo; os outros painéis começam fechados e abrem pelo
-/// menu Exibir.
-pub const DEFAULT_DOCK_TABS: [DockTab; 5] = [
+/// Painéis do grupo à esquerda da Prévia num layout novo, na ordem das abas
+/// do VEGAS Pro (o Explorer vem primeiro). O Trimmer fica no grupo da Prévia
+/// de Vídeo; os outros painéis começam fechados e abrem pelo menu Exibir.
+pub const DEFAULT_DOCK_TABS: [DockTab; 6] = [
+    DockTab::Explorer,
     DockTab::ProjectMedia,
     DockTab::Transitions,
     DockTab::VideoFx,
@@ -163,7 +164,7 @@ pub fn default_closed_tabs() -> HashSet<DockTab> {
 }
 
 fn default_dock_height() -> f32 {
-    320.0
+    440.0
 }
 
 fn default_preview_ratio() -> f32 {
@@ -341,7 +342,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
         WindowLayout::default(),
         WindowLayout {
             name: "Edição com Trimmer".into(),
-            dock_height: 340.0,
+            dock_height: 460.0,
             preview_ratio: 0.34,
             dock_visible: true,
             active_tab: panel_key(DockTab::ProjectMedia).into(),
@@ -367,7 +368,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
         },
         WindowLayout {
             name: "Correção de Cor (Escopos)".into(),
-            dock_height: 380.0,
+            dock_height: 520.0,
             preview_ratio: 0.36,
             dock_visible: true,
             active_tab: panel_key(DockTab::Scopes).into(),
@@ -391,7 +392,7 @@ pub fn builtin_presets() -> Vec<WindowLayout> {
         },
         WindowLayout {
             name: "Mixagem de Áudio".into(),
-            dock_height: 360.0,
+            dock_height: 500.0,
             preview_ratio: 0.30,
             dock_visible: true,
             active_tab: panel_key(DockTab::Mixer).into(),
@@ -542,7 +543,7 @@ mod tests {
             floating_docks: Vec::new(),
         };
         bad.sanitize();
-        assert_eq!(bad.dock_height, 320.0);
+        assert_eq!(bad.dock_height, 440.0);
         assert_eq!(bad.preview_ratio, 0.72);
         assert_eq!(bad.active_panel(), DockTab::ProjectMedia);
         assert_eq!(bad.detached_tabs, vec!["mixer", "scopes"]);
