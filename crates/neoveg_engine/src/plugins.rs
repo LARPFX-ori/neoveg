@@ -79,9 +79,25 @@ fn ofx_arch_dir() -> &'static str {
     }
 }
 
+/// Pastas portáteis ao lado do executável (`<exe_dir>/plugins/ofx` e
+/// `<exe_dir>/plugins/vst3`).
+fn portable_search_dirs(exe_dir: &Path) -> [(ExternalKind, PathBuf); 2] {
+    let base = exe_dir.join("plugins");
+    [
+        (ExternalKind::Ofx, base.join("ofx")),
+        (ExternalKind::Vst3, base.join("vst3")),
+    ]
+}
+
 /// Pastas padrão de busca, por formato.
 pub fn default_search_dirs() -> Vec<(ExternalKind, PathBuf)> {
     let mut dirs = vec![];
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        dirs.extend(portable_search_dirs(&exe_dir));
+    }
     if cfg!(target_os = "windows") {
         if let Some(common) = std::env::var_os("CommonProgramFiles") {
             let common = PathBuf::from(common);
@@ -582,5 +598,62 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "Ruim");
         assert!(scan_dir(ExternalKind::Ofx, &d.join("nao-existe")).is_empty());
+    }
+
+    #[test]
+    fn default_search_dirs_includes_portable_ofx_and_vst3_next_to_exe() {
+        let exe_dir = std::env::current_exe()
+            .expect("caminho do executável")
+            .parent()
+            .expect("pasta do executável")
+            .to_path_buf();
+        let dirs = default_search_dirs();
+        assert!(
+            dirs.iter()
+                .any(|(k, p)| *k == ExternalKind::Ofx && p == &exe_dir.join("plugins").join("ofx")),
+            "esperava <exe_dir>/plugins/ofx em default_search_dirs: {dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(
+                |(k, p)| *k == ExternalKind::Vst3 && p == &exe_dir.join("plugins").join("vst3")
+            ),
+            "esperava <exe_dir>/plugins/vst3 em default_search_dirs: {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn portable_plugins_ofx_dir_is_discovered_and_scanned() {
+        let exe_dir = tmp_dir("portatil");
+        let portable = portable_search_dirs(&exe_dir);
+        let ofx_dir = portable
+            .iter()
+            .find(|(k, _)| *k == ExternalKind::Ofx)
+            .map(|(_, p)| p.clone())
+            .expect("pasta portátil OFX");
+        let vst3_dir = portable
+            .iter()
+            .find(|(k, _)| *k == ExternalKind::Vst3)
+            .map(|(_, p)| p.clone())
+            .expect("pasta portátil VST3");
+        assert_eq!(ofx_dir, exe_dir.join("plugins").join("ofx"));
+        assert_eq!(vst3_dir, exe_dir.join("plugins").join("vst3"));
+
+        // Pastas ausentes devolvem vazio sem erro.
+        assert!(scan_dir(ExternalKind::Ofx, &ofx_dir).is_empty());
+        assert!(scan_dir(ExternalKind::Vst3, &vst3_dir).is_empty());
+
+        let bundle_bin = ofx_dir
+            .join("BulldogLens.ofx.bundle")
+            .join("Contents")
+            .join(ofx_arch_dir());
+        std::fs::create_dir_all(&bundle_bin).expect("cria bundle OFX portátil");
+        std::fs::write(bundle_bin.join("BulldogLens.ofx"), b"MZ").expect("grava binário");
+
+        let found = scan_dir(ExternalKind::Ofx, &ofx_dir);
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, ExternalKind::Ofx);
+        assert_eq!(found[0].name, "BulldogLens");
+        assert!(found[0].binary.is_some());
     }
 }

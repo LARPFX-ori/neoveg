@@ -7,7 +7,8 @@
 //! código de terceiros e pode travar ou derrubar o processo.
 //!
 //! Escopo: contextos *General* (com `Source`, `Output` e clipes auxiliares
-//! conectados sob demanda), *Filter* e *Generator*, renderização por tiles
+//! conectados sob demanda), *Filter*, *Generator* e *Transition* (`SourceFrom`,
+//! `SourceTo`, `Output`), renderização por tiles
 //! (`OfxImageEffectPropSupportsTiles = 1`), profundidade float ou byte,
 //! parâmetros com keyframes (`getValueAtTime`, `getDerivative`, `getIntegral`,
 //! chaves) e execução *multithread* sequencial.
@@ -903,7 +904,7 @@ unsafe extern "C" fn ie_clip_get_image(
     }
     let data = match c.name.as_str() {
         "Output" => b.dst.as_mut_ptr(),
-        "Source" => {
+        "Source" | "SourceFrom" => {
             if b.src.is_empty() {
                 return STAT_FAILED;
             }
@@ -1822,6 +1823,7 @@ fn host_props() -> Box<PropSet> {
             "OfxImageEffectContextGeneral",
             "OfxImageEffectContextFilter",
             "OfxImageEffectContextGenerator",
+            "OfxImageEffectContextTransition",
         ],
     );
     p.set_str(
@@ -1910,7 +1912,36 @@ fn encode_ofx_plane(pixels: &[f32], w: usize, h: usize, float: bool) -> Vec<u8> 
     }
 }
 
-/// Plug-in OFX carregado, descrito e instanciado em *General*, *Filter* ou *Generator*.
+fn select_supported_context(contexts: &[String]) -> Result<&'static str, String> {
+    if contexts.iter().any(|c| c == "OfxImageEffectContextGeneral") {
+        Ok("OfxImageEffectContextGeneral")
+    } else if contexts.iter().any(|c| c == "OfxImageEffectContextFilter") {
+        Ok("OfxImageEffectContextFilter")
+    } else if contexts
+        .iter()
+        .any(|c| c == "OfxImageEffectContextGenerator")
+    {
+        Ok("OfxImageEffectContextGenerator")
+    } else if contexts
+        .iter()
+        .any(|c| c == "OfxImageEffectContextTransition")
+    {
+        Ok("OfxImageEffectContextTransition")
+    } else {
+        Err("plug-in não suporta os contextos General, Filter, Generator nem Transition".into())
+    }
+}
+
+fn has_required_context_clips(ctx: &str, clips: &[Box<Clip>]) -> bool {
+    let has = |name: &str| clips.iter().any(|c| c.name == name);
+    match ctx {
+        "OfxImageEffectContextGenerator" => has("Output"),
+        "OfxImageEffectContextTransition" => has("Output") && has("SourceFrom") && has("SourceTo"),
+        _ => has("Output") && has("Source"),
+    }
+}
+
+/// Plug-in OFX carregado, descrito e instanciado em *General*, *Filter*, *Generator* ou *Transition*.
 pub(crate) struct HostedEffect {
     plugin: *const OfxPluginRaw,
     _host: Box<OfxHostRaw>,
@@ -2025,18 +2056,7 @@ impl HostedEffect {
             return Err(format!("OfxActionDescribe falhou (status {st})"));
         }
         let contexts = me._desc.props.strs("OfxImageEffectPropSupportedContexts");
-        let ctx = if contexts.iter().any(|c| c == "OfxImageEffectContextGeneral") {
-            "OfxImageEffectContextGeneral"
-        } else if contexts.iter().any(|c| c == "OfxImageEffectContextFilter") {
-            "OfxImageEffectContextFilter"
-        } else if contexts
-            .iter()
-            .any(|c| c == "OfxImageEffectContextGenerator")
-        {
-            "OfxImageEffectContextGenerator"
-        } else {
-            return Err("plug-in não suporta os contextos General, Filter nem Generator".into());
-        };
+        let ctx = select_supported_context(&contexts)?;
         me.context = ctx.to_string();
         // Pela especificação OFX 1.4, `OfxImageEffectPropSupportsTiles` tem padrão 1.
         me.supports_tiles = me
@@ -2066,17 +2086,17 @@ impl HostedEffect {
         if !ok(st) {
             return Err(format!("DescribeInContext falhou (status {st})"));
         }
-        let is_gen = ctx == "OfxImageEffectContextGenerator";
-        if !me._desc.clips.iter().any(|c| c.name == "Output")
-            || (!is_gen && !me._desc.clips.iter().any(|c| c.name == "Source"))
-        {
+        let is_trans = ctx == "OfxImageEffectContextTransition";
+        if !has_required_context_clips(ctx, &me._desc.clips) {
             return Err("plug-in não define os clipes obrigatórios do contexto".into());
         }
         me.aux_clips = me
             ._desc
             .clips
             .iter()
-            .filter(|c| c.name != "Output" && c.name != "Source")
+            .filter(|c| {
+                c.name != "Output" && c.name != "Source" && !(is_trans && c.name == "SourceFrom")
+            })
             .map(|c| c.name.clone())
             .collect();
 
@@ -2093,7 +2113,10 @@ impl HostedEffect {
             "OfxBitDepthByte"
         };
         for c in &mut me.inst.clips {
-            let connected = if c.name == "Source" || c.name == "Output" {
+            let connected = if c.name == "Source"
+                || c.name == "Output"
+                || (is_trans && (c.name == "SourceFrom" || c.name == "SourceTo"))
+            {
                 1
             } else {
                 0
@@ -2194,7 +2217,8 @@ impl HostedEffect {
 
     pub(crate) fn is_generator(&self) -> bool {
         self.context == "OfxImageEffectContextGenerator"
-            || !self.inst.clips.iter().any(|c| c.name == "Source")
+            || (self.context != "OfxImageEffectContextTransition"
+                && !self.inst.clips.iter().any(|c| c.name == "Source"))
     }
 
     /// Renderiza um quadro RGBA premultiplicado (de cima para baixo) no lugar,
@@ -2287,8 +2311,9 @@ impl HostedEffect {
             .first()
             .filter(|(_, p)| p.len() == pixels.len())
             .map(|(_, p)| encode_ofx_plane(p, w as usize, h as usize, self.float));
+        let is_trans = self.context == "OfxImageEffectContextTransition";
         for c in &mut self.inst.clips {
-            if c.name == "Output" || c.name == "Source" {
+            if c.name == "Output" || c.name == "Source" || (is_trans && c.name == "SourceFrom") {
                 c.props.set_int("OfxImageClipPropConnected", &[1]);
                 continue;
             }
@@ -2630,6 +2655,65 @@ mod tests {
                 ie_clip_get_image(&mut *missing_clip, 0.0, std::ptr::null(), &mut img_out),
                 STAT_FAILED
             );
+        }
+    }
+
+    #[test]
+    fn ofx_transition_context_is_supported_and_maps_source_from_and_to() {
+        let host = host_props();
+        assert!(host
+            .strs("OfxImageEffectPropSupportedContexts")
+            .iter()
+            .any(|c| c == "OfxImageEffectContextTransition"));
+        assert_eq!(
+            select_supported_context(&["OfxImageEffectContextTransition".into()]),
+            Ok("OfxImageEffectContextTransition")
+        );
+        assert!(select_supported_context(&["OfxImageEffectContextUnknown".into()]).is_err());
+
+        let mut eff = Effect::new();
+        eff.bufs.w = 4;
+        eff.bufs.h = 4;
+        eff.bufs.float = true;
+        eff.bufs.src = vec![11u8; 4 * 4 * 16];
+        eff.bufs.dst = vec![0u8; 4 * 4 * 16];
+        eff.bufs
+            .aux_srcs
+            .insert("SourceTo".to_string(), vec![22u8; 4 * 4 * 16]);
+        let eff_ptr: *mut Effect = &mut *eff;
+        let mk = |name: &str| {
+            Box::new(Clip {
+                name: name.into(),
+                props: Box::default(),
+                images: vec![],
+                owner: eff_ptr,
+            })
+        };
+        let incomplete = vec![mk("Output"), mk("SourceFrom")];
+        assert!(!has_required_context_clips(
+            "OfxImageEffectContextTransition",
+            &incomplete
+        ));
+        let mut complete = vec![mk("Output"), mk("SourceFrom"), mk("SourceTo")];
+        assert!(has_required_context_clips(
+            "OfxImageEffectContextTransition",
+            &complete
+        ));
+
+        let mut img_from: *mut PropSet = std::ptr::null_mut();
+        let mut img_to: *mut PropSet = std::ptr::null_mut();
+        // SAFETY: clipes e efeito locais válidos.
+        unsafe {
+            assert_eq!(
+                ie_clip_get_image(&mut *complete[1], 0.0, std::ptr::null(), &mut img_from),
+                STAT_OK
+            );
+            assert_eq!(
+                ie_clip_get_image(&mut *complete[2], 0.0, std::ptr::null(), &mut img_to),
+                STAT_OK
+            );
+            assert!(!img_from.is_null());
+            assert!(!img_to.is_null());
         }
     }
 }
