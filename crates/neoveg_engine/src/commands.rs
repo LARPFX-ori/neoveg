@@ -3029,6 +3029,20 @@ pub static COMMANDS: &[CommandDef] = &[
         run: |_s, h| ui_action(UiAction::InsertNestedTimelineDialog, h),
     },
     CommandDef {
+        id: "insert.assignable_fx",
+        label: "FX atribuível",
+        menu_path: "Inserir/FX atribuível",
+        default_shortcut: None,
+        needs_ui: false,
+        enabled: |s, _| s.project.audio_buses.len() < crate::model::MAX_AUDIO_BUSES,
+        run: |s, h| {
+            if s.add_assignable_fx().is_none() {
+                return Err(tr(s.lang, "limite de 26 barramentos auxiliares atingido").into());
+            }
+            ok_mutated(s, h)
+        },
+    },
+    CommandDef {
         id: "insert.audio_bus",
         label: "Barramento de áudio",
         menu_path: "Inserir/Barramento de áudio",

@@ -4186,6 +4186,7 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.track_adjustment");
                 self.cmd_menu_btn(ui, "insert.track_folder");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
+                self.cmd_menu_btn(ui, "insert.assignable_fx");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.nested_timeline");
                 ui.separator();
@@ -4471,6 +4472,7 @@ impl App {
             "insert.track_folder" => (Icon::TrackFolder, None, None),
             "insert.nested_timeline" => (Icon::NestedTimeline, None, None),
             "insert.audio_bus" => (Icon::BusTrack, None, None),
+            "insert.assignable_fx" => (Icon::BusTrack, None, None),
             "file.advanced_save" => (Icon::LiveSave, None, None),
             "file.archive_project" => (Icon::ArchiveProject, None, None),
             "file.snapshot" => (Icon::CameraSnap, None, None),

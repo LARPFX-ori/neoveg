@@ -3204,5 +3204,8 @@
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marcador en cursor",
-  "＋ Áudio": "+ Audio"
+  "＋ Áudio": "+ Audio",
+  "FX atribuível": "FX asignable",
+  "Inserir FX atribuível": "Insertar FX asignable",
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Insertar un canal de FX asignable: los envíos de las pistas pasan por su cadena de efectos y salen al Master"
 }

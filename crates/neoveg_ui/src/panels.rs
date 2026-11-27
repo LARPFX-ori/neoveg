@@ -24,22 +24,36 @@ pub enum MixerChannelFilter {
     All,
     AudioTracks,
     AudioBuses,
+    /// Canais de FX atribuível.
+    AssignableFx,
     MasterOnly,
 }
 
 impl MixerChannelFilter {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::All,
         Self::AudioTracks,
         Self::AudioBuses,
+        Self::AssignableFx,
         Self::MasterOnly,
     ];
+
+    /// O barramento (comum ou de FX atribuível) aparece com este filtro.
+    pub fn shows_bus(self, assignable_fx: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::AudioBuses => !assignable_fx,
+            Self::AssignableFx => assignable_fx,
+            Self::AudioTracks | Self::MasterOnly => false,
+        }
+    }
 
     pub fn label_in(self, lang: Language) -> &'static str {
         let key = match self {
             Self::All => "Todas",
             Self::AudioTracks => "Trilhas",
             Self::AudioBuses => "Barramentos",
+            Self::AssignableFx => "FX atribuível",
             Self::MasterOnly => "Master",
         };
         tr(lang, key)
@@ -3454,6 +3468,24 @@ impl App {
                 let ctx = ui.ctx().clone();
                 self.exec_cmd(Some(&ctx), "insert.audio_bus");
             }
+            if ui
+                .add_enabled(can_add, egui::Button::new(tr(lang, "Inserir FX atribuível")))
+                .on_hover_text(tr(
+                    lang,
+                    "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master",
+                ))
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                let before = self.project.audio_buses.len();
+                self.exec_cmd(Some(&ctx), "insert.assignable_fx");
+                // como no VEGAS Pro, o canal novo já abre a cadeia de efeitos
+                if self.project.audio_buses.len() > before {
+                    if let Some(id) = self.project.audio_buses.last().map(|b| b.id) {
+                        self.open_fx_target(FxTarget::AudioBus(id));
+                    }
+                }
+            }
             let n_s = self.project.audio_buses.len().to_string();
             let max_s = crate::model::MAX_AUDIO_BUSES.to_string();
             ui.label(
@@ -3663,7 +3695,9 @@ impl App {
                         );
                         let show_buses = matches!(
                             filter,
-                            MixerChannelFilter::All | MixerChannelFilter::AudioBuses
+                            MixerChannelFilter::All
+                                | MixerChannelFilter::AudioBuses
+                                | MixerChannelFilter::AssignableFx
                         );
                         let show_master = !self.mixer_ui.hide_master
                             && matches!(
@@ -4063,7 +4097,10 @@ impl App {
                             let nb = self.project.audio_buses.len();
                             for bi in 0..nb {
                                 let bid = self.project.audio_buses[bi].id;
-                                if self.mixer_ui.hidden_buses.contains(&bid) {
+                                let is_fx_channel = self.project.audio_buses[bi].assignable_fx;
+                                if self.mixer_ui.hidden_buses.contains(&bid)
+                                    || !filter.shows_bus(is_fx_channel)
+                                {
                                     continue;
                                 }
                                 let lv = self.meters_hold.get(&bid).cloned().unwrap_or([0.0; 2]);
@@ -4102,6 +4139,15 @@ impl App {
                                                 .unwrap_or_else(|| cur_name.clone())
                                         });
                                         ui.horizontal(|ui| {
+                                            if is_fx_channel {
+                                                ui.label(
+                                                    egui::RichText::new("FX")
+                                                        .small()
+                                                        .strong()
+                                                        .color(self.theme.accent),
+                                                )
+                                                .on_hover_text(tr(lang, "FX atribuível"));
+                                            }
                                             let nr = ui.add(
                                                 egui::TextEdit::singleline(&mut draft)
                                                     .desired_width((strip_w - 34.0).max(52.0))
@@ -5436,6 +5482,19 @@ mod master_strip_tests {
         let row = Rect::from_min_size(pos2(5.0, 0.0), vec2(20.0, 100.0));
         let l = master_strip_layout(row, false, true);
         assert_eq!(l.fader.left(), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod mixer_filter_tests {
+    use super::MixerChannelFilter as F;
+
+    #[test]
+    fn filtro_separa_barramentos_e_fx_atribuivel() {
+        assert!(F::All.shows_bus(false) && F::All.shows_bus(true));
+        assert!(F::AudioBuses.shows_bus(false) && !F::AudioBuses.shows_bus(true));
+        assert!(F::AssignableFx.shows_bus(true) && !F::AssignableFx.shows_bus(false));
+        assert!(!F::AudioTracks.shows_bus(false) && !F::MasterOnly.shows_bus(true));
     }
 }
 

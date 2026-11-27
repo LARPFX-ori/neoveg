@@ -3204,5 +3204,8 @@
   "★ Favoritos": "★ お気に入り",
   "＋ Barramento": "+ バス",
   "＋ Marcador no Cursor": "+ カーソル位置にマーカー",
-  "＋ Áudio": "＋ オーディオ"
+  "＋ Áudio": "＋ オーディオ",
+  "FX atribuível": "割り当て可能な FX",
+  "Inserir FX atribuível": "割り当て可能な FX を挿入",
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "割り当て可能な FX チャンネルを挿入: トラックのセンドはエフェクトチェーンを通ってマスターへ出力されます"
 }

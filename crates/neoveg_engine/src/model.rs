@@ -1516,6 +1516,31 @@ impl Project {
         format!("Bus {}", self.audio_buses.len() + 1)
     }
 
+    /// Próximo nome livre de canal de FX atribuível: "FX 1", "FX 2"...
+    pub fn next_assignable_fx_name(&self) -> String {
+        for n in 1..=MAX_AUDIO_BUSES {
+            let candidate = format!("FX {n}");
+            if !self.audio_buses.iter().any(|b| b.name == candidate) {
+                return candidate;
+            }
+        }
+        format!("FX {}", self.audio_buses.len() + 1)
+    }
+
+    /// Cria um canal de FX atribuível (*Assignable FX*): um barramento que
+    /// recebe os envios das trilhas, passa pela cadeia de efeitos dele e sai
+    /// no Master. Conta no mesmo limite dos barramentos.
+    pub fn add_assignable_fx(&mut self) -> Option<Id> {
+        if self.audio_buses.len() >= MAX_AUDIO_BUSES {
+            return None;
+        }
+        let mut bus = AudioBus::new(&self.next_assignable_fx_name());
+        bus.assignable_fx = true;
+        let id = bus.id;
+        self.audio_buses.push(bus);
+        Some(id)
+    }
+
     pub fn add_audio_bus(&mut self, name: Option<&str>) -> Option<Id> {
         if self.audio_buses.len() >= MAX_AUDIO_BUSES {
             return None;
@@ -4001,6 +4026,10 @@ pub struct AudioBus {
     /// Inverte a polaridade (fase 180°) do sinal do barramento (Console de Mixagem, p. 63).
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert_phase: bool,
+    /// Canal de FX atribuível (*Assignable FX*) em vez de barramento comum:
+    /// muda o nome, o rótulo no console e o filtro; o roteamento é o mesmo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assignable_fx: bool,
 }
 
 impl AudioBus {
@@ -4021,6 +4050,7 @@ impl AudioBus {
             envelopes: vec![],
             automation_mode: AutomationMode::Read,
             invert_phase: false,
+            assignable_fx: false,
         }
     }
 

@@ -3204,5 +3204,8 @@
   "★ Favoritos": "★ Favoritos",
   "＋ Barramento": "＋ Barramento",
   "＋ Marcador no Cursor": "＋ Marcador no Cursor",
-  "＋ Áudio": "＋ Áudio"
+  "＋ Áudio": "＋ Áudio",
+  "FX atribuível": "FX atribuível",
+  "Inserir FX atribuível": "Inserir FX atribuível",
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master"
 }
