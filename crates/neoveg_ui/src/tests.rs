@@ -2483,3 +2483,33 @@ fn adicionar_midia_av_coloca_video_e_audio_agrupados_mesmo_com_audio_no_cursor()
     assert!(v_ev.group.is_some() && v_ev.group == a_ev.group);
     assert_eq!(app.project.tracks[1].events.len(), 2);
 }
+
+/// Console de Mixagem: o fader cresce com a altura do painel (antes ficava
+/// em 102 px fixos) e encolhe quando as seções ocupam mais espaço.
+#[test]
+fn mixer_fader_acompanha_a_altura_do_painel() {
+    use crate::panels::{mixer_fader_height, MixerSections};
+    let none = MixerSections::default();
+    let all = MixerSections {
+        io: true,
+        insert_fx: true,
+        sends: true,
+        automation: true,
+        pan: true,
+    };
+    assert_eq!(mixer_fader_height(200.0, all), 102.0, "mínimo");
+    assert!(mixer_fader_height(700.0, none) > 500.0);
+    assert!(mixer_fader_height(700.0, all) < mixer_fader_height(700.0, none));
+    assert_eq!(mixer_fader_height(5000.0, none), 640.0, "máximo");
+    assert_eq!(mixer_fader_height(f32::NAN, all), 102.0);
+    // a escala não trava em retângulos ruins
+    let ctx = egui::Context::default();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    for r in [
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(20.0, 300.0)),
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(20.0, 5.0)),
+        egui::Rect::NOTHING,
+    ] {
+        crate::panels::draw_db_scale(&painter, r, egui::Color32::GRAY);
+    }
+}

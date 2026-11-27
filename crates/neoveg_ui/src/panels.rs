@@ -67,6 +67,8 @@ pub struct MixerConsoleState {
     pub hidden_buses: HashSet<Id>,
     pub hide_master: bool,
     pub show_io: bool,
+    /// Seção *Inserir FX* (cadeia de efeitos do canal), como no VEGAS Pro.
+    pub show_insert_fx: bool,
     pub show_sends: bool,
     pub show_automation: bool,
     pub show_pan: bool,
@@ -89,6 +91,7 @@ impl Default for MixerConsoleState {
             hidden_buses: HashSet::new(),
             hide_master: false,
             show_io: true,
+            show_insert_fx: true,
             show_sends: true,
             show_automation: true,
             show_pan: true,
@@ -3120,6 +3123,64 @@ impl App {
     // Mixer
     // -----------------------------------------------------------------
 
+    /// Seção *Inserir FX* de um canal do Console de Mixagem: os efeitos da
+    /// cadeia (clique abre a cadeia) e o botão para adicionar.
+    fn mixer_insert_fx(&mut self, ui: &mut egui::Ui, target: FxTarget, strip_w: f32) {
+        let lang = self.lang();
+        let names: Vec<(String, bool)> = self
+            .fx_chain_mut(target)
+            .map(|c| {
+                c.iter()
+                    .map(|f| {
+                        let name = match f.kind {
+                            FxKind::Ofx | FxKind::Vst3 => f.display_name(),
+                            k => k.name_in(lang).to_string(),
+                        };
+                        (name, f.enabled)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let w = (strip_w - 10.0).max(60.0);
+        let mut open = false;
+        for (name, enabled) in names.iter().take(MIXER_FX_ROWS) {
+            let text = egui::RichText::new(name).small();
+            let text = if *enabled {
+                text
+            } else {
+                text.weak().strikethrough()
+            };
+            if ui
+                .add_sized([w, 16.0], egui::Button::new(text).truncate())
+                .on_hover_text(name)
+                .clicked()
+            {
+                open = true;
+            }
+        }
+        if names.len() > MIXER_FX_ROWS {
+            let more = (names.len() - MIXER_FX_ROWS).to_string();
+            ui.label(
+                egui::RichText::new(tr_args(lang, "+{n} efeitos", &[("n", &more)]))
+                    .small()
+                    .weak(),
+            );
+        }
+        if ui
+            .add_sized(
+                [w, 16.0],
+                egui::Button::new(egui::RichText::new("+ FX").small()),
+            )
+            .on_hover_text(tr(lang, "Inserir efeito no canal"))
+            .clicked()
+        {
+            open = true;
+        }
+        if open {
+            self.open_fx_target(target);
+        }
+    }
+
     fn mixer_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         // teclas do Mixer (lista do VEGAS Pro 21, "Mixing Console") com o
@@ -3195,7 +3256,7 @@ impl App {
                 self.mixer_ui.sidebar_open = !self.mixer_ui.sidebar_open;
             }
             if ui
-                .button(tr(lang, "＋ Áudio"))
+                .button(tr(lang, "Inserir trilha de áudio"))
                 .on_hover_text(tr(lang, "Inserir trilha de áudio"))
                 .clicked()
             {
@@ -3204,7 +3265,7 @@ impl App {
             }
             let can_add = self.project.audio_buses.len() < crate::model::MAX_AUDIO_BUSES;
             if ui
-                .add_enabled(can_add, egui::Button::new(tr(lang, "＋ Barramento")))
+                .add_enabled(can_add, egui::Button::new(tr(lang, "Inserir barramento")))
                 .on_hover_text(tr(lang, "Inserir barramento auxiliar de áudio (até 26)"))
                 .clicked()
             {
@@ -3267,20 +3328,22 @@ impl App {
                             .small()
                             .strong(),
                     );
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for f in MixerChannelFilter::ALL {
-                            if ui
-                                .selectable_label(
+                    // filtros empilhados, como na lateral do VEGAS Pro
+                    for f in MixerChannelFilter::ALL {
+                        if ui
+                            .add_sized(
+                                [160.0, 18.0],
+                                egui::SelectableLabel::new(
                                     self.mixer_ui.channel_filter == f,
                                     egui::RichText::new(f.label_in(lang)).small(),
-                                )
-                                .clicked()
-                            {
-                                self.mixer_ui.channel_filter = f;
-                            }
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.mixer_ui.channel_filter = f;
                         }
-                    });
+                    }
+                    ui.add_space(4.0);
                     egui::ScrollArea::vertical()
                         .id_salt("mixer_sidebar_list")
                         .max_height(110.0)
@@ -3340,15 +3403,31 @@ impl App {
                     }
                     ui.separator();
                     ui.label(egui::RichText::new(tr(lang, "Seções")).small().strong());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        ui.toggle_value(&mut self.mixer_ui.show_io, "I/O");
-                        ui.toggle_value(&mut self.mixer_ui.show_sends, tr(lang, "Envios"));
-                        ui.toggle_value(&mut self.mixer_ui.show_automation, tr(lang, "Automação"));
-                        ui.toggle_value(&mut self.mixer_ui.show_pan, "Pan");
-                        ui.toggle_value(&mut self.mixer_ui.show_meters, tr(lang, "Medidores"));
-                        ui.toggle_value(&mut self.mixer_ui.show_faders, tr(lang, "Faders"));
-                    });
+                    {
+                        let st = &mut self.mixer_ui;
+                        for (v, label) in [
+                            (&mut st.show_insert_fx, tr(lang, "Inserir FX")),
+                            (&mut st.show_sends, tr(lang, "Envios")),
+                            (&mut st.show_io, "I/O"),
+                            (&mut st.show_automation, tr(lang, "Automação")),
+                            (&mut st.show_pan, "Pan"),
+                            (&mut st.show_meters, tr(lang, "Medidores")),
+                            (&mut st.show_faders, tr(lang, "Faders")),
+                        ] {
+                            if ui
+                                .add_sized(
+                                    [160.0, 18.0],
+                                    egui::SelectableLabel::new(
+                                        *v,
+                                        egui::RichText::new(label).small(),
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                *v = !*v;
+                            }
+                        }
+                    }
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(tr(lang, "Largura:")).small().weak());
@@ -3377,7 +3456,19 @@ impl App {
             let show_pan = self.mixer_ui.show_pan;
             let show_meters = self.mixer_ui.show_meters;
             let show_faders = self.mixer_ui.show_faders;
+            let show_insert_fx = self.mixer_ui.show_insert_fx;
             let filter = self.mixer_ui.channel_filter;
+            // o fader e o medidor ocupam a altura que sobra no painel
+            let fader_h = mixer_fader_height(
+                ui.available_height(),
+                MixerSections {
+                    io: show_io && !bus_choices.is_empty(),
+                    insert_fx: show_insert_fx,
+                    sends: show_sends && !bus_choices.is_empty(),
+                    automation: show_automation,
+                    pan: show_pan,
+                },
+            );
 
             egui::ScrollArea::horizontal()
                 .id_salt("mixer_channels_scroll")
@@ -3594,11 +3685,14 @@ impl App {
 
                                         let mut vol = self.project.tracks[ti].volume_db;
                                         let mut vol_new: Option<f32> = None;
+                                        if show_insert_fx {
+                                            self.mixer_insert_fx(ui, FxTarget::Track(tid), strip_w);
+                                        }
                                         if show_faders || show_meters {
                                             ui.horizontal(|ui| {
                                                 if show_faders {
                                                     let r = ui.add_sized(
-                                                        [22.0, 102.0],
+                                                        [22.0, fader_h],
                                                         egui::Slider::new(&mut vol, -60.0..=12.0)
                                                             .vertical()
                                                             .show_value(false),
@@ -3616,10 +3710,19 @@ impl App {
                                                 }
                                                 if show_meters {
                                                     let (mr, _) = ui.allocate_exact_size(
-                                                        vec2(14.0, 102.0),
+                                                        vec2(14.0, fader_h),
                                                         Sense::hover(),
                                                     );
                                                     draw_meter(ui.painter(), mr, lv);
+                                                    let (sr, _) = ui.allocate_exact_size(
+                                                        vec2(20.0, fader_h),
+                                                        Sense::hover(),
+                                                    );
+                                                    draw_db_scale(
+                                                        ui.painter(),
+                                                        sr,
+                                                        self.theme.text_muted,
+                                                    );
                                                 }
                                             });
                                         }
@@ -3961,11 +4064,18 @@ impl App {
                                         }
                                         let mut vol =
                                             self.session.project.audio_buses[bi].volume_db;
+                                        if show_insert_fx {
+                                            self.mixer_insert_fx(
+                                                ui,
+                                                FxTarget::AudioBus(bid),
+                                                strip_w,
+                                            );
+                                        }
                                         if show_faders || show_meters {
                                             ui.horizontal(|ui| {
                                                 if show_faders {
                                                     let r = ui.add_sized(
-                                                        [22.0, 102.0],
+                                                        [22.0, fader_h],
                                                         egui::Slider::new(&mut vol, -60.0..=12.0)
                                                             .vertical()
                                                             .show_value(false),
@@ -3986,10 +4096,19 @@ impl App {
                                                 }
                                                 if show_meters {
                                                     let (mr, _) = ui.allocate_exact_size(
-                                                        vec2(14.0, 102.0),
+                                                        vec2(14.0, fader_h),
                                                         Sense::hover(),
                                                     );
                                                     draw_meter(ui.painter(), mr, lv);
+                                                    let (sr, _) = ui.allocate_exact_size(
+                                                        vec2(20.0, fader_h),
+                                                        Sense::hover(),
+                                                    );
+                                                    draw_db_scale(
+                                                        ui.painter(),
+                                                        sr,
+                                                        self.theme.text_muted,
+                                                    );
                                                 }
                                             });
                                         }
@@ -4766,6 +4885,77 @@ impl App {
         if changed {
             self.last_req = crate::app::PreviewReqKey::default();
         }
+    }
+}
+
+/// Linhas de efeito mostradas por canal na seção *Inserir FX*.
+const MIXER_FX_ROWS: usize = 4;
+
+/// Seções visíveis de um canal do Console de Mixagem (para calcular a altura
+/// que sobra para o fader).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MixerSections {
+    pub(crate) io: bool,
+    pub(crate) insert_fx: bool,
+    pub(crate) sends: bool,
+    pub(crate) automation: bool,
+    pub(crate) pan: bool,
+}
+
+/// Altura do fader e do medidor de um canal: o que sobra da altura do
+/// painel depois das seções visíveis, entre 102 e 640 px.
+pub(crate) fn mixer_fader_height(avail_h: f32, s: MixerSections) -> f32 {
+    // cabeçalho, botões M/S/FX, pico, valor do fader e margens
+    let mut used = 18.0 + 24.0 + 18.0 + 18.0 + 40.0;
+    if s.io {
+        used += 24.0;
+    }
+    if s.automation {
+        used += 24.0;
+    }
+    if s.pan {
+        used += 38.0;
+    }
+    if s.sends {
+        used += 24.0;
+    }
+    if s.insert_fx {
+        used += 18.0 * (MIXER_FX_ROWS as f32 + 1.0) + 6.0;
+    }
+    if !avail_h.is_finite() {
+        return 102.0;
+    }
+    (avail_h - used).clamp(102.0, 640.0)
+}
+
+/// Escala em dB ao lado do medidor (de +6 a -60, mesma escala de
+/// `draw_meter_channel`): traços a cada 3 dB e números a cada 6 dB.
+pub(crate) fn draw_db_scale(painter: &egui::Painter, r: Rect, color: Color32) {
+    if !r.is_finite() || r.height() < 20.0 {
+        return;
+    }
+    let y_of = |db: f32| r.bottom() - ((db + 60.0) / 66.0).clamp(0.0, 1.0) * r.height();
+    let mut db = 6.0_f32;
+    let mut last_label_y = f32::NEG_INFINITY;
+    while db >= -60.0 {
+        let y = y_of(db);
+        let major = (db as i32) % 6 == 0;
+        let len = if major { 4.0 } else { 2.0 };
+        painter.line_segment(
+            [pos2(r.left(), y), pos2(r.left() + len, y)],
+            Stroke::new(1.0, color.gamma_multiply(0.7)),
+        );
+        if major && (y - last_label_y).abs() >= 9.0 {
+            painter.text(
+                pos2(r.right(), y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{}", -(db as i32)),
+                egui::FontId::monospace(7.5),
+                color,
+            );
+            last_label_y = y;
+        }
+        db -= 3.0;
     }
 }
 
