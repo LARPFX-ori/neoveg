@@ -599,6 +599,48 @@ impl App {
                                                 egui::StrokeKind::Outside,
                                             );
                                         }
+                                        // ao passar o mouse, + (inserir no cursor) e
+                                        // ★ (favorito) sobre a miniatura, como no VEGAS Pro
+                                        if ui.rect_contains_pointer(r) {
+                                            let kind_fav = GenKind::of(spec);
+                                            let fav = self
+                                                .prefs
+                                                .gen_favorites
+                                                .contains(&kind_fav.fav_id());
+                                            let bsz = egui::vec2(18.0, 18.0);
+                                            let plus_r = egui::Rect::from_min_size(
+                                                r.right_top() + egui::vec2(-bsz.x - 2.0, 2.0),
+                                                bsz,
+                                            );
+                                            let star_r =
+                                                plus_r.translate(egui::vec2(-bsz.x - 2.0, 0.0));
+                                            if ui
+                                                .put(plus_r, egui::Button::new("+").small())
+                                                .on_hover_text(tr(lang, "Inserir no cursor"))
+                                                .clicked()
+                                            {
+                                                insert = Some(spec.clone());
+                                            }
+                                            if ui
+                                                .put(
+                                                    star_r,
+                                                    egui::Button::new(if fav {
+                                                        "★"
+                                                    } else {
+                                                        "☆"
+                                                    })
+                                                    .small(),
+                                                )
+                                                .on_hover_text(if fav {
+                                                    tr(lang, "Tirar dos favoritos")
+                                                } else {
+                                                    tr(lang, "Marcar como favorito")
+                                                })
+                                                .clicked()
+                                            {
+                                                toggle_fav = Some(kind_fav);
+                                            }
+                                        }
                                         ui.selectable_label(
                                             chosen,
                                             egui::RichText::new(tr(lang, name)).small(),
@@ -750,6 +792,26 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Miniaturas dos presets não saem pretas: todo preset (menos texto,
+    /// que depende das fontes do sistema, e o preto de propósito) tem pixels
+    /// claros e opacos.
+    #[test]
+    fn miniaturas_dos_presets_nao_saem_pretas() {
+        let fonts = generate::Fonts::default();
+        for (name, spec) in gen_presets() {
+            if matches!(spec, GenSpec::Text(_) | GenSpec::Ofx(_)) || name.contains("preto") {
+                continue;
+            }
+            let img = render_thumb(&spec, &fonts);
+            assert_eq!(img.size, [THUMB_W, THUMB_H], "{name}");
+            let visible = img
+                .pixels
+                .iter()
+                .any(|p| p.a() > 200 && (p.r() as u32 + p.g() as u32 + p.b() as u32) > 60);
+            assert!(visible, "miniatura preta: {name}");
+        }
+    }
 
     #[test]
     fn todo_preset_de_gerador_tem_tipo_e_miniatura_do_tamanho_certo() {
