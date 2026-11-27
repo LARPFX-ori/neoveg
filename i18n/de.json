@@ -3204,5 +3204,8 @@
   "★ Favoritos": "★ Favoriten",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker am Cursor",
-  "＋ Áudio": "+ Audio"
+  "＋ Áudio": "+ Audio",
+  "FX atribuível": "Zuweisbarer FX",
+  "Inserir FX atribuível": "Zuweisbaren FX einfügen",
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Zuweisbaren FX-Kanal einfügen: Spur-Sends laufen durch seine Effektkette und gehen zum Master"
 }

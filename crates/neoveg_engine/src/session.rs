@@ -1133,6 +1133,17 @@ impl EditorSession {
         idx
     }
 
+    /// Insere um canal de FX atribuível (com Desfazer).
+    pub fn add_assignable_fx(&mut self) -> Option<Id> {
+        if self.project.audio_buses.len() >= MAX_AUDIO_BUSES {
+            return None;
+        }
+        self.checkpoint();
+        let id = self.project.add_assignable_fx()?;
+        self.changed();
+        Some(id)
+    }
+
     pub fn add_audio_bus(&mut self) -> Option<Id> {
         if self.project.audio_buses.len() >= MAX_AUDIO_BUSES {
             return None;
@@ -7103,6 +7114,53 @@ impl EditorSession {
         self.changed();
         self.post_ripple_applied = Some(self.edit_count);
         moved
+    }
+}
+
+#[cfg(test)]
+mod assignable_fx_tests {
+    use super::*;
+
+    /// Não havia canal de FX atribuível: os envios só iam para barramentos.
+    #[test]
+    fn insere_canais_de_fx_atribuivel_com_nomes_proprios() {
+        let mut s = EditorSession::new(Project::new_default());
+        let a = s.add_assignable_fx().expect("FX 1");
+        let b = s.add_assignable_fx().expect("FX 2");
+        let bus = s.add_audio_bus().expect("barramento comum");
+        let fx1 = s.project.audio_bus(a).expect("canal");
+        assert!(fx1.assignable_fx);
+        assert_eq!(fx1.name, "FX 1");
+        assert_eq!(
+            s.project.audio_bus(b).map(|x| x.name.as_str()),
+            Some("FX 2")
+        );
+        assert!(!s.project.audio_bus(bus).is_some_and(|x| x.assignable_fx));
+        // Desfazer remove o último inserido
+        s.undo();
+        assert!(s.project.audio_bus(bus).is_none());
+    }
+
+    #[test]
+    fn respeita_o_limite_de_barramentos() {
+        let mut s = EditorSession::new(Project::new_default());
+        while s.project.audio_buses.len() < MAX_AUDIO_BUSES {
+            let _ = s.add_audio_bus();
+        }
+        assert!(s.add_assignable_fx().is_none());
+    }
+
+    /// Projetos antigos não têm o campo: o barramento continua comum.
+    #[test]
+    fn projeto_antigo_carrega_barramento_comum() {
+        let bus = AudioBus::new("Bus A");
+        let mut v = serde_json::to_value(&bus).expect("json");
+        assert!(v.get("assignable_fx").is_none(), "falso não é gravado");
+        if let Some(o) = v.as_object_mut() {
+            o.remove("assignable_fx");
+        }
+        let back: AudioBus = serde_json::from_value(v).expect("lê");
+        assert!(!back.assignable_fx);
     }
 }
 
