@@ -2785,10 +2785,15 @@ fn kittest_arrastar_midia_do_projeto_para_o_trimmer() {
         })
         .map(|b| egui::pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32))
         .expect("cartão da mídia na Mídia do Projeto");
+    // a aba fica no rodapé do grupo da Prévia, dentro do dock (cuja altura
+    // segue o layout): procura acima do fim do tile da Prévia
+    let pv_bottom = find_pane_tile(&harness.state().dock_tree, DockPane::Preview)
+        .and_then(|id| harness.state().dock_tree.tiles.rect(id))
+        .map_or(380.0, |r| r.bottom());
     let to = harness
         .query_all_by_label("Trimmer")
         .filter_map(|n| n.raw_bounds())
-        .find(|b| (b.y0 as f32) < 380.0)
+        .find(|b| (b.y0 as f32) < pv_bottom)
         .map(|b| egui::pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32))
         .expect("aba Trimmer no dock");
 
@@ -3268,6 +3273,54 @@ fn kittest_paridade_color_grading_e_trimmer_historico() {
             .is_some(),
         "histórico do Trimmer deve exibir nome e diretório entre colchetes"
     );
+}
+
+/// A altura do dock segue `dock_height` mesmo depois do primeiro quadro: o
+/// egui grava a altura do painel e antes ignorava a do Neoveg (ficava presa
+/// num valor pequeno salvo uma vez e trocar de layout não mudava o dock).
+#[test]
+fn kittest_altura_do_dock_segue_o_layout() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(3);
+    let pv_h = |h: &Harness<'_, App>| {
+        find_pane_tile(&h.state().dock_tree, DockPane::Preview)
+            .and_then(|id| h.state().dock_tree.tiles.rect(id))
+            .map(|r| r.height())
+            .unwrap_or(0.0)
+    };
+    let h1 = pv_h(&harness);
+    // padrão perto de metade da tela, como no VEGAS Pro
+    assert!(h1 > 1000.0 * 0.35, "dock padrão baixo demais: {h1}");
+    harness.state_mut().dock_height = 220.0;
+    harness.run_steps(3);
+    let h2 = pv_h(&harness);
+    assert!(
+        h2 < h1 - 100.0,
+        "o dock não acompanhou dock_height: {h1} -> {h2}"
+    );
+}
+
+#[test]
+fn escopos_cabem_inteiros_na_altura_do_dock() {
+    use crate::panels::fit_scope_image;
+    // dock baixo: os quadros encolhem em vez de cortar
+    for (w, h) in [(400.0_f32, 60.0_f32), (300.0, 120.0), (500.0, 400.0)] {
+        for (tex, sq) in [
+            (egui::vec2(256.0, 256.0), true),
+            (egui::vec2(512.0, 256.0), false),
+        ] {
+            let s = fit_scope_image(tex, w, h, sq);
+            assert!(s.x <= w + 0.01 && s.y <= h + 0.01, "{s:?} em {w}x{h}");
+            if !sq {
+                assert!((s.x / s.y - 2.0).abs() < 0.01, "proporção mantida");
+            }
+        }
+    }
+    // entradas hostis
+    let s = fit_scope_image(egui::vec2(0.0, f32::NAN), f32::INFINITY, -5.0, false);
+    assert!(s.x.is_finite() && s.y.is_finite() && s.x > 0.0);
 }
 
 /// Mídia ausente: a janela procura todos os arquivos de uma vez, pede a
