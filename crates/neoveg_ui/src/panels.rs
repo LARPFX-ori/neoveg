@@ -4943,7 +4943,7 @@ pub(crate) fn draw_db_scale(painter: &egui::Painter, r: Rect, color: Color32) {
         let len: f32 = if major { 4.0 } else { 2.0 };
         painter.line_segment(
             [pos2(r.left(), y), pos2(r.left() + len, y)],
-            Stroke::new(1.0, color.gamma_multiply(0.7)),
+            Stroke::new(1.0_f32, color.gamma_multiply(0.7)),
         );
         if major && (y - last_label_y).abs() >= 9.0 {
             painter.text(
