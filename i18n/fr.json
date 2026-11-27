@@ -3219,5 +3219,7 @@
   "Remover barramento de entrada": "Supprimer le bus d'entrée",
   "limite de barramentos de entrada atingido": "limite de bus d'entrée atteinte",
   "Silenciar": "Muet",
-  "Inverter fase": "Inverser la phase"
+  "Inverter fase": "Inverser la phase",
+  "Modo de composição: {mode}": "Mode de composition : {mode}",
+  "Entrada": "Entrée"
 }

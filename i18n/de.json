@@ -3219,5 +3219,7 @@
   "Remover barramento de entrada": "Eingangsbus entfernen",
   "limite de barramentos de entrada atingido": "Grenze für Eingangsbusse erreicht",
   "Silenciar": "Stumm",
-  "Inverter fase": "Phase umkehren"
+  "Inverter fase": "Phase umkehren",
+  "Modo de composição: {mode}": "Compositing-Modus: {mode}",
+  "Entrada": "Eingang"
 }
