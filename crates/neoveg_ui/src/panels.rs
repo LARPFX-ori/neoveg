@@ -2934,72 +2934,254 @@ impl App {
     // Transições, efeitos e geradores
     // -----------------------------------------------------------------
 
+    /// Janela Transições no arranjo do VEGAS Pro (manual 21, p. 53; ajuda
+    /// "The Transitions Window"): busca, abas de categoria com Todos e
+    /// Favoritos, a lista à esquerda e a grade de miniaturas à direita, que
+    /// quebra de linha conforme a largura. Arrastar uma miniatura até um
+    /// evento aplica; clique duplo aplica aos eventos selecionados.
     fn transitions_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        ui.label(
-            egui::RichText::new(tr(
-                lang,
-                "Arraste uma transição até um evento de vídeo (ela é usada no crossfade/fade de entrada), ou selecione o evento e clique em Aplicar.",
-            ))
-            .small()
-            .weak(),
-        );
-        ui.separator();
-        let sel: Vec<Id> = self.sel_events.iter().cloned().collect();
-        let thumb_sz = vec2(
-            neoveg_engine::engine::fx_preview::THUMB_W as f32,
-            neoveg_engine::engine::fx_preview::THUMB_H as f32,
-        );
-        egui::Grid::new("tr_grid")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                for (i, k) in TransitionKind::ALL.into_iter().enumerate() {
-                    let id = egui::Id::new(("tr", k as u32));
-                    // miniatura (meio do progresso; anima ao passar o mouse)
-                    let hover_id = egui::Id::new(("tr_hover", i));
-                    let hovered = ui
-                        .ctx()
-                        .data(|d| d.get_temp::<bool>(hover_id))
-                        .unwrap_or(false);
-                    let ctx = ui.ctx().clone();
-                    let tex = self.fx_browser.transitions.texture(&ctx, i, hovered);
-                    let resp = ui
-                        .dnd_drag_source(id, DndPayload::Transition(k), |ui| {
-                            ui.vertical(|ui| {
-                                match &tex {
-                                    Some(t) => {
-                                        ui.image((t.id(), thumb_sz));
-                                    }
-                                    None => {
-                                        let (r, _) =
-                                            ui.allocate_exact_size(thumb_sz, Sense::hover());
-                                        ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
-                                    }
-                                }
-                                icons::icon_label(
-                                    ui,
-                                    Icon::TransitionSplit,
-                                    14.0,
-                                    k.name_in(lang),
-                                    &self.theme,
-                                );
-                            });
-                        })
-                        .response;
-                    let now_hover = resp.hovered();
-                    ui.ctx().data_mut(|d| d.insert_temp(hover_id, now_hover));
-                    if ui
-                        .add_enabled(!sel.is_empty(), egui::Button::new(tr(lang, "Aplicar")))
-                        .clicked()
-                    {
-                        for e in &sel {
-                            self.apply_transition(*e, k);
-                        }
-                    }
-                    ui.end_row();
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transitions_ui.search)
+                    .hint_text(tr(lang, "Buscar plug-ins"))
+                    .desired_width(200.0),
+            );
+            ui.separator();
+            let st = &mut self.transitions_ui;
+            if ui
+                .selectable_label(st.cat.is_none() && !st.favorites_only, tr(lang, "Todos"))
+                .clicked()
+            {
+                st.cat = None;
+                st.favorites_only = false;
+            }
+            for c in TransitionCategory::ALL {
+                if ui
+                    .selectable_label(st.cat == Some(c) && !st.favorites_only, c.name_in(lang))
+                    .clicked()
+                {
+                    st.cat = Some(c);
+                    st.favorites_only = false;
                 }
+            }
+            if ui
+                .selectable_label(st.favorites_only, format!("★ {}", tr(lang, "Favoritos")))
+                .clicked()
+            {
+                st.cat = None;
+                st.favorites_only = true;
+            }
+        });
+        ui.separator();
+
+        let q = self.transitions_ui.search.trim().to_lowercase();
+        let favs = self.prefs.fx_favorites.clone();
+        let list: Vec<(usize, TransitionKind)> = TransitionKind::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, k)| {
+                (self.transitions_ui.cat.is_none()
+                    || self.transitions_ui.cat == Some(TransitionCategory::of(*k)))
+                    && (!self.transitions_ui.favorites_only
+                        || favs.contains(&transition_fav_id(*k)))
+                    && (q.is_empty() || k.name_in(lang).to_lowercase().contains(&q))
+            })
+            .collect();
+        if list.is_empty() {
+            ui.label(
+                egui::RichText::new(if self.transitions_ui.favorites_only {
+                    tr(
+                        lang,
+                        "Nenhum favorito. Clique na estrela de uma transição para marcá-la.",
+                    )
+                } else {
+                    tr(lang, "Nenhuma transição encontrada.")
+                })
+                .small()
+                .weak(),
+            );
+            return;
+        }
+        if !self
+            .transitions_ui
+            .selected
+            .is_some_and(|k| list.iter().any(|(_, x)| *x == k))
+        {
+            self.transitions_ui.selected = list.first().map(|(_, k)| *k);
+        }
+
+        let sel_events: Vec<Id> = self.sel_events.iter().cloned().collect();
+        let left_w = (ui.available_width() * 0.30).clamp(140.0, 220.0);
+        let visible_w = (ui.clip_rect().right() - ui.cursor().left()).min(ui.available_width());
+        let right_w = (visible_w - left_w - 24.0).max(120.0);
+        let body_h = (ui.available_height() - 28.0).max(80.0);
+        let thumb = vec2(
+            neoveg_engine::engine::fx_preview::THUMB_W as f32 * 1.25,
+            neoveg_engine::engine::fx_preview::THUMB_H as f32 * 1.25,
+        );
+        let cell_w = thumb.x + 12.0;
+        let per_row = ((right_w + 4.0) / cell_w).floor().max(1.0) as usize;
+        let mut toggle_fav: Option<TransitionKind> = None;
+        let mut select: Option<TransitionKind> = None;
+        let mut apply: Option<TransitionKind> = None;
+        let (accent, bg) = (self.theme.accent, self.theme.extreme_bg);
+
+        ui.horizontal_top(|ui| {
+            // esquerda: a lista com a estrela de favorito
+            ui.vertical(|ui| {
+                ui.set_width(left_w);
+                egui::ScrollArea::vertical()
+                    .id_salt("tr_lista")
+                    .max_height(body_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (_, k) in &list {
+                            let fav = favs.contains(&transition_fav_id(*k));
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(fav, if fav { "★" } else { "☆" })
+                                    .on_hover_text(if fav {
+                                        tr(lang, "Tirar dos favoritos")
+                                    } else {
+                                        tr(lang, "Marcar como favorito")
+                                    })
+                                    .clicked()
+                                {
+                                    toggle_fav = Some(*k);
+                                }
+                                let sel = self.transitions_ui.selected == Some(*k);
+                                if ui.selectable_label(sel, k.name_in(lang)).clicked() {
+                                    select = Some(*k);
+                                }
+                            });
+                        }
+                    });
             });
+            ui.separator();
+            // direita: grade de miniaturas (meio do progresso; anima ao passar o mouse)
+            ui.vertical(|ui| {
+                ui.set_width(right_w);
+                egui::ScrollArea::vertical()
+                    .id_salt("tr_grade")
+                    .max_height(body_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for row in list.chunks(per_row) {
+                            ui.horizontal_top(|ui| {
+                                for (i, k) in row {
+                                    let hover_id = egui::Id::new(("tr_hover", *i));
+                                    let hovered = ui
+                                        .ctx()
+                                        .data(|d| d.get_temp::<bool>(hover_id))
+                                        .unwrap_or(false);
+                                    let ctx = ui.ctx().clone();
+                                    let tex =
+                                        self.fx_browser.transitions.texture(&ctx, *i, hovered);
+                                    let selected = self.transitions_ui.selected == Some(*k);
+                                    let id = egui::Id::new(("tr", *k as u32));
+                                    let inner =
+                                        ui.dnd_drag_source(id, DndPayload::Transition(*k), |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.set_width(cell_w - 4.0);
+                                                let (r, resp) =
+                                                    ui.allocate_exact_size(thumb, Sense::click());
+                                                match &tex {
+                                                    Some(t) => {
+                                                        ui.painter().image(
+                                                            t.id(),
+                                                            r,
+                                                            Rect::from_min_max(
+                                                                pos2(0.0, 0.0),
+                                                                pos2(1.0, 1.0),
+                                                            ),
+                                                            Color32::WHITE,
+                                                        );
+                                                    }
+                                                    None => {
+                                                        ui.painter().rect_filled(r, 2.0, bg);
+                                                    }
+                                                }
+                                                if selected {
+                                                    ui.painter().rect_stroke(
+                                                        r.expand(1.5),
+                                                        2.0,
+                                                        Stroke::new(2.0_f32, accent),
+                                                        StrokeKind::Outside,
+                                                    );
+                                                }
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(k.name_in(lang))
+                                                            .small(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                resp
+                                            })
+                                            .inner
+                                        });
+                                    let thumb_resp = inner.inner;
+                                    let now_hover =
+                                        inner.response.hovered() || thumb_resp.hovered();
+                                    ui.ctx().data_mut(|d| d.insert_temp(hover_id, now_hover));
+                                    if thumb_resp.clicked() {
+                                        select = Some(*k);
+                                    }
+                                    if thumb_resp.double_clicked() {
+                                        apply = Some(*k);
+                                    }
+                                    thumb_resp.on_hover_text(k.name_in(lang));
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            });
+        });
+
+        // rodapé: a transição escolhida e o botão Aplicar
+        ui.separator();
+        ui.horizontal(|ui| {
+            if let Some(k) = self.transitions_ui.selected {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} — {}",
+                        k.name_in(lang),
+                        TransitionCategory::of(k).name_in(lang)
+                    ))
+                    .small(),
+                );
+                if ui
+                    .add_enabled(
+                        !sel_events.is_empty(),
+                        egui::Button::new(tr(lang, "Aplicar")),
+                    )
+                    .on_hover_text(tr(lang, "Aplicar aos eventos selecionados"))
+                    .clicked()
+                {
+                    apply = Some(k);
+                }
+            }
+        });
+
+        if let Some(k) = select {
+            self.transitions_ui.selected = Some(k);
+        }
+        if let Some(k) = apply {
+            for e in &sel_events {
+                self.apply_transition(*e, k);
+            }
+        }
+        if let Some(k) = toggle_fav {
+            let id = transition_fav_id(k);
+            if let Some(pos) = self.prefs.fx_favorites.iter().position(|x| *x == id) {
+                self.prefs.fx_favorites.remove(pos);
+            } else {
+                self.prefs.fx_favorites.push(id);
+            }
+            let _ = self.prefs.save();
+        }
     }
 
     fn fx_tab(&mut self, ui: &mut egui::Ui, audio: bool) {
@@ -4773,6 +4955,96 @@ impl App {
             self.last_req = crate::app::PreviewReqKey::default();
         }
     }
+}
+
+/// Categorias da janela Transições, nas abas do VEGAS Pro (Efeitos 3D,
+/// Revelar, Wipes, Fades e Dobras e páginas).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TransitionCategory {
+    ThreeD,
+    Reveals,
+    Wipes,
+    Fades,
+    Pages,
+}
+
+impl TransitionCategory {
+    pub(crate) const ALL: [TransitionCategory; 5] = [
+        TransitionCategory::ThreeD,
+        TransitionCategory::Reveals,
+        TransitionCategory::Wipes,
+        TransitionCategory::Fades,
+        TransitionCategory::Pages,
+    ];
+
+    pub(crate) fn name_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            TransitionCategory::ThreeD => "Efeitos 3D",
+            TransitionCategory::Reveals => "Revelar",
+            TransitionCategory::Wipes => "Wipes",
+            TransitionCategory::Fades => "Fades",
+            TransitionCategory::Pages => "Dobras e páginas",
+        };
+        tr(lang, key)
+    }
+
+    /// Categoria de cada transição (exaustivo: uma transição nova obriga a
+    /// escolher a aba dela).
+    pub(crate) fn of(k: TransitionKind) -> Self {
+        use TransitionKind as T;
+        match k {
+            T::Zoom
+            | T::FlyIn
+            | T::Blinds3D
+            | T::Cascade3D
+            | T::Shuffle3D
+            | T::WarpFlow
+            | T::Swap => TransitionCategory::ThreeD,
+            T::PushLeft
+            | T::PushRight
+            | T::PushUp
+            | T::PushDown
+            | T::SlideOver
+            | T::Squeeze
+            | T::IrisOpen
+            | T::IrisClose
+            | T::BarnDoor
+            | T::SplitHorizontal
+            | T::Portals => TransitionCategory::Reveals,
+            T::WipeLeft
+            | T::WipeRight
+            | T::WipeUp
+            | T::WipeDown
+            | T::ClockWipe
+            | T::Blinds
+            | T::Checker
+            | T::StarWipe
+            | T::DiagonalWipe
+            | T::GradientWipe
+            | T::VenetianBlinds
+            | T::Spiral
+            | T::Cascade => TransitionCategory::Wipes,
+            T::Dissolve | T::FadeThroughBlack | T::RandomDissolve | T::FlashWhite => {
+                TransitionCategory::Fades
+            }
+            T::PagePeel | T::PageLoop | T::PageRoll => TransitionCategory::Pages,
+        }
+    }
+}
+
+/// Identificador de favorito de uma transição (lista `fx_favorites`).
+pub(crate) fn transition_fav_id(k: TransitionKind) -> String {
+    format!("tr:{k:?}")
+}
+
+/// Estado da janela Transições.
+#[derive(Default)]
+pub(crate) struct TransitionsUiState {
+    pub(crate) search: String,
+    /// `None` = Todos.
+    pub(crate) cat: Option<TransitionCategory>,
+    pub(crate) favorites_only: bool,
+    pub(crate) selected: Option<TransitionKind>,
 }
 
 /// Indica se a prévia está redimensionada em relação ao projeto (`prev_scaled`)
