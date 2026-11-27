@@ -171,6 +171,7 @@ impl App {
         self.thumbs.clear();
         self.multicam_thumbs.clear();
         self.meters_hold.clear();
+        self.vu_levels.clear();
         self.project_media.clear_thumbs();
         let d = &mut self.dlg;
         d.event_props = None;

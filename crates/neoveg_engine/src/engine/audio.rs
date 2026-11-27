@@ -24,6 +24,34 @@ pub struct Meters {
     /// Pico por barramento auxiliar (L, R).
     pub buses: HashMap<Id, [f32; 2]>,
     pub master: [f32; 2],
+    /// Nível médio (RMS) do bloco por trilha (L, R), para o medidor VU.
+    pub track_rms: HashMap<Id, [f32; 2]>,
+    /// Nível médio (RMS) do bloco por barramento auxiliar (L, R).
+    pub bus_rms: HashMap<Id, [f32; 2]>,
+    /// Nível médio (RMS) do bloco no Master (L, R).
+    pub master_rms: [f32; 2],
+}
+
+/// Nível médio quadrático (RMS) de um bloco estéreo intercalado (L, R).
+/// Bloco vazio ou amostras não finitas dão zero.
+pub fn block_rms(buf: &[f32]) -> [f32; 2] {
+    let n = buf.len() / 2;
+    if n == 0 {
+        return [0.0; 2];
+    }
+    let fin = |s: Option<&f32>| match s {
+        Some(v) if v.is_finite() => f64::from(*v),
+        _ => 0.0,
+    };
+    let mut sum = [0f64; 2];
+    for i in 0..n {
+        let l = fin(buf.get(i * 2));
+        let r = fin(buf.get(i * 2 + 1));
+        sum[0] += l * l;
+        sum[1] += r * r;
+    }
+    let d = n as f64;
+    [(sum[0] / d).sqrt() as f32, (sum[1] / d).sqrt() as f32]
 }
 
 fn sinc_params() -> SincInterpolationParameters {
@@ -1242,6 +1270,7 @@ impl Mixer {
             out[i * 2 + 1] = r;
         }
         self.meters.master = peak;
+        self.meters.master_rms = block_rms(&out[..n * 2]);
     }
 
     /// Mixa no layout de canais do projeto: `out` tem `n * channel_layout.channels()`
@@ -1355,6 +1384,7 @@ impl Mixer {
             }
             if p.is_track_effectively_muted(track.id) || (any_solo && !track.solo) {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
+                self.meters.track_rms.insert(track.id, [0.0, 0.0]);
                 continue;
             }
             let max_ev_lat = pdc.track_ev_lat.get(ti).copied().unwrap_or(0);
@@ -1495,6 +1525,9 @@ impl Mixer {
                 },
             );
             self.meters.tracks.insert(track.id, peak);
+            self.meters
+                .track_rms
+                .insert(track.id, block_rms(&track_buf[..n * 2]));
 
             // Envios auxiliares pós-fader (post-fader sends) com alinhamento PDC
             for (si, send) in track.sends.iter().enumerate() {
@@ -1564,6 +1597,7 @@ impl Mixer {
             let mut bbuf = std::mem::take(&mut self.bus_bufs[bi]);
             if !bus.is_audible(any_bus_solo) {
                 self.meters.buses.insert(bus.id, [0.0, 0.0]);
+                self.meters.bus_rms.insert(bus.id, [0.0, 0.0]);
                 self.bus_bufs[bi] = bbuf;
                 continue;
             }
@@ -1595,6 +1629,9 @@ impl Mixer {
                 },
             );
             self.meters.buses.insert(bus.id, bpeak);
+            self.meters
+                .bus_rms
+                .insert(bus.id, block_rms(&bbuf[..n * 2]));
 
             let mut sent_to_downstream = false;
             if let Some(dst_id) = bus.output_bus {
@@ -1711,6 +1748,22 @@ fn master_gain(p: &Project) -> f32 {
         0.0
     } else {
         db_to_lin(p.master.volume_db)
+    }
+}
+
+#[cfg(test)]
+mod rms_tests {
+    use super::block_rms;
+
+    #[test]
+    fn rms_de_bloco_estereo() {
+        // L: onda quadrada de amplitude 0,5 (RMS 0,5); R: silêncio
+        let buf = [0.5, 0.0, -0.5, 0.0, 0.5, 0.0, -0.5, 0.0];
+        let r = block_rms(&buf);
+        assert!((r[0] - 0.5).abs() < 1e-6);
+        assert_eq!(r[1], 0.0);
+        assert_eq!(block_rms(&[]), [0.0, 0.0]);
+        assert_eq!(block_rms(&[f32::NAN, f32::INFINITY]), [0.0, 0.0]);
     }
 }
 
