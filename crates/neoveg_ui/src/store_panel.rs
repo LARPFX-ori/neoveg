@@ -1,4 +1,4 @@
-//! Aba Loja de scripts: catálogo do repositório `neoveg-loja`, instalação,
+//! Aba Loja de scripts: catálogo do repositório `neoveg-marketplace`, instalação,
 //! atualização, remoção e execução dos scripts instalados.
 //!
 //! Download e instalação rodam fora da thread da interface
