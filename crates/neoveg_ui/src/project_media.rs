@@ -42,9 +42,9 @@ impl MediaThumbSize {
 
     pub fn thumb_height(self) -> f32 {
         match self {
-            MediaThumbSize::Small => 68.0,
-            MediaThumbSize::Medium => 90.0,
-            MediaThumbSize::Large => 116.0,
+            MediaThumbSize::Small => 60.0,
+            MediaThumbSize::Medium => 74.0,
+            MediaThumbSize::Large => 104.0,
         }
     }
 
@@ -1172,7 +1172,15 @@ impl App {
     ) {
         let lang = self.lang();
         let card_w = self.project_media.thumb_size.card_width();
-        let thumb_h = self.project_media.thumb_size.thumb_height();
+        let vis_h = ui.clip_rect().height();
+        let thumb_h = if vis_h.is_finite() && vis_h > 48.0 {
+            self.project_media
+                .thumb_size
+                .thumb_height()
+                .min((vis_h - 30.0).max(42.0))
+        } else {
+            self.project_media.thumb_size.thumb_height()
+        };
         // Colunas pela largura visível (a área rola nos dois eixos, então a
         // largura disponível não limita nada) e pela largura real do cartão no
         // quadro anterior: o nome ao lado da miniatura alarga o cartão, e com a
@@ -1242,175 +1250,192 @@ impl App {
                                 .corner_radius(2.0)
                                 .inner_margin(4.0)
                                 .show(ui, |ui| {
-                                    ui.set_width(card_w - 8.0);
-                                    ui.set_max_width(card_w - 8.0);
-                                    let thumb_size = vec2(card_w - 8.0, thumb_h);
-                                    let (thumb_rect, thumb_sense) =
-                                        ui.allocate_exact_size(thumb_size, Sense::hover());
-                                    if !self.theme.high_contrast
-                                        && (matches!(m.source, MediaSource::Generated(_))
-                                            || (m.has_video && m.duration.is_none()))
-                                    {
-                                        paint_alpha_checkerboard(ui.painter(), thumb_rect);
-                                    } else {
-                                        ui.painter().rect_filled(
+                                    ui.vertical(|ui| {
+                                        ui.set_width(card_w - 8.0);
+                                        ui.set_max_width(card_w - 8.0);
+                                        let thumb_size = vec2(card_w - 8.0, thumb_h);
+                                        let (thumb_rect, thumb_sense) =
+                                            ui.allocate_exact_size(thumb_size, Sense::hover());
+                                        if !self.theme.high_contrast
+                                            && (matches!(m.source, MediaSource::Generated(_))
+                                                || (m.has_video && m.duration.is_none()))
+                                        {
+                                            paint_alpha_checkerboard(ui.painter(), thumb_rect);
+                                        } else {
+                                            ui.painter().rect_filled(
+                                                thumb_rect,
+                                                1.0,
+                                                self.theme.extreme_bg,
+                                            );
+                                        }
+                                        let pointer_hover = thumb_sense
+                                            .hovered()
+                                            .then(|| ui.input(|i| i.pointer.hover_pos()))
+                                            .flatten();
+                                        let scrubbing =
+                                            pointer_hover.filter(|p| thumb_rect.contains(*p));
+                                        if let Some(pos) = scrubbing {
+                                            let frac = ((pos.x - thumb_rect.left())
+                                                / thumb_rect.width().max(1.0))
+                                            .clamp(0.0, 1.0);
+                                            let (scrub_tex, sample_t) =
+                                                self.thumb_scrub(ctx, m.id, frac);
+                                            if let Some(t) = scrub_tex {
+                                                paint_aspect_tex(ui.painter(), thumb_rect, &t);
+                                            }
+                                            let sx = thumb_rect.left() + frac * thumb_rect.width();
+                                            ui.painter().line_segment(
+                                                [
+                                                    pos2(sx, thumb_rect.top()),
+                                                    pos2(sx, thumb_rect.bottom()),
+                                                ],
+                                                Stroke::new(1.5_f32, self.theme.accent),
+                                            );
+                                            let tc = self.fmt_time(sample_t);
+                                            ui.painter().rect_filled(
+                                                Rect::from_min_max(
+                                                    pos2(
+                                                        thumb_rect.left() + 2.0,
+                                                        thumb_rect.bottom() - 15.0,
+                                                    ),
+                                                    pos2(
+                                                        thumb_rect.right() - 2.0,
+                                                        thumb_rect.bottom() - 1.0,
+                                                    ),
+                                                ),
+                                                2.0,
+                                                Color32::from_black_alpha(190),
+                                            );
+                                            ui.painter().text(
+                                                pos2(
+                                                    thumb_rect.center().x,
+                                                    thumb_rect.bottom() - 8.0,
+                                                ),
+                                                egui::Align2::CENTER_CENTER,
+                                                tc,
+                                                egui::FontId::monospace(9.5),
+                                                Color32::WHITE,
+                                            );
+                                        } else {
+                                            if let Some(t) = self.thumb(ctx, m.id) {
+                                                paint_aspect_tex(ui.painter(), thumb_rect, &t);
+                                            } else {
+                                                let icon = if matches!(
+                                                    m.source,
+                                                    MediaSource::Sequence { .. }
+                                                        | MediaSource::NestedProject { .. }
+                                                ) {
+                                                    Icon::NestedTimeline
+                                                } else if m.has_audio {
+                                                    Icon::AudioTrack
+                                                } else {
+                                                    Icon::MediaItem
+                                                };
+                                                let icon_box = Rect::from_center_size(
+                                                    thumb_rect.center(),
+                                                    vec2(24.0, 24.0),
+                                                );
+                                                icons::paint(
+                                                    ui.painter(),
+                                                    icon_box,
+                                                    icon,
+                                                    &self.theme,
+                                                    true,
+                                                );
+                                            }
+                                            // Selo superior esquerdo (tipo de mídia, estilo VEGAS Pro)
+                                            let tag_r = Rect::from_min_size(
+                                                thumb_rect.left_top() + vec2(3.0, 3.0),
+                                                vec2(28.0, 14.0),
+                                            );
+                                            ui.painter().rect_filled(
+                                                tag_r,
+                                                2.0,
+                                                Color32::from_black_alpha(175),
+                                            );
+                                            ui.painter().text(
+                                                tag_r.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                tag,
+                                                egui::FontId::proportional(9.0),
+                                                Color32::WHITE,
+                                            );
+                                            // Selo superior direito (contagem de uso na timeline)
+                                            if use_cnt > 0 {
+                                                let cnt_s = format!("{use_cnt}×");
+                                                let cnt_w = (cnt_s.len() as f32 * 5.8 + 8.0)
+                                                    .clamp(22.0, 44.0);
+                                                let cnt_r = Rect::from_min_size(
+                                                    pos2(
+                                                        thumb_rect.right() - cnt_w - 3.0,
+                                                        thumb_rect.top() + 3.0,
+                                                    ),
+                                                    vec2(cnt_w, 14.0),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    cnt_r,
+                                                    2.0,
+                                                    Color32::from_black_alpha(175),
+                                                );
+                                                ui.painter().text(
+                                                    cnt_r.center(),
+                                                    egui::Align2::CENTER_CENTER,
+                                                    cnt_s,
+                                                    egui::FontId::monospace(9.0),
+                                                    Color32::WHITE,
+                                                );
+                                            }
+                                            // Selo inferior direito (duração)
+                                            let dur_w = (dur.len() as f32 * 5.6 + 8.0)
+                                                .clamp(42.0, thumb_rect.width() - 6.0);
+                                            let dur_r = Rect::from_min_size(
+                                                pos2(
+                                                    thumb_rect.right() - dur_w - 3.0,
+                                                    thumb_rect.bottom() - 16.0,
+                                                ),
+                                                vec2(dur_w, 13.0),
+                                            );
+                                            ui.painter().rect_filled(
+                                                dur_r,
+                                                2.0,
+                                                Color32::from_black_alpha(180),
+                                            );
+                                            ui.painter().text(
+                                                dur_r.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                &dur,
+                                                egui::FontId::monospace(9.0),
+                                                Color32::WHITE,
+                                            );
+                                        }
+                                        ui.painter().rect_stroke(
                                             thumb_rect,
                                             1.0,
-                                            self.theme.extreme_bg,
+                                            Stroke::new(1.0_f32, self.theme.border),
+                                            egui::StrokeKind::Inside,
                                         );
-                                    }
-                                    let pointer_hover = thumb_sense
-                                        .hovered()
-                                        .then(|| ui.input(|i| i.pointer.hover_pos()))
-                                        .flatten();
-                                    let scrubbing =
-                                        pointer_hover.filter(|p| thumb_rect.contains(*p));
-                                    if let Some(pos) = scrubbing {
-                                        let frac = ((pos.x - thumb_rect.left())
-                                            / thumb_rect.width().max(1.0))
-                                        .clamp(0.0, 1.0);
-                                        let (scrub_tex, sample_t) =
-                                            self.thumb_scrub(ctx, m.id, frac);
-                                        if let Some(t) = scrub_tex {
-                                            paint_aspect_tex(ui.painter(), thumb_rect, &t);
-                                        }
-                                        let sx = thumb_rect.left() + frac * thumb_rect.width();
-                                        ui.painter().line_segment(
-                                            [
-                                                pos2(sx, thumb_rect.top()),
-                                                pos2(sx, thumb_rect.bottom()),
-                                            ],
-                                            Stroke::new(1.5_f32, self.theme.accent),
-                                        );
-                                        let tc = self.fmt_time(sample_t);
-                                        ui.painter().rect_filled(
-                                            Rect::from_min_max(
-                                                pos2(
-                                                    thumb_rect.left() + 2.0,
-                                                    thumb_rect.bottom() - 15.0,
-                                                ),
-                                                pos2(
-                                                    thumb_rect.right() - 2.0,
-                                                    thumb_rect.bottom() - 1.0,
-                                                ),
-                                            ),
-                                            2.0,
-                                            Color32::from_black_alpha(190),
-                                        );
-                                        ui.painter().text(
-                                            pos2(thumb_rect.center().x, thumb_rect.bottom() - 8.0),
-                                            egui::Align2::CENTER_CENTER,
-                                            tc,
-                                            egui::FontId::monospace(9.5),
-                                            Color32::WHITE,
-                                        );
-                                    } else {
-                                        if let Some(t) = self.thumb(ctx, m.id) {
-                                            paint_aspect_tex(ui.painter(), thumb_rect, &t);
+                                        let name_fg = if selected {
+                                            crate::theme::contrast_on(self.theme.selection_bg)
                                         } else {
-                                            let icon = if matches!(
-                                                m.source,
-                                                MediaSource::Sequence { .. }
-                                                    | MediaSource::NestedProject { .. }
-                                            ) {
-                                                Icon::NestedTimeline
-                                            } else if m.has_audio {
-                                                Icon::AudioTrack
-                                            } else {
-                                                Icon::MediaItem
-                                            };
-                                            let icon_box = Rect::from_center_size(
-                                                thumb_rect.center(),
-                                                vec2(24.0, 24.0),
+                                            self.theme.text_primary
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.set_max_width(card_w - 8.0);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&m.name)
+                                                        .small()
+                                                        .color(name_fg),
+                                                )
+                                                .truncate(),
                                             );
-                                            icons::paint(
-                                                ui.painter(),
-                                                icon_box,
-                                                icon,
-                                                &self.theme,
-                                                true,
-                                            );
-                                        }
-                                        // Selo superior esquerdo (tipo de mídia, estilo VEGAS Pro)
-                                        let tag_r = Rect::from_min_size(
-                                            thumb_rect.left_top() + vec2(3.0, 3.0),
-                                            vec2(28.0, 14.0),
-                                        );
-                                        ui.painter().rect_filled(
-                                            tag_r,
-                                            2.0,
-                                            Color32::from_black_alpha(175),
-                                        );
-                                        ui.painter().text(
-                                            tag_r.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            tag,
-                                            egui::FontId::proportional(9.0),
-                                            Color32::WHITE,
-                                        );
-                                        // Selo inferior direito (duração)
-                                        let dur_w = (dur.len() as f32 * 5.6 + 8.0)
-                                            .clamp(42.0, thumb_rect.width() - 6.0);
-                                        let dur_r = Rect::from_min_size(
-                                            pos2(
-                                                thumb_rect.right() - dur_w - 3.0,
-                                                thumb_rect.bottom() - 16.0,
-                                            ),
-                                            vec2(dur_w, 13.0),
-                                        );
-                                        ui.painter().rect_filled(
-                                            dur_r,
-                                            2.0,
-                                            Color32::from_black_alpha(180),
-                                        );
-                                        ui.painter().text(
-                                            dur_r.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            &dur,
-                                            egui::FontId::monospace(9.0),
-                                            Color32::WHITE,
-                                        );
-                                    }
-                                    ui.painter().rect_stroke(
-                                        thumb_rect,
-                                        1.0,
-                                        Stroke::new(1.0_f32, self.theme.border),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                    ui.add_space(2.0);
-                                    let name_fg = if selected {
-                                        crate::theme::contrast_on(self.theme.selection_bg)
-                                    } else {
-                                        self.theme.text_primary
-                                    };
-                                    ui.horizontal(|ui| {
-                                        ui.set_max_width(card_w - 10.0);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&m.name)
-                                                    .strong()
-                                                    .small()
-                                                    .color(name_fg),
-                                            )
-                                            .truncate(),
-                                        );
-                                        if offline {
-                                            ui.colored_label(
-                                                self.theme.offline_fg,
-                                                egui::RichText::new("offline").small(),
-                                            );
-                                        } else if use_cnt > 0 {
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(format!("{use_cnt}×"))
-                                                            .small()
-                                                            .weak(),
-                                                    );
-                                                },
-                                            );
-                                        }
+                                            if offline {
+                                                ui.colored_label(
+                                                    self.theme.offline_fg,
+                                                    egui::RichText::new("offline").small(),
+                                                );
+                                            }
+                                        });
                                     });
                                 });
                         })

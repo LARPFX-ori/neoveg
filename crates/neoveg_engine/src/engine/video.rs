@@ -1125,7 +1125,7 @@ fn compose_subtree(
     if track.kind != TrackKind::Video {
         return;
     }
-    let track_active = !any_solo || track.solo;
+    let track_active = !any_solo || p.is_track_effectively_soloed(track.id);
     if track.is_adjustment() {
         if track_active && !opts.bypass_fx {
             apply_adjustment(track, out, t, p.settings.fps);
@@ -1173,7 +1173,7 @@ fn compose_subtree(
     );
     for child in ordered_children {
         if !p.is_track_effectively_muted(child.id) && child.mask_mode != TrackMaskMode::None {
-            if !any_solo || child.solo {
+            if !any_solo || p.is_track_effectively_soloed(child.id) {
                 if let Some(mask) = render_track_processed(
                     p,
                     media,

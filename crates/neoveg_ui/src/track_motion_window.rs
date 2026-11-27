@@ -57,6 +57,8 @@ pub(crate) struct TrackMotionUi {
     /// Linha ativa na trilha de quadros-chave: 0 = Posição, 1 = Sombra 2D, 2 = Brilho 2D.
     pub active_row: usize,
     pub preset: usize,
+    /// Predefinições personalizadas salvas pelo usuário nesta sessão.
+    pub custom_presets: Vec<(String, MotionKey)>,
     pub ws: Workspace,
     /// Ferramenta mão: arrastar desloca a vista (também com Espaço segurado).
     pub hand_tool: bool,
@@ -84,6 +86,7 @@ impl Default for TrackMotionUi {
             parent_mode: false,
             active_row: 0,
             preset: 0,
+            custom_presets: Vec::new(),
             ws: Workspace {
                 grid: 10.0,
                 ..Workspace::default()
@@ -386,10 +389,17 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Predefinição:"));
-                let sel = PRESETS.get(st.preset).copied().unwrap_or(PRESETS[0]);
+                let sel_label = if st.preset < PRESETS.len() {
+                    tr(lang, PRESETS[st.preset]).to_string()
+                } else {
+                    st.custom_presets
+                        .get(st.preset - PRESETS.len())
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| tr(lang, PRESETS[0]).to_string())
+                };
                 egui::ComboBox::from_id_salt("tm_preset")
-                    .width((ui.available_width() - 8.0).max(120.0))
-                    .selected_text(tr(lang, sel))
+                    .width((ui.available_width() - 62.0).max(120.0))
+                    .selected_text(sel_label)
                     .show_ui(ui, |ui| {
                         for (i, p) in PRESETS.iter().enumerate() {
                             if ui.selectable_label(st.preset == i, tr(lang, p)).clicked() {
@@ -397,7 +407,47 @@ impl App {
                                 actions.push(TmAction::Preset(i));
                             }
                         }
+                        if !st.custom_presets.is_empty() {
+                            ui.separator();
+                            let custom_list: Vec<(usize, String, MotionKey)> = st
+                                .custom_presets
+                                .iter()
+                                .enumerate()
+                                .map(|(ci, (n, k))| (PRESETS.len() + ci, n.clone(), k.clone()))
+                                .collect();
+                            for (idx, cname, ckey) in custom_list {
+                                if ui.selectable_label(st.preset == idx, &cname).clicked() {
+                                    st.preset = idx;
+                                    new_key = Some(ckey);
+                                }
+                            }
+                        }
                     });
+                if icons::small_icon_button(ui, Icon::SaveDisk, None, false, &theme)
+                    .on_hover_text(tr(lang, "Salvar predefinição"))
+                    .clicked()
+                {
+                    let n = st.custom_presets.len() + 1;
+                    let pname = format!("{} {n}", tr(lang, "Personalizado"));
+                    st.custom_presets.push((pname, cur.clone()));
+                    st.preset = PRESETS.len() + st.custom_presets.len() - 1;
+                }
+                let can_del = st.preset >= PRESETS.len()
+                    && (st.preset - PRESETS.len()) < st.custom_presets.len();
+                if ui
+                    .add_enabled_ui(can_del, |ui| {
+                        icons::small_icon_button(ui, Icon::DeleteTrash, None, false, &theme)
+                            .on_hover_text(tr(lang, "Excluir predefinição"))
+                    })
+                    .inner
+                    .clicked()
+                {
+                    let ci = st.preset - PRESETS.len();
+                    if ci < st.custom_presets.len() {
+                        st.custom_presets.remove(ci);
+                        st.preset = 0;
+                    }
+                }
             });
             self.tm_toolbar(ui, &mut st, blend, is_3d, has_children, &mut actions);
             ui.separator();

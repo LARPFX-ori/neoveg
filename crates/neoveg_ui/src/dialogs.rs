@@ -30,6 +30,8 @@ pub struct RenderDialogState {
     pub wav_bits: WavBits,
     pub video_bitrate_kbps: u32,
     pub audio_bitrate_kbps: u32,
+    /// Exibe os controles de personalização do modelo selecionado (*Personalizar modelo...*).
+    pub customizing: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1343,6 +1345,7 @@ impl Dialogs {
             wav_bits,
             video_bitrate_kbps,
             audio_bitrate_kbps,
+            customizing: false,
         });
         self.render_use_loop = p.loop_region.is_some() && self.render_use_loop;
     }
@@ -4897,68 +4900,168 @@ impl App {
             return;
         };
 
+        let free_disk = PathBuf::from(&r.path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .and_then(neoveg_engine::media::free_disk_bytes)
+            .or_else(|| neoveg_engine::media::free_disk_bytes(&self.explorer_dir));
+        let est_secs = range_ticks.as_secs_f64().max(0.0);
+
         crate::dialog_window::DialogWindow::new(tr(lang, "Renderizar como"))
             .id(egui::Id::new("render_as_win"))
             .open(&mut open)
             .resizable(true)
-            .default_size([740.0, 440.0])
-            .min_width(560.0)
+            .default_size([780.0, 500.0])
+            .min_width(580.0)
             .show(ctx, |ui| {
-                ui.columns(2, |cols| {
-                    // Coluna esquerda: Formatos, pesquisa, favoritos e modelos (templates)
-                    let left = &mut cols[0];
-                    left.label(egui::RichText::new(tr(lang, "Formatos e modelos")).strong());
-                    left.add_space(3.0);
-                    left.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut r.filter)
-                                .hint_text(tr(lang, "Filtrar formatos ou modelos..."))
-                                .desired_width(175.0),
-                        );
-                        ui.checkbox(&mut r.only_favorites, tr(lang, "★ Favoritos"));
+                // Topo estilo VEGAS Pro: destino do arquivo + filtro e favoritos
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Arquivo"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut r.path)
+                            .desired_width((ui.available_width() - 96.0).max(200.0)),
+                    );
+                    if ui
+                        .button("...")
+                        .on_hover_text(tr(lang, "Procurar destino"))
+                        .clicked()
+                    {
+                        let ext = r.format.ext();
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter(ext.to_uppercase(), &[ext])
+                            .set_file_name(
+                                PathBuf::from(&r.path)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                            )
+                            .save_file()
+                        {
+                            r.path = p.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut r.filter)
+                            .hint_text(tr(lang, "Filtrar formatos ou modelos..."))
+                            .desired_width(220.0),
+                    );
+                    ui.checkbox(&mut r.only_favorites, tr(lang, "★ Favoritos"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.toggle_value(&mut r.customizing, tr(lang, "Personalizar modelo..."));
                     });
-                    left.separator();
-                    let query = r.filter.trim().to_lowercase();
-                    // a lista acompanha a altura da janela (antes ficava em
-                    // 280 px e sobrava área vazia com a janela grande); o
-                    // resumo do modelo ativo fica embaixo
-                    let list_h = render_template_list_height(left.available_height());
+                });
+                ui.separator();
+
+                let query = r.filter.trim().to_lowercase();
+                let list_h = render_template_list_height(if r.customizing {
+                    (ui.available_height() - 160.0).max(160.0)
+                } else {
+                    (ui.available_height() - 96.0).max(180.0)
+                })
+                .min(250.0);
+
+                // Painéis separados de Formatos (esquerda) e Modelos (direita), como no VEGAS Pro
+                ui.columns(2, |cols| {
+                    let left = &mut cols[0];
+                    left.label(egui::RichText::new(tr(lang, "Formatos")).strong());
+                    left.add_space(2.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("render_formats_scroll")
+                        .max_height(list_h)
+                        .show(left, |ui| {
+                            let scroll_key = egui::Id::new("render_fmt_last_scrolled");
+                            let last_fmt =
+                                ui.ctx().data(|d| d.get_temp::<RenderFormat>(scroll_key));
+                            let want_scroll = last_fmt != Some(r.format);
+                            let mut any_fmt = false;
+                            for fmt in RenderFormat::ALL {
+                                let has_match = RENDER_TEMPLATES.iter().any(|t| {
+                                    if t.format != fmt {
+                                        return false;
+                                    }
+                                    if r.only_favorites && !favs.iter().any(|f| f == t.id) {
+                                        return false;
+                                    }
+                                    if query.is_empty() {
+                                        return true;
+                                    }
+                                    tr(lang, t.title).to_lowercase().contains(&query)
+                                        || t.title.to_lowercase().contains(&query)
+                                        || tr(lang, t.summary).to_lowercase().contains(&query)
+                                        || fmt.name_in(lang).to_lowercase().contains(&query)
+                                });
+                                if !has_match {
+                                    continue;
+                                }
+                                any_fmt = true;
+                                let sel_fmt = r.format == fmt;
+                                let lbl = format!("{} (.{})", fmt.name_in(lang), fmt.ext());
+                                let resp = ui.selectable_label(sel_fmt, lbl);
+                                if sel_fmt && want_scroll {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                    ui.ctx().data_mut(|d| d.insert_temp(scroll_key, r.format));
+                                }
+                                if resp.clicked() && !sel_fmt {
+                                    r.format = fmt;
+                                    r.path = PathBuf::from(&r.path)
+                                        .with_extension(r.format.ext())
+                                        .to_string_lossy()
+                                        .to_string();
+                                    if let Some(first_t) =
+                                        RENDER_TEMPLATES.iter().find(|t| t.format == r.format)
+                                    {
+                                        apply_tmpl = Some(*first_t);
+                                    }
+                                }
+                            }
+                            if !any_fmt {
+                                ui.label(
+                                    egui::RichText::new(tr(
+                                        lang,
+                                        "Nenhum modelo corresponde ao filtro atual.",
+                                    ))
+                                    .small()
+                                    .weak(),
+                                );
+                            }
+                        });
+
+                    let right = &mut cols[1];
+                    right.label(egui::RichText::new(tr(lang, "Modelos")).strong());
+                    right.add_space(2.0);
                     egui::ScrollArea::vertical()
                         .id_salt("render_templates_scroll")
                         .max_height(list_h)
-                        .show(left, |ui| {
-                            let mut any = false;
-                            for fmt in RenderFormat::ALL {
-                                let matching: Vec<&RenderTemplate> = RENDER_TEMPLATES
-                                    .iter()
-                                    .filter(|t| t.format == fmt)
-                                    .filter(|t| {
-                                        if r.only_favorites && !favs.iter().any(|f| f == t.id) {
-                                            return false;
-                                        }
-                                        if query.is_empty() {
-                                            return true;
-                                        }
-                                        tr(lang, t.title).to_lowercase().contains(&query)
-                                            || t.title.to_lowercase().contains(&query)
-                                            || tr(lang, t.summary).to_lowercase().contains(&query)
-                                            || fmt.name_in(lang).to_lowercase().contains(&query)
-                                    })
-                                    .collect();
-                                if matching.is_empty() {
-                                    continue;
-                                }
-                                any = true;
+                        .show(right, |ui| {
+                            let show_all_fmts = !query.is_empty() || r.only_favorites;
+                            let matching: Vec<&RenderTemplate> = RENDER_TEMPLATES
+                                .iter()
+                                .filter(|t| show_all_fmts || t.format == r.format)
+                                .filter(|t| {
+                                    if r.only_favorites && !favs.iter().any(|f| f == t.id) {
+                                        return false;
+                                    }
+                                    if query.is_empty() {
+                                        return true;
+                                    }
+                                    tr(lang, t.title).to_lowercase().contains(&query)
+                                        || t.title.to_lowercase().contains(&query)
+                                        || tr(lang, t.summary).to_lowercase().contains(&query)
+                                        || t.format.name_in(lang).to_lowercase().contains(&query)
+                                })
+                                .collect();
+                            if matching.is_empty() {
                                 ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} (.{})",
-                                        fmt.name_in(lang),
-                                        fmt.ext()
+                                    egui::RichText::new(tr(
+                                        lang,
+                                        "Nenhum modelo corresponde ao filtro atual.",
                                     ))
                                     .small()
-                                    .strong()
-                                    .color(self.theme.accent),
+                                    .weak(),
                                 );
+                            } else {
                                 for t in matching {
                                     let is_fav = favs.iter().any(|f| f == t.id);
                                     let selected = r.template_id == t.id && r.format == t.format;
@@ -4970,118 +5073,65 @@ impl App {
                                         {
                                             toggle_fav = Some(t.id.to_string());
                                         }
-                                        if ui.selectable_label(selected, tr(lang, t.title)).clicked() {
+                                        if ui
+                                            .selectable_label(selected, tr(lang, t.title))
+                                            .clicked()
+                                        {
                                             apply_tmpl = Some(*t);
                                         }
                                     });
                                 }
-                                ui.add_space(4.0);
-                            }
-                            if !any {
-                                ui.label(
-                                    egui::RichText::new(tr(
-                                        lang,
-                                        "Nenhum modelo corresponde ao filtro atual.",
-                                    ))
-                                    .small()
-                                    .weak(),
-                                );
                             }
                         });
-                    if let Some(active_t) = RENDER_TEMPLATES.iter().find(|t| t.id == r.template_id)
-                    {
-                        left.separator();
-                        left.group(|ui| {
-                            ui.label(egui::RichText::new(tr(lang, active_t.title)).small().strong());
-                            ui.label(
-                                egui::RichText::new(tr(lang, active_t.summary))
-                                    .small()
-                                    .weak(),
-                            );
-                        });
+                });
+
+                if let Some(tmpl) = apply_tmpl {
+                    r.format = tmpl.format;
+                    r.template_id = tmpl.id.to_string();
+                    if tmpl.half_project {
+                        r.width = ((pw / 2) / 2).max(8) * 2;
+                        r.height = ((ph / 2) / 2).max(8) * 2;
+                    } else if let Some((tw, th)) = tmpl.resolution {
+                        r.width = tw;
+                        r.height = th;
+                    } else {
+                        r.width = pw;
+                        r.height = ph;
                     }
-
-                    // Coluna direita: Arquivo de saída, parâmetros de saída, intervalo e resumo
-                    let right = &mut cols[1];
-                    right.label(egui::RichText::new(tr(lang, "Destino e configurações")).strong());
-                    right.add_space(3.0);
-
-                    if let Some(tmpl) = apply_tmpl {
-                        r.format = tmpl.format;
-                        r.template_id = tmpl.id.to_string();
-                        if tmpl.half_project {
-                            r.width = ((pw / 2) / 2).max(8) * 2;
-                            r.height = ((ph / 2) / 2).max(8) * 2;
-                        } else if let Some((tw, th)) = tmpl.resolution {
-                            r.width = tw;
-                            r.height = th;
-                        } else {
-                            r.width = pw;
-                            r.height = ph;
-                        }
-                        r.quality = tmpl.quality;
-                        r.include_audio = tmpl.include_audio;
-                        r.wav_bits = tmpl.wav_bits;
-                        if tmpl.video_bitrate_kbps > 0 {
-                            r.video_bitrate_kbps = tmpl.video_bitrate_kbps;
-                        }
-                        if tmpl.audio_bitrate_kbps > 0 {
-                            r.audio_bitrate_kbps = tmpl.audio_bitrate_kbps;
-                        }
-                        r.path = PathBuf::from(&r.path)
-                            .with_extension(r.format.ext())
-                            .to_string_lossy()
-                            .to_string();
+                    r.quality = tmpl.quality;
+                    r.include_audio = tmpl.include_audio;
+                    r.wav_bits = tmpl.wav_bits;
+                    if tmpl.video_bitrate_kbps > 0 {
+                        r.video_bitrate_kbps = tmpl.video_bitrate_kbps;
                     }
+                    if tmpl.audio_bitrate_kbps > 0 {
+                        r.audio_bitrate_kbps = tmpl.audio_bitrate_kbps;
+                    }
+                    r.path = PathBuf::from(&r.path)
+                        .with_extension(r.format.ext())
+                        .to_string_lossy()
+                        .to_string();
+                }
 
-                    egui::Grid::new("rg_right").num_columns(2).show(right, |ui| {
-                        ui.label(tr(lang, "Formato"));
-                        let before = r.format;
-                        egui::ComboBox::from_id_salt("rfmt")
-                            .selected_text(r.format.name_in(lang))
-                            .show_ui(ui, |ui| {
-                                for f in RenderFormat::ALL {
-                                    ui.selectable_value(&mut r.format, f, f.name_in(lang));
-                                }
-                            });
-                        if before != r.format {
-                            r.path = PathBuf::from(&r.path)
-                                .with_extension(r.format.ext())
-                                .to_string_lossy()
-                                .to_string();
-                            if let Some(first_t) =
-                                RENDER_TEMPLATES.iter().find(|t| t.format == r.format)
-                            {
-                                r.template_id = first_t.id.to_string();
-                            }
-                        }
-                        ui.end_row();
+                if let Some(active_t) = RENDER_TEMPLATES.iter().find(|t| t.id == r.template_id) {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(tr(lang, active_t.title))
+                                .small()
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("— {}", tr(lang, active_t.summary)))
+                                .small()
+                                .weak(),
+                        );
+                    });
+                }
 
-                        ui.label(tr(lang, "Arquivo"));
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut r.path).desired_width(240.0));
-                            if ui
-                                .button("...")
-                                .on_hover_text(tr(lang, "Procurar destino"))
-                                .clicked()
-                            {
-                                let ext = r.format.ext();
-                                if let Some(p) = rfd::FileDialog::new()
-                                    .add_filter(ext.to_uppercase(), &[ext])
-                                    .set_file_name(
-                                        PathBuf::from(&r.path)
-                                            .file_name()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                            .unwrap_or_default(),
-                                    )
-                                    .save_file()
-                                {
-                                    r.path = p.to_string_lossy().to_string();
-                                }
-                            }
-                        });
-                        ui.end_row();
-
+                if r.customizing {
+                    ui.separator();
+                    egui::Grid::new("rg_custom").num_columns(2).show(ui, |ui| {
                         if !r.format.is_audio_only() {
                             ui.label(tr(lang, "Resolução"));
                             ui.horizontal(|ui| {
@@ -5157,53 +5207,63 @@ impl App {
                             });
                             ui.end_row();
                         }
-                        ui.label(tr(lang, "Intervalo"));
-                        ui.vertical(|ui| {
-                            ui.radio_value(
-                                &mut use_loop,
-                                false,
-                                tr_args(lang, "Projeto inteiro ({dur})", &[("dur", &fmt_dur)]),
-                            );
-                            let loop_str = fmt_loop.clone().unwrap_or_default();
-                            ui.add_enabled_ui(has_loop, |ui| {
-                                ui.radio_value(
-                                    &mut use_loop,
-                                    true,
-                                    tr_args(
-                                        lang,
-                                        "Somente a região de loop {range}",
-                                        &[("range", &loop_str)],
-                                    ),
-                                );
-                            });
-                        });
-                        ui.end_row();
                     });
+                }
 
-                    right.add_space(6.0);
-                    right.group(|ui| {
-                        ui.label(
-                            egui::RichText::new(tr(lang, "Resumo da saída"))
-                                .small()
-                                .strong(),
-                        );
-                        let video_line = if r.format.is_audio_only() {
-                            tr_args(lang, "Somente áudio • {sr} Hz", &[("sr", &sr)])
-                        } else {
-                            let fps_l = fps.label_in(lang);
+                ui.separator();
+                let est_bytes = estimate_render_bytes(
+                    r.format,
+                    est_secs,
+                    r.width,
+                    r.height,
+                    fps.as_f64(),
+                    sr,
+                    r.video_bitrate_kbps,
+                    r.audio_bitrate_kbps,
+                    r.include_audio,
+                    r.wav_bits,
+                    r.quality,
+                );
+                let human = neoveg_engine::media::format_bytes_human;
+                ui.horizontal_wrapped(|ui| {
+                    ui.radio_value(
+                        &mut use_loop,
+                        false,
+                        tr_args(lang, "Projeto inteiro ({dur})", &[("dur", &fmt_dur)]),
+                    );
+                    let loop_str = fmt_loop.clone().unwrap_or_default();
+                    ui.add_enabled_ui(has_loop, |ui| {
+                        ui.radio_value(
+                            &mut use_loop,
+                            true,
                             tr_args(
                                 lang,
-                                "{w}×{h} • {fps} • {frames} quadro(s) • {sr} Hz",
-                                &[
-                                    ("w", &r.width),
-                                    ("h", &r.height),
-                                    ("fps", &fps_l),
-                                    ("frames", &est_frames),
-                                    ("sr", &sr),
-                                ],
-                            )
-                        };
+                                "Somente a região de loop {range}",
+                                &[("range", &loop_str)],
+                            ),
+                        );
+                    });
+                });
+                ui.group(|ui| {
+                    let video_line = if r.format.is_audio_only() {
+                        tr_args(lang, "Somente áudio • {sr} Hz", &[("sr", &sr)])
+                    } else {
+                        let fps_l = fps.label_in(lang);
+                        tr_args(
+                            lang,
+                            "{w}×{h} • {fps} • {frames} quadro(s) • {sr} Hz",
+                            &[
+                                ("w", &r.width),
+                                ("h", &r.height),
+                                ("fps", &fps_l),
+                                ("frames", &est_frames),
+                                ("sr", &sr),
+                            ],
+                        )
+                    };
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(video_line).small());
+                        ui.separator();
                         ui.label(
                             egui::RichText::new(tr_args(
                                 lang,
@@ -5213,58 +5273,70 @@ impl App {
                             .small()
                             .weak(),
                         );
-                        if r.format == RenderFormat::AviMjpeg {
-                            ui.label(
-                                egui::RichText::new(tr(
-                                    lang,
-                                    "AVI Motion-JPEG é compatível com VLC e editores externos (acima de 1 GB usa as extensões OpenDML).",
-                                ))
-                                .small()
-                                .weak(),
-                            );
-                        } else if r.format.uses_windows_mf() {
-                            ui.label(
-                                egui::RichText::new(tr(
-                                    lang,
-                                    "Codificação acelerada via Windows Media Foundation (IMFSinkWriter).",
-                                ))
-                                .small()
-                                .weak(),
-                            );
-                        }
                     });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Tamanho estimado:"))
+                                .small()
+                                .weak(),
+                        );
+                        ui.label(
+                            egui::RichText::new(human(est_bytes))
+                                .small()
+                                .monospace()
+                                .strong(),
+                        );
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Espaço livre em disco:"))
+                                .small()
+                                .weak(),
+                        );
+                        let low_disk = free_disk.is_some_and(|fb| est_bytes > fb);
+                        let free_s = free_disk.map(human).unwrap_or_else(|| "—".to_string());
+                        ui.label(egui::RichText::new(free_s).small().monospace().color(
+                            if low_disk {
+                                self.theme.offline_fg
+                            } else {
+                                self.theme.text_primary
+                            },
+                        ));
+                    });
+                });
 
-                    right.add_space(6.0);
-                    right.horizontal_wrapped(|ui| {
-                        if icons::icon_button(
-                            ui,
-                            Icon::RenderClapper,
-                            Some(tr(lang, "Renderizar")),
-                            false,
-                            true,
-                            &self.theme,
-                        )
-                        .clicked()
-                        {
-                            start = true;
-                        }
-                        if icons::icon_button(
-                            ui,
-                            Icon::EncoderQueue,
-                            Some(tr(lang, "Enviar para o Encoder")),
-                            false,
-                            true,
-                            &self.theme,
-                        )
-                        .on_hover_text(tr(lang, "Adiciona a timeline à fila em lote do Neoveg Encoder"))
-                        .clicked()
-                        {
-                            send_encoder = true;
-                        }
-                        if ui.button(tr(lang, "Cancelar")).clicked() {
-                            cancel_btn = true;
-                        }
-                    });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if icons::icon_button(
+                        ui,
+                        Icon::RenderClapper,
+                        Some(tr(lang, "Renderizar")),
+                        false,
+                        true,
+                        &self.theme,
+                    )
+                    .clicked()
+                    {
+                        start = true;
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Icon::EncoderQueue,
+                        Some(tr(lang, "Enviar para o Encoder")),
+                        false,
+                        true,
+                        &self.theme,
+                    )
+                    .on_hover_text(tr(
+                        lang,
+                        "Adiciona a timeline à fila em lote do Neoveg Encoder",
+                    ))
+                    .clicked()
+                    {
+                        send_encoder = true;
+                    }
+                    if ui.button(tr(lang, "Cancelar")).clicked() {
+                        cancel_btn = true;
+                    }
                 });
             });
 
@@ -5828,156 +5900,80 @@ impl App {
             ]);
         }
         win.show(ctx, |ui| {
-            // altura real da janela (a padrão só vale na primeira abertura):
-            // com a janela maior, o corpo crescia pouco e sobrava uma faixa
-            // vazia embaixo do rodapé
-            let body_h = prefs_body_height(ui.available_height(), 40.0 + extra_wrap, body_h);
-            let nav_inner_h = (body_h - 10.0).max(90.0);
+            // Abas horizontais no alto, como na janela Preferences do VEGAS Pro.
             let avail_w = ui.available_width().max(260.0);
-            let side_by_side = avail_w >= 480.0;
-
-            if side_by_side {
-                let side_w = (avail_w * 0.25).clamp(140.0, 185.0);
-                let right_w = (avail_w - side_w - 14.0).max(260.0);
-                ui.horizontal_top(|ui| {
-                    // Painel esquerdo: lista de categorias em moldura escura/contrastada
-                    egui::Frame::NONE
-                        .fill(theme.extreme_bg)
-                        .stroke(Stroke::new(1.0_f32, theme.border))
-                        .corner_radius(3.0)
-                        .inner_margin(egui::Margin::same(4))
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                let visuals = ui.visuals_mut();
+                visuals.selection.bg_fill = sel_bg;
+                visuals.selection.stroke = Stroke::NONE;
+                visuals.widgets.hovered.bg_fill = theme.widget_hover_bg;
+                visuals.widgets.hovered.weak_bg_fill = theme.widget_hover_bg;
+                for cat in PrefsCategory::ALL {
+                    let selected = self.dlg.prefs_tab == cat;
+                    let fg = if selected { sel_fg } else { theme.text_primary };
+                    let resp = ui.selectable_label(
+                        selected,
+                        egui::RichText::new(cat.label_in(lang)).small().color(fg),
+                    );
+                    if resp.clicked() {
+                        self.dlg.prefs_tab = cat;
+                    }
+                }
+            });
+            ui.add_space(2.0);
+            // altura real da janela (a padrão só vale na primeira abertura):
+            // com a janela maior, o corpo acompanha sem deixar faixa vazia embaixo
+            let body_h = prefs_body_height(ui.available_height(), 42.0 + extra_wrap, body_h);
+            let inner_w = (avail_w - 22.0).max(220.0);
+            egui::Frame::NONE
+                .fill(theme.window_fill)
+                .stroke(Stroke::new(1.0_f32, theme.border))
+                .corner_radius(2.0)
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_min_width(inner_w);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("prefs_body_scroll", self.dlg.prefs_tab as u8))
+                        .max_height((body_h - 14.0).max(90.0))
                         .show(ui, |ui| {
-                            ui.set_width(side_w);
-                            ui.set_min_height(nav_inner_h);
-                            egui::ScrollArea::vertical()
-                                .id_salt("prefs_nav_scroll")
-                                .max_height(nav_inner_h)
-                                .show(ui, |ui| {
-                                    ui.with_layout(
-                                        egui::Layout::top_down_justified(egui::Align::LEFT),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.y = 1.0;
-                                            let visuals = ui.visuals_mut();
-                                            visuals.selection.bg_fill = sel_bg;
-                                            visuals.selection.stroke = Stroke::NONE;
-                                            visuals.widgets.hovered.bg_fill = theme.widget_hover_bg;
-                                            visuals.widgets.hovered.weak_bg_fill =
-                                                theme.widget_hover_bg;
-                                            for cat in PrefsCategory::ALL {
-                                                let selected = self.dlg.prefs_tab == cat;
-                                                let fg = if selected {
-                                                    sel_fg
-                                                } else {
-                                                    theme.text_primary
-                                                };
-                                                let resp = ui.selectable_label(
-                                                    selected,
-                                                    egui::RichText::new(cat.label_in(lang))
-                                                        .color(fg),
-                                                );
-                                                if resp.clicked() {
-                                                    self.dlg.prefs_tab = cat;
-                                                }
-                                            }
-                                        },
-                                    );
-                                });
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.set_min_width(inner_w - 6.0);
+                            ui.set_max_width(inner_w - 6.0);
+                            let ctx_refs = PrefsFormContext {
+                                lang,
+                                theme: &theme,
+                                tab: self.dlg.prefs_tab,
+                                rec_workers,
+                                active_sr,
+                                audio_device: &audio_device,
+                                audio_sr,
+                                audio_error: audio_error.as_deref(),
+                                render_favs_count,
+                                pref_path: &pref_path_text,
+                                layout_dir: &layout_dir_text,
+                                label_w: if avail_w >= 480.0 {
+                                    (inner_w * 0.36).clamp(150.0, 235.0)
+                                } else {
+                                    0.0
+                                },
+                            };
+                            render_prefs_category(
+                                ui,
+                                &ctx_refs,
+                                &mut draft,
+                                &mut PrefsActions {
+                                    live_theme: &mut live_theme,
+                                    live_language: &mut live_language,
+                                    live_layout_preview: &mut live_layout_preview,
+                                    clear_cache_now: &mut clear_cache_now,
+                                    clear_recents_now: &mut clear_recents_now,
+                                    open_shortcuts: &mut open_shortcuts,
+                                    apply_defaults_to_session: &mut apply_defaults_to_session,
+                                },
+                            );
                         });
-
-                    ui.add_space(6.0);
-
-                    // Painel direito: opções da categoria selecionada
-                    let inner_right_w = (right_w - 14.0).max(200.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(right_w);
-                        ui.set_max_width(right_w);
-                        egui::ScrollArea::vertical()
-                            .id_salt(("prefs_body_scroll", self.dlg.prefs_tab as u8))
-                            .max_height(body_h)
-                            .show(ui, |ui| {
-                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                ui.set_min_width(inner_right_w);
-                                ui.set_max_width(inner_right_w);
-                                let ctx_refs = PrefsFormContext {
-                                    lang,
-                                    theme: &theme,
-                                    tab: self.dlg.prefs_tab,
-                                    rec_workers,
-                                    active_sr,
-                                    audio_device: &audio_device,
-                                    audio_sr,
-                                    audio_error: audio_error.as_deref(),
-                                    render_favs_count,
-                                    pref_path: &pref_path_text,
-                                    layout_dir: &layout_dir_text,
-                                    label_w: (right_w * 0.42).clamp(150.0, 225.0),
-                                };
-                                render_prefs_category(
-                                    ui,
-                                    &ctx_refs,
-                                    &mut draft,
-                                    &mut PrefsActions {
-                                        live_theme: &mut live_theme,
-                                        live_language: &mut live_language,
-                                        live_layout_preview: &mut live_layout_preview,
-                                        clear_cache_now: &mut clear_cache_now,
-                                        clear_recents_now: &mut clear_recents_now,
-                                        open_shortcuts: &mut open_shortcuts,
-                                        apply_defaults_to_session: &mut apply_defaults_to_session,
-                                    },
-                                );
-                            });
-                    });
                 });
-            } else {
-                egui::ScrollArea::horizontal()
-                    .id_salt("prefs_nav_compact")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for cat in PrefsCategory::ALL {
-                                let selected = self.dlg.prefs_tab == cat;
-                                if ui.selectable_label(selected, cat.label_in(lang)).clicked() {
-                                    self.dlg.prefs_tab = cat;
-                                }
-                            }
-                        });
-                    });
-                ui.separator();
-                let compact_h = (body_h - 34.0).max(80.0);
-                egui::ScrollArea::vertical()
-                    .id_salt(("prefs_body_scroll_compact", self.dlg.prefs_tab as u8))
-                    .max_height(compact_h)
-                    .show(ui, |ui| {
-                        let ctx_refs = PrefsFormContext {
-                            lang,
-                            theme: &theme,
-                            tab: self.dlg.prefs_tab,
-                            rec_workers,
-                            active_sr,
-                            audio_device: &audio_device,
-                            audio_sr,
-                            audio_error: audio_error.as_deref(),
-                            render_favs_count,
-                            pref_path: &pref_path_text,
-                            layout_dir: &layout_dir_text,
-                            label_w: 0.0,
-                        };
-                        render_prefs_category(
-                            ui,
-                            &ctx_refs,
-                            &mut draft,
-                            &mut PrefsActions {
-                                live_theme: &mut live_theme,
-                                live_language: &mut live_language,
-                                live_layout_preview: &mut live_layout_preview,
-                                clear_cache_now: &mut clear_cache_now,
-                                clear_recents_now: &mut clear_recents_now,
-                                open_shortcuts: &mut open_shortcuts,
-                                apply_defaults_to_session: &mut apply_defaults_to_session,
-                            },
-                        );
-                    });
-            }
 
             ui.separator();
             ui.horizontal_wrapped(|ui| {
@@ -8540,6 +8536,65 @@ mod prefs_body_height_tests {
     }
 }
 
+/// Estima o tamanho final do arquivo renderizado (em bytes) a partir do
+/// formato, duração, resolução, taxa de quadros, taxa de bits e opções de áudio.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn estimate_render_bytes(
+    format: RenderFormat,
+    secs: f64,
+    w: u32,
+    h: u32,
+    fps: f64,
+    sample_rate: u32,
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
+    include_audio: bool,
+    wav_bits: WavBits,
+    quality: u8,
+) -> u64 {
+    if !secs.is_finite() || secs <= 0.0 {
+        return 0;
+    }
+    let fps_ok = if fps.is_finite() && fps > 0.0 {
+        fps.clamp(1.0, 240.0)
+    } else {
+        30.0
+    };
+    let bps_pcm = match wav_bits {
+        WavBits::Pcm16 => 2.0_f64,
+        WavBits::Pcm24 => 3.0_f64,
+        WavBits::Float32 => 4.0_f64,
+    };
+    let audio_bytes_per_sec = if format.is_audio_only() || include_audio {
+        if format.uses_audio_bitrate() {
+            f64::from(audio_bitrate_kbps.max(64)) * 1_000.0 / 8.0
+        } else {
+            f64::from(sample_rate.max(8_000)) * 2.0 * bps_pcm
+        }
+    } else {
+        0.0
+    };
+    let video_bytes_per_sec = if format.is_audio_only() {
+        0.0
+    } else if format.uses_video_bitrate() {
+        f64::from(video_bitrate_kbps.max(500)) * 1_000.0 / 8.0
+    } else if format.uses_jpeg_quality() {
+        let q = f64::from(quality.clamp(30, 100)) / 100.0;
+        let bpp = 0.08 + 0.28 * q * q;
+        f64::from(w.max(16)) * f64::from(h.max(16)) * bpp * fps_ok
+    } else if matches!(format, RenderFormat::AviUncompressed | RenderFormat::Y4m) {
+        f64::from(w.max(16)) * f64::from(h.max(16)) * 3.0 * fps_ok
+    } else {
+        f64::from(w.max(16)) * f64::from(h.max(16)) * 0.45 * fps_ok
+    };
+    let total = (video_bytes_per_sec + audio_bytes_per_sec) * secs;
+    if total.is_finite() && total > 0.0 {
+        total.min(u64::MAX as f64).round() as u64
+    } else {
+        0
+    }
+}
+
 /// Altura da lista de formatos e modelos do Renderizar como: o que sobra na
 /// coluna menos o resumo do modelo ativo (~64 px), nunca menos de 180 px.
 fn render_template_list_height(available: f32) -> f32 {
@@ -8552,7 +8607,8 @@ fn render_template_list_height(available: f32) -> f32 {
 
 #[cfg(test)]
 mod render_list_height_tests {
-    use super::render_template_list_height;
+    use super::{estimate_render_bytes, render_template_list_height};
+    use crate::render::{RenderFormat, WavBits};
 
     #[test]
     fn lista_do_renderizar_como_cresce_com_a_janela() {
@@ -8560,6 +8616,41 @@ mod render_list_height_tests {
         assert_eq!(render_template_list_height(100.0), 180.0);
         assert_eq!(render_template_list_height(f32::INFINITY), 280.0);
         assert_eq!(render_template_list_height(f32::NAN), 280.0);
+    }
+
+    #[test]
+    fn estimativa_de_tamanho_renderizar_como_sem_panico() {
+        // WAV 16 bits estéreo 48 kHz por 10 s = 1_920_000 bytes
+        let wav = estimate_render_bytes(
+            RenderFormat::Wav,
+            10.0,
+            1920,
+            1080,
+            30.0,
+            48_000,
+            0,
+            0,
+            true,
+            WavBits::Pcm16,
+            90,
+        );
+        assert_eq!(wav, 1_920_000);
+        assert_eq!(
+            estimate_render_bytes(
+                RenderFormat::Wav,
+                f64::NAN,
+                0,
+                0,
+                f64::NAN,
+                0,
+                0,
+                0,
+                true,
+                WavBits::Pcm16,
+                90,
+            ),
+            0
+        );
     }
 }
 

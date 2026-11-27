@@ -346,8 +346,8 @@ impl App {
                 .show(ui, |ui| {
                     if active_sec.show_wheels() {
                         ui.horizontal_wrapped(|ui| {
-                            // 3 rodas tonais com anel cromático e barra vertical + pad cromático 2D
-                            let wheel_d = 92.0_f32;
+                            // 4 rodas tonais (Lift, Gamma, Gain, Offset) + pad Temp × Tinta + Histograma
+                            let wheel_d = 78.0_f32;
                             if let Some(spec) = specs.first() {
                                 modified |= draw_tone_wheel(
                                     ui,
@@ -393,6 +393,32 @@ impl App {
                                     &self.theme,
                                 );
                             }
+                            let mut offset_lum = fx_work
+                                .color_grade
+                                .as_ref()
+                                .map(|c| c.rl_offset[3])
+                                .unwrap_or(0.0);
+                            if draw_tone_wheel(
+                                ui,
+                                lang,
+                                "tone_offset",
+                                tr(lang, "Offset"),
+                                &mut offset_lum,
+                                -1.0,
+                                1.0,
+                                0.0,
+                                Color32::from_rgb(185, 130, 235),
+                                wheel_d,
+                                &self.theme,
+                            ) {
+                                let cg = fx_work.color_grade.get_or_insert_with(Default::default);
+                                cg.rl_offset[3] = offset_lum;
+                                cg.sanitize();
+                                if cg.is_identity() {
+                                    fx_work.color_grade = None;
+                                }
+                                modified = true;
+                            }
                             let mut temp = vals[3];
                             let mut tint = vals[4];
                             if draw_balance_pad(
@@ -411,14 +437,15 @@ impl App {
                             if let Some(sc_tex) = &self.scopes_tex {
                                 ui.group(|ui| {
                                     ui.vertical(|ui| {
+                                        ui.set_min_width(114.0);
                                         ui.label(
                                             egui::RichText::new(tr(lang, "Histograma"))
                                                 .small()
                                                 .weak(),
                                         );
                                         let s = sc_tex[0].size_vec2();
-                                        let w = 132.0_f32;
-                                        let h = (w * s.y / s.x.max(1.0)).clamp(60.0, 96.0);
+                                        let w = 114.0_f32;
+                                        let h = (w * s.y / s.x.max(1.0)).clamp(60.0, 82.0);
                                         ui.image((sc_tex[0].id(), vec2(w, h)));
                                     });
                                 });
@@ -667,9 +694,11 @@ fn draw_tone_wheel(
     };
 
     ui.group(|ui| {
-        ui.vertical_centered(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width((d + 22.0).max(94.0));
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(title).small().strong());
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.add(egui::Label::new(egui::RichText::new(title).small().strong()).truncate());
                 let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", &title)]);
                 let is_modified = (cur - def).abs() > 1e-4;
                 if icons::icon_button_named(
@@ -870,10 +899,12 @@ fn draw_balance_pad(
         0.0
     };
     ui.group(|ui| {
-        ui.vertical_centered(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width((d + 12.0).max(86.0));
             let title = tr(lang, "Temp × Tinta");
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(title).small().strong());
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.add(egui::Label::new(egui::RichText::new(title).small().strong()).truncate());
                 let reset_lbl = tr_args(lang, "Redefinir {name}", &[("name", &title)]);
                 let is_modified = cur_t.abs() > 1e-4 || cur_n.abs() > 1e-4;
                 if icons::icon_button_named(

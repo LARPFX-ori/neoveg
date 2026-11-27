@@ -432,6 +432,8 @@ pub struct App {
     pub(crate) focused_pane: Option<crate::dock::DockPane>,
     /// Loja de scripts e extensões (aba Loja de scripts).
     pub(crate) store: crate::store_panel::StoreState,
+    /// Cache recente do espaço livre em disco (para *Record Time* na barra de status e Renderizar).
+    pub(crate) status_disk_cache: Option<(Instant, PathBuf, Option<u64>)>,
 }
 
 impl Deref for App {
@@ -672,6 +674,7 @@ impl App {
             project_media: crate::project_media::ProjectMediaState::default(),
             focused_pane: None,
             store: crate::store_panel::StoreState::default(),
+            status_disk_cache: None,
         };
         app.sync_floating_docks();
         app.ram_preview =
@@ -5097,6 +5100,17 @@ impl App {
                 );
             }
             let wide = ui.available_width() >= 680.0;
+            let disk_dir = self
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.explorer_dir.clone());
+            let free_bytes = if wide {
+                self.cached_free_disk_bytes(&disk_dir)
+            } else {
+                None
+            };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let s = &self.project.settings;
                 let file_name = self
@@ -5117,7 +5131,27 @@ impl App {
                 let ms_s = format!("{:.0}", self.preview_ms);
                 let (ram_used_mb, ram_cap_mb) =
                     format_ram_budget_mb(self.ram_preview.bytes_used, self.prefs.ram_preview_mb);
+                let rec_ch: u32 = if self.master_mono { 1 } else { 2 };
                 if wide {
+                    if let Some(fb) = free_bytes {
+                        let rec_t = format_record_time(fb, s.sample_rate, rec_ch);
+                        let ch_n = rec_ch.to_string();
+                        ui.label(
+                            egui::RichText::new(tr_args(
+                                lang,
+                                "Tempo de gravação ({ch} ch): {t}",
+                                &[("ch", &ch_n), ("t", &rec_t)],
+                            ))
+                            .small()
+                            .monospace()
+                            .color(self.theme.text_muted),
+                        )
+                        .on_hover_text(tr(
+                            lang,
+                            "Tempo de gravação de áudio estimado pelo espaço livre no disco",
+                        ));
+                        ui.separator();
+                    }
                     let used_s = ram_used_mb.to_string();
                     let cap_s = ram_cap_mb.to_string();
                     ui.label(
@@ -5220,6 +5254,18 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Espaço livre em disco em cache (atualiza no máximo a cada 5 s ou ao trocar de pasta).
+    pub(crate) fn cached_free_disk_bytes(&mut self, dir: &std::path::Path) -> Option<u64> {
+        if let Some((at, cached_dir, val)) = &self.status_disk_cache {
+            if cached_dir == dir && at.elapsed().as_secs() < 5 {
+                return *val;
+            }
+        }
+        let val = neoveg_engine::media::free_disk_bytes(dir);
+        self.status_disk_cache = Some((Instant::now(), dir.to_path_buf(), val));
+        val
     }
 
     pub(crate) fn snapshot_dialog(&mut self) {
@@ -6762,6 +6808,19 @@ fn to_egui_key(k: ShortcutKey) -> Key {
     }
 }
 
+/// Formata o tempo estimado de gravação de áudio PCM 16 bits (como "Record Time"
+/// na barra de status do VEGAS Pro) em `H:MM:SS`.
+pub(crate) fn format_record_time(free_bytes: u64, sample_rate: u32, channels: u32) -> String {
+    let bps = u64::from(sample_rate.max(8_000))
+        .saturating_mul(u64::from(channels.clamp(1, 8)))
+        .saturating_mul(2);
+    let secs = (free_bytes / bps.max(1)).min(9999 * 3600 + 59 * 60 + 59);
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{h}:{m:02}:{s:02}")
+}
+
 /// Converte o uso atual do cache de Prévia em RAM (`used_bytes`) e o orçamento
 /// configurado (`budget_mb`) em megabytes arredondados com aritmética saturada (§0.4).
 pub(crate) fn format_ram_budget_mb(used_bytes: usize, budget_mb: u32) -> (u32, u32) {
@@ -6778,6 +6837,14 @@ mod status_bar_tests {
         assert_eq!(format_ram_budget_mb(0, 256), (0, 256));
         assert_eq!(format_ram_budget_mb(50 * 1024 * 1024, 512), (50, 512));
         assert_eq!(format_ram_budget_mb(usize::MAX, 1024).1, 1024);
+    }
+
+    #[test]
+    fn format_record_time_calcula_horas_sem_panico() {
+        // 48 kHz * 2 ch * 2 bytes = 192_000 bytes/s -> 3661 s = 1:01:01
+        assert_eq!(format_record_time(192_000 * 3661, 48_000, 2), "1:01:01");
+        assert_eq!(format_record_time(0, 0, 0), "0:00:00");
+        assert_eq!(format_record_time(u64::MAX, 48_000, 2), "9999:59:59");
     }
 }
 

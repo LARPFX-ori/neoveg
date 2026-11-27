@@ -3537,6 +3537,26 @@ impl App {
                 self.theme.tl_header_idle
             };
             painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, bg);
+            if self.theme.classic_bevel {
+                let hi = Color32::from_rgba_unmultiplied(255, 255, 255, 165);
+                let lo = Color32::from_rgba_unmultiplied(64, 64, 68, 150);
+                let br = r.shrink2(vec2(0.0, 0.5));
+                painter.line_segment(
+                    [pos2(br.left(), br.top()), pos2(br.right(), br.top())],
+                    Stroke::new(1.0_f32, hi),
+                );
+                painter.line_segment(
+                    [pos2(br.left(), br.top()), pos2(br.left(), br.bottom())],
+                    Stroke::new(1.0_f32, hi),
+                );
+                painter.line_segment(
+                    [
+                        pos2(br.left(), br.bottom() - 1.0),
+                        pos2(br.right(), br.bottom() - 1.0),
+                    ],
+                    Stroke::new(1.0_f32, lo),
+                );
+            }
             let use_gutter = h >= 42.0;
             let gutter_col = shade(
                 self.track_rgb(track.color),
@@ -3811,16 +3831,42 @@ impl App {
                     icons::paint_inline(ui, track_icon, 14.0, &self.theme);
                 }
                 if is_folder {
-                    let toggle_lbl = if folder_collapsed { ">" } else { "v" };
-                    if ui
-                        .small_button(toggle_lbl)
-                        .on_hover_text(if folder_collapsed {
-                            "Expandir pasta de trilhas"
+                    let tip = if folder_collapsed {
+                        tr(lang, "Expandir pasta de trilhas")
+                    } else {
+                        tr(lang, "Recolher pasta de trilhas")
+                    };
+                    let (tri_r, tri_resp) =
+                        ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                    tri_resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
+                    });
+                    if ui.is_rect_visible(tri_r) {
+                        if tri_resp.hovered() {
+                            ui.painter()
+                                .rect_filled(tri_r, 2.0, self.theme.widget_hover_bg);
+                        }
+                        let c = tri_r.center();
+                        let pts = if folder_collapsed {
+                            vec![
+                                pos2(c.x - 2.5, c.y - 4.0),
+                                pos2(c.x + 3.5, c.y),
+                                pos2(c.x - 2.5, c.y + 4.0),
+                            ]
                         } else {
-                            "Recolher pasta de trilhas"
-                        })
-                        .clicked()
-                    {
+                            vec![
+                                pos2(c.x - 4.0, c.y - 2.5),
+                                pos2(c.x + 4.0, c.y - 2.5),
+                                pos2(c.x, c.y + 3.5),
+                            ]
+                        };
+                        ui.painter().add(Shape::convex_polygon(
+                            pts,
+                            self.theme.text_primary,
+                            Stroke::NONE,
+                        ));
+                    }
+                    if tri_resp.on_hover_text(tip).clicked() {
                         self.session.toggle_track_folder(ti);
                         self.sync_status_from_session();
                     }
@@ -3880,7 +3926,7 @@ impl App {
                         if btns.mute {
                             btns_w += 22.0;
                         }
-                        if btns.solo && !is_folder {
+                        if btns.solo {
                             btns_w += 22.0;
                         }
                         if btns.fx && !is_folder {
@@ -3930,7 +3976,6 @@ impl App {
                 }
                 if show_btns
                     && btns.solo
-                    && !is_folder
                     && ui
                         .selectable_label(t.solo, "S")
                         .on_hover_text(tr(lang, "Solo (X)"))
@@ -4237,7 +4282,12 @@ impl App {
                             |ui| {
                                 ui.set_min_width(150.0);
                                 for b in BlendMode::ALL {
-                                    ui.selectable_value(&mut t.blend, b, b.name_in(lang));
+                                    if ui.selectable_label(t.blend == b, b.name_in(lang)).clicked()
+                                    {
+                                        t.blend = b;
+                                        changed_track = true;
+                                        ui.memory_mut(|m| m.close_popup());
+                                    }
                                 }
                             },
                         );
@@ -4427,8 +4477,9 @@ impl App {
             {
                 self.tl.latch_hold = None;
             }
-            // medidor de nível (áudio / entrada armada durante gravação)
-            if kind == TrackKind::Audio {
+            // medidor de nível (áudio / entrada armada durante gravação), com escala
+            // graduada em dB quando a trilha tem altura suficiente (como no VEGAS Pro)
+            if kind == TrackKind::Audio && !is_folder {
                 let rec_lv = if self.project.tracks[ti].record_armed {
                     self.recording_peaks.get(&tid).copied()
                 } else {
@@ -7828,7 +7879,8 @@ impl App {
                 lane,
                 0.0,
                 if track_is_folder {
-                    shade(self.track_rgb(self.project.tracks[ti].color), 0.32)
+                    // No VEGAS Pro, a linha de um grupo de trilhas na timeline fica vazia.
+                    self.theme.tl_bg
                 } else if selected {
                     self.theme.tl_lane_even
                 } else {
@@ -8403,23 +8455,34 @@ impl App {
                             let hovering_gain = pointer_pos.is_some_and(|hp| {
                                 (hp.y - gy).abs() <= 7.5 && hp.x >= x0 && hp.x <= x1
                             });
-                            let thick = if dragging_gain || hovering_gain {
-                                4.5_f32
+                            let adjusted_gain = e.gain_db.abs() > 0.05;
+                            let draw_y = if dragging_gain || hovering_gain || adjusted_gain {
+                                gy
                             } else {
-                                3.0_f32
+                                // Em 0 dB sem hover, fica na borda superior para não cortar o título do evento.
+                                (r.top() + 1.5).min(r.bottom() - 1.5)
                             };
+                            let thick = if dragging_gain || hovering_gain {
+                                4.0_f32
+                            } else if adjusted_gain {
+                                2.5_f32
+                            } else {
+                                1.5_f32
+                            };
+                            if dragging_gain || hovering_gain || adjusted_gain {
+                                painter.line_segment(
+                                    [pos2(x0, draw_y), pos2(x1, draw_y)],
+                                    Stroke::new(thick + 2.0, backing_col),
+                                );
+                            }
                             painter.line_segment(
-                                [pos2(x0, gy), pos2(x1, gy)],
-                                Stroke::new(thick + 2.0, backing_col),
-                            );
-                            painter.line_segment(
-                                [pos2(x0, gy), pos2(x1, gy)],
+                                [pos2(x0, draw_y), pos2(x1, draw_y)],
                                 Stroke::new(thick, self.theme.tl_gain_line),
                             );
-                            if dragging_gain || hovering_gain || e.gain_db.abs() > 0.05 {
+                            if dragging_gain || hovering_gain || adjusted_gain {
                                 painter.rect_filled(
                                     Rect::from_center_size(
-                                        pos2((x0 + x1) * 0.5, gy),
+                                        pos2((x0 + x1) * 0.5, draw_y),
                                         vec2(18.0, 5.5),
                                     ),
                                     2.5,
@@ -8452,28 +8515,38 @@ impl App {
                             let hovering_op = pointer_pos.is_some_and(|hp| {
                                 (hp.y - oy).abs() <= 7.5 && hp.x >= x0 && hp.x <= x1
                             });
+                            let adjusted_op = (1.0 - e.opacity).abs() > 0.005;
+                            let draw_y = if dragging_op || hovering_op || adjusted_op {
+                                oy
+                            } else {
+                                (r.top() + 1.5).min(r.bottom() - 1.5)
+                            };
                             let op_col = if self.theme.dark_mode {
                                 Color32::from_rgb(95, 185, 255)
                             } else {
                                 Color32::from_rgb(20, 105, 205)
                             };
                             let thick = if dragging_op || hovering_op {
-                                4.5_f32
+                                4.0_f32
+                            } else if adjusted_op {
+                                2.5_f32
                             } else {
-                                3.0_f32
+                                1.5_f32
                             };
+                            if dragging_op || hovering_op || adjusted_op {
+                                painter.line_segment(
+                                    [pos2(x0, draw_y), pos2(x1, draw_y)],
+                                    Stroke::new(thick + 2.0, backing_col),
+                                );
+                            }
                             painter.line_segment(
-                                [pos2(x0, oy), pos2(x1, oy)],
-                                Stroke::new(thick + 2.0, backing_col),
-                            );
-                            painter.line_segment(
-                                [pos2(x0, oy), pos2(x1, oy)],
+                                [pos2(x0, draw_y), pos2(x1, draw_y)],
                                 Stroke::new(thick, op_col),
                             );
-                            if dragging_op || hovering_op || (1.0 - e.opacity).abs() > 0.005 {
+                            if dragging_op || hovering_op || adjusted_op {
                                 painter.rect_filled(
                                     Rect::from_center_size(
-                                        pos2((x0 + x1) * 0.5, oy),
+                                        pos2((x0 + x1) * 0.5, draw_y),
                                         vec2(18.0, 5.5),
                                     ),
                                     2.5,
