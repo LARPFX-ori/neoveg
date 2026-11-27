@@ -3221,5 +3221,7 @@
   "Silenciar": "Silenciar",
   "Inverter fase": "Inverter fase",
   "Modo de composição: {mode}": "Modo de composição: {mode}",
-  "Entrada": "Entrada"
+  "Entrada": "Entrada",
+  "Duplo clique no arquivo de mídia carrega no Trimmer em vez das trilhas": "Duplo clique no arquivo de mídia carrega no Trimmer em vez das trilhas",
+  "Duplo clique: abrir no Trimmer": "Duplo clique: abrir no Trimmer"
 }

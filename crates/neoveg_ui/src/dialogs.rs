@@ -7057,6 +7057,13 @@ fn prefs_general(
             ),
         );
         ui.checkbox(
+            &mut draft.double_click_loads_trimmer,
+            tr(
+                lang,
+                "Duplo clique no arquivo de mídia carrega no Trimmer em vez das trilhas",
+            ),
+        );
+        ui.checkbox(
             &mut draft.always_draw_marker_lines,
             tr(lang, "Desenhar sempre as linhas de marcadores na timeline"),
         );

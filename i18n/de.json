@@ -3221,5 +3221,7 @@
   "Silenciar": "Stumm",
   "Inverter fase": "Phase umkehren",
   "Modo de composição: {mode}": "Compositing-Modus: {mode}",
-  "Entrada": "Eingang"
+  "Entrada": "Eingang",
+  "Duplo clique no arquivo de mídia carrega no Trimmer em vez das trilhas": "Doppelklick auf eine Mediendatei lädt sie in den Trimmer statt auf die Spuren",
+  "Duplo clique: abrir no Trimmer": "Doppelklick: im Trimmer öffnen"
 }
