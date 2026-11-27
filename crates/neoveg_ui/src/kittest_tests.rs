@@ -208,7 +208,7 @@ fn kittest_mixer_barramentos_auxiliares_e_taxa_reproducao() {
     assert_eq!(harness.state().dock_tab, DockTab::Mixer);
     assert!(harness.state().project.audio_buses.is_empty());
 
-    harness.get_by_label("＋ Barramento").click();
+    harness.get_by_label("Inserir barramento").click();
     harness.run_steps(2);
     assert_eq!(harness.state().project.audio_buses.len(), 1);
     assert_eq!(harness.state().project.audio_buses[0].name, "Bus A");
