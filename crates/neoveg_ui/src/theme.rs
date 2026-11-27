@@ -149,6 +149,9 @@ pub struct ThemeColors {
     pub tl_event_body_k: f32,
     /// Fator da cor da trilha na barra de nome do evento.
     pub tl_event_header_k: f32,
+    /// Chanfros 3D sutis nos cabeçalhos e painéis, como nos temas antigos
+    /// (Clássico v1–v7, Claro XP v8 e Prata v10–v14).
+    pub classic_bevel: bool,
 }
 
 pub fn palette(id: ThemeId) -> ThemeColors {
@@ -168,11 +171,11 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(176, 180, 190),
             border: Color32::from_rgb(58, 58, 58),
             accent: Color32::from_rgb(120, 200, 255),
-            timecode_fg: Color32::from_rgb(120, 232, 145),
+            timecode_fg: Color32::from_rgb(228, 232, 238),
             offline_fg: Color32::from_rgb(245, 130, 90),
             tl_bg: Color32::from_rgb(34, 34, 34),
             tl_header_bg: Color32::from_rgb(34, 34, 34),
-            tl_header_sel: Color32::from_rgb(46, 46, 46),
+            tl_header_sel: Color32::from_rgb(50, 66, 86),
             tl_header_idle: Color32::from_rgb(36, 36, 36),
             tl_loop_bar: Color32::from_rgb(28, 28, 28),
             tl_marker_bar: Color32::from_rgb(30, 30, 30),
@@ -197,6 +200,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::from_rgb(34, 34, 34),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
         ThemeId::VegasModerno => ThemeColors {
             // Geração 23/2026: cinza neutro 40 em painéis, régua e faixas,
@@ -213,11 +217,11 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(168, 172, 180),
             border: Color32::from_rgb(58, 58, 58),
             accent: Color32::from_rgb(84, 184, 255),
-            timecode_fg: Color32::from_rgb(112, 232, 152),
+            timecode_fg: Color32::from_rgb(232, 236, 242),
             offline_fg: Color32::from_rgb(245, 118, 86),
             tl_bg: Color32::from_rgb(40, 40, 40),
             tl_header_bg: Color32::from_rgb(40, 40, 40),
-            tl_header_sel: Color32::from_rgb(48, 48, 48),
+            tl_header_sel: Color32::from_rgb(48, 70, 96),
             tl_header_idle: Color32::from_rgb(42, 42, 42),
             tl_loop_bar: Color32::from_rgb(34, 34, 34),
             tl_marker_bar: Color32::from_rgb(36, 36, 36),
@@ -242,35 +246,37 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::from_rgb(20, 20, 20),
             tl_event_body_k: 1.6,
             tl_event_header_k: 1.6,
+            classic_bevel: false,
         },
         ThemeId::VegasPrata => ThemeColors {
-            // Cinza prata neutro característico da geração Intermediária (v8–v13)
+            // Cinza prata metálico característico da geração Intermediária (v10–v14):
+            // painéis titânio, régua clara, trilhas densas e cabeçalho selecionado azul-aço
             dark_mode: false,
             high_contrast: false,
-            panel_fill: Color32::from_rgb(176, 178, 182),
-            window_fill: Color32::from_rgb(190, 192, 196),
-            extreme_bg: Color32::from_rgb(228, 230, 234),
-            widget_bg: Color32::from_rgb(164, 166, 172),
-            widget_hover_bg: Color32::from_rgb(150, 156, 168),
-            selection_bg: Color32::from_rgb(48, 92, 158),
-            text_primary: Color32::from_rgb(14, 16, 20),
-            text_muted: Color32::from_rgb(42, 46, 54),
-            border: Color32::from_rgb(110, 114, 122),
+            panel_fill: Color32::from_rgb(158, 160, 164),
+            window_fill: Color32::from_rgb(172, 174, 178),
+            extreme_bg: Color32::from_rgb(230, 232, 236),
+            widget_bg: Color32::from_rgb(148, 150, 156),
+            widget_hover_bg: Color32::from_rgb(138, 152, 174),
+            selection_bg: Color32::from_rgb(46, 94, 162),
+            text_primary: Color32::from_rgb(12, 14, 18),
+            text_muted: Color32::from_rgb(34, 38, 46),
+            border: Color32::from_rgb(98, 102, 110),
             accent: Color32::from_rgb(24, 72, 148),
-            timecode_fg: Color32::from_rgb(14, 72, 28),
+            timecode_fg: Color32::from_rgb(14, 16, 20),
             offline_fg: Color32::from_rgb(156, 28, 12),
-            tl_bg: Color32::from_rgb(162, 164, 168),
-            tl_header_bg: Color32::from_rgb(178, 180, 184),
-            tl_header_sel: Color32::from_rgb(138, 160, 192),
-            tl_header_idle: Color32::from_rgb(186, 188, 192),
-            tl_loop_bar: Color32::from_rgb(152, 154, 160),
-            tl_marker_bar: Color32::from_rgb(168, 170, 175),
-            tl_ruler_bg: Color32::from_rgb(194, 196, 200),
-            tl_grid_line: Color32::from_rgb(134, 137, 144),
-            tl_lane_even: Color32::from_rgb(174, 176, 180),
-            tl_lane_odd: Color32::from_rgb(164, 166, 170),
-            tl_playhead_edit: Color32::from_rgb(148, 24, 10),
-            tl_playhead_live: Color32::from_rgb(184, 34, 14),
+            tl_bg: Color32::from_rgb(136, 138, 142),
+            tl_header_bg: Color32::from_rgb(162, 164, 168),
+            tl_header_sel: Color32::from_rgb(128, 156, 188),
+            tl_header_idle: Color32::from_rgb(170, 172, 176),
+            tl_loop_bar: Color32::from_rgb(142, 144, 150),
+            tl_marker_bar: Color32::from_rgb(158, 160, 166),
+            tl_ruler_bg: Color32::from_rgb(212, 214, 218),
+            tl_grid_line: Color32::from_rgb(116, 119, 126),
+            tl_lane_even: Color32::from_rgb(148, 150, 154),
+            tl_lane_odd: Color32::from_rgb(138, 140, 144),
+            tl_playhead_edit: Color32::from_rgb(122, 14, 8),
+            tl_playhead_live: Color32::from_rgb(158, 22, 10),
             tl_loop_active: Color32::from_rgb(44, 92, 168),
             tl_loop_inactive: Color32::from_rgb(96, 100, 110),
             tl_marker: Color32::from_rgb(184, 86, 12),
@@ -281,55 +287,58 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_gain_line: Color32::from_rgb(16, 104, 48),
             tl_env_primary: Color32::from_rgb(20, 74, 168),
             tl_env_secondary: Color32::from_rgb(168, 28, 28),
-            tl_event_border: Color32::from_rgb(64, 68, 76),
+            tl_event_border: Color32::from_rgb(56, 60, 68),
             tl_event_sel_border: Color32::from_rgb(16, 46, 112),
-            tl_preview_bg: Color32::from_rgb(24, 26, 30),
+            tl_preview_bg: Color32::from_rgb(20, 22, 26),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: true,
         },
         ThemeId::VegasClassico => ThemeColors {
-            // Cinza quente clássico da geração 1.0 com chanfros 3D
+            // Cinza clássico da geração 1.0–7.0 com chanfros 3D, seleção marinho
+            // e visor de tempo escuro de alto contraste
             dark_mode: false,
             high_contrast: false,
-            panel_fill: Color32::from_rgb(214, 210, 202),
-            window_fill: Color32::from_rgb(224, 220, 212),
-            extreme_bg: Color32::from_rgb(246, 244, 240),
-            widget_bg: Color32::from_rgb(200, 196, 188),
-            widget_hover_bg: Color32::from_rgb(186, 188, 194),
-            selection_bg: Color32::from_rgb(28, 86, 174),
-            text_primary: Color32::from_rgb(18, 18, 20),
-            text_muted: Color32::from_rgb(62, 60, 56),
-            border: Color32::from_rgb(128, 124, 116),
-            accent: Color32::from_rgb(20, 74, 162),
-            timecode_fg: Color32::from_rgb(16, 92, 34),
+            panel_fill: Color32::from_rgb(204, 202, 196),
+            window_fill: Color32::from_rgb(214, 212, 206),
+            extreme_bg: Color32::WHITE,
+            widget_bg: Color32::from_rgb(212, 208, 200),
+            widget_hover_bg: Color32::from_rgb(194, 198, 208),
+            selection_bg: Color32::from_rgb(10, 36, 106),
+            text_primary: Color32::from_rgb(14, 14, 16),
+            text_muted: Color32::from_rgb(54, 54, 58),
+            border: Color32::from_rgb(128, 128, 128),
+            accent: Color32::from_rgb(16, 60, 146),
+            timecode_fg: Color32::from_rgb(14, 14, 16),
             offline_fg: Color32::from_rgb(172, 34, 16),
-            tl_bg: Color32::from_rgb(196, 192, 184),
-            tl_header_bg: Color32::from_rgb(210, 206, 198),
-            tl_header_sel: Color32::from_rgb(172, 188, 214),
-            tl_header_idle: Color32::from_rgb(220, 216, 208),
-            tl_loop_bar: Color32::from_rgb(186, 182, 174),
-            tl_marker_bar: Color32::from_rgb(202, 198, 190),
-            tl_ruler_bg: Color32::from_rgb(226, 222, 214),
-            tl_grid_line: Color32::from_rgb(164, 160, 152),
-            tl_lane_even: Color32::from_rgb(204, 200, 192),
-            tl_lane_odd: Color32::from_rgb(194, 190, 182),
+            tl_bg: Color32::from_rgb(192, 192, 192),
+            tl_header_bg: Color32::from_rgb(208, 204, 196),
+            tl_header_sel: Color32::from_rgb(158, 178, 210),
+            tl_header_idle: Color32::from_rgb(214, 210, 202),
+            tl_loop_bar: Color32::from_rgb(184, 182, 176),
+            tl_marker_bar: Color32::from_rgb(198, 196, 190),
+            tl_ruler_bg: Color32::from_rgb(222, 220, 214),
+            tl_grid_line: Color32::from_rgb(156, 156, 156),
+            tl_lane_even: Color32::from_rgb(202, 200, 196),
+            tl_lane_odd: Color32::from_rgb(192, 190, 186),
             tl_playhead_edit: Color32::from_rgb(192, 42, 20),
             tl_playhead_live: Color32::from_rgb(208, 30, 18),
-            tl_loop_active: Color32::from_rgb(32, 88, 176),
+            tl_loop_active: Color32::from_rgb(24, 76, 162),
             tl_loop_inactive: Color32::from_rgb(112, 110, 106),
             tl_marker: Color32::from_rgb(192, 38, 28),
             tl_region: Color32::from_rgb(22, 118, 48),
-            tl_sel_band: Color32::from_rgba_unmultiplied(32, 88, 176, 44),
+            tl_sel_band: Color32::from_rgba_unmultiplied(10, 36, 106, 40),
             tl_fade: Color32::from_rgb(142, 92, 0),
             tl_crossfade: Color32::from_rgb(18, 66, 202),
             tl_gain_line: Color32::from_rgb(18, 114, 52),
             tl_env_primary: Color32::from_rgb(20, 82, 184),
             tl_env_secondary: Color32::from_rgb(184, 34, 34),
             tl_event_border: Color32::from_rgb(68, 66, 62),
-            tl_event_sel_border: Color32::from_rgb(12, 34, 96),
+            tl_event_sel_border: Color32::from_rgb(10, 36, 106),
             tl_preview_bg: Color32::from_rgb(18, 18, 20),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: true,
         },
         ThemeId::VegasBranco => ThemeColors {
             // Superfície branca limpa (equivalente ao Interface Type: White)
@@ -345,7 +354,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(72, 76, 86),
             border: Color32::from_rgb(196, 202, 212),
             accent: Color32::from_rgb(20, 92, 186),
-            timecode_fg: Color32::from_rgb(14, 112, 46),
+            timecode_fg: Color32::from_rgb(20, 22, 28),
             offline_fg: Color32::from_rgb(184, 38, 18),
             tl_bg: Color32::from_rgb(234, 236, 242),
             tl_header_bg: Color32::from_rgb(242, 244, 248),
@@ -374,6 +383,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::from_rgb(18, 20, 24),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
         ThemeId::VegasProfundo => ThemeColors {
             dark_mode: true,
@@ -388,11 +398,11 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(155, 160, 170),
             border: Color32::from_rgb(64, 66, 76),
             accent: Color32::from_rgb(110, 195, 255),
-            timecode_fg: Color32::from_rgb(110, 235, 145),
+            timecode_fg: Color32::from_rgb(226, 230, 236),
             offline_fg: Color32::from_rgb(245, 120, 80),
             tl_bg: Color32::from_rgb(18, 19, 22),
             tl_header_bg: Color32::from_rgb(24, 25, 29),
-            tl_header_sel: Color32::from_rgb(44, 50, 62),
+            tl_header_sel: Color32::from_rgb(42, 56, 76),
             tl_header_idle: Color32::from_rgb(31, 32, 37),
             tl_loop_bar: Color32::from_rgb(16, 16, 19),
             tl_marker_bar: Color32::from_rgb(22, 22, 26),
@@ -417,6 +427,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::from_rgb(8, 8, 10),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
         ThemeId::VegasMedio => ThemeColors {
             dark_mode: true,
@@ -431,11 +442,11 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(206, 210, 218),
             border: Color32::from_rgb(112, 116, 126),
             accent: Color32::from_rgb(135, 210, 255),
-            timecode_fg: Color32::from_rgb(135, 245, 155),
+            timecode_fg: Color32::from_rgb(238, 240, 244),
             offline_fg: Color32::from_rgb(255, 145, 105),
             tl_bg: Color32::from_rgb(54, 56, 62),
             tl_header_bg: Color32::from_rgb(64, 66, 72),
-            tl_header_sel: Color32::from_rgb(84, 92, 108),
+            tl_header_sel: Color32::from_rgb(76, 94, 118),
             tl_header_idle: Color32::from_rgb(72, 74, 82),
             tl_loop_bar: Color32::from_rgb(48, 50, 56),
             tl_marker_bar: Color32::from_rgb(56, 58, 64),
@@ -460,49 +471,53 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::from_rgb(20, 20, 22),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
         ThemeId::VegasClaro => ThemeColors {
+            // Bege/creme quente clássico da geração v8 (estilo Windows XP) com
+            // listas claras e seleção azul vibrante
             dark_mode: false,
             high_contrast: false,
-            panel_fill: Color32::from_rgb(228, 230, 235),
-            window_fill: Color32::from_rgb(238, 240, 244),
-            extreme_bg: Color32::from_rgb(250, 251, 253),
-            widget_bg: Color32::from_rgb(212, 215, 222),
-            widget_hover_bg: Color32::from_rgb(194, 200, 212),
-            selection_bg: Color32::from_rgb(52, 108, 196),
-            text_primary: Color32::from_rgb(20, 22, 28),
-            text_muted: Color32::from_rgb(64, 68, 80),
-            border: Color32::from_rgb(152, 158, 172),
-            accent: Color32::from_rgb(20, 82, 170),
-            timecode_fg: Color32::from_rgb(12, 105, 42),
+            panel_fill: Color32::from_rgb(236, 233, 216),
+            window_fill: Color32::from_rgb(242, 240, 228),
+            extreme_bg: Color32::WHITE,
+            widget_bg: Color32::from_rgb(224, 220, 204),
+            widget_hover_bg: Color32::from_rgb(206, 216, 234),
+            selection_bg: Color32::from_rgb(0, 84, 228),
+            text_primary: Color32::from_rgb(18, 20, 24),
+            text_muted: Color32::from_rgb(60, 62, 68),
+            border: Color32::from_rgb(152, 148, 134),
+            accent: Color32::from_rgb(0, 72, 188),
+            timecode_fg: Color32::from_rgb(18, 20, 24),
             offline_fg: Color32::from_rgb(180, 40, 18),
-            tl_bg: Color32::from_rgb(214, 217, 224),
-            tl_header_bg: Color32::from_rgb(224, 226, 232),
-            tl_header_sel: Color32::from_rgb(184, 202, 232),
-            tl_header_idle: Color32::from_rgb(236, 238, 242),
-            tl_loop_bar: Color32::from_rgb(200, 204, 212),
-            tl_marker_bar: Color32::from_rgb(212, 216, 224),
-            tl_ruler_bg: Color32::from_rgb(236, 238, 244),
-            tl_grid_line: Color32::from_rgb(184, 188, 200),
-            tl_lane_even: Color32::from_rgb(222, 225, 232),
-            tl_lane_odd: Color32::from_rgb(212, 215, 222),
+            tl_bg: Color32::from_rgb(220, 217, 202),
+            tl_header_bg: Color32::from_rgb(232, 229, 214),
+            tl_header_sel: Color32::from_rgb(178, 204, 238),
+            tl_header_idle: Color32::from_rgb(238, 235, 220),
+            tl_loop_bar: Color32::from_rgb(208, 204, 188),
+            tl_marker_bar: Color32::from_rgb(220, 216, 200),
+            tl_ruler_bg: Color32::from_rgb(244, 242, 232),
+            tl_grid_line: Color32::from_rgb(186, 182, 168),
+            tl_lane_even: Color32::from_rgb(228, 225, 212),
+            tl_lane_odd: Color32::from_rgb(218, 215, 200),
             tl_playhead_edit: Color32::from_rgb(188, 68, 0),
             tl_playhead_live: Color32::from_rgb(205, 38, 20),
-            tl_loop_active: Color32::from_rgb(40, 98, 188),
-            tl_loop_inactive: Color32::from_rgb(124, 130, 146),
+            tl_loop_active: Color32::from_rgb(0, 84, 228),
+            tl_loop_inactive: Color32::from_rgb(124, 126, 136),
             tl_marker: Color32::from_rgb(180, 92, 10),
             tl_region: Color32::from_rgb(20, 120, 48),
-            tl_sel_band: Color32::from_rgba_unmultiplied(45, 105, 200, 42),
+            tl_sel_band: Color32::from_rgba_unmultiplied(0, 84, 228, 38),
             tl_fade: Color32::from_rgb(155, 110, 0),
             tl_crossfade: Color32::from_rgb(18, 72, 210),
             tl_gain_line: Color32::from_rgb(18, 125, 58),
             tl_env_primary: Color32::from_rgb(20, 90, 195),
             tl_env_secondary: Color32::from_rgb(195, 40, 40),
-            tl_event_border: Color32::from_rgb(80, 84, 96),
-            tl_event_sel_border: Color32::from_rgb(10, 30, 80),
-            tl_preview_bg: Color32::from_rgb(22, 24, 28),
+            tl_event_border: Color32::from_rgb(80, 80, 74),
+            tl_event_sel_border: Color32::from_rgb(0, 56, 160),
+            tl_preview_bg: Color32::from_rgb(20, 22, 26),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: true,
         },
         ThemeId::VegasArdosia => ThemeColors {
             dark_mode: true,
@@ -517,7 +532,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(170, 182, 200),
             border: Color32::from_rgb(72, 86, 108),
             accent: Color32::from_rgb(105, 205, 245),
-            timecode_fg: Color32::from_rgb(120, 235, 185),
+            timecode_fg: Color32::from_rgb(230, 236, 245),
             offline_fg: Color32::from_rgb(250, 130, 95),
             tl_bg: Color32::from_rgb(24, 30, 40),
             tl_header_bg: Color32::from_rgb(29, 36, 48),
@@ -546,6 +561,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::from_rgb(12, 16, 22),
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
         ThemeId::AltoContrasteEscuro => ThemeColors {
             // Contraste WCAG AAA >= 7:1 sobre #000000 / #0A0A0A
@@ -561,7 +577,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(218, 218, 218),
             border: Color32::WHITE,
             accent: Color32::from_rgb(255, 230, 0),
-            timecode_fg: Color32::from_rgb(110, 255, 120),
+            timecode_fg: Color32::WHITE,
             offline_fg: Color32::from_rgb(255, 130, 110),
             tl_bg: Color32::BLACK,
             tl_header_bg: Color32::BLACK,
@@ -590,6 +606,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::BLACK,
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
         ThemeId::AltoContrasteClaro => ThemeColors {
             // Contraste WCAG AAA >= 7:1 sobre #FFFFFF / #F4F4F4
@@ -605,7 +622,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             text_muted: Color32::from_rgb(35, 35, 35),
             border: Color32::BLACK,
             accent: Color32::from_rgb(0, 42, 132),
-            timecode_fg: Color32::from_rgb(0, 90, 20),
+            timecode_fg: Color32::BLACK,
             offline_fg: Color32::from_rgb(148, 0, 0),
             tl_bg: Color32::WHITE,
             tl_header_bg: Color32::WHITE,
@@ -634,6 +651,7 @@ pub fn palette(id: ThemeId) -> ThemeColors {
             tl_preview_bg: Color32::BLACK,
             tl_event_body_k: 0.55,
             tl_event_header_k: 0.9,
+            classic_bevel: false,
         },
     }
 }
@@ -688,10 +706,26 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
     v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, c.text_primary);
     v.widgets.hovered.corner_radius = cr;
 
-    v.widgets.active.bg_fill = c.selection_bg;
-    v.widgets.active.weak_bg_fill = c.selection_bg;
-    v.widgets.active.bg_stroke = Stroke::new(border_w, sel_fg);
-    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, sel_fg);
+    // No egui, `Visuals::strong_text_color()` lê `widgets.active.fg_stroke.color`.
+    // Sempre usar `c.text_primary` aqui garante que rótulos `.strong()` tenham
+    // contraste pleno sobre `panel_fill` em todos os 11 temas (inclusive escuros
+    // com seleção clara como `VegasModerno` e todos os temas claros).
+    let min_active_ratio = if c.high_contrast { 7.0 } else { 4.5 };
+    let active_bg = if c.dark_mode {
+        if contrast_ratio(c.text_primary, c.selection_bg) >= min_active_ratio {
+            c.selection_bg
+        } else {
+            c.tl_header_sel
+        }
+    } else if c.high_contrast {
+        Color32::from_rgb(196, 212, 240)
+    } else {
+        c.tl_header_sel
+    };
+    v.widgets.active.bg_fill = active_bg;
+    v.widgets.active.weak_bg_fill = active_bg;
+    v.widgets.active.bg_stroke = Stroke::new(border_w, if c.dark_mode { sel_fg } else { c.accent });
+    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, c.text_primary);
     v.widgets.active.corner_radius = cr;
 
     v.widgets.open.bg_fill = c.widget_hover_bg;
@@ -802,6 +836,25 @@ mod tests {
                 contrast_ratio(p.tl_playhead_edit, p.tl_lane_even) >= 3.0,
                 "playhead de {:?} precisa de contraste visível na timeline",
                 id
+            );
+            let ctx = egui::Context::default();
+            apply_theme(&ctx, id);
+            let vis = &ctx.style().visuals;
+            let min_ratio = if p.high_contrast { 7.0 } else { 4.5 };
+            assert!(
+                contrast_ratio(vis.strong_text_color(), p.panel_fill) >= min_ratio,
+                "texto .strong() de {:?} precisa >= {}:1 sobre panel_fill",
+                id,
+                min_ratio
+            );
+            assert!(
+                contrast_ratio(
+                    vis.widgets.active.fg_stroke.color,
+                    vis.widgets.active.bg_fill
+                ) >= min_ratio,
+                "texto ativo de {:?} precisa >= {}:1 sobre fundo ativo",
+                id,
+                min_ratio
             );
         }
         assert_eq!(ThemeId::from_pref("invalido"), ThemeId::VegasEscuro);

@@ -3537,6 +3537,26 @@ impl App {
                 self.theme.tl_header_idle
             };
             painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 0.0, bg);
+            if self.theme.classic_bevel {
+                let hi = Color32::from_rgba_unmultiplied(255, 255, 255, 165);
+                let lo = Color32::from_rgba_unmultiplied(64, 64, 68, 150);
+                let br = r.shrink2(vec2(0.0, 0.5));
+                painter.line_segment(
+                    [pos2(br.left(), br.top()), pos2(br.right(), br.top())],
+                    Stroke::new(1.0_f32, hi),
+                );
+                painter.line_segment(
+                    [pos2(br.left(), br.top()), pos2(br.left(), br.bottom())],
+                    Stroke::new(1.0_f32, hi),
+                );
+                painter.line_segment(
+                    [
+                        pos2(br.left(), br.bottom() - 1.0),
+                        pos2(br.right(), br.bottom() - 1.0),
+                    ],
+                    Stroke::new(1.0_f32, lo),
+                );
+            }
             let use_gutter = h >= 42.0;
             let gutter_col = shade(
                 self.track_rgb(track.color),
@@ -3763,12 +3783,20 @@ impl App {
                 });
             }
 
+            let right_pad = if kind == TrackKind::Audio && !is_folder && h >= 56.0 {
+                32.0
+            } else {
+                14.0
+            };
             let inner = Rect::from_min_max(
                 pos2(
                     r.left() + indent + if use_gutter { 26.0 } else { 10.0 },
                     r.top() + 3.0,
                 ),
-                pos2(r.right() - 14.0, r.bottom() - 3.0),
+                pos2(
+                    (r.right() - right_pad).max(r.left() + 60.0),
+                    r.bottom() - 3.0,
+                ),
             );
             let mut child =
                 ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("th", tid)));
@@ -3808,16 +3836,42 @@ impl App {
                     icons::paint_inline(ui, track_icon, 14.0, &self.theme);
                 }
                 if is_folder {
-                    let toggle_lbl = if folder_collapsed { ">" } else { "v" };
-                    if ui
-                        .small_button(toggle_lbl)
-                        .on_hover_text(if folder_collapsed {
-                            "Expandir pasta de trilhas"
+                    let tip = if folder_collapsed {
+                        tr(lang, "Expandir pasta de trilhas")
+                    } else {
+                        tr(lang, "Recolher pasta de trilhas")
+                    };
+                    let (tri_r, tri_resp) =
+                        ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                    tri_resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
+                    });
+                    if ui.is_rect_visible(tri_r) {
+                        if tri_resp.hovered() {
+                            ui.painter()
+                                .rect_filled(tri_r, 2.0, self.theme.widget_hover_bg);
+                        }
+                        let c = tri_r.center();
+                        let pts = if folder_collapsed {
+                            vec![
+                                pos2(c.x - 2.5, c.y - 4.0),
+                                pos2(c.x + 3.5, c.y),
+                                pos2(c.x - 2.5, c.y + 4.0),
+                            ]
                         } else {
-                            "Recolher pasta de trilhas"
-                        })
-                        .clicked()
-                    {
+                            vec![
+                                pos2(c.x - 4.0, c.y - 2.5),
+                                pos2(c.x + 4.0, c.y - 2.5),
+                                pos2(c.x, c.y + 3.5),
+                            ]
+                        };
+                        ui.painter().add(Shape::convex_polygon(
+                            pts,
+                            self.theme.text_primary,
+                            Stroke::NONE,
+                        ));
+                    }
+                    if tri_resp.on_hover_text(tip).clicked() {
                         self.session.toggle_track_folder(ti);
                         self.sync_status_from_session();
                     }
@@ -3877,7 +3931,7 @@ impl App {
                         if btns.mute {
                             btns_w += 22.0;
                         }
-                        if btns.solo && !is_folder {
+                        if btns.solo {
                             btns_w += 22.0;
                         }
                         if btns.fx && !is_folder {
@@ -3927,7 +3981,6 @@ impl App {
                 }
                 if show_btns
                     && btns.solo
-                    && !is_folder
                     && ui
                         .selectable_label(t.solo, "S")
                         .on_hover_text(tr(lang, "Solo (X)"))
@@ -4041,19 +4094,32 @@ impl App {
                     more = Some(HeaderAction::ToggleCompositingChild);
                 }
                 if show_btns && btns.height && !is_folder {
-                    // ▲ / ▼ têm cobertura garantida em todas as fontes (fonts.rs)
-                    if ui
-                        .small_button("▲")
-                        .on_hover_text(tr(lang, "Minimizar a altura da trilha"))
-                        .clicked()
-                    {
+                    let min_tip = tr(lang, "Minimizar a altura da trilha");
+                    let min_btn = icons::small_icon_button(
+                        ui,
+                        Icon::TrackHeightMin,
+                        None,
+                        false,
+                        &self.theme,
+                    );
+                    min_btn.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, min_tip)
+                    });
+                    if min_btn.on_hover_text(min_tip).clicked() {
                         more = Some(HeaderAction::Minimize);
                     }
-                    if ui
-                        .small_button("▼")
-                        .on_hover_text(tr(lang, "Maximizar a altura da trilha"))
-                        .clicked()
-                    {
+                    let max_tip = tr(lang, "Maximizar a altura da trilha");
+                    let max_btn = icons::small_icon_button(
+                        ui,
+                        Icon::TrackHeightMax,
+                        None,
+                        false,
+                        &self.theme,
+                    );
+                    max_btn.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, max_tip)
+                    });
+                    if max_btn.on_hover_text(max_tip).clicked() {
                         more = Some(HeaderAction::Maximize);
                     }
                 }
@@ -4195,7 +4261,14 @@ impl App {
                     }
                 });
             }
+            let mut make_child_req = false;
+            let mut make_parent_req = false;
             if h >= 72.0 && show_sliders {
+                let audio_inputs = if kind == TrackKind::Audio {
+                    self.cached_audio_inputs()
+                } else {
+                    Vec::new()
+                };
                 child.horizontal(|ui| {
                     if kind == TrackKind::Audio {
                         let t = &mut self.project.tracks[ti];
@@ -4228,6 +4301,32 @@ impl App {
                                 .map(|b| (b.id, b.name.clone()))
                                 .collect();
                             let t = &mut self.project.tracks[ti];
+                            let in_lbl = t
+                                .input_device
+                                .as_deref()
+                                .unwrap_or_else(|| tr(lang, "Entrada: Padrão"));
+                            let before_in = t.input_device.clone();
+                            egui::ComboBox::from_id_salt(("hdr_in", tid))
+                                .width(66.0)
+                                .selected_text(in_lbl)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut t.input_device,
+                                        None,
+                                        tr(lang, "Entrada: Padrão"),
+                                    );
+                                    for dev in &audio_inputs {
+                                        ui.selectable_value(
+                                            &mut t.input_device,
+                                            Some(dev.clone()),
+                                            dev,
+                                        );
+                                    }
+                                });
+                            if t.input_device != before_in {
+                                want_checkpoint = true;
+                                changed_track = true;
+                            }
                             let out_lbl = t
                                 .output_bus
                                 .and_then(|bid| {
@@ -4239,7 +4338,7 @@ impl App {
                                 .unwrap_or_else(|| tr(lang, "Master"));
                             let before = t.output_bus;
                             egui::ComboBox::from_id_salt(("hdr_out", tid))
-                                .width(64.0)
+                                .width(58.0)
                                 .selected_text(out_lbl)
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
@@ -4257,22 +4356,104 @@ impl App {
                             }
                         }
                     } else {
-                        let t = &mut self.project.tracks[ti];
-                        ui.label(egui::RichText::new(tr(lang, "Modo")).small());
-                        let before = t.blend;
-                        egui::ComboBox::from_id_salt(("blend", tid))
-                            .width(120.0)
-                            .selected_text(t.blend.name_in(lang))
-                            .show_ui(ui, |ui| {
+                        // 3 ícones de composição do VEGAS Pro: Modo de composição,
+                        // Tornar filho de composição e Promover para trilha pai.
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        let cur_blend = self.project.tracks[ti].blend;
+                        let mode_tip = format!(
+                            "{}: {}",
+                            tr(lang, "Modo de composição"),
+                            cur_blend.name_in(lang)
+                        );
+                        let theme_snap = self.theme.clone();
+                        let mode_btn = icons::small_icon_button(
+                            ui,
+                            Icon::CompositingMode,
+                            None,
+                            cur_blend != BlendMode::SourceAlpha,
+                            &theme_snap,
+                        )
+                        .on_hover_text(&mode_tip);
+                        let pop_id = ui.make_persistent_id(("blend_pop", tid));
+                        if mode_btn.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(pop_id));
+                        }
+                        egui::popup_below_widget(
+                            ui,
+                            pop_id,
+                            &mode_btn,
+                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
+                                ui.set_min_width(150.0);
+                                let t = &mut self.project.tracks[ti];
                                 for b in BlendMode::ALL {
-                                    ui.selectable_value(&mut t.blend, b, b.name_in(lang));
+                                    if ui.selectable_label(t.blend == b, b.name_in(lang)).clicked()
+                                    {
+                                        t.blend = b;
+                                        changed_track = true;
+                                        ui.memory_mut(|m| m.close_popup());
+                                    }
                                 }
+                            },
+                        );
+                        if !adj {
+                            let child_tip = tr(lang, "Tornar filho de composição (Pai/Filho)");
+                            let child_btn = icons::small_icon_button(
+                                ui,
+                                Icon::MakeCompositingChild,
+                                None,
+                                has_parent,
+                                &theme_snap,
+                            );
+                            child_btn.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, child_tip)
                             });
-                        if t.blend != before {
-                            changed_track = true;
+                            if child_btn.on_hover_text(child_tip).clicked() {
+                                make_child_req = true;
+                            }
+                            let parent_tip = tr(lang, "Promover para trilha pai");
+                            let parent_btn = ui
+                                .add_enabled_ui(has_parent, |ui| {
+                                    icons::small_icon_button(
+                                        ui,
+                                        Icon::MakeCompositingParent,
+                                        None,
+                                        false,
+                                        &theme_snap,
+                                    )
+                                })
+                                .inner;
+                            parent_btn.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    has_parent,
+                                    parent_tip,
+                                )
+                            });
+                            if parent_btn.on_hover_text(parent_tip).clicked() {
+                                make_parent_req = true;
+                            }
+                        }
+                        if cur_blend != BlendMode::SourceAlpha {
+                            ui.label(
+                                egui::RichText::new(cur_blend.name_in(lang))
+                                    .small()
+                                    .color(self.theme.text_muted),
+                            );
                         }
                     }
                 });
+            }
+            if make_child_req {
+                if let Err(e) = self.session.make_compositing_child(ti) {
+                    self.set_status(format!("{e}"));
+                } else {
+                    self.sync_after_session();
+                }
+            }
+            if make_parent_req {
+                self.session.unmake_compositing_child(ti);
+                self.sync_after_session();
             }
             // envio para barramento (como "FX 1 ... Post" no VEGAS Pro): o
             // primeiro envio da trilha, com nível e antes/depois do fader
@@ -4363,8 +4544,9 @@ impl App {
             {
                 self.tl.latch_hold = None;
             }
-            // medidor de nível (áudio / entrada armada durante gravação)
-            if kind == TrackKind::Audio {
+            // medidor de nível (áudio / entrada armada durante gravação), com escala
+            // graduada em dB quando a trilha tem altura suficiente (como no VEGAS Pro)
+            if kind == TrackKind::Audio && !is_folder {
                 let rec_lv = if self.project.tracks[ti].record_armed {
                     self.recording_peaks.get(&tid).copied()
                 } else {
@@ -4372,11 +4554,24 @@ impl App {
                 };
                 let lv = rec_lv
                     .unwrap_or_else(|| self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]));
-                let mr = Rect::from_min_max(
-                    pos2(r.right() - 11.0, r.top() + 4.0),
-                    pos2(r.right() - 3.0, r.bottom() - 4.0),
-                );
-                draw_meter(&painter, mr, lv);
+                if h >= 56.0 {
+                    let mr = Rect::from_min_max(
+                        pos2(r.right() - 29.0, r.top() + 4.0),
+                        pos2(r.right() - 19.0, r.bottom() - 4.0),
+                    );
+                    draw_meter(&painter, mr, lv);
+                    let sr = Rect::from_min_max(
+                        pos2(r.right() - 18.0, r.top() + 4.0),
+                        pos2(r.right() - 2.0, r.bottom() - 4.0),
+                    );
+                    crate::panels::draw_db_scale(&painter, sr, self.theme.text_muted);
+                } else {
+                    let mr = Rect::from_min_max(
+                        pos2(r.right() - 11.0, r.top() + 4.0),
+                        pos2(r.right() - 3.0, r.bottom() - 4.0),
+                    );
+                    draw_meter(&painter, mr, lv);
+                }
             }
             // alça de altura da trilha
             let hr = Rect::from_min_max(
@@ -7749,7 +7944,8 @@ impl App {
                 lane,
                 0.0,
                 if track_is_folder {
-                    shade(self.track_rgb(self.project.tracks[ti].color), 0.32)
+                    // No VEGAS Pro, a linha de um grupo de trilhas na timeline fica vazia.
+                    self.theme.tl_bg
                 } else if selected {
                     self.theme.tl_lane_even
                 } else {
@@ -8324,23 +8520,34 @@ impl App {
                             let hovering_gain = pointer_pos.is_some_and(|hp| {
                                 (hp.y - gy).abs() <= 7.5 && hp.x >= x0 && hp.x <= x1
                             });
-                            let thick = if dragging_gain || hovering_gain {
-                                4.5_f32
+                            let adjusted_gain = e.gain_db.abs() > 0.05;
+                            let draw_y = if dragging_gain || hovering_gain || adjusted_gain {
+                                gy
                             } else {
-                                3.0_f32
+                                // Em 0 dB sem hover, fica na borda superior para não cortar o título do evento.
+                                (r.top() + 1.5).min(r.bottom() - 1.5)
                             };
+                            let thick = if dragging_gain || hovering_gain {
+                                4.0_f32
+                            } else if adjusted_gain {
+                                2.5_f32
+                            } else {
+                                1.5_f32
+                            };
+                            if dragging_gain || hovering_gain || adjusted_gain {
+                                painter.line_segment(
+                                    [pos2(x0, draw_y), pos2(x1, draw_y)],
+                                    Stroke::new(thick + 2.0, backing_col),
+                                );
+                            }
                             painter.line_segment(
-                                [pos2(x0, gy), pos2(x1, gy)],
-                                Stroke::new(thick + 2.0, backing_col),
-                            );
-                            painter.line_segment(
-                                [pos2(x0, gy), pos2(x1, gy)],
+                                [pos2(x0, draw_y), pos2(x1, draw_y)],
                                 Stroke::new(thick, self.theme.tl_gain_line),
                             );
-                            if dragging_gain || hovering_gain || e.gain_db.abs() > 0.05 {
+                            if dragging_gain || hovering_gain || adjusted_gain {
                                 painter.rect_filled(
                                     Rect::from_center_size(
-                                        pos2((x0 + x1) * 0.5, gy),
+                                        pos2((x0 + x1) * 0.5, draw_y),
                                         vec2(18.0, 5.5),
                                     ),
                                     2.5,
@@ -8373,28 +8580,38 @@ impl App {
                             let hovering_op = pointer_pos.is_some_and(|hp| {
                                 (hp.y - oy).abs() <= 7.5 && hp.x >= x0 && hp.x <= x1
                             });
+                            let adjusted_op = (1.0 - e.opacity).abs() > 0.005;
+                            let draw_y = if dragging_op || hovering_op || adjusted_op {
+                                oy
+                            } else {
+                                (r.top() + 1.5).min(r.bottom() - 1.5)
+                            };
                             let op_col = if self.theme.dark_mode {
                                 Color32::from_rgb(95, 185, 255)
                             } else {
                                 Color32::from_rgb(20, 105, 205)
                             };
                             let thick = if dragging_op || hovering_op {
-                                4.5_f32
+                                4.0_f32
+                            } else if adjusted_op {
+                                2.5_f32
                             } else {
-                                3.0_f32
+                                1.5_f32
                             };
+                            if dragging_op || hovering_op || adjusted_op {
+                                painter.line_segment(
+                                    [pos2(x0, draw_y), pos2(x1, draw_y)],
+                                    Stroke::new(thick + 2.0, backing_col),
+                                );
+                            }
                             painter.line_segment(
-                                [pos2(x0, oy), pos2(x1, oy)],
-                                Stroke::new(thick + 2.0, backing_col),
-                            );
-                            painter.line_segment(
-                                [pos2(x0, oy), pos2(x1, oy)],
+                                [pos2(x0, draw_y), pos2(x1, draw_y)],
                                 Stroke::new(thick, op_col),
                             );
-                            if dragging_op || hovering_op || (1.0 - e.opacity).abs() > 0.005 {
+                            if dragging_op || hovering_op || adjusted_op {
                                 painter.rect_filled(
                                     Rect::from_center_size(
-                                        pos2((x0 + x1) * 0.5, oy),
+                                        pos2((x0 + x1) * 0.5, draw_y),
                                         vec2(18.0, 5.5),
                                     ),
                                     2.5,

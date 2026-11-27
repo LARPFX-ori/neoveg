@@ -239,14 +239,24 @@ pub enum ExplorerSortCol {
     Size,
 }
 
+/// Modo de visualização dos arquivos no painel Explorer (VEGAS Pro: Lista, Detalhes e Miniaturas).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ExplorerViewMode {
+    List,
+    #[default]
+    Details,
+    Thumbnails,
+}
+
 /// Estado de navegação do Explorer: histórico voltar/avançar, favoritos, modo
-/// Lista/Detalhes e painel lateral de pastas (manual VEGAS Pro 21, p. 45).
+/// Lista/Detalhes/Miniaturas e painel lateral de pastas (manual VEGAS Pro 21, p. 45).
 pub struct ExplorerState {
     pub back_stack: Vec<PathBuf>,
     pub forward_stack: Vec<PathBuf>,
     pub favorites: Vec<PathBuf>,
     pub show_tree: bool,
     pub details_view: bool,
+    pub view_mode: ExplorerViewMode,
     pub editing_path: bool,
     pub path_buf: String,
     pub sort_col: ExplorerSortCol,
@@ -262,6 +272,7 @@ impl Default for ExplorerState {
             favorites: Vec::new(),
             show_tree: true,
             details_view: true,
+            view_mode: ExplorerViewMode::Details,
             editing_path: false,
             path_buf: String::new(),
             sort_col: ExplorerSortCol::Name,
@@ -2234,15 +2245,18 @@ impl App {
         // na largura do painel e com a altura do painel, como no console do
         // VEGAS Pro. Antes o grupo ficava colado à esquerda e, num painel alto,
         // parava em 240 px e deixava o resto do painel vazio.
+        let vis_h = (ui.clip_rect().bottom() - ui.cursor().top()).max(110.0);
         let meter_h = if tall_dock {
-            (ui.available_height() - MASTER_BOTTOM_ROWS_H).max(36.0)
+            (ui.available_height().min(vis_h) - MASTER_BOTTOM_ROWS_H).max(36.0)
         } else {
-            110.0
+            (vis_h - MASTER_BOTTOM_ROWS_H - 12.0).clamp(110.0, 210.0)
         };
         let show_preview_strip =
             tall_dock && self.master_show_preview_bus && ui.available_width() >= 118.0;
+        let with_scale = (tall_dock && meter_h >= 78.0)
+            || (!tall_dock && meter_h >= 120.0 && ui.available_width() >= 96.0);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), meter_h), Sense::hover());
-        let lay = master_strip_layout(row, show_preview_strip, tall_dock && meter_h >= 78.0);
+        let lay = master_strip_layout(row, show_preview_strip, with_scale);
 
         if let Some(pr) = lay.preview {
             ui.scope_builder(egui::UiBuilder::new().max_rect(pr), |ui| {
@@ -2260,13 +2274,18 @@ impl App {
                         self.master_preview_mute = !self.master_preview_mute;
                         monitor_changed = true;
                     }
+                    let pv_h = (meter_h - 46.0).max(28.0);
                     let pv_s = ui
-                        .add_sized(
-                            [20.0, (meter_h - 34.0).max(28.0)],
-                            egui::Slider::new(&mut self.master_preview_vol_db, -60.0..=12.0)
-                                .vertical()
-                                .show_value(false),
-                        )
+                        .scope(|ui| {
+                            ui.spacing_mut().slider_width = (pv_h - 4.0).max(24.0);
+                            ui.add_sized(
+                                [20.0, pv_h],
+                                egui::Slider::new(&mut self.master_preview_vol_db, -60.0..=12.0)
+                                    .vertical()
+                                    .show_value(false),
+                            )
+                        })
+                        .inner
                         .on_hover_text(tr(
                             lang,
                             "Volume do barramento Preview (duplo clique para 0,0 dB)",
@@ -2293,12 +2312,19 @@ impl App {
             );
         }
 
-        let slider = ui.put(
-            lay.fader,
-            egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
-                .vertical()
-                .show_value(false),
-        );
+        // Usa scope_builder em vez de ui.put() para não rebobinar o cursor da coluna
+        // e configura slider_width para o fader vertical acompanhar toda a altura do medidor.
+        let slider = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(lay.fader), |ui| {
+                ui.spacing_mut().slider_width = (lay.fader.height() - 4.0).max(24.0);
+                ui.add_sized(
+                    lay.fader.size(),
+                    egui::Slider::new(&mut self.project.master.volume_db, -60.0..=12.0)
+                        .vertical()
+                        .show_value(false),
+                )
+            })
+            .inner;
         if slider.drag_started() {
             self.checkpoint();
         }
@@ -2346,18 +2372,33 @@ impl App {
             Sense::click(),
         );
         let pk_font = egui::FontId::monospace(9.0);
-        for (v, x) in [(pk_l, lay.left.center().x), (pk_r, lay.right.center().x)] {
+        if (lay.right.center().x - lay.left.center().x).abs() < 28.0 {
+            let pk_max = pk_l.max(pk_r);
             ui.painter().text(
-                pos2(x, pk_row.center().y),
+                pos2(lay.left.union(lay.right).center().x, pk_row.center().y),
                 egui::Align2::CENTER_CENTER,
-                fmt_pk(v),
-                pk_font.clone(),
-                if v > -0.1 {
+                fmt_pk(pk_max),
+                pk_font,
+                if pk_max > -0.1 {
                     self.theme.offline_fg
                 } else {
                     self.theme.text_muted
                 },
             );
+        } else {
+            for (v, x) in [(pk_l, lay.left.center().x), (pk_r, lay.right.center().x)] {
+                ui.painter().text(
+                    pos2(x, pk_row.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    fmt_pk(v),
+                    pk_font.clone(),
+                    if v > -0.1 {
+                        self.theme.offline_fg
+                    } else {
+                        self.theme.text_muted
+                    },
+                );
+            }
         }
         if peak_resp
             .on_hover_text(tr(lang, "Clique para zerar os picos retidos"))
@@ -2485,19 +2526,32 @@ impl App {
             {
                 self.explorer_ui.show_tree = !self.explorer_ui.show_tree;
             }
-            if ui
-                .selectable_label(
-                    self.explorer_ui.details_view,
-                    if self.explorer_ui.details_view {
-                        tr(lang, "Detalhes")
-                    } else {
-                        tr(lang, "Lista")
-                    },
+            for (mode, icon, lbl) in [
+                (ExplorerViewMode::List, Icon::ViewList, tr(lang, "Lista")),
+                (
+                    ExplorerViewMode::Details,
+                    Icon::ViewDetails,
+                    tr(lang, "Detalhes"),
+                ),
+                (
+                    ExplorerViewMode::Thumbnails,
+                    Icon::ViewThumbnails,
+                    tr(lang, "Miniaturas"),
+                ),
+            ] {
+                if icons::small_icon_button(
+                    ui,
+                    icon,
+                    Some(lbl),
+                    self.explorer_ui.view_mode == mode,
+                    &self.theme,
                 )
-                .on_hover_text(tr(lang, "Alternar visualização entre Lista e Detalhes"))
+                .on_hover_text(lbl)
                 .clicked()
-            {
-                self.explorer_ui.details_view = !self.explorer_ui.details_view;
+                {
+                    self.explorer_ui.view_mode = mode;
+                    self.explorer_ui.details_view = mode == ExplorerViewMode::Details;
+                }
             }
             ui.separator();
             ui.label(tr(lang, "Filtro:"));
@@ -2632,7 +2686,7 @@ impl App {
 
         let filter = self.explorer_filter.to_lowercase();
         let show_tree = self.explorer_ui.show_tree && ui.available_width() >= 420.0;
-        let details_view = self.explorer_ui.details_view;
+        let view_mode = self.explorer_ui.view_mode;
 
         ui.horizontal_top(|ui| {
             if show_tree {
@@ -2737,7 +2791,227 @@ impl App {
                             })
                             .collect();
 
-                        if details_view {
+                        if view_mode == ExplorerViewMode::Thumbnails {
+                            let avail_w = ui.available_width().max(110.0);
+                            let card_w = 104.0_f32;
+                            let cols = ((avail_w / (card_w + 8.0)).floor() as usize).max(1);
+                            egui::Grid::new("explorer_thumbs_grid")
+                                .num_columns(cols)
+                                .spacing([8.0, 8.0])
+                                .show(ui, |ui| {
+                                    for (idx, (is_dir, p, name, size, is_proj)) in
+                                        visible.into_iter().enumerate()
+                                    {
+                                        let sel = self.explorer_ui.selected.as_ref() == Some(&p);
+                                        let fill = if sel {
+                                            self.theme.selection_bg.gamma_multiply(0.35)
+                                        } else {
+                                            self.theme.window_fill
+                                        };
+                                        let stroke = Stroke::new(
+                                            if sel { 1.5_f32 } else { 1.0_f32 },
+                                            if sel {
+                                                self.theme.accent
+                                            } else {
+                                                self.theme.border
+                                            },
+                                        );
+                                        let card_r = ui
+                                            .scope(|ui| {
+                                                egui::Frame::new()
+                                                    .fill(fill)
+                                                    .stroke(stroke)
+                                                    .corner_radius(2.0)
+                                                    .inner_margin(4.0)
+                                                    .show(ui, |ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.set_width(card_w - 8.0);
+                                                            let (tr_rect, tr_resp) = ui
+                                                                .allocate_exact_size(
+                                                                    vec2(card_w - 8.0, 56.0),
+                                                                    Sense::click(),
+                                                                );
+                                                            ui.painter().rect_filled(
+                                                                tr_rect,
+                                                                2.0,
+                                                                self.theme.extreme_bg,
+                                                            );
+                                                            // Se o arquivo já estiver carregado no projeto, reutiliza a miniatura
+                                                            let existing_thumb = (!is_dir && !is_proj)
+                                                                .then(|| {
+                                                                    self.project
+                                                                        .media
+                                                                        .iter()
+                                                                        .find(|m| {
+                                                                            matches!(
+                                                                                &m.source,
+                                                                                crate::model::MediaSource::File { path }
+                                                                                    if std::path::Path::new(path) == p.as_path()
+                                                                            )
+                                                                        })
+                                                                        .and_then(|m| {
+                                                                            self.thumbs.get(&m.id)
+                                                                        })
+                                                                })
+                                                                .flatten()
+                                                                .cloned();
+                                                            if let Some(tex) = existing_thumb {
+                                                                egui::Image::new((
+                                                                    tex.id(),
+                                                                    tr_rect.size(),
+                                                                ))
+                                                                .paint_at(ui, tr_rect);
+                                                            } else {
+                                                                let ext_l = p
+                                                                    .extension()
+                                                                    .map(|e| {
+                                                                        e.to_string_lossy()
+                                                                            .to_ascii_lowercase()
+                                                                    })
+                                                                    .unwrap_or_default();
+                                                                let ico = if is_dir {
+                                                                    Icon::FolderItem
+                                                                } else if is_proj {
+                                                                    Icon::NestedTimeline
+                                                                } else if matches!(
+                                                                    ext_l.as_str(),
+                                                                    "wav"
+                                                                        | "mp3"
+                                                                        | "flac"
+                                                                        | "ogg"
+                                                                        | "aac"
+                                                                        | "m4a"
+                                                                        | "aif"
+                                                                        | "aiff"
+                                                                        | "w64"
+                                                                        | "qoa"
+                                                                ) {
+                                                                    Icon::AudioTrack
+                                                                } else {
+                                                                    Icon::MediaItem
+                                                                };
+                                                                let ib = Rect::from_center_size(
+                                                                    tr_rect.center(),
+                                                                    vec2(24.0, 24.0),
+                                                                );
+                                                                icons::paint(
+                                                                    ui.painter(),
+                                                                    ib,
+                                                                    ico,
+                                                                    &self.theme,
+                                                                    true,
+                                                                );
+                                                            }
+                                                            if !is_dir {
+                                                                let ext = p
+                                                                    .extension()
+                                                                    .map(|e| {
+                                                                        e.to_string_lossy()
+                                                                            .to_uppercase()
+                                                                    })
+                                                                    .unwrap_or_default();
+                                                                if !ext.is_empty() {
+                                                                    let badge = Rect::from_min_size(
+                                                                        tr_rect.left_top()
+                                                                            + vec2(2.0, 2.0),
+                                                                        vec2(30.0, 13.0),
+                                                                    );
+                                                                    ui.painter().rect_filled(
+                                                                        badge,
+                                                                        2.0,
+                                                                        Color32::from_black_alpha(
+                                                                            175,
+                                                                        ),
+                                                                    );
+                                                                    ui.painter().text(
+                                                                        badge.center(),
+                                                                        egui::Align2::CENTER_CENTER,
+                                                                        ext,
+                                                                        egui::FontId::monospace(
+                                                                            8.5,
+                                                                        ),
+                                                                        Color32::WHITE,
+                                                                    );
+                                                                }
+                                                            }
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(&name)
+                                                                        .small(),
+                                                                )
+                                                                .truncate(),
+                                                            );
+                                                            tr_resp
+                                                        })
+                                                        .inner
+                                                    })
+                                                    .inner
+                                            })
+                                            .inner;
+                                        if card_r.clicked() {
+                                            self.explorer_ui.selected = Some(p.clone());
+                                        }
+                                        if card_r.double_clicked() {
+                                            if is_dir {
+                                                pending_nav = Some(p.clone());
+                                            } else if is_proj {
+                                                pending_open_proj = Some(p.clone());
+                                            } else {
+                                                pending_import_at_cursor.push(p.clone());
+                                            }
+                                        }
+                                        let tip = if is_dir {
+                                            name.clone()
+                                        } else {
+                                            format!("{name} ({})", format_file_size(size))
+                                        };
+                                        card_r.on_hover_text(tip).context_menu(|ui| {
+                                            if is_dir {
+                                                if ui.button(tr(lang, "Abrir pasta")).clicked() {
+                                                    pending_nav = Some(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .button(tr(lang, "Adicionar aos favoritos"))
+                                                    .clicked()
+                                                {
+                                                    self.explorer_ui.toggle_favorite(&p);
+                                                    ui.close_menu();
+                                                }
+                                            } else if is_proj {
+                                                if ui.button(tr(lang, "Abrir projeto")).clicked() {
+                                                    pending_open_proj = Some(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                            } else {
+                                                if ui
+                                                    .button(tr(
+                                                        lang,
+                                                        "Importar e adicionar no cursor",
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    pending_import_at_cursor.push(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .button(tr(
+                                                        lang,
+                                                        "Adicionar à Mídia do Projeto",
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    pending_import_only.push(p.clone());
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                        if (idx + 1) % cols == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                        } else if view_mode == ExplorerViewMode::Details {
                             let mut next_sort: Option<ExplorerSortCol> = None;
                             egui::Grid::new("explorer_details_grid")
                                 .num_columns(3)
@@ -3640,12 +3914,17 @@ impl App {
             let show_faders = self.mixer_ui.show_faders;
             let show_insert_fx = self.mixer_ui.show_insert_fx;
             let filter = self.mixer_ui.channel_filter;
+            let audio_inputs = if show_io {
+                self.cached_audio_inputs()
+            } else {
+                Vec::new()
+            };
             // o fader e o medidor ocupam a altura visível que sobra no painel
             let vis_h = (ui.clip_rect().bottom() - ui.cursor().top()).max(180.0);
             let fader_h = mixer_fader_height(
                 ui.available_height().min(vis_h),
                 MixerSections {
-                    io: show_io && !bus_choices.is_empty(),
+                    io: show_io,
                     insert_fx: show_insert_fx,
                     sends: show_sends && !bus_choices.is_empty(),
                     automation: show_automation,
@@ -3692,6 +3971,8 @@ impl App {
                                 let mut pending_toggle_phase = false;
                                 let mut pending_toggle_rec = false;
                                 let mut pending_output = self.project.tracks[ti].output_bus;
+                                let mut pending_input =
+                                    self.project.tracks[ti].input_device.clone();
                                 let mut pending_auto = self.project.tracks[ti].automation_mode;
                                 let mut vol_reset = false;
                                 let mut pan_reset = false;
@@ -3726,7 +4007,32 @@ impl App {
                                             hdr_fg,
                                         );
 
-                                        if show_io && !bus_choices.is_empty() {
+                                        if show_io {
+                                            let in_lbl = pending_input
+                                                .as_deref()
+                                                .unwrap_or_else(|| tr(lang, "Entrada: Padrão"));
+                                            let before_in = pending_input.clone();
+                                            egui::ComboBox::from_id_salt(("mix_trk_in", tid))
+                                                .width((strip_w - 10.0).max(64.0))
+                                                .selected_text(in_lbl)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut pending_input,
+                                                        None,
+                                                        tr(lang, "Entrada: Padrão"),
+                                                    );
+                                                    for dev in &audio_inputs {
+                                                        ui.selectable_value(
+                                                            &mut pending_input,
+                                                            Some(dev.clone()),
+                                                            dev,
+                                                        );
+                                                    }
+                                                });
+                                            if pending_input != before_in {
+                                                checkpoint_needed = true;
+                                                changed = true;
+                                            }
                                             let sel_lbl = pending_output
                                                 .and_then(|bid| {
                                                     bus_choices
@@ -4023,6 +4329,10 @@ impl App {
                                 }
                                 if self.session.project.tracks[ti].output_bus != pending_output {
                                     self.session.project.tracks[ti].output_bus = pending_output;
+                                    changed = true;
+                                }
+                                if self.session.project.tracks[ti].input_device != pending_input {
+                                    self.session.project.tracks[ti].input_device = pending_input;
                                     changed = true;
                                 }
                                 if self.session.project.tracks[ti].automation_mode != pending_auto {
@@ -4369,7 +4679,7 @@ impl App {
                         // Master Bus no Console
                         if show_master {
                             ui.group(|ui| {
-                                ui.set_width(strip_w.max(114.0));
+                                ui.set_width(strip_w.max(126.0));
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new(tr(lang, "Master")).strong());
                                     self.master_bus_controls(ui, false);
@@ -4536,7 +4846,7 @@ impl App {
                         .small()
                         .color(meter_col(val, ref_db)),
                 );
-                let (rect, _) = ui.allocate_exact_size(vec2(30.0, 128.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(vec2(34.0, 114.0), Sense::hover());
                 let p = ui.painter_at(rect);
                 p.rect_filled(rect, 2.0, self.theme.extreme_bg);
                 p.rect_stroke(
@@ -4557,7 +4867,7 @@ impl App {
                     let fill_h = (rect.height() - 2.0) * fill_n;
                     let fr = Rect::from_min_max(
                         pos2(rect.left() + 2.0, rect.bottom() - 1.0 - fill_h),
-                        pos2(rect.right() - 2.0, rect.bottom() - 1.0),
+                        pos2(rect.left() + 13.0, rect.bottom() - 1.0),
                     );
                     let bar_col = if self.theme.high_contrast {
                         meter_col(val, ref_db)
@@ -4577,8 +4887,12 @@ impl App {
                     p.rect_filled(fr, 1.0, bar_col);
                 }
                 let ref_y = rect.bottom() - 1.0 - (rect.height() - 2.0) * norm(ref_db);
+                // Marca de alvo fica na faixa esquerda da barra para não cortar o número da escala
                 p.line_segment(
-                    [pos2(rect.left(), ref_y), pos2(rect.right(), ref_y)],
+                    [
+                        pos2(rect.left() + 1.0, ref_y),
+                        pos2(rect.left() + 13.0, ref_y),
+                    ],
                     Stroke::new(1.5_f32, self.theme.text_primary),
                 );
                 let tick_font = egui::FontId::monospace(8.0);
@@ -4587,16 +4901,21 @@ impl App {
                 } else {
                     Color32::from_white_alpha(200)
                 };
+                let mut last_y = f32::INFINITY;
                 for &tk in ticks {
                     let y = rect.bottom() - 1.0 - (rect.height() - 2.0) * norm(f64::from(tk));
-                    if y >= rect.top() + 5.0 && y <= rect.bottom() - 5.0 {
+                    if y >= rect.top() + 6.0
+                        && y <= rect.bottom() - 5.0
+                        && (last_y - y).abs() >= 12.0
+                    {
                         p.text(
-                            pos2(rect.right() - 3.0, y),
+                            pos2(rect.right() - 2.0, y),
                             egui::Align2::RIGHT_CENTER,
                             format!("{tk}"),
                             tick_font.clone(),
                             tick_col,
                         );
+                        last_y = y;
                     }
                 }
                 ui.label(egui::RichText::new(label).strong().small());
@@ -5033,19 +5352,27 @@ impl App {
                 };
                 let s = t[tex_idx].size_vec2();
                 let is_vec = kind == ScopeViewLayout::Vectorscope;
-                // cada quadro cabe na altura que sobrou (os 4 aparecem inteiros)
-                ui.image((t[tex_idx].id(), fit_scope_image(s, tile_w, max_h, is_vec)));
+                // cada quadro cabe na altura visível que sobrou (os 4 aparecem inteiros)
+                let img_resp =
+                    ui.image((t[tex_idx].id(), fit_scope_image(s, tile_w, max_h, is_vec)));
+                paint_scope_graticule_labels(
+                    ui.painter_at(img_resp.rect),
+                    img_resp.rect,
+                    kind,
+                    cfg,
+                );
             });
         };
 
         let avail = ui.available_width();
-        // altura de cada quadro: o que sobra na aba, menos o título de cada
-        // linha, dividido por 2 na grade (VEGAS Pro 21, p. 61)
+        // altura visível da aba (dentro do arrow_scroll_area do dock, available_height
+        // pode ficar maior que o viewport; limitar por clip_rect garante os 4 escopos inteiros)
         let title_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
-        let avail_h = ui.available_height();
+        let vis_h = (ui.clip_rect().bottom() - ui.cursor().top()).max(120.0);
+        let avail_h = ui.available_height().min(vis_h);
         if self.scopes_layout == ScopeViewLayout::All {
             let w = ((avail - 24.0) / 2.0).max(80.0);
-            let max_h = ((avail_h - 2.0 * title_h - 8.0) / 2.0).max(48.0);
+            let max_h = ((avail_h - 2.0 * title_h - 10.0) / 2.0).max(48.0);
             egui::Grid::new("scopes").num_columns(2).show(ui, |ui| {
                 draw_scope_tile(
                     ui,
@@ -5092,6 +5419,105 @@ impl App {
         if changed {
             self.last_req = crate::app::PreviewReqKey::default();
         }
+    }
+}
+
+/// Desenha os rótulos âmbar das gratículas dos escopos de vídeo (Vectorscope
+/// R/Mg/B/Cy/G/Yl, escala IRE/mV/8-bit/Float na Waveform e Parade, e 0/128/255
+/// no Histograma), mantendo o visual canônico do VEGAS Pro.
+fn paint_scope_graticule_labels(
+    p: egui::Painter,
+    r: Rect,
+    kind: ScopeViewLayout,
+    cfg: &neoveg_engine::scopes::ScopeConfig,
+) {
+    if !r.is_finite() || r.width() < 44.0 || r.height() < 32.0 {
+        return;
+    }
+    let amber = Color32::from_rgba_unmultiplied(212, 168, 72, 205);
+    let font = egui::FontId::monospace(8.0);
+    match kind {
+        ScopeViewLayout::Vectorscope => {
+            let amp = cfg.vectorscope_targets.amplitude();
+            let (wr, wg, wb) = cfg.matrix.luma_weights();
+            // 6 alvos primários/complementares (Cb, Cr) na mesma projeção de scopes.rs
+            let targets: [(&str, f32, f32, f32); 6] = [
+                ("R", amp, 0.0, 0.0),
+                ("Mg", amp, 0.0, amp),
+                ("B", 0.0, 0.0, amp),
+                ("Cy", 0.0, amp, amp),
+                ("G", 0.0, amp, 0.0),
+                ("Yl", amp, amp, 0.0),
+            ];
+            for (lbl, rr, gg, bb) in targets {
+                let l = wr * rr + wg * gg + wb * bb;
+                let cb = (bb - l) * 0.5389;
+                let cr = (rr - l) * 0.6350;
+                let x = r.left() + (cb + 0.5).clamp(0.06, 0.94) * r.width();
+                let y = r.top() + (0.5 - cr).clamp(0.08, 0.92) * r.height();
+                p.text(
+                    pos2(x, y - 6.0),
+                    egui::Align2::CENTER_CENTER,
+                    lbl,
+                    font.clone(),
+                    amber,
+                );
+            }
+        }
+        ScopeViewLayout::Waveform | ScopeViewLayout::RgbParade => {
+            let marks: &[(&str, f32)] = match cfg.waveform_scale {
+                neoveg_engine::scopes::WaveformScale::Ire => &[
+                    ("100", 1.0),
+                    ("75", 0.75),
+                    ("50", 0.5),
+                    ("25", 0.25),
+                    ("0", 0.0),
+                ],
+                neoveg_engine::scopes::WaveformScale::MilliVolts => {
+                    &[("700", 1.0), ("350", 0.5), ("0", 0.0)]
+                }
+                neoveg_engine::scopes::WaveformScale::Digital8Bit => &[
+                    ("255", 1.0),
+                    ("235", 235.0 / 255.0),
+                    ("128", 0.5),
+                    ("16", 16.0 / 255.0),
+                    ("0", 0.0),
+                ],
+                neoveg_engine::scopes::WaveformScale::Float => {
+                    &[("1.0", 1.0), ("0.5", 0.5), ("0.0", 0.0)]
+                }
+            };
+            let mut last_y = f32::NEG_INFINITY;
+            for &(lbl, frac) in marks {
+                let y = (r.bottom() - frac * r.height()).clamp(r.top() + 6.0, r.bottom() - 6.0);
+                if (y - last_y).abs() >= 11.0 {
+                    p.text(
+                        pos2(r.left() + 3.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        lbl,
+                        font.clone(),
+                        amber,
+                    );
+                    last_y = y;
+                }
+            }
+        }
+        ScopeViewLayout::Histogram => {
+            for (lbl, frac, align) in [
+                ("0", 0.02_f32, egui::Align2::LEFT_BOTTOM),
+                ("128", 0.50_f32, egui::Align2::CENTER_BOTTOM),
+                ("255", 0.98_f32, egui::Align2::RIGHT_BOTTOM),
+            ] {
+                p.text(
+                    pos2(r.left() + r.width() * frac, r.bottom() - 2.0),
+                    align,
+                    lbl,
+                    font.clone(),
+                    amber,
+                );
+            }
+        }
+        ScopeViewLayout::All => {}
     }
 }
 
@@ -5152,7 +5578,7 @@ pub(crate) fn draw_db_scale(painter: &egui::Painter, r: Rect, color: Color32) {
             [pos2(r.left(), y), pos2(r.left() + len, y)],
             Stroke::new(1.0_f32, color.gamma_multiply(0.7)),
         );
-        if major && (y - last_label_y).abs() >= 9.0 {
+        if major && (y - last_label_y).abs() >= 11.0 {
             let db_i = db as i32;
             let lbl = if db_i > 0 {
                 format!("+{db_i}")

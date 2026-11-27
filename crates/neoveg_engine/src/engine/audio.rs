@@ -1353,7 +1353,9 @@ impl Mixer {
             if track.kind != TrackKind::Audio || track.is_folder {
                 continue;
             }
-            if p.is_track_effectively_muted(track.id) || (any_solo && !track.solo) {
+            if p.is_track_effectively_muted(track.id)
+                || (any_solo && !p.is_track_effectively_soloed(track.id))
+            {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
                 continue;
             }

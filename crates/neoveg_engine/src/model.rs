@@ -1490,7 +1490,9 @@ impl Project {
     }
 
     pub fn any_solo(&self, kind: TrackKind) -> bool {
-        self.tracks.iter().any(|t| t.kind == kind && t.solo)
+        self.tracks
+            .iter()
+            .any(|t| !t.is_folder && t.kind == kind && self.is_track_effectively_soloed(t.id))
     }
 
     pub fn any_bus_solo(&self) -> bool {
@@ -1706,6 +1708,27 @@ impl Project {
                 break;
             };
             if tr.mute {
+                return true;
+            }
+            cur = tr.parent_track_id;
+            steps += 1;
+        }
+        false
+    }
+
+    /// Verdadeiro se a trilha ou alguma pasta/pai ancestral estiver em solo.
+    pub fn is_track_effectively_soloed(&self, track_id: Id) -> bool {
+        let mut cur = Some(track_id);
+        let mut steps = 0usize;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(tid) = cur {
+            if steps > MAX_TRACK_DEPTH || !visited.insert(tid) {
+                break;
+            }
+            let Some(tr) = self.tracks.iter().find(|t| t.id == tid) else {
+                break;
+            };
+            if tr.solo {
                 return true;
             }
             cur = tr.parent_track_id;
@@ -3894,6 +3917,9 @@ pub struct Track {
     /// Áudio: inverte a polaridade (fase 180°) do sinal da trilha (Console de Mixagem, p. 63).
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert_phase: bool,
+    /// Áudio: dispositivo de entrada selecionado para gravação (`None` = padrão do sistema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_device: Option<String>,
 }
 
 fn default_glow_keyframes() -> Keyframes<ShadowGlowKey> {
@@ -4113,6 +4139,7 @@ impl Track {
             multicam: false,
             automation_mode: AutomationMode::Read,
             invert_phase: false,
+            input_device: None,
         }
     }
 

@@ -2528,3 +2528,29 @@ fn faders_com_alca_retangular_em_todos_os_temas() {
         );
     }
 }
+
+/// Solo em um grupo de trilhas isola suas trilhas filhas no motor de áudio/vídeo.
+#[test]
+fn grupo_de_trilhas_solo_isola_trilhas_filhas() {
+    let mut p = crate::model::Project::new_default();
+    let v_child = p.tracks[0].id;
+    let a_child = p.tracks[1].id;
+    let mut other_v = crate::model::Track::new(crate::model::TrackKind::Video, "V2");
+    other_v.solo = false;
+    let other_v_id = other_v.id;
+    p.tracks.push(other_v);
+
+    let mut folder = crate::model::Track::new(crate::model::TrackKind::Video, "Grupo 1");
+    folder.is_folder = true;
+    folder.solo = true;
+    let folder_id = folder.id;
+    p.tracks[0].parent_track_id = Some(folder_id);
+    p.tracks[1].parent_track_id = Some(folder_id);
+    p.tracks.insert(0, folder);
+
+    assert!(p.any_solo(crate::model::TrackKind::Video));
+    assert!(p.any_solo(crate::model::TrackKind::Audio));
+    assert!(p.is_track_effectively_soloed(v_child));
+    assert!(p.is_track_effectively_soloed(a_child));
+    assert!(!p.is_track_effectively_soloed(other_v_id));
+}

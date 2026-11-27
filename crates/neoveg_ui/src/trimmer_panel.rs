@@ -1729,7 +1729,7 @@ impl App {
             self.refresh_trimmer_texture(ui.ctx(), &item, media_id, preview_t, 640, 360);
         }
 
-        let ruler_h = 24.0;
+        let ruler_h = 26.0;
         let scroll_h = 18.0;
         let bar_h = 30.0;
         let bottom_h = 22.0;
@@ -1751,8 +1751,8 @@ impl App {
             (false, false) => (usable_h, 0.0),
         };
 
-        self.trimmer_ruler(ui, &item, media_id, dur, frame_dur, ruler_h, lang);
-
+        // No VEGAS Pro, o monitor de vídeo fica acima e a régua de tempo fica
+        // logo abaixo dele, encostada à forma de onda e aos controles de transporte.
         if show_video || (!show_wave && !item.has_video) {
             self.trimmer_video(
                 ui,
@@ -1770,6 +1770,8 @@ impl App {
         if show_video && show_wave {
             self.trimmer_splitter(ui, avail.x.max(160.0), splitter_h, usable_h);
         }
+
+        self.trimmer_ruler(ui, &item, media_id, dur, frame_dur, ruler_h, lang);
 
         if show_wave {
             self.trimmer_waveform(ui, &item, media_id, dur, frame_dur, wave_h, lang);
@@ -2004,11 +2006,13 @@ impl App {
                 Stroke::new(1.0_f32, th.text_muted),
             );
             if i < n_ticks {
+                // Posiciona o texto abaixo da faixa do triângulo da agulha (top + 7 px)
+                // para o cursor amarelo não sobrepor o código de tempo.
                 p.text(
-                    pos2(x + 2.0, strip.top() + 1.0),
+                    pos2(x + 2.0, strip.top() + 7.5),
                     Align2::LEFT_TOP,
                     format_ticks(t, fps, sr, fmt),
-                    FontId::monospace(9.5),
+                    FontId::monospace(9.0),
                     th.text_muted,
                 );
             }
