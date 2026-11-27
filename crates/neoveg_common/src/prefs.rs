@@ -956,6 +956,11 @@ pub struct Preferences {
     /// Exibe a tela de boas-vindas com ações rápidas e projetos recentes ao iniciar.
     #[serde(default = "default_show_welcome")]
     pub show_welcome: bool,
+    /// Duplo clique num arquivo de mídia (Explorer ou Mídia do Projeto) abre
+    /// o arquivo no Trimmer em vez de criar eventos nas trilhas (VEGAS Pro:
+    /// *Double-click on media file loads into Trimmer instead of tracks*).
+    #[serde(default)]
+    pub double_click_loads_trimmer: bool,
     /// Caminhos dos projetos recentes (mais recente primeiro, máx. 10).
     #[serde(default)]
     pub recent_projects: Vec<String>,
@@ -1652,6 +1657,7 @@ impl Default for Preferences {
             display: DisplayPrefs::default(),
             ui_scale_pct: default_ui_scale_pct(),
             show_welcome: default_show_welcome(),
+            double_click_loads_trimmer: false,
             recent_projects: Vec::new(),
             render_favorites: Vec::new(),
             fx_favorites: Vec::new(),
