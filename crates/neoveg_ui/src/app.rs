@@ -335,6 +335,8 @@ pub struct App {
     pub master_channels_locked: bool,
     /// Estado visual do Console de Mixagem (barra lateral, filtros, seções e largura).
     pub mixer_ui: crate::panels::MixerConsoleState,
+    /// Janela Transições (categoria, busca, escolha).
+    pub(crate) transitions_ui: crate::panels::TransitionsUiState,
     pub dock_visible: bool,
     pub dock_height: f32,
     pub preview_ratio: f32,
@@ -580,6 +582,7 @@ impl App {
             master_preview_mute: false,
             master_channels_locked: true,
             mixer_ui: crate::panels::MixerConsoleState::default(),
+            transitions_ui: crate::panels::TransitionsUiState::default(),
             dock_visible: initial_layout.dock_visible,
             dock_maximized: None,
             timeline_restore: None,

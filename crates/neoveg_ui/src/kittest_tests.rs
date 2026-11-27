@@ -3239,3 +3239,57 @@ fn kittest_paridade_color_grading_e_trimmer_historico() {
         "histórico do Trimmer deve exibir nome e diretório entre colchetes"
     );
 }
+
+/// Janela Transições no arranjo do VEGAS Pro: abas de categoria, lista e
+/// grade de miniaturas; filtrar por categoria e por favoritos.
+#[test]
+fn kittest_transicoes_em_grade_com_categorias() {
+    use crate::model::TransitionKind;
+    use crate::panels::{transition_fav_id, TransitionCategory};
+    // toda transição tem uma aba e toda aba tem transições
+    for c in TransitionCategory::ALL {
+        assert!(TransitionKind::ALL
+            .iter()
+            .any(|k| TransitionCategory::of(*k) == c));
+    }
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 950.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .exec_cmd(Some(&ctx), "view.tab.transitions");
+    harness.run_steps(3);
+    for name in [
+        "Efeitos 3D",
+        "Revelar",
+        "Wipes",
+        "Fades",
+        "Dobras e páginas",
+    ] {
+        harness.get_by_label(name);
+    }
+    // a aba Fades mostra os fades e esconde os wipes
+    harness.get_by_label("Fades").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().transitions_ui.cat,
+        Some(TransitionCategory::Fades)
+    );
+    let dissolve = TransitionKind::Dissolve.name_in(neoveg_common::Language::PtBr);
+    let star = TransitionKind::StarWipe.name_in(neoveg_common::Language::PtBr);
+    assert!(harness.query_all_by_label(dissolve).count() >= 1);
+    assert_eq!(harness.query_all_by_label(star).count(), 0);
+    // favoritos: só o marcado aparece
+    harness
+        .state_mut()
+        .prefs
+        .fx_favorites
+        .push(transition_fav_id(TransitionKind::StarWipe));
+    harness.get_by_label_contains("Favoritos").click();
+    harness.run_steps(3);
+    assert!(harness.state().transitions_ui.favorites_only);
+    assert!(harness.query_all_by_label(star).count() >= 1);
+    assert_eq!(harness.query_all_by_label(dissolve).count(), 0);
+}
