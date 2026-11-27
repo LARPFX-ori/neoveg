@@ -1046,13 +1046,20 @@ impl App {
                                                 PluginCategory::Generator => "GM",
                                                 _ => "FX",
                                             };
-                                            let resp = ui.selectable_label(
-                                                selected == Some(e),
-                                                egui::RichText::new(format!(
-                                                    "{tag}  {}",
-                                                    e.name_in(lang)
-                                                )),
-                                            );
+                                            // etiqueta do tipo à parte: o nome acessível é só o do plug-in
+                                            let resp = ui
+                                                .horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(tag)
+                                                            .small()
+                                                            .color(self.theme.text_muted),
+                                                    );
+                                                    ui.selectable_label(
+                                                        selected == Some(e),
+                                                        e.name_in(lang),
+                                                    )
+                                                })
+                                                .inner;
                                             if resp.clicked() {
                                                 selected = Some(e);
                                                 selected_ofx = None;

@@ -3136,7 +3136,7 @@ fn kittest_paridade_explorer_midia_plugins_e_escopos() {
         .state_mut()
         .exec_cmd(Some(&ctx), "view.tab.plugin_manager");
     harness.run_steps(2);
-    assert!(harness.query_by_label("Plug-Ins").is_some());
+    assert!(harness.query_all_by_label("Plug-Ins").count() >= 1);
 
     // 4. Escopos de Vídeo: seletor de layout "Todos (2×2)"
     harness.state_mut().exec_cmd(Some(&ctx), "view.tab.scopes");
