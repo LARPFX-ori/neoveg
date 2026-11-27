@@ -3234,5 +3234,7 @@
   "Silenciar": "Mute",
   "Inverter fase": "Invert phase",
   "Modo de composição: {mode}": "Compositing mode: {mode}",
-  "Entrada": "Input"
+  "Entrada": "Input",
+  "Duplo clique no arquivo de mídia carrega no Trimmer em vez das trilhas": "Double-click on media file loads into Trimmer instead of tracks",
+  "Duplo clique: abrir no Trimmer": "Double-click: open in Trimmer"
 }

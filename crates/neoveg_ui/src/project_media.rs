@@ -1474,7 +1474,10 @@ impl App {
                     }
                     if resp.double_clicked() {
                         self.session.active_media_id = Some(m.id);
-                        actions.push(MediaRowAction::AddAtCursor(m.id));
+                        actions.push(double_click_action(
+                            self.prefs.double_click_loads_trimmer,
+                            m.id,
+                        ));
                     }
                     widest = widest.max(resp.rect.width());
                     self.media_item_context_menu(&resp, m, actions);
@@ -1546,7 +1549,10 @@ impl App {
                 self.session.active_media_id = Some(m.id);
             }
             if resp.double_clicked() {
-                actions.push(MediaRowAction::AddAtCursor(m.id));
+                actions.push(double_click_action(
+                    self.prefs.double_click_loads_trimmer,
+                    m.id,
+                ));
             }
             self.media_item_context_menu(&resp, m, actions);
         }
@@ -1622,7 +1628,10 @@ impl App {
                         self.session.active_media_id = Some(m.id);
                     }
                     if resp.double_clicked() {
-                        actions.push(MediaRowAction::AddAtCursor(m.id));
+                        actions.push(double_click_action(
+                            self.prefs.double_click_loads_trimmer,
+                            m.id,
+                        ));
                     }
                     self.media_item_context_menu(&resp, m, actions);
 
@@ -2215,5 +2224,34 @@ mod thumb_grid_tests {
         assert_eq!(thumb_grid_columns(f32::NAN, 168.0), 1);
         assert_eq!(thumb_grid_columns(800.0, 0.0), 1);
         assert_eq!(thumb_grid_columns(1e9, 1.0), 256);
+    }
+}
+
+/// Ação do duplo clique numa mídia: abrir no Trimmer (com a preferência
+/// *Duplo clique carrega no Trimmer*) ou adicionar no cursor.
+fn double_click_action(loads_trimmer: bool, id: Id) -> MediaRowAction {
+    if loads_trimmer {
+        MediaRowAction::OpenTrimmer(id)
+    } else {
+        MediaRowAction::AddAtCursor(id)
+    }
+}
+
+#[cfg(test)]
+mod double_click_tests {
+    use super::{double_click_action, MediaRowAction};
+
+    /// O duplo clique sempre criava eventos, sem a opção do VEGAS Pro de
+    /// carregar no Trimmer.
+    #[test]
+    fn duplo_clique_respeita_a_preferencia() {
+        assert!(matches!(
+            double_click_action(true, 7),
+            MediaRowAction::OpenTrimmer(7)
+        ));
+        assert!(matches!(
+            double_click_action(false, 7),
+            MediaRowAction::AddAtCursor(7)
+        ));
     }
 }

@@ -144,6 +144,8 @@ pub enum FxTarget {
 pub enum PlaceTarget {
     At(Ticks),
     EndOfTrack,
+    /// Não cria eventos: a mídia importada abre no Trimmer.
+    Trimmer,
 }
 
 pub enum LoadMsg {
@@ -2260,6 +2262,23 @@ impl App {
         }
     }
 
+    /// Abre arquivos do disco no Trimmer: entram na Mídia do Projeto, sem
+    /// criar eventos, e o último abre no Trimmer quando terminar de carregar.
+    pub(crate) fn open_paths_in_trimmer(&mut self, paths: Vec<PathBuf>) {
+        for p in paths {
+            if media::is_supported(&p) {
+                self.spawn_import(p, Some(PlaceTarget::Trimmer));
+            } else {
+                let lang = self.lang();
+                self.offer_conversion(
+                    p,
+                    Some(PlaceTarget::Trimmer),
+                    tr(lang, "formato não suportado diretamente"),
+                );
+            }
+        }
+    }
+
     /// Importa um arquivo em segundo plano; a falha volta como `ImportFailed`.
     pub(crate) fn spawn_import(&mut self, p: PathBuf, place: Option<PlaceTarget>) {
         let tx = self.loader_tx.clone();
@@ -2326,12 +2345,16 @@ impl App {
                     self.media.insert(id, imp.entry);
                     self.checkpoint();
                     self.session.register_imported_media(imp.item, sr);
-                    if let Some(place) = place {
-                        let t = match place {
-                            PlaceTarget::At(t) => t,
-                            PlaceTarget::EndOfTrack => self.end_of_selected_track(),
-                        };
-                        self.add_media_to_timeline(id, t, self.sel_track);
+                    match place {
+                        Some(PlaceTarget::Trimmer) => self.open_in_trimmer(id),
+                        Some(PlaceTarget::At(t)) => {
+                            self.add_media_to_timeline(id, t, self.sel_track);
+                        }
+                        Some(PlaceTarget::EndOfTrack) => {
+                            let t = self.end_of_selected_track();
+                            self.add_media_to_timeline(id, t, self.sel_track);
+                        }
+                        None => {}
                     }
                     self.changed();
                 }

@@ -2489,6 +2489,8 @@ impl App {
         let mut pending_nav: Option<PathBuf> = None;
         let mut pending_import_at_cursor: Vec<PathBuf> = Vec::new();
         let mut pending_import_only: Vec<PathBuf> = Vec::new();
+        let mut pending_trimmer: Vec<PathBuf> = Vec::new();
+        let dbl_trimmer = self.prefs.double_click_loads_trimmer;
         let mut pending_open_proj: Option<PathBuf> = None;
 
         // Barra superior: Voltar, Avançar, Acima, Favorito ★, Árvore, Lista/Detalhes e Filtro (p. 45)
@@ -2978,6 +2980,8 @@ impl App {
                                                 pending_nav = Some(p.clone());
                                             } else if is_proj {
                                                 pending_open_proj = Some(p.clone());
+                                            } else if dbl_trimmer {
+                                                pending_trimmer.push(p.clone());
                                             } else {
                                                 pending_import_at_cursor.push(p.clone());
                                             }
@@ -3006,6 +3010,13 @@ impl App {
                                                     ui.close_menu();
                                                 }
                                             } else {
+                                                if ui
+                                                    .button(tr(lang, "Abrir no Trimmer"))
+                                                    .clicked()
+                                                {
+                                                    pending_trimmer.push(p.clone());
+                                                    ui.close_menu();
+                                                }
                                                 if ui
                                                     .button(tr(
                                                         lang,
@@ -3091,6 +3102,8 @@ impl App {
                                                 pending_nav = Some(p.clone());
                                             } else if is_proj {
                                                 pending_open_proj = Some(p.clone());
+                                            } else if dbl_trimmer {
+                                                pending_trimmer.push(p.clone());
                                             } else {
                                                 pending_import_at_cursor.push(p.clone());
                                             }
@@ -3114,6 +3127,13 @@ impl App {
                                                     ui.close_menu();
                                                 }
                                             } else {
+                                                if ui
+                                                    .button(tr(lang, "Abrir no Trimmer"))
+                                                    .clicked()
+                                                {
+                                                    pending_trimmer.push(p.clone());
+                                                    ui.close_menu();
+                                                }
                                                 if ui
                                                     .button(tr(
                                                         lang,
@@ -3196,15 +3216,18 @@ impl App {
                                         pending_nav = Some(p.clone());
                                     } else if is_proj {
                                         pending_open_proj = Some(p.clone());
+                                    } else if dbl_trimmer {
+                                        pending_trimmer.push(p.clone());
                                     } else {
                                         pending_import_at_cursor.push(p.clone());
                                     }
                                 }
                                 if !is_dir {
-                                    r.on_hover_text(tr(
-                                        lang,
-                                        "Duplo clique: importar e adicionar no cursor",
-                                    ));
+                                    r.on_hover_text(if dbl_trimmer {
+                                        tr(lang, "Duplo clique: abrir no Trimmer")
+                                    } else {
+                                        tr(lang, "Duplo clique: importar e adicionar no cursor")
+                                    });
                                 }
                             }
                         }
@@ -3226,6 +3249,9 @@ impl App {
         }
         if !pending_import_only.is_empty() {
             self.import_paths(pending_import_only, None);
+        }
+        if !pending_trimmer.is_empty() {
+            self.open_paths_in_trimmer(pending_trimmer);
         }
     }
 

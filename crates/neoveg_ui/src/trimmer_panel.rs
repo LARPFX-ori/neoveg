@@ -1751,8 +1751,8 @@ impl App {
             (false, false) => (usable_h, 0.0),
         };
 
-        // No VEGAS Pro, o monitor de vídeo fica acima e a régua de tempo fica
-        // logo abaixo dele, encostada à forma de onda e aos controles de transporte.
+        // Ordem do Trimmer do VEGAS Pro: vídeo em cima, régua com marcadores e
+        // regiões logo acima da forma de onda e dos controles de transporte.
         if show_video || (!show_wave && !item.has_video) {
             self.trimmer_video(
                 ui,

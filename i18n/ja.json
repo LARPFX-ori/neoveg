@@ -3234,5 +3234,7 @@
   "Silenciar": "ミュート",
   "Inverter fase": "位相を反転",
   "Modo de composição: {mode}": "合成モード: {mode}",
-  "Entrada": "入力"
+  "Entrada": "入力",
+  "Duplo clique no arquivo de mídia carrega no Trimmer em vez das trilhas": "メディアファイルをダブルクリックするとトラックではなくトリマーに読み込む",
+  "Duplo clique: abrir no Trimmer": "ダブルクリック: トリマーで開く"
 }
