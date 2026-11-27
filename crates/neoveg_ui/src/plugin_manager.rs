@@ -703,15 +703,17 @@ pub(crate) enum PluginCategory {
     AudioFx,
     Transition,
     Compositor,
+    Generator,
 }
 
 impl PluginCategory {
     #[cfg(test)]
-    pub(crate) const ALL: [PluginCategory; 4] = [
+    pub(crate) const ALL: [PluginCategory; 5] = [
         PluginCategory::VideoFx,
         PluginCategory::AudioFx,
         PluginCategory::Transition,
         PluginCategory::Compositor,
+        PluginCategory::Generator,
     ];
 
     pub(crate) fn name_in(self, lang: Language) -> &'static str {
@@ -720,6 +722,7 @@ impl PluginCategory {
             PluginCategory::AudioFx => "Efeitos de áudio",
             PluginCategory::Transition => "Transições",
             PluginCategory::Compositor => "Compositores",
+            PluginCategory::Generator => "Geradores de Mídia",
         };
         tr(lang, key)
     }
@@ -730,8 +733,76 @@ impl PluginCategory {
             PluginCategory::AudioFx => Icon::FxAudio,
             PluginCategory::Transition => Icon::TransitionSplit,
             PluginCategory::Compositor => Icon::Compositors,
+            PluginCategory::Generator => Icon::FxSparkle,
         }
     }
+}
+
+/// Pasta da árvore do *Plug-In Manager* (manual do VEGAS Pro 21, p. 60).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
+pub(crate) enum PluginFolder {
+    AudioFx,
+    Generators,
+    #[default]
+    VideoFx,
+    Transitions,
+    Compositors,
+    /// Plug-ins externos (VST3 e OFX) encontrados nas pastas de plug-ins.
+    ThirdParty,
+}
+
+impl PluginFolder {
+    pub(crate) fn name_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            PluginFolder::AudioFx => "FX",
+            PluginFolder::Generators => "Geradores de Mídia",
+            PluginFolder::VideoFx => "FX",
+            PluginFolder::Transitions => "Transições",
+            PluginFolder::Compositors => "Compositores",
+            PluginFolder::ThirdParty => "Terceiros (VST3 / OFX)",
+        };
+        tr(lang, key)
+    }
+
+    /// Categoria do catálogo nativo (`None` = plug-ins externos).
+    pub(crate) fn category(self) -> Option<PluginCategory> {
+        match self {
+            PluginFolder::AudioFx => Some(PluginCategory::AudioFx),
+            PluginFolder::Generators => Some(PluginCategory::Generator),
+            PluginFolder::VideoFx => Some(PluginCategory::VideoFx),
+            PluginFolder::Transitions => Some(PluginCategory::Transition),
+            PluginFolder::Compositors => Some(PluginCategory::Compositor),
+            PluginFolder::ThirdParty => None,
+        }
+    }
+
+    fn count(self, filter: &str, lang: Language) -> Option<usize> {
+        self.category()
+            .map(|c| plugin_catalog_in(c, filter, lang).len())
+    }
+}
+
+/// Colunas de uma lista que corre de cima para baixo: `(colunas, linhas)`
+/// para `n` itens numa largura `width` com colunas de `col_w`.
+pub(crate) fn column_layout(n: usize, width: f32, col_w: f32) -> (usize, usize) {
+    if n == 0 {
+        return (1, 0);
+    }
+    let col_w = if col_w.is_finite() && col_w > 1.0 {
+        col_w
+    } else {
+        190.0
+    };
+    let w = if width.is_finite() {
+        width.max(0.0)
+    } else {
+        0.0
+    };
+    let cols = ((w / col_w).floor() as usize).clamp(1, n);
+    let rows = n.div_ceil(cols);
+    // sem colunas vazias no fim
+    let cols = n.div_ceil(rows.max(1));
+    (cols, rows)
 }
 
 /// Um plug-in do catálogo.
@@ -740,6 +811,7 @@ pub(crate) enum PluginEntry {
     Fx(FxKind),
     Transition(TransitionKind),
     Compositor(BlendMode),
+    Generator(crate::gen_browser::GenKind),
 }
 
 impl PluginEntry {
@@ -748,6 +820,7 @@ impl PluginEntry {
             PluginEntry::Fx(k) => k.name_in(lang),
             PluginEntry::Transition(k) => k.name_in(lang),
             PluginEntry::Compositor(b) => b.name_in(lang),
+            PluginEntry::Generator(g) => g.name_in(lang),
         }
     }
 
@@ -761,6 +834,7 @@ impl PluginEntry {
             PluginEntry::Fx(_) => PluginCategory::VideoFx,
             PluginEntry::Transition(_) => PluginCategory::Transition,
             PluginEntry::Compositor(_) => PluginCategory::Compositor,
+            PluginEntry::Generator(_) => PluginCategory::Generator,
         }
     }
 }
@@ -787,6 +861,10 @@ pub(crate) fn plugin_catalog_in(
         PluginCategory::Compositor => BlendMode::ALL
             .iter()
             .map(|b| PluginEntry::Compositor(*b))
+            .collect(),
+        PluginCategory::Generator => crate::gen_browser::GenKind::ALL
+            .iter()
+            .map(|g| PluginEntry::Generator(*g))
             .collect(),
     };
     let f = filter.trim().to_lowercase();
@@ -861,104 +939,154 @@ impl App {
             }
         });
         ui.separator();
-        ui.columns(2, |cols| {
-            egui::ScrollArea::vertical()
-                .id_salt("plugin_tree")
-                .auto_shrink([false, false])
-                .show(&mut cols[0], |ui| {
-                    // Árvore hierárquica fiel ao VEGAS Pro 21 (p. 60): Vídeo -> FX/Transições/Compositores, Áudio -> FX, Externos
-                    if scope == 0 || scope == 1 {
-                        egui::CollapsingHeader::new(
-                            egui::RichText::new(tr(lang, "Vídeo")).strong(),
-                        )
-                        .id_salt("plugin_root_video")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for cat in [
-                                PluginCategory::VideoFx,
-                                PluginCategory::Transition,
-                                PluginCategory::Compositor,
-                            ] {
-                                let items = plugin_catalog_in(cat, &filter, lang);
-                                let header = format!("{} ({})", cat.name_in(lang), items.len());
-                                egui::CollapsingHeader::new(header)
-                                    .id_salt(("plugin_cat", cat))
-                                    .default_open(
-                                        !filter.is_empty() || cat == PluginCategory::VideoFx,
-                                    )
-                                    .show(ui, |ui| {
-                                        for e in items {
-                                            let is_sel = selected == Some(e);
-                                            let label = e.name_in(lang);
-                                            if ui.selectable_label(is_sel, label).clicked() {
-                                                selected = Some(e);
-                                                selected_ofx = None;
-                                            }
-                                        }
-                                    });
+        // Arranjo do VEGAS Pro (manual 21, p. 60): à esquerda a árvore só
+        // de pastas; à direita os plug-ins da pasta em colunas (de cima para
+        // baixo) e, embaixo, os detalhes do escolhido.
+        let folder_key = egui::Id::new("plugin_manager_folder");
+        let mut folder: PluginFolder = ui.data(|d| d.get_temp(folder_key)).unwrap_or_default();
+        let avail = ui.available_size();
+        let tree_w = (avail.x * 0.26).clamp(150.0, 240.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(tree_w);
+                egui::ScrollArea::vertical()
+                    .id_salt("plugin_tree")
+                    .auto_shrink([false, false])
+                    .max_height(avail.y.max(80.0))
+                    .show(ui, |ui| {
+                        let mut leaf = |ui: &mut egui::Ui, f: PluginFolder| {
+                            let n = f.count(&filter, lang);
+                            let text = match n {
+                                Some(n) => format!("📁 {} ({n})", f.name_in(lang)),
+                                None => format!("📁 {}", f.name_in(lang)),
+                            };
+                            if ui.selectable_label(folder == f, text).clicked() {
+                                folder = f;
                             }
-                        });
-                    }
-                    if scope == 0 || scope == 2 {
-                        egui::CollapsingHeader::new(
-                            egui::RichText::new(tr(lang, "Áudio")).strong(),
-                        )
-                        .id_salt("plugin_root_audio")
-                        .default_open(scope == 2 || !filter.is_empty())
-                        .show(ui, |ui| {
-                            let items = plugin_catalog_in(PluginCategory::AudioFx, &filter, lang);
-                            let header = format!(
-                                "{} ({})",
-                                PluginCategory::AudioFx.name_in(lang),
-                                items.len()
-                            );
-                            egui::CollapsingHeader::new(header)
-                                .id_salt(("plugin_cat", PluginCategory::AudioFx))
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    for e in items {
-                                        let is_sel = selected == Some(e);
-                                        let label = e.name_in(lang);
-                                        if ui.selectable_label(is_sel, label).clicked() {
-                                            selected = Some(e);
-                                            selected_ofx = None;
-                                        }
-                                    }
-                                });
-                        });
-                    }
-                    egui::CollapsingHeader::new(tr(lang, "Plug-ins externos (VST3 / OFX)"))
-                        .id_salt("plugin_cat_external")
-                        .show(ui, |ui| {
+                        };
+                        egui::CollapsingHeader::new(egui::RichText::new("Plug-Ins").strong())
+                            .id_salt("plugin_root")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                if scope != 1 {
+                                    egui::CollapsingHeader::new(tr(lang, "Áudio"))
+                                        .id_salt("plugin_root_audio")
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            leaf(ui, PluginFolder::AudioFx);
+                                        });
+                                }
+                                if scope != 2 {
+                                    egui::CollapsingHeader::new(tr(lang, "Vídeo"))
+                                        .id_salt("plugin_root_video")
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            for f in [
+                                                PluginFolder::Generators,
+                                                PluginFolder::VideoFx,
+                                                PluginFolder::Transitions,
+                                                PluginFolder::Compositors,
+                                            ] {
+                                                leaf(ui, f);
+                                            }
+                                        });
+                                }
+                                leaf(ui, PluginFolder::ThirdParty);
+                            });
+                    });
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                let right_w = ui.available_width();
+                ui.set_width(right_w);
+                let details_h = if selected.is_some() || selected_ofx.is_some() {
+                    (avail.y * 0.38).clamp(90.0, 240.0)
+                } else {
+                    0.0
+                };
+                let list_h = (avail.y - details_h - 12.0).max(60.0);
+                egui::ScrollArea::both()
+                    .id_salt(("plugin_list", folder))
+                    .auto_shrink([false, false])
+                    .max_height(list_h)
+                    .show(ui, |ui| match folder.category() {
+                        None => {
                             if let Some(ofx_pick) =
                                 self.external_plugins_list(ui, &filter, &selected_ofx)
                             {
                                 selected_ofx = Some(ofx_pick);
                                 selected = None;
                             }
+                        }
+                        Some(cat) => {
+                            let items = plugin_catalog_in(cat, &filter, lang);
+                            if items.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "Nenhum plug-in nesta pasta."))
+                                        .small()
+                                        .color(self.theme.text_muted),
+                                );
+                                return;
+                            }
+                            // colunas de cima para baixo, como no VEGAS Pro
+                            let (cols, rows) = column_layout(items.len(), right_w, 190.0);
+                            egui::Grid::new(("plugin_cols", folder))
+                                .num_columns(cols)
+                                .spacing([18.0, 2.0])
+                                .show(ui, |ui| {
+                                    for r in 0..rows {
+                                        for c in 0..cols {
+                                            let Some(e) = items.get(c * rows + r).copied() else {
+                                                ui.label("");
+                                                continue;
+                                            };
+                                            let tag = match cat {
+                                                PluginCategory::Transition => "TR",
+                                                PluginCategory::Compositor => "CP",
+                                                PluginCategory::Generator => "GM",
+                                                _ => "FX",
+                                            };
+                                            // etiqueta do tipo à parte: o nome acessível é só o do plug-in
+                                            let resp = ui
+                                                .horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(tag)
+                                                            .small()
+                                                            .color(self.theme.text_muted),
+                                                    );
+                                                    ui.selectable_label(
+                                                        selected == Some(e),
+                                                        e.name_in(lang),
+                                                    )
+                                                })
+                                                .inner;
+                                            if resp.clicked() {
+                                                selected = Some(e);
+                                                selected_ofx = None;
+                                            }
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
+                if details_h > 0.0 {
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("plugin_details_scroll")
+                        .auto_shrink([false, false])
+                        .max_height(details_h)
+                        .show(ui, |ui| {
+                            if let Some((ref bin, ref info)) = selected_ofx {
+                                self.external_ofx_details(ui, bin, info);
+                            } else if let Some(e) = selected {
+                                self.plugin_details(ui, e);
+                            }
                         });
-                });
-            egui::ScrollArea::vertical()
-                .id_salt("plugin_details_scroll")
-                .auto_shrink([false, false])
-                .show(&mut cols[1], |ui| {
-                    if let Some((ref bin, ref info)) = selected_ofx {
-                        self.external_ofx_details(ui, bin, info);
-                    } else if let Some(e) = selected {
-                        self.plugin_details(ui, e);
-                    } else {
-                        ui.label(
-                            egui::RichText::new(tr(
-                                lang,
-                                "Selecione um plug-in para ver os detalhes. Arraste efeitos e \
-                                 transições até um evento ou trilha.",
-                            ))
-                            .small()
-                            .color(self.theme.text_muted),
-                        );
-                    }
-                });
+                }
+            });
         });
+        ui.data_mut(|d| d.insert_temp(folder_key, folder));
         ui.data_mut(|d| {
             d.insert_temp(filter_key, filter);
             d.insert_temp(scope_key, scope);
@@ -1641,6 +1769,11 @@ impl App {
                     self.apply_compositor(b);
                 }
             }
+            PluginEntry::Generator(_) => {
+                if ui.button(tr(lang, "Abrir Geradores de Mídia")).clicked() {
+                    self.exec_cmd(Some(ui.ctx()), "view.tab.generators");
+                }
+            }
         }
     }
 
@@ -1900,6 +2033,10 @@ mod tests {
             plugin_catalog(PluginCategory::Compositor, "").len(),
             BlendMode::ALL.len()
         );
+        assert_eq!(
+            plugin_catalog(PluginCategory::Generator, "").len(),
+            crate::gen_browser::GenKind::ALL.len()
+        );
     }
 
     #[test]
@@ -1908,6 +2045,20 @@ mod tests {
             for e in plugin_catalog(cat, "") {
                 assert_eq!(e.category(), cat, "{e:?}");
             }
+        }
+    }
+
+    #[test]
+    fn colunas_de_cima_para_baixo_sem_colunas_vazias() {
+        assert_eq!(column_layout(0, 800.0, 190.0), (1, 0));
+        assert_eq!(column_layout(10, 800.0, 190.0), (4, 3));
+        assert_eq!(column_layout(10, 50.0, 190.0), (1, 10));
+        assert_eq!(column_layout(3, 2000.0, 190.0), (3, 1));
+        let (c, r) = column_layout(7, f32::NAN, f32::NAN);
+        assert!(c >= 1 && c * r >= 7);
+        for n in 1..60 {
+            let (c, r) = column_layout(n, 900.0, 190.0);
+            assert!(c * r >= n && (c - 1) * r < n, "{n}: {c}x{r}");
         }
     }
 
