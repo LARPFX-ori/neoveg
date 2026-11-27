@@ -276,6 +276,7 @@ pub(crate) fn gen_presets() -> Vec<(&'static str, GenSpec)> {
 fn thumb_time(spec: &GenSpec) -> f64 {
     match spec {
         GenSpec::Text(t) if t.anim != TextAnim::None => f64::from(t.anim_duration.max(0.0)) * 0.5,
+        GenSpec::CreditRoll(cr) => f64::from(cr.scroll_duration.max(0.5)) * 0.45,
         _ => 0.0,
     }
 }
@@ -600,7 +601,8 @@ impl App {
                                             );
                                         }
                                         // ao passar o mouse, + (inserir no cursor) e
-                                        // ★ (favorito) sobre a miniatura, como no VEGAS Pro
+                                        // ★ (favorito) sobre a miniatura, como no VEGAS Pro;
+                                        // usa scope_builder para não mover o cursor da coluna.
                                         if ui.rect_contains_pointer(r) {
                                             let kind_fav = GenKind::of(spec);
                                             let fav = self
@@ -614,32 +616,48 @@ impl App {
                                             );
                                             let star_r =
                                                 plus_r.translate(egui::vec2(-bsz.x - 2.0, 0.0));
-                                            if ui
-                                                .put(plus_r, egui::Button::new("+").small())
-                                                .on_hover_text(tr(lang, "Inserir no cursor"))
-                                                .clicked()
-                                            {
-                                                insert = Some(spec.clone());
-                                            }
-                                            if ui
-                                                .put(
-                                                    star_r,
-                                                    egui::Button::new(if fav {
-                                                        "★"
-                                                    } else {
-                                                        "☆"
-                                                    })
-                                                    .small(),
-                                                )
-                                                .on_hover_text(if fav {
-                                                    tr(lang, "Tirar dos favoritos")
-                                                } else {
-                                                    tr(lang, "Marcar como favorito")
-                                                })
-                                                .clicked()
-                                            {
-                                                toggle_fav = Some(kind_fav);
-                                            }
+                                            ui.scope_builder(
+                                                egui::UiBuilder::new().max_rect(plus_r),
+                                                |ui| {
+                                                    if ui
+                                                        .add_sized(
+                                                            bsz,
+                                                            egui::Button::new("+").small(),
+                                                        )
+                                                        .on_hover_text(tr(
+                                                            lang,
+                                                            "Inserir no cursor",
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        insert = Some(spec.clone());
+                                                    }
+                                                },
+                                            );
+                                            ui.scope_builder(
+                                                egui::UiBuilder::new().max_rect(star_r),
+                                                |ui| {
+                                                    if ui
+                                                        .add_sized(
+                                                            bsz,
+                                                            egui::Button::new(if fav {
+                                                                "★"
+                                                            } else {
+                                                                "☆"
+                                                            })
+                                                            .small(),
+                                                        )
+                                                        .on_hover_text(if fav {
+                                                            tr(lang, "Tirar dos favoritos")
+                                                        } else {
+                                                            tr(lang, "Marcar como favorito")
+                                                        })
+                                                        .clicked()
+                                                    {
+                                                        toggle_fav = Some(kind_fav);
+                                                    }
+                                                },
+                                            );
                                         }
                                         ui.selectable_label(
                                             chosen,
@@ -800,7 +818,10 @@ mod tests {
     fn miniaturas_dos_presets_nao_saem_pretas() {
         let fonts = generate::Fonts::default();
         for (name, spec) in gen_presets() {
-            if matches!(spec, GenSpec::Text(_) | GenSpec::Ofx(_)) || name.contains("preto") {
+            if matches!(spec, GenSpec::Text(_) | GenSpec::Ofx(_))
+                || (matches!(spec, GenSpec::CreditRoll(_)) && fonts.get("").is_none())
+                || name.contains("preto")
+            {
                 continue;
             }
             let img = render_thumb(&spec, &fonts);
