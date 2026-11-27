@@ -3293,3 +3293,101 @@ fn kittest_transicoes_em_grade_com_categorias() {
     assert!(harness.query_all_by_label(star).count() >= 1);
     assert_eq!(harness.query_all_by_label(dissolve).count(), 0);
 }
+
+/// Mídia ausente: a janela procura todos os arquivos de uma vez, pede a
+/// escolha entre homônimos e reaponta as mídias num passo de Desfazer.
+#[test]
+fn kittest_localizar_midia_ausente_procura_tudo_e_escolhe_homonimo() {
+    use crate::model::{MediaItem, MediaSource};
+    let dir = std::env::temp_dir().join(format!("neoveg_kittest_relink_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for rel in [
+        "Novo/Audio/voz.wav",
+        "Backup/voz.wav",
+        "Novo/Video/cena.png",
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"x").unwrap();
+    }
+    let item = |id, path: &str| MediaItem {
+        id,
+        name: path.rsplit('/').next().unwrap_or_default().into(),
+        source: MediaSource::File { path: path.into() },
+        duration: None,
+        has_video: true,
+        has_audio: false,
+        width: 0,
+        height: 0,
+        fps: None,
+        info: String::new(),
+        proxy_path: None,
+    };
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.session
+            .project
+            .media
+            .push(item(9001, "Q:/Sumiu/Audio/voz.wav"));
+        app.session
+            .project
+            .media
+            .push(item(9002, "Q:/Sumiu/Video/cena.png"));
+        assert_eq!(crate::dlg_relink::open_if_missing(app), 2);
+        // a busca usa só a pasta de teste
+        app.dlg.relink.roots = vec![dir.clone()];
+        crate::dlg_relink::start_search(app);
+    }
+    for _ in 0..200 {
+        harness.run_steps(1);
+        if !harness.state().dlg.relink.searching() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!harness.state().dlg.relink.searching());
+    harness.get_by_label("Mídia não encontrada");
+    // cena.png tem um só candidato; voz.wav tem dois e espera a escolha
+    let st = &harness.state().dlg.relink;
+    assert_eq!(st.choices().len(), 1);
+    assert!(st.chosen(9001).is_none());
+    assert_eq!(
+        st.result
+            .as_ref()
+            .and_then(|r| r.candidates.get(&9001))
+            .map(Vec::len),
+        Some(2)
+    );
+
+    harness.state_mut().dlg.relink.choice.insert(9001, 0);
+    harness.state_mut().dlg.relink.dont_save = true;
+    crate::dlg_relink::apply(harness.state_mut());
+    harness.run_steps(2);
+    let app = harness.state();
+    assert!(relink_path(app, 9001).ends_with("voz.wav"));
+    assert!(
+        relink_path(app, 9001).contains("Novo"),
+        "o mais parecido com o original vem primeiro"
+    );
+    assert!(relink_path(app, 9002).ends_with("cena.png"));
+    assert!(!app.dlg.relink.open, "nada mais ausente: a janela fecha");
+    // um único Desfazer devolve os dois caminhos antigos
+    assert!(harness.state_mut().session.undo());
+    let app = harness.state();
+    assert_eq!(relink_path(app, 9001), "Q:/Sumiu/Audio/voz.wav");
+    assert_eq!(relink_path(app, 9002), "Q:/Sumiu/Video/cena.png");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+fn relink_path(app: &App, id: crate::model::Id) -> String {
+    match app.session.project.media(id).map(|m| &m.source) {
+        Some(crate::model::MediaSource::File { path }) => path.clone(),
+        _ => String::new(),
+    }
+}

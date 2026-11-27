@@ -1596,6 +1596,8 @@ impl App {
                 }
                 self.session.reset_project(p, Some(path.clone()));
                 self.reload_all_media();
+                // arquivos que sumiram: abre a pesquisa de mídia ausente (§0: sem perder o projeto)
+                crate::dlg_relink::open_if_missing(self);
                 let path_s = path.display().to_string();
                 if fixes.is_empty() {
                     self.set_status(tr_args(
@@ -3101,6 +3103,7 @@ impl App {
                 self.dlg.work_folders_open = true;
                 self.dlg.work_folders_draft = Some(self.session.project.work_folders.clone());
             }
+            UiAction::FindMissingMedia => crate::dlg_relink::open_from_command(self),
             UiAction::OpenAdvancedSaveDialog => {
                 self.dlg.adv_save.open = true;
                 self.dlg.adv_save.draft = Some(self.prefs.advanced_save.clone());
@@ -3826,6 +3829,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.project_props");
                 self.cmd_menu_btn(ui, "file.work_folders");
+                self.cmd_menu_btn(ui, "file.find_missing_media");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.exit");
             });
@@ -4420,6 +4424,7 @@ impl App {
             ),
             "file.project_props" => (Icon::GearProps, None, None),
             "file.work_folders" => (Icon::FolderItem, None, None),
+            "file.find_missing_media" => (Icon::FolderItem, None, None),
             "file.import_media" => (Icon::ImportMedia, None, None),
             "edit.cut" => (Icon::Cut, None, None),
             "edit.copy" => (Icon::Copy, None, None),
