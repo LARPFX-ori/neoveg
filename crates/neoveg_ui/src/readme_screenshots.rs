@@ -32,7 +32,7 @@ fn output_dir() -> PathBuf {
 }
 
 /// WAV PCM 16 bits estéreo, 48 kHz, com um acorde senoidal e fade nas pontas.
-fn write_sine_wav(path: &Path, secs: u32) {
+fn write_sine_wav(path: &Path, secs: u32) -> std::io::Result<()> {
     let rate = 48_000u32;
     let frames = rate * secs;
     let mut data = Vec::with_capacity(frames as usize * 4);
@@ -63,7 +63,7 @@ fn write_sine_wav(path: &Path, secs: u32) {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
     wav.extend_from_slice(&data);
-    std::fs::write(path, wav).expect("o WAV de teste é gravado");
+    std::fs::write(path, wav)
 }
 
 fn add_generated(app: &mut App, spec: crate::model::GenSpec) -> crate::model::Id {
@@ -76,7 +76,7 @@ fn add_generated(app: &mut App, spec: crate::model::GenSpec) -> crate::model::Id
 
 /// Projeto demonstrativo: título sobre gradiente e barras de cor com
 /// crossfade, trilha sonora, dois marcadores, uma região e dois barramentos.
-fn build_demo_project(app: &mut App, wav_dir: &Path) {
+fn build_demo_project(app: &mut App, wav_dir: &Path) -> Result<(), String> {
     use crate::model::{GenSpec, Marker, MarkerKind, Region, TextSpec};
     let secs = |s: f64| Ticks::from_secs_f64_clamped(s);
 
@@ -98,8 +98,9 @@ fn build_demo_project(app: &mut App, wav_dir: &Path) {
         }),
     );
     let wav = wav_dir.join("Trilha Sonora.wav");
-    write_sine_wav(&wav, 8);
-    let audio = neoveg_engine::media::import_file(&wav).expect("o WAV sintético é importado");
+    write_sine_wav(&wav, 8).map_err(|e| format!("WAV de teste: {e}"))?;
+    let audio =
+        neoveg_engine::media::import_file(&wav).map_err(|e| format!("importar WAV: {e}"))?;
     let audio_id = audio.item.id;
     app.media.insert(audio_id, audio.entry);
     app.session.register_imported_media(audio.item, None);
@@ -127,6 +128,7 @@ fn build_demo_project(app: &mut App, wav_dir: &Path) {
     app.session.cursor = secs(3.5);
     app.session.sel_events.clear();
     app.changed();
+    Ok(())
 }
 
 /// Roda quadros até os trabalhos em segundo plano (prévia, miniaturas,
@@ -138,37 +140,51 @@ fn settle(harness: &mut Harness<'_, App>) {
     }
 }
 
-fn save(harness: &mut Harness<'_, App>, dir: &Path, name: &str) {
+fn save(harness: &mut Harness<'_, App>, dir: &Path, name: &str) -> Result<(), String> {
     settle(harness);
     let img = harness
         .render()
-        .unwrap_or_else(|e| panic!("{name}: a renderização wgpu falhou: {e}"));
+        .map_err(|e| format!("{name}: a renderização wgpu falhou: {e}"))?;
     let path = dir.join(name);
     img.save(&path)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     eprintln!("gravado: {}", path.display());
+    Ok(())
 }
 
 fn demo_harness(
     wav_dir: &Path,
     setup: impl FnOnce(&mut App, &egui::Context),
-) -> Harness<'static, App> {
+) -> Result<Harness<'static, App>, String> {
     let wav_dir = wav_dir.to_path_buf();
+    let err_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let err_slot_cb = std::sync::Arc::clone(&err_slot);
     let mut harness = Harness::builder()
         .with_size(egui::vec2(W, H))
         .with_pixels_per_point(1.0)
         .wgpu()
         .build_eframe(move |cc| {
             let mut app = build_ready_app(cc);
-            build_demo_project(&mut app, &wav_dir);
+            if let Err(e) = build_demo_project(&mut app, &wav_dir) {
+                *err_slot_cb
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
+            }
             app
         });
+    if let Some(e) = err_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        return Err(e);
+    }
     harness.run_steps(2);
     let ctx = harness.ctx.clone();
     harness.state_mut().exec_cmd(Some(&ctx), "timeline.zoom_in");
     harness.state_mut().exec_cmd(Some(&ctx), "timeline.zoom_in");
     setup(harness.state_mut(), &ctx);
-    harness
+    Ok(harness)
 }
 
 fn first_video_event_id(app: &App, nth: usize) -> Option<crate::model::Id> {
@@ -183,15 +199,15 @@ fn first_video_event_id(app: &App, nth: usize) -> Option<crate::model::Id> {
 
 #[test]
 #[ignore = "gera docs/screenshots: NEOVEG_SCREENSHOTS=1 ... -- --ignored"]
-fn readme_screenshots() {
+fn readme_screenshots() -> Result<(), String> {
     if std::env::var("NEOVEG_SCREENSHOTS").as_deref() != Ok("1") {
         eprintln!("pulado: defina NEOVEG_SCREENSHOTS=1 para gerar docs/screenshots");
-        return;
+        return Ok(());
     }
     let dir = output_dir();
-    std::fs::create_dir_all(&dir).expect("a pasta de saída é criada");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("pasta de saída: {e}"))?;
     let wav_dir = std::env::temp_dir().join(format!("neoveg_readme_{}", std::process::id()));
-    std::fs::create_dir_all(&wav_dir).expect("a pasta temporária é criada");
+    std::fs::create_dir_all(&wav_dir).map_err(|e| format!("pasta temporária: {e}"))?;
 
     type Setup = fn(&mut App, &egui::Context);
     let shots: [(&str, Setup); 15] = [
@@ -285,8 +301,9 @@ fn readme_screenshots() {
         if only.as_deref().is_some_and(|o| !name.starts_with(o)) {
             continue;
         }
-        let mut harness = demo_harness(&wav_dir, setup);
-        save(&mut harness, &dir, name);
+        let mut harness = demo_harness(&wav_dir, setup)?;
+        save(&mut harness, &dir, name)?;
     }
     let _ = std::fs::remove_dir_all(&wav_dir);
+    Ok(())
 }
