@@ -3219,5 +3219,7 @@
   "Remover barramento de entrada": "Remover barramento de entrada",
   "limite de barramentos de entrada atingido": "limite de barramentos de entrada atingido",
   "Silenciar": "Silenciar",
-  "Inverter fase": "Inverter fase"
+  "Inverter fase": "Inverter fase",
+  "Modo de composição: {mode}": "Modo de composição: {mode}",
+  "Entrada": "Entrada"
 }

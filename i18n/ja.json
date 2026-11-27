@@ -3219,5 +3219,7 @@
   "Remover barramento de entrada": "入力バスを削除",
   "limite de barramentos de entrada atingido": "入力バスの上限に達しました",
   "Silenciar": "ミュート",
-  "Inverter fase": "位相を反転"
+  "Inverter fase": "位相を反転",
+  "Modo de composição: {mode}": "合成モード: {mode}",
+  "Entrada": "入力"
 }

@@ -157,11 +157,17 @@ pub enum Icon {
     LiveSave,
     HandPan,
     ScreenCapture,
+    /// Minimizar a altura da trilha: duas setas apontando para a linha do meio.
+    TrackMinimize,
+    /// Maximizar a altura da trilha: duas setas saindo da linha do meio.
+    TrackMaximize,
+    /// Modo de composição da trilha: duas camadas sobrepostas.
+    CompositingMode,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 148] = [
+    pub const ALL: [Icon; 151] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -310,6 +316,9 @@ impl Icon {
         Icon::LiveSave,
         Icon::HandPan,
         Icon::ScreenCapture,
+        Icon::TrackMinimize,
+        Icon::TrackMaximize,
+        Icon::CompositingMode,
     ];
 }
 
@@ -2213,6 +2222,29 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.50, 0.70, 0.50, 0.86, pal.ink, 0.08);
             c.line(0.32, 0.86, 0.68, 0.86, pal.ink, 0.08);
             c.p.circle_filled(c.pt(0.72, 0.34), c.u(0.11), pal.red);
+        }
+        Icon::TrackMinimize => {
+            c.line(0.16, 0.50, 0.84, 0.50, pal.ink, 0.08);
+            c.poly(&[(0.30, 0.14), (0.70, 0.14), (0.50, 0.40)], pal.blue, None);
+            c.poly(&[(0.30, 0.86), (0.70, 0.86), (0.50, 0.60)], pal.blue, None);
+        }
+        Icon::TrackMaximize => {
+            c.line(0.16, 0.50, 0.84, 0.50, pal.ink, 0.08);
+            c.poly(&[(0.30, 0.42), (0.70, 0.42), (0.50, 0.14)], pal.blue, None);
+            c.poly(&[(0.30, 0.58), (0.70, 0.58), (0.50, 0.86)], pal.blue, None);
+        }
+        Icon::CompositingMode => {
+            // camada de trás (cheia) e camada da frente (losango vazado)
+            c.poly(
+                &[(0.16, 0.40), (0.46, 0.22), (0.76, 0.40), (0.46, 0.58)],
+                pal.blue,
+                None,
+            );
+            c.poly(
+                &[(0.24, 0.60), (0.54, 0.42), (0.84, 0.60), (0.54, 0.78)],
+                pal.paper,
+                Some((0.07, pal.cyan)),
+            );
         }
     }
 }
