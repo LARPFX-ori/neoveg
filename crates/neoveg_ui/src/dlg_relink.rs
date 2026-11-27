@@ -325,8 +325,10 @@ pub fn show_relink_window(app: &mut crate::App, ctx: &egui::Context) {
                             let missing = st.missing.clone();
                             for m in &missing {
                                 ui.label(&m.name).on_hover_text(&m.file_name);
-                                ui.label(egui::RichText::new(&m.path).small().weak())
-                                    .on_hover_text(&m.path);
+                                ui.label(
+                                    egui::RichText::new(short_path(&m.path)).small().weak(),
+                                )
+                                .on_hover_text(&m.path);
                                 ui.horizontal(|ui| {
                                     location_cell(ui, lang, st, m);
                                     if ui
@@ -444,12 +446,13 @@ fn location_cell(
                 .first()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
-            ui.label(egui::RichText::new(&p).small()).on_hover_text(&p);
+            ui.label(egui::RichText::new(short_path(&p)).small())
+                .on_hover_text(&p);
         }
         n => {
             let cur = st.choice.get(&m.id).copied();
             let text = match cur.and_then(|i| list.get(i)) {
-                Some(p) => p.display().to_string(),
+                Some(p) => short_path(&p.display().to_string()),
                 None => tr_args(
                     lang,
                     "{n} arquivos com este nome: escolha um",
@@ -470,5 +473,39 @@ fn location_cell(
                     }
                 });
         }
+    }
+}
+
+/// Caracteres de um caminho mostrados na janela; o resto vai na dica.
+const SHORT_PATH_CHARS: usize = 56;
+
+/// Encurta um caminho longo mantendo o fim (pasta e nome do arquivo), que é o
+/// que diferencia arquivos de mesmo nome. Sem isso, um caminho longo alargava
+/// a coluna *Novo local* e empurrava *Aplicar e salvar* e *Fechar* para fora
+/// da janela.
+pub(crate) fn short_path(p: &str) -> String {
+    let n = p.chars().count();
+    if n <= SHORT_PATH_CHARS {
+        return p.to_string();
+    }
+    let tail: String = p.chars().skip(n - (SHORT_PATH_CHARS - 1)).collect();
+    format!("…{tail}")
+}
+
+#[cfg(test)]
+mod short_path_tests {
+    use super::{short_path, SHORT_PATH_CHARS};
+
+    #[test]
+    fn caminho_longo_mantem_o_fim_e_cabe_no_limite() {
+        let longo = format!("C:/{}/movida/a/qa_teste.mp4", "pasta_comprida/".repeat(12));
+        let curto = short_path(&longo);
+        assert_eq!(curto.chars().count(), SHORT_PATH_CHARS);
+        assert!(curto.starts_with('…'));
+        assert!(curto.ends_with("movida/a/qa_teste.mp4"));
+        assert_eq!(short_path("C:/a/b.mp4"), "C:/a/b.mp4");
+        // limite de caractere, não de byte
+        let acentos = "ção/".repeat(40);
+        assert_eq!(short_path(&acentos).chars().count(), SHORT_PATH_CHARS);
     }
 }

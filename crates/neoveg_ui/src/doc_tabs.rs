@@ -307,6 +307,9 @@ impl App {
         let i = self.doc_tabs.len() - 1;
         self.switch_doc_tab(i);
         self.reload_all_media();
+        // arquivos que sumiram: abre a pesquisa de mídia ausente, como ao
+        // abrir no lugar do projeto principal
+        crate::dlg_relink::open_if_missing(self);
         let name = file_label(Some(path)).unwrap_or_default();
         let msg = if nested {
             "Projeto aninhado aberto em aba: {name}"

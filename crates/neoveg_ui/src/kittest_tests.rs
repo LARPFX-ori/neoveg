@@ -1044,6 +1044,121 @@ fn kittest_navegador_de_geradores_de_midia() {
     assert!(radial, "inseriu o preset Gradiente radial");
 }
 
+/// Abrir um projeto com mídia ausente numa aba nova (o principal já está em
+/// uso) também abre a janela *Localizar mídia ausente*. Antes, só o caminho
+/// que substitui o projeto principal a abria, e a mídia ficava offline sem
+/// aviso além da barra de status.
+#[test]
+fn kittest_abrir_em_aba_com_midia_ausente_abre_a_busca() {
+    let dir =
+        std::env::temp_dir().join(format!("neoveg_kittest_relink_aba_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("pasta de teste");
+    let path = dir.join("com_midia_ausente.neoveg");
+    let mut p = crate::model::Project::new_default();
+    p.media.push(crate::model::MediaItem {
+        id: 9101,
+        name: "sumiu.wav".into(),
+        source: crate::model::MediaSource::File {
+            path: dir.join("sumiu.wav").to_string_lossy().into_owned(),
+        },
+        duration: None,
+        has_video: false,
+        has_audio: true,
+        width: 0,
+        height: 0,
+        fps: None,
+        info: String::new(),
+        proxy_path: None,
+    });
+    p.save_file(&path).expect("salvar projeto de teste");
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        // o principal está em uso: o projeto vai para uma aba nova
+        app.session.dirty = true;
+        assert!(app.open_goes_to_new_tab(false));
+        app.open_project_path(path.clone());
+        assert!(app.dlg.relink.open, "a busca de mídia ausente abriu");
+        assert_eq!(app.dlg.relink.missing.len(), 1);
+    }
+    harness.run_steps(2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Com um arquivo de caminho longo escolhido entre homônimos, *Aplicar e
+/// salvar* e *Fechar* continuam dentro da janela *Mídia não encontrada*.
+/// Antes, o caminho inteiro alargava a coluna e empurrava os botões para fora,
+/// e não havia como aplicar a escolha.
+#[test]
+fn kittest_localizar_midia_caminho_longo_nao_esconde_os_botoes() {
+    let dir = std::env::temp_dir().join(format!(
+        "neoveg_kittest_relink_longo_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let fundo = dir.join("uma_pasta_com_nome_bem_comprido_para_o_teste/outra_pasta_tambem_comprida_aqui/e_mais_uma_pasta_comprida");
+    for sub in ["a", "b"] {
+        std::fs::create_dir_all(fundo.join(sub)).expect("pasta de teste");
+        std::fs::write(fundo.join(sub).join("homonimo.wav"), b"x").expect("arquivo de teste");
+    }
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.session.project.media.push(crate::model::MediaItem {
+            id: 9201,
+            name: "homonimo.wav".into(),
+            source: crate::model::MediaSource::File {
+                path: "Q:/Sumiu/homonimo.wav".into(),
+            },
+            duration: None,
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        });
+        assert_eq!(crate::dlg_relink::open_if_missing(app), 1);
+        app.dlg.relink.roots = vec![dir.clone()];
+        crate::dlg_relink::start_search(app);
+    }
+    for _ in 0..200 {
+        harness.run_steps(1);
+        if !harness.state().dlg.relink.searching() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    harness.state_mut().dlg.relink.choice.insert(9201, 0);
+    harness.run_steps(4);
+    let janela = harness
+        .ctx
+        .memory(|m| m.area_rect(egui::Id::new("relink_media_window")))
+        .expect("janela Mídia não encontrada");
+    for rotulo in ["Aplicar e salvar (1)", "Fechar"] {
+        let b = harness
+            .get_by_label(rotulo)
+            .raw_bounds()
+            .expect("botão com limites");
+        assert!(
+            (b.x1 as f32) <= janela.right() + 1.0,
+            "{rotulo} fica dentro da janela ({} > {})",
+            b.x1,
+            janela.right()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn lock_test_prefs() -> std::sync::MutexGuard<'static, ()> {
