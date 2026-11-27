@@ -647,6 +647,9 @@ pub fn apply_theme(ctx: &egui::Context, id: ThemeId) -> ThemeColors {
         egui::Visuals::light()
     };
     let sel_fg = contrast_on(c.selection_bg);
+    // alça retangular nos faders e controles deslizantes, como no VEGAS Pro
+    // (antes era redonda): na vertical vira uma tampa larga e baixa
+    v.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 0.55 };
     v.panel_fill = c.panel_fill;
     v.window_fill = c.window_fill;
     v.extreme_bg_color = c.extreme_bg;

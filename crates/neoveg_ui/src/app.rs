@@ -335,6 +335,8 @@ pub struct App {
     pub master_channels_locked: bool,
     /// Estado visual do Console de Mixagem (barra lateral, filtros, seções e largura).
     pub mixer_ui: crate::panels::MixerConsoleState,
+    /// Janela Transições (categoria, busca, escolha).
+    pub(crate) transitions_ui: crate::panels::TransitionsUiState,
     pub dock_visible: bool,
     pub dock_height: f32,
     pub preview_ratio: f32,
@@ -580,6 +582,7 @@ impl App {
             master_preview_mute: false,
             master_channels_locked: true,
             mixer_ui: crate::panels::MixerConsoleState::default(),
+            transitions_ui: crate::panels::TransitionsUiState::default(),
             dock_visible: initial_layout.dock_visible,
             dock_maximized: None,
             timeline_restore: None,
@@ -1593,6 +1596,8 @@ impl App {
                 }
                 self.session.reset_project(p, Some(path.clone()));
                 self.reload_all_media();
+                // arquivos que sumiram: abre a pesquisa de mídia ausente (§0: sem perder o projeto)
+                crate::dlg_relink::open_if_missing(self);
                 let path_s = path.display().to_string();
                 if fixes.is_empty() {
                     self.set_status(tr_args(
@@ -3098,6 +3103,7 @@ impl App {
                 self.dlg.work_folders_open = true;
                 self.dlg.work_folders_draft = Some(self.session.project.work_folders.clone());
             }
+            UiAction::FindMissingMedia => crate::dlg_relink::open_from_command(self),
             UiAction::OpenAdvancedSaveDialog => {
                 self.dlg.adv_save.open = true;
                 self.dlg.adv_save.draft = Some(self.prefs.advanced_save.clone());
@@ -3823,6 +3829,7 @@ impl App {
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.project_props");
                 self.cmd_menu_btn(ui, "file.work_folders");
+                self.cmd_menu_btn(ui, "file.find_missing_media");
                 ui.separator();
                 self.cmd_menu_btn(ui, "file.exit");
             });
@@ -4417,6 +4424,7 @@ impl App {
             ),
             "file.project_props" => (Icon::GearProps, None, None),
             "file.work_folders" => (Icon::FolderItem, None, None),
+            "file.find_missing_media" => (Icon::FolderItem, None, None),
             "file.import_media" => (Icon::ImportMedia, None, None),
             "edit.cut" => (Icon::Cut, None, None),
             "edit.copy" => (Icon::Copy, None, None),
@@ -5972,8 +5980,19 @@ impl App {
             egui::TopBottomPanel::bottom("dock_bot")
         };
         let screen_h = ctx.screen_rect().height();
-        let max_h = (screen_h * 0.56).max(160.0);
+        let max_h = (screen_h * 0.62).max(160.0);
         let eff_h = self.dock_height.min(max_h);
+        // O egui grava a altura do painel na memória persistente e, depois da
+        // primeira execução, ignora `default_height`: uma altura pequena salva
+        // uma vez ficava para sempre e trocar de layout não mudava o dock.
+        // A altura do Neoveg (`dock_height`) manda.
+        let panel_id = egui::Id::new(if at_top { "dock_top" } else { "dock_bot" });
+        if let Some(mut st) = egui::containers::panel::PanelState::load(ctx, panel_id) {
+            if (st.rect.height() - eff_h).abs() > 0.5 {
+                st.rect.max.y = st.rect.min.y + eff_h;
+                ctx.data_mut(|d| d.insert_persisted(panel_id, st));
+            }
+        }
         let resp = panel
             .resizable(true)
             .default_height(eff_h)

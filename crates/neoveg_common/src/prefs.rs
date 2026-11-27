@@ -191,9 +191,10 @@ impl LayoutType {
 
     pub fn default_dock_height(self) -> f32 {
         match self {
-            LayoutType::SonicFoundry => 270.0,
-            LayoutType::Sony => 300.0,
-            LayoutType::Magix | LayoutType::Moderno => 320.0,
+            // perto de metade de uma tela de 1080 px, como no VEGAS Pro
+            LayoutType::SonicFoundry => 400.0,
+            LayoutType::Sony => 420.0,
+            LayoutType::Magix | LayoutType::Moderno => 440.0,
         }
     }
 

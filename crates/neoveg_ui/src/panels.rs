@@ -6,7 +6,7 @@ use crate::app::{LoadMsg, LoudnessJob};
 use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
-use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind};
+use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind, Vec2};
 use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::engine::loudness::{
     analyze_project_loudness, format_db, format_lufs, LoudnessSnapshot, LoudnessTarget,
@@ -2937,72 +2937,254 @@ impl App {
     // Transições, efeitos e geradores
     // -----------------------------------------------------------------
 
+    /// Janela Transições no arranjo do VEGAS Pro (manual 21, p. 53; ajuda
+    /// "The Transitions Window"): busca, abas de categoria com Todos e
+    /// Favoritos, a lista à esquerda e a grade de miniaturas à direita, que
+    /// quebra de linha conforme a largura. Arrastar uma miniatura até um
+    /// evento aplica; clique duplo aplica aos eventos selecionados.
     fn transitions_tab(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
-        ui.label(
-            egui::RichText::new(tr(
-                lang,
-                "Arraste uma transição até um evento de vídeo (ela é usada no crossfade/fade de entrada), ou selecione o evento e clique em Aplicar.",
-            ))
-            .small()
-            .weak(),
-        );
-        ui.separator();
-        let sel: Vec<Id> = self.sel_events.iter().cloned().collect();
-        let thumb_sz = vec2(
-            neoveg_engine::engine::fx_preview::THUMB_W as f32,
-            neoveg_engine::engine::fx_preview::THUMB_H as f32,
-        );
-        egui::Grid::new("tr_grid")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                for (i, k) in TransitionKind::ALL.into_iter().enumerate() {
-                    let id = egui::Id::new(("tr", k as u32));
-                    // miniatura (meio do progresso; anima ao passar o mouse)
-                    let hover_id = egui::Id::new(("tr_hover", i));
-                    let hovered = ui
-                        .ctx()
-                        .data(|d| d.get_temp::<bool>(hover_id))
-                        .unwrap_or(false);
-                    let ctx = ui.ctx().clone();
-                    let tex = self.fx_browser.transitions.texture(&ctx, i, hovered);
-                    let resp = ui
-                        .dnd_drag_source(id, DndPayload::Transition(k), |ui| {
-                            ui.vertical(|ui| {
-                                match &tex {
-                                    Some(t) => {
-                                        ui.image((t.id(), thumb_sz));
-                                    }
-                                    None => {
-                                        let (r, _) =
-                                            ui.allocate_exact_size(thumb_sz, Sense::hover());
-                                        ui.painter().rect_filled(r, 2.0, self.theme.extreme_bg);
-                                    }
-                                }
-                                icons::icon_label(
-                                    ui,
-                                    Icon::TransitionSplit,
-                                    14.0,
-                                    k.name_in(lang),
-                                    &self.theme,
-                                );
-                            });
-                        })
-                        .response;
-                    let now_hover = resp.hovered();
-                    ui.ctx().data_mut(|d| d.insert_temp(hover_id, now_hover));
-                    if ui
-                        .add_enabled(!sel.is_empty(), egui::Button::new(tr(lang, "Aplicar")))
-                        .clicked()
-                    {
-                        for e in &sel {
-                            self.apply_transition(*e, k);
-                        }
-                    }
-                    ui.end_row();
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transitions_ui.search)
+                    .hint_text(tr(lang, "Buscar plug-ins"))
+                    .desired_width(200.0),
+            );
+            ui.separator();
+            let st = &mut self.transitions_ui;
+            if ui
+                .selectable_label(st.cat.is_none() && !st.favorites_only, tr(lang, "Todos"))
+                .clicked()
+            {
+                st.cat = None;
+                st.favorites_only = false;
+            }
+            for c in TransitionCategory::ALL {
+                if ui
+                    .selectable_label(st.cat == Some(c) && !st.favorites_only, c.name_in(lang))
+                    .clicked()
+                {
+                    st.cat = Some(c);
+                    st.favorites_only = false;
                 }
+            }
+            if ui
+                .selectable_label(st.favorites_only, format!("★ {}", tr(lang, "Favoritos")))
+                .clicked()
+            {
+                st.cat = None;
+                st.favorites_only = true;
+            }
+        });
+        ui.separator();
+
+        let q = self.transitions_ui.search.trim().to_lowercase();
+        let favs = self.prefs.fx_favorites.clone();
+        let list: Vec<(usize, TransitionKind)> = TransitionKind::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, k)| {
+                (self.transitions_ui.cat.is_none()
+                    || self.transitions_ui.cat == Some(TransitionCategory::of(*k)))
+                    && (!self.transitions_ui.favorites_only
+                        || favs.contains(&transition_fav_id(*k)))
+                    && (q.is_empty() || k.name_in(lang).to_lowercase().contains(&q))
+            })
+            .collect();
+        if list.is_empty() {
+            ui.label(
+                egui::RichText::new(if self.transitions_ui.favorites_only {
+                    tr(
+                        lang,
+                        "Nenhum favorito. Clique na estrela de uma transição para marcá-la.",
+                    )
+                } else {
+                    tr(lang, "Nenhuma transição encontrada.")
+                })
+                .small()
+                .weak(),
+            );
+            return;
+        }
+        if !self
+            .transitions_ui
+            .selected
+            .is_some_and(|k| list.iter().any(|(_, x)| *x == k))
+        {
+            self.transitions_ui.selected = list.first().map(|(_, k)| *k);
+        }
+
+        let sel_events: Vec<Id> = self.sel_events.iter().cloned().collect();
+        let left_w = (ui.available_width() * 0.30).clamp(140.0, 220.0);
+        let visible_w = (ui.clip_rect().right() - ui.cursor().left()).min(ui.available_width());
+        let right_w = (visible_w - left_w - 24.0).max(120.0);
+        let body_h = (ui.available_height() - 28.0).max(80.0);
+        let thumb = vec2(
+            neoveg_engine::engine::fx_preview::THUMB_W as f32 * 1.25,
+            neoveg_engine::engine::fx_preview::THUMB_H as f32 * 1.25,
+        );
+        let cell_w = thumb.x + 12.0;
+        let per_row = ((right_w + 4.0) / cell_w).floor().max(1.0) as usize;
+        let mut toggle_fav: Option<TransitionKind> = None;
+        let mut select: Option<TransitionKind> = None;
+        let mut apply: Option<TransitionKind> = None;
+        let (accent, bg) = (self.theme.accent, self.theme.extreme_bg);
+
+        ui.horizontal_top(|ui| {
+            // esquerda: a lista com a estrela de favorito
+            ui.vertical(|ui| {
+                ui.set_width(left_w);
+                egui::ScrollArea::vertical()
+                    .id_salt("tr_lista")
+                    .max_height(body_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (_, k) in &list {
+                            let fav = favs.contains(&transition_fav_id(*k));
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(fav, if fav { "★" } else { "☆" })
+                                    .on_hover_text(if fav {
+                                        tr(lang, "Tirar dos favoritos")
+                                    } else {
+                                        tr(lang, "Marcar como favorito")
+                                    })
+                                    .clicked()
+                                {
+                                    toggle_fav = Some(*k);
+                                }
+                                let sel = self.transitions_ui.selected == Some(*k);
+                                if ui.selectable_label(sel, k.name_in(lang)).clicked() {
+                                    select = Some(*k);
+                                }
+                            });
+                        }
+                    });
             });
+            ui.separator();
+            // direita: grade de miniaturas (meio do progresso; anima ao passar o mouse)
+            ui.vertical(|ui| {
+                ui.set_width(right_w);
+                egui::ScrollArea::vertical()
+                    .id_salt("tr_grade")
+                    .max_height(body_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for row in list.chunks(per_row) {
+                            ui.horizontal_top(|ui| {
+                                for (i, k) in row {
+                                    let hover_id = egui::Id::new(("tr_hover", *i));
+                                    let hovered = ui
+                                        .ctx()
+                                        .data(|d| d.get_temp::<bool>(hover_id))
+                                        .unwrap_or(false);
+                                    let ctx = ui.ctx().clone();
+                                    let tex =
+                                        self.fx_browser.transitions.texture(&ctx, *i, hovered);
+                                    let selected = self.transitions_ui.selected == Some(*k);
+                                    let id = egui::Id::new(("tr", *k as u32));
+                                    let inner =
+                                        ui.dnd_drag_source(id, DndPayload::Transition(*k), |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.set_width(cell_w - 4.0);
+                                                let (r, resp) =
+                                                    ui.allocate_exact_size(thumb, Sense::click());
+                                                match &tex {
+                                                    Some(t) => {
+                                                        ui.painter().image(
+                                                            t.id(),
+                                                            r,
+                                                            Rect::from_min_max(
+                                                                pos2(0.0, 0.0),
+                                                                pos2(1.0, 1.0),
+                                                            ),
+                                                            Color32::WHITE,
+                                                        );
+                                                    }
+                                                    None => {
+                                                        ui.painter().rect_filled(r, 2.0, bg);
+                                                    }
+                                                }
+                                                if selected {
+                                                    ui.painter().rect_stroke(
+                                                        r.expand(1.5),
+                                                        2.0,
+                                                        Stroke::new(2.0_f32, accent),
+                                                        StrokeKind::Outside,
+                                                    );
+                                                }
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(k.name_in(lang))
+                                                            .small(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                resp
+                                            })
+                                            .inner
+                                        });
+                                    let thumb_resp = inner.inner;
+                                    let now_hover =
+                                        inner.response.hovered() || thumb_resp.hovered();
+                                    ui.ctx().data_mut(|d| d.insert_temp(hover_id, now_hover));
+                                    if thumb_resp.clicked() {
+                                        select = Some(*k);
+                                    }
+                                    if thumb_resp.double_clicked() {
+                                        apply = Some(*k);
+                                    }
+                                    thumb_resp.on_hover_text(k.name_in(lang));
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            });
+        });
+
+        // rodapé: a transição escolhida e o botão Aplicar
+        ui.separator();
+        ui.horizontal(|ui| {
+            if let Some(k) = self.transitions_ui.selected {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} — {}",
+                        k.name_in(lang),
+                        TransitionCategory::of(k).name_in(lang)
+                    ))
+                    .small(),
+                );
+                if ui
+                    .add_enabled(
+                        !sel_events.is_empty(),
+                        egui::Button::new(tr(lang, "Aplicar")),
+                    )
+                    .on_hover_text(tr(lang, "Aplicar aos eventos selecionados"))
+                    .clicked()
+                {
+                    apply = Some(k);
+                }
+            }
+        });
+
+        if let Some(k) = select {
+            self.transitions_ui.selected = Some(k);
+        }
+        if let Some(k) = apply {
+            for e in &sel_events {
+                self.apply_transition(*e, k);
+            }
+        }
+        if let Some(k) = toggle_fav {
+            let id = transition_fav_id(k);
+            if let Some(pos) = self.prefs.fx_favorites.iter().position(|x| *x == id) {
+                self.prefs.fx_favorites.remove(pos);
+            } else {
+                self.prefs.fx_favorites.push(id);
+            }
+            let _ = self.prefs.save();
+        }
     }
 
     fn fx_tab(&mut self, ui: &mut egui::Ui, audio: bool) {
@@ -3458,9 +3640,10 @@ impl App {
             let show_faders = self.mixer_ui.show_faders;
             let show_insert_fx = self.mixer_ui.show_insert_fx;
             let filter = self.mixer_ui.channel_filter;
-            // o fader e o medidor ocupam a altura que sobra no painel
+            // o fader e o medidor ocupam a altura visível que sobra no painel
+            let vis_h = (ui.clip_rect().bottom() - ui.cursor().top()).max(180.0);
             let fader_h = mixer_fader_height(
-                ui.available_height(),
+                ui.available_height().min(vis_h),
                 MixerSections {
                     io: show_io && !bus_choices.is_empty(),
                     insert_fx: show_insert_fx,
@@ -3691,12 +3874,21 @@ impl App {
                                         if show_faders || show_meters {
                                             ui.horizontal(|ui| {
                                                 if show_faders {
-                                                    let r = ui.add_sized(
-                                                        [22.0, fader_h],
-                                                        egui::Slider::new(&mut vol, -60.0..=12.0)
-                                                            .vertical()
-                                                            .show_value(false),
-                                                    );
+                                                    let r = ui
+                                                        .scope(|ui| {
+                                                            ui.spacing_mut().slider_width =
+                                                                (fader_h - 4.0).max(40.0);
+                                                            ui.add_sized(
+                                                                [22.0, fader_h],
+                                                                egui::Slider::new(
+                                                                    &mut vol,
+                                                                    -60.0..=12.0,
+                                                                )
+                                                                .vertical()
+                                                                .show_value(false),
+                                                            )
+                                                        })
+                                                        .inner;
                                                     if r.drag_started() {
                                                         checkpoint_needed = true;
                                                     }
@@ -4074,12 +4266,21 @@ impl App {
                                         if show_faders || show_meters {
                                             ui.horizontal(|ui| {
                                                 if show_faders {
-                                                    let r = ui.add_sized(
-                                                        [22.0, fader_h],
-                                                        egui::Slider::new(&mut vol, -60.0..=12.0)
-                                                            .vertical()
-                                                            .show_value(false),
-                                                    );
+                                                    let r = ui
+                                                        .scope(|ui| {
+                                                            ui.spacing_mut().slider_width =
+                                                                (fader_h - 4.0).max(40.0);
+                                                            ui.add_sized(
+                                                                [22.0, fader_h],
+                                                                egui::Slider::new(
+                                                                    &mut vol,
+                                                                    -60.0..=12.0,
+                                                                )
+                                                                .vertical()
+                                                                .show_value(false),
+                                                            )
+                                                        })
+                                                        .inner;
                                                     if r.drag_started() {
                                                         checkpoint_needed = true;
                                                     }
@@ -4725,7 +4926,8 @@ impl App {
                                cfg: &mut neoveg_engine::scopes::ScopeConfig,
                                changed: &mut bool,
                                kind: ScopeViewLayout,
-                               tile_w: f32| {
+                               tile_w: f32,
+                               max_h: f32| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| match kind {
                     ScopeViewLayout::Vectorscope => {
@@ -4831,19 +5033,19 @@ impl App {
                 };
                 let s = t[tex_idx].size_vec2();
                 let is_vec = kind == ScopeViewLayout::Vectorscope;
-                let h = if is_vec {
-                    tile_w.min(300.0)
-                } else {
-                    (tile_w * s.y / s.x.max(1.0)).min(300.0)
-                };
-                let ww = if is_vec { h } else { tile_w };
-                ui.image((t[tex_idx].id(), vec2(ww, h)));
+                // cada quadro cabe na altura que sobrou (os 4 aparecem inteiros)
+                ui.image((t[tex_idx].id(), fit_scope_image(s, tile_w, max_h, is_vec)));
             });
         };
 
         let avail = ui.available_width();
+        // altura de cada quadro: o que sobra na aba, menos o título de cada
+        // linha, dividido por 2 na grade (VEGAS Pro 21, p. 61)
+        let title_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
+        let avail_h = ui.available_height();
         if self.scopes_layout == ScopeViewLayout::All {
-            let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
+            let w = ((avail - 24.0) / 2.0).max(80.0);
+            let max_h = ((avail_h - 2.0 * title_h - 8.0) / 2.0).max(48.0);
             egui::Grid::new("scopes").num_columns(2).show(ui, |ui| {
                 draw_scope_tile(
                     ui,
@@ -4851,6 +5053,7 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::Vectorscope,
                     w,
+                    max_h,
                 );
                 draw_scope_tile(
                     ui,
@@ -4858,6 +5061,7 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::Waveform,
                     w,
+                    max_h,
                 );
                 ui.end_row();
                 draw_scope_tile(
@@ -4866,6 +5070,7 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::Histogram,
                     w,
+                    max_h,
                 );
                 draw_scope_tile(
                     ui,
@@ -4873,13 +5078,15 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::RgbParade,
                     w,
+                    max_h,
                 );
                 ui.end_row();
             });
         } else {
-            let w = (avail - 16.0).clamp(200.0, 720.0);
+            let w = (avail - 16.0).max(120.0);
+            let max_h = (avail_h - title_h - 4.0).max(48.0);
             let chosen = self.scopes_layout;
-            draw_scope_tile(ui, &mut self.scopes_config, &mut changed, chosen, w);
+            draw_scope_tile(ui, &mut self.scopes_config, &mut changed, chosen, w, max_h);
         }
 
         if changed {
@@ -4946,10 +5153,16 @@ pub(crate) fn draw_db_scale(painter: &egui::Painter, r: Rect, color: Color32) {
             Stroke::new(1.0_f32, color.gamma_multiply(0.7)),
         );
         if major && (y - last_label_y).abs() >= 9.0 {
+            let db_i = db as i32;
+            let lbl = if db_i > 0 {
+                format!("+{db_i}")
+            } else {
+                format!("{db_i}")
+            };
             painter.text(
                 pos2(r.right(), y),
                 egui::Align2::RIGHT_CENTER,
-                format!("{}", -(db as i32)),
+                lbl,
                 egui::FontId::monospace(7.5),
                 color,
             );
@@ -4959,6 +5172,95 @@ pub(crate) fn draw_db_scale(painter: &egui::Painter, r: Rect, color: Color32) {
     }
 }
 
+/// Categorias da janela Transições, nas abas do VEGAS Pro (Efeitos 3D,
+/// Revelar, Wipes, Fades e Dobras e páginas).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TransitionCategory {
+    ThreeD,
+    Reveals,
+    Wipes,
+    Fades,
+    Pages,
+}
+
+impl TransitionCategory {
+    pub(crate) const ALL: [TransitionCategory; 5] = [
+        TransitionCategory::ThreeD,
+        TransitionCategory::Reveals,
+        TransitionCategory::Wipes,
+        TransitionCategory::Fades,
+        TransitionCategory::Pages,
+    ];
+
+    pub(crate) fn name_in(self, lang: Language) -> &'static str {
+        let key = match self {
+            TransitionCategory::ThreeD => "Efeitos 3D",
+            TransitionCategory::Reveals => "Revelar",
+            TransitionCategory::Wipes => "Wipes",
+            TransitionCategory::Fades => "Fades",
+            TransitionCategory::Pages => "Dobras e páginas",
+        };
+        tr(lang, key)
+    }
+
+    /// Categoria de cada transição (exaustivo: uma transição nova obriga a
+    /// escolher a aba dela).
+    pub(crate) fn of(k: TransitionKind) -> Self {
+        use TransitionKind as T;
+        match k {
+            T::Zoom
+            | T::FlyIn
+            | T::Blinds3D
+            | T::Cascade3D
+            | T::Shuffle3D
+            | T::WarpFlow
+            | T::Swap => TransitionCategory::ThreeD,
+            T::PushLeft
+            | T::PushRight
+            | T::PushUp
+            | T::PushDown
+            | T::SlideOver
+            | T::Squeeze
+            | T::IrisOpen
+            | T::IrisClose
+            | T::BarnDoor
+            | T::SplitHorizontal
+            | T::Portals => TransitionCategory::Reveals,
+            T::WipeLeft
+            | T::WipeRight
+            | T::WipeUp
+            | T::WipeDown
+            | T::ClockWipe
+            | T::Blinds
+            | T::Checker
+            | T::StarWipe
+            | T::DiagonalWipe
+            | T::GradientWipe
+            | T::VenetianBlinds
+            | T::Spiral
+            | T::Cascade => TransitionCategory::Wipes,
+            T::Dissolve | T::FadeThroughBlack | T::RandomDissolve | T::FlashWhite => {
+                TransitionCategory::Fades
+            }
+            T::PagePeel | T::PageLoop | T::PageRoll => TransitionCategory::Pages,
+        }
+    }
+}
+
+/// Identificador de favorito de uma transição (lista `fx_favorites`).
+pub(crate) fn transition_fav_id(k: TransitionKind) -> String {
+    format!("tr:{k:?}")
+}
+
+/// Estado da janela Transições.
+#[derive(Default)]
+pub(crate) struct TransitionsUiState {
+    pub(crate) search: String,
+    /// `None` = Todos.
+    pub(crate) cat: Option<TransitionCategory>,
+    pub(crate) favorites_only: bool,
+    pub(crate) selected: Option<TransitionKind>,
+}
 /// Indica se a prévia está redimensionada em relação ao projeto (`prev_scaled`)
 /// ou se o tamanho de exibição no monitor diverge da prévia (`disp_scaled`).
 /// Usado pelo rodapé da Prévia de Vídeo para aplicar o destaque visual do VEGAS Pro.
@@ -4970,6 +5272,37 @@ pub(crate) fn preview_footer_scaled_flags(
     let prev_scaled = prev.0 != proj.0 || prev.1 != proj.1;
     let disp_scaled = disp.0 != prev.0 || disp.1 != prev.1;
     (prev_scaled, disp_scaled)
+}
+
+/// Tamanho de um quadro da aba Escopos: cabe em `tile_w` × `max_h`
+/// mantendo a proporção da textura; o vectorscope é quadrado.
+pub(crate) fn fit_scope_image(tex: Vec2, tile_w: f32, max_h: f32, square: bool) -> Vec2 {
+    let tile_w = if tile_w.is_finite() {
+        tile_w.max(1.0)
+    } else {
+        1.0
+    };
+    let max_h = if max_h.is_finite() {
+        max_h.max(1.0)
+    } else {
+        1.0
+    };
+    if square {
+        let side = tile_w.min(max_h);
+        return vec2(side, side);
+    }
+    let aspect = if tex.x > 0.0 && tex.y > 0.0 && tex.x.is_finite() && tex.y.is_finite() {
+        tex.x / tex.y
+    } else {
+        1.0
+    };
+    let mut w = tile_w;
+    let mut h = w / aspect;
+    if h > max_h {
+        h = max_h;
+        w = h * aspect;
+    }
+    vec2(w, h)
 }
 
 /// Maior retângulo de proporção `aspect` (largura/altura) centrado em `r`.

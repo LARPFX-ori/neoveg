@@ -26,10 +26,11 @@ pub(crate) enum ColorGradingSection {
 impl ColorGradingSection {
     pub(crate) const ALL: [Self; 7] = [
         Self::All,
+        // ordem da lateral do VEGAS Pro: LUTs, Rodas, Rodas RL, Utilitários, Curvas
+        Self::Luts,
         Self::Wheels,
         Self::RlWheels,
         Self::Utilities,
-        Self::Luts,
         Self::Curves,
         Self::Hsl,
     ];
@@ -201,19 +202,20 @@ impl App {
                 .position(|fx| fx.kind == FxKind::ColorCorrector)
         });
 
-        if existing_idx.is_none() {
-            self.color_grading_empty_state(ui, target, local_t, tol);
-            return;
-        }
-
-        let Some(fx_idx) = existing_idx else {
-            return;
-        };
-        let Some(chain) = self.fx_chain_mut(target) else {
-            return;
-        };
-        let Some(fx) = chain.get(fx_idx).cloned() else {
-            return;
+        // Como no VEGAS Pro, o painel abre completo mesmo sem o efeito na
+        // cadeia: começa neutro e o Corretor de Cor entra na primeira edição.
+        let fx_idx = existing_idx;
+        let fx = match fx_idx {
+            Some(i) => {
+                let Some(chain) = self.fx_chain_mut(target) else {
+                    return;
+                };
+                let Some(fx) = chain.get(i).cloned() else {
+                    return;
+                };
+                fx
+            }
+            None => FxInstance::new(FxKind::ColorCorrector),
         };
 
         let mut fx_work = fx;
@@ -265,15 +267,16 @@ impl App {
             {
                 reset_all = true;
             }
-            if icons::small_icon_button(
-                ui,
-                Icon::CloseX,
-                Some(tr(lang, "Remover")),
-                false,
-                &self.theme,
-            )
-            .on_hover_text(tr(lang, "Remover Color Corrector da cadeia"))
-            .clicked()
+            if fx_idx.is_some()
+                && icons::small_icon_button(
+                    ui,
+                    Icon::CloseX,
+                    Some(tr(lang, "Remover")),
+                    false,
+                    &self.theme,
+                )
+                .on_hover_text(tr(lang, "Remover Color Corrector da cadeia"))
+                .clicked()
             {
                 remove_fx = true;
             }
@@ -281,9 +284,9 @@ impl App {
 
         if remove_fx {
             self.checkpoint();
-            if let Some(c) = self.fx_chain_mut(target) {
-                if fx_idx < c.len() {
-                    c.remove(fx_idx);
+            if let (Some(c), Some(i)) = (self.fx_chain_mut(target), fx_idx) {
+                if i < c.len() {
+                    c.remove(i);
                 }
             }
             self.changed();
@@ -551,7 +554,9 @@ impl App {
         ui.ctx().data_mut(|d| d.insert_temp(sec_id, section));
 
         if modified {
-            if checkpoint_op {
+            // a primeira edição coloca o efeito na cadeia (um passo de Desfazer)
+            let inserting = fx_idx.is_none();
+            if checkpoint_op || inserting {
                 self.checkpoint();
             }
             for (i, spec) in specs.iter().enumerate() {
@@ -572,79 +577,16 @@ impl App {
                 }
             }
             if let Some(chain) = self.fx_chain_mut(target) {
-                if let Some(slot) = chain.get_mut(fx_idx) {
-                    *slot = fx_work;
+                match fx_idx.and_then(|i| chain.get_mut(i)) {
+                    Some(slot) => *slot = fx_work,
+                    None => chain.push(fx_work),
                 }
             }
-            if checkpoint_op {
+            if checkpoint_op || inserting {
                 self.changed();
             } else {
                 self.dialog_change();
             }
-        }
-    }
-
-    fn color_grading_empty_state(
-        &mut self,
-        ui: &mut egui::Ui,
-        target: FxTarget,
-        _local_t: Ticks,
-        _tol: Ticks,
-    ) {
-        let lang = self.lang();
-        ui.label(
-            egui::RichText::new(tr(
-                lang,
-                "O alvo selecionado ainda não possui o efeito Corretor de Cor na cadeia.",
-            ))
-            .weak(),
-        );
-        ui.add_space(6.0);
-        let mut chosen_preset: Option<GradingPreset> = None;
-        ui.horizontal_wrapped(|ui| {
-            if icons::icon_button(
-                ui,
-                Icon::ColorWheels,
-                Some(tr(lang, "Ativar Color Grading")),
-                true,
-                true,
-                &self.theme,
-            )
-            .clicked()
-            {
-                if let Some(first) = GRADING_PRESETS.first() {
-                    chosen_preset = Some(*first);
-                }
-            }
-            ui.label(
-                egui::RichText::new(tr(lang, "ou iniciar com predefinição:"))
-                    .small()
-                    .weak(),
-            );
-            for preset in GRADING_PRESETS.iter().skip(1) {
-                if ui.button(tr(lang, preset.label)).clicked() {
-                    chosen_preset = Some(*preset);
-                }
-            }
-        });
-        if let Some(preset) = chosen_preset {
-            self.checkpoint();
-            let mut inst = FxInstance::new(FxKind::ColorCorrector);
-            for (i, &pv) in preset.values.iter().enumerate() {
-                if let Some(p) = inst.params.get_mut(i) {
-                    p.value = pv;
-                }
-            }
-            if let Some(chain) = self.fx_chain_mut(target) {
-                chain.push(inst);
-            }
-            self.changed();
-            let pname = tr(lang, preset.label);
-            self.set_status(tr_args(
-                lang,
-                "Color Grading ativado ({name})",
-                &[("name", &pname)],
-            ));
         }
     }
 }
