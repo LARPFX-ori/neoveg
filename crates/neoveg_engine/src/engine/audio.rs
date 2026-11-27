@@ -35,19 +35,20 @@ pub struct Meters {
 /// Nível médio quadrático (RMS) de um bloco estéreo intercalado (L, R).
 /// Bloco vazio ou amostras não finitas dão zero.
 pub fn block_rms(buf: &[f32]) -> [f32; 2] {
-    let mut sum = [0f64; 2];
-    let mut n = 0usize;
-    for f in buf.chunks_exact(2) {
-        for (k, s) in f.iter().enumerate() {
-            let v = if s.is_finite() { f64::from(*s) } else { 0.0 };
-            if let Some(acc) = sum.get_mut(k) {
-                *acc += v * v;
-            }
-        }
-        n += 1;
-    }
+    let n = buf.len() / 2;
     if n == 0 {
         return [0.0; 2];
+    }
+    let fin = |s: Option<&f32>| match s {
+        Some(v) if v.is_finite() => f64::from(*v),
+        _ => 0.0,
+    };
+    let mut sum = [0f64; 2];
+    for i in 0..n {
+        let l = fin(buf.get(i * 2));
+        let r = fin(buf.get(i * 2 + 1));
+        sum[0] += l * l;
+        sum[1] += r * r;
     }
     let d = n as f64;
     [(sum[0] / d).sqrt() as f32, (sum[1] / d).sqrt() as f32]
