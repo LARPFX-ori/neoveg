@@ -162,3 +162,25 @@ Levantamento feito capítulo por capítulo nos manuais do usuário do VEGAS Pro 
   - **Color Grading e Histórico do Trimmer:** painel *Color Grading* com barra lateral de categorias (`Tudo`, `Rodas de Cor`, `LUTs`, `Curvas`, `HSL`), anel cromático vetorial, barra vertical de ajuste fino e botão individual de redefinição por roda + localização integral em 6 idiomas; histórico do *Trimmer* exibindo `Arquivo [Diretório]` para mídias em disco (`color_grading.rs`, `trimmer_panel.rs`);
   - **Temas por geração, Estilos de ícones, Notas estruturadas, Slideshow, Salvamento Avançado, Arquivar e Rotação de saída:** 4 novos temas por geração (`VegasClassico`, `VegasPrata`, `VegasBranco`, `VegasModerno`), `IconStyle` em *Preferências → Cores e exibição*, 146 ícones vetoriais originais com mapeamento completo na barra personalizável, botões de timeline aninhada na barra de transporte (`timeline.open_parent`, `file.open_nested_tab`, `sequence.nest_selection`), botão *Modo da Barra de Espaço* na Prévia de Vídeo, painel *Notas do Projeto* estruturado com timecode/cor/resolução (`project_notes.rs`), *Criador de Apresentação de Slides* (`slideshow.rs`, `dlg_slideshow.rs`), *Salvamento Avançado (Live Save & Backups com Restauração)* (`recovery.rs`, `dlg_advanced_save.rs`), *Arquivar Projeto com Mídias* (`archive.rs`) e *Rotação de saída do projeto* (`OutputRotation` em `video.rs`);
   - **Áudio avançado, Timeline avançada, Color Grading 2026, Credit Roll, 58 Video FX e 38 Transições:** *Auto Normalize* (`tools.auto_normalize`), *Auto Ducking* (`tools.auto_ducking`), *Detecção de Batidas e Andamento (BPM)* (`tools.beat_detection`), 6 *Modos de Panorâmica de Áudio* (`AudioPanMode`), detecção/reparo de dessincronia A/V (*Move* / *Slip*), *Envelope de Velocidade* em eventos de vídeo (`-100%..+300%`, congelar `0%`), *Eventos de Ajuste* (`Event.is_adjustment`), *Trilha do Barramento de Vídeo* (`Ctrl+Shift+B`), *Rodas de Cor RL* e *Utilitários* no painel Color Grading, gerador *Rolagem de Créditos* (`GenSpec::CreditRoll`), +12 efeitos nativos de vídeo (58 no total) e +5 transições nativas 3D/página (38 no total) (`audio_tools.rs`, `dlg_audio_tools.rs`, `vfx_extra.rs`, `transition.rs`, `generate.rs`, `color_grading.rs`, `timeline.rs`).
+
+### Inspeção visual da interface (novembro de 2026)
+
+Uma inspeção da interface em outra máquina, conferida com as figuras da ajuda pública do VEGAS Pro, listou 17 diferenças. As 15 abaixo foram corrigidas (PRs #196 a #212):
+
+- **Localizar mídia ausente** (`file.find_missing_media`, `relink.rs`, `dlg_relink.rs`): ao abrir um projeto com mídia que não está mais no lugar, uma janela lista os arquivos ausentes e procura todos de uma vez nas pastas escolhidas, numa thread de fundo que pode ser cancelada. Quando há mais de um arquivo com o mesmo nome, uma lista permite escolher a origem. Depois de religar, o projeto é salvo.
+- **Altura do dock e escopos:** o dock abre na altura do layout em vez de ficar com a altura antiga gravada pelo egui, e os 4 escopos cabem inteiros em `Todos (2×2)`.
+- ***Color Grading*** abre completo, sem o aviso "Ativar Color Grading". O efeito entra na cadeia na primeira edição, com Desfazer.
+- **Janela *Transições*** com busca, categorias (*Efeitos 3D*, *Revelar*, *Wipes*, *Fades*, *Dobras e páginas* e *Favoritos*) e grade de miniaturas para arrastar ou aplicar com duplo clique.
+- ***Explorer*** é a primeira aba do dock padrão e ganhou o modo *Miniaturas*.
+- ***Plug-In Manager*** com árvore só de pastas (efeitos de áudio, geradores, efeitos de vídeo, transições, compositores e terceiros) e lista em colunas.
+- ***Console de Mixagem*** com fader e medidor na altura do painel, escala em dB, seção *Inserir FX*, botões *Inserir trilha de áudio* e *Inserir barramento*, filtros empilhados na lateral, canais de FX atribuível, medidor VU e barramentos de entrada (*Input Bus*).
+- **Faders com alça retangular** em todos os temas, inclusive no *Master Bus*.
+- ***Geradores de Mídia*** com os botões + (inserir no cursor) e ★ (favorito) sobre a miniatura.
+- ***Renderizar como*** com Formatos e Modelos separados, *Personalizar modelo...*, tamanho estimado e espaço livre em disco.
+- **Cabeçalhos de trilha:** entrada de gravação e escala em dB no medidor das trilhas de áudio; ícones próprios de altura e do modo de composição nas de vídeo.
+- ***Trimmer***: *Abrir no Trimmer* no Explorer, a preferência "Duplo clique no arquivo de mídia carrega no Trimmer" e a régua entre o vídeo e a forma de onda.
+- ***Preferências*** com abas no topo.
+- **Grupo de trilhas** com solo do grupo, triângulo de recolher e linha vazia na pista do grupo.
+- ***Movimento da trilha*** com salvar e excluir predefinição ao lado do seletor, e **Tempo de gravação** na barra de status.
+
+Ainda não entraram: os recursos de IA e o Mocha, que aguardam decisão.
