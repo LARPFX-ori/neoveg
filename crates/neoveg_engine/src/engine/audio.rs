@@ -24,6 +24,34 @@ pub struct Meters {
     /// Pico por barramento auxiliar (L, R).
     pub buses: HashMap<Id, [f32; 2]>,
     pub master: [f32; 2],
+    /// Nível médio (RMS) do bloco por trilha (L, R), para o medidor VU.
+    pub track_rms: HashMap<Id, [f32; 2]>,
+    /// Nível médio (RMS) do bloco por barramento auxiliar (L, R).
+    pub bus_rms: HashMap<Id, [f32; 2]>,
+    /// Nível médio (RMS) do bloco no Master (L, R).
+    pub master_rms: [f32; 2],
+}
+
+/// Nível médio quadrático (RMS) de um bloco estéreo intercalado (L, R).
+/// Bloco vazio ou amostras não finitas dão zero.
+pub fn block_rms(buf: &[f32]) -> [f32; 2] {
+    let n = buf.len() / 2;
+    if n == 0 {
+        return [0.0; 2];
+    }
+    let fin = |s: Option<&f32>| match s {
+        Some(v) if v.is_finite() => f64::from(*v),
+        _ => 0.0,
+    };
+    let mut sum = [0f64; 2];
+    for i in 0..n {
+        let l = fin(buf.get(i * 2));
+        let r = fin(buf.get(i * 2 + 1));
+        sum[0] += l * l;
+        sum[1] += r * r;
+    }
+    let d = n as f64;
+    [(sum[0] / d).sqrt() as f32, (sum[1] / d).sqrt() as f32]
 }
 
 fn sinc_params() -> SincInterpolationParameters {
@@ -1242,6 +1270,7 @@ impl Mixer {
             out[i * 2 + 1] = r;
         }
         self.meters.master = peak;
+        self.meters.master_rms = block_rms(&out[..n * 2]);
     }
 
     /// Mixa no layout de canais do projeto: `out` tem `n * channel_layout.channels()`
@@ -1357,6 +1386,7 @@ impl Mixer {
                 || (any_solo && !p.is_track_effectively_soloed(track.id))
             {
                 self.meters.tracks.insert(track.id, [0.0, 0.0]);
+                self.meters.track_rms.insert(track.id, [0.0, 0.0]);
                 continue;
             }
             let max_ev_lat = pdc.track_ev_lat.get(ti).copied().unwrap_or(0);
@@ -1497,6 +1527,9 @@ impl Mixer {
                 },
             );
             self.meters.tracks.insert(track.id, peak);
+            self.meters
+                .track_rms
+                .insert(track.id, block_rms(&track_buf[..n * 2]));
 
             // Envios auxiliares pós-fader (post-fader sends) com alinhamento PDC
             for (si, send) in track.sends.iter().enumerate() {
@@ -1566,6 +1599,7 @@ impl Mixer {
             let mut bbuf = std::mem::take(&mut self.bus_bufs[bi]);
             if !bus.is_audible(any_bus_solo) {
                 self.meters.buses.insert(bus.id, [0.0, 0.0]);
+                self.meters.bus_rms.insert(bus.id, [0.0, 0.0]);
                 self.bus_bufs[bi] = bbuf;
                 continue;
             }
@@ -1597,6 +1631,9 @@ impl Mixer {
                 },
             );
             self.meters.buses.insert(bus.id, bpeak);
+            self.meters
+                .bus_rms
+                .insert(bus.id, block_rms(&bbuf[..n * 2]));
 
             let mut sent_to_downstream = false;
             if let Some(dst_id) = bus.output_bus {
@@ -1708,11 +1745,138 @@ pub fn render_event_fx_stereo(
     Some(out)
 }
 
+/// Passa um take estéreo intercalado gravado na taxa `sr` pelo barramento de
+/// entrada `bus` (efeitos, volume, fase e mudo), fora de tempo real, com o
+/// mesmo mixer do render. Devolve o take processado com o mesmo número de
+/// quadros (no máximo 10 minutos são processados; o resto fica como estava).
+pub fn render_input_bus_take(bus: &crate::model::InputBus, stereo: &[f32], sr: u32) -> Vec<f32> {
+    let frames = stereo.len() / 2;
+    if frames == 0 {
+        return Vec::new();
+    }
+    if bus.mute {
+        return vec![0.0; frames * 2];
+    }
+    if bus.is_transparent() {
+        return stereo[..frames * 2].to_vec();
+    }
+    let sr = sr.clamp(8000, 192_000);
+    let max_frames = (sr as usize).saturating_mul(600);
+    let n_proc = frames.min(max_frames);
+    let mut iso = Project::default();
+    iso.settings.sample_rate = sr;
+    iso.settings.channel_layout = ChannelLayout::Stereo;
+    let dur = Ticks::from_samples(n_proc as i64, sr);
+    let media = MediaItem {
+        id: neoveg_common::curve::new_id(),
+        name: "take".into(),
+        source: crate::model::MediaSource::File {
+            path: String::new(),
+        },
+        duration: Some(dur),
+        has_video: false,
+        has_audio: true,
+        width: 0,
+        height: 0,
+        fps: None,
+        info: String::new(),
+        proxy_path: None,
+    };
+    let mut tr = Track::new(TrackKind::Audio, "Entrada");
+    tr.fx = bus.fx.clone();
+    tr.volume_db = bus.volume_db;
+    tr.invert_phase = bus.invert_phase;
+    tr.events.push(Event::new(&media, Ticks::ZERO, dur));
+    let mid = media.id;
+    iso.media.push(media);
+    iso.tracks.push(tr);
+    let mut audio_map: HashMap<Id, Arc<crate::media::AudioData>> = HashMap::new();
+    audio_map.insert(
+        mid,
+        Arc::new(crate::media::AudioData::from_stereo(
+            sr,
+            stereo[..n_proc * 2].to_vec(),
+        )),
+    );
+    let mut mixer = Mixer::new_offline(sr);
+    let pdc = mixer.total_latency(&iso) as i64;
+    let mut out = Vec::with_capacity(frames * 2);
+    let mut pos = 0usize;
+    let chunk = 2048usize;
+    while pos < n_proc {
+        let n = (n_proc - pos).min(chunk);
+        let mut blk = vec![0.0f32; n * 2];
+        mixer.process(&iso, &audio_map, pos as i64 + pdc, &mut blk);
+        out.extend_from_slice(&blk);
+        pos += n;
+    }
+    // além do limite: o take segue sem processamento
+    out.extend_from_slice(&stereo[n_proc * 2..frames * 2]);
+    out
+}
+
 fn master_gain(p: &Project) -> f32 {
     if p.master.mute {
         0.0
     } else {
         db_to_lin(p.master.volume_db)
+    }
+}
+
+#[cfg(test)]
+mod input_bus_render_tests {
+    use super::render_input_bus_take;
+    use crate::model::InputBus;
+
+    fn tone(frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let v = ((i as f32) * 0.05).sin() * 0.5;
+                [v, v]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn barramento_transparente_devolve_o_take() {
+        let take = tone(4800);
+        let out = render_input_bus_take(&InputBus::new("Entrada A"), &take, 48_000);
+        assert_eq!(out, take);
+        assert!(render_input_bus_take(&InputBus::new("A"), &[], 48_000).is_empty());
+    }
+
+    /// O take gravado não passava pelo barramento de entrada: o volume dele
+    /// tem de chegar ao take.
+    #[test]
+    fn volume_e_mudo_do_barramento_chegam_ao_take() {
+        let take = tone(4800);
+        let mut b = InputBus::new("Entrada A");
+        b.volume_db = -6.0;
+        let out = render_input_bus_take(&b, &take, 48_000);
+        assert_eq!(out.len(), take.len());
+        let peak_in = take.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let peak_out = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak_out < peak_in * 0.7, "{peak_out} vs {peak_in}");
+        assert!(peak_out > peak_in * 0.3, "{peak_out} vs {peak_in}");
+        b.mute = true;
+        let muted = render_input_bus_take(&b, &take, 48_000);
+        assert!(muted.iter().all(|v| *v == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod rms_tests {
+    use super::block_rms;
+
+    #[test]
+    fn rms_de_bloco_estereo() {
+        // L: onda quadrada de amplitude 0,5 (RMS 0,5); R: silêncio
+        let buf = [0.5, 0.0, -0.5, 0.0, 0.5, 0.0, -0.5, 0.0];
+        let r = block_rms(&buf);
+        assert!((r[0] - 0.5).abs() < 1e-6);
+        assert_eq!(r[1], 0.0);
+        assert_eq!(block_rms(&[]), [0.0, 0.0]);
+        assert_eq!(block_rms(&[f32::NAN, f32::INFINITY]), [0.0, 0.0]);
     }
 }
 

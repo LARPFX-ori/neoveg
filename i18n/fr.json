@@ -3217,5 +3217,22 @@
   "★ Favoritos": "★ Favoris",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marqueur au curseur",
-  "＋ Áudio": "+ Audio"
+  "＋ Áudio": "+ Audio",
+  "FX atribuível": "FX assignable",
+  "Inserir FX atribuível": "Insérer un FX assignable",
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Insérer un canal de FX assignable : les envois des pistes passent par sa chaîne d'effets et sortent sur le Master",
+  "Barramento de entrada": "Bus d'entrée",
+  "Inserir barramento de entrada": "Insérer un bus d'entrée",
+  "Inserir barramento de entrada: a entrada de áudio passa pelos efeitos dele antes de ser gravada nas trilhas que o usam": "Insérer un bus d'entrée : l'entrée audio passe par ses effets avant d'être enregistrée sur les pistes qui l'utilisent",
+  "Entradas": "Entrées",
+  "Entrada do sistema": "Entrée système",
+  "Entrada de gravação da trilha": "Entrée d'enregistrement de la piste",
+  "Efeitos do barramento de entrada": "Effets du bus d'entrée",
+  "Efeitos do barramento de entrada — {name}": "Effets du bus d'entrée — {name}",
+  "Remover barramento de entrada": "Supprimer le bus d'entrée",
+  "limite de barramentos de entrada atingido": "limite de bus d'entrée atteinte",
+  "Silenciar": "Muet",
+  "Inverter fase": "Inverser la phase",
+  "Modo de composição: {mode}": "Mode de composition : {mode}",
+  "Entrada": "Entrée"
 }

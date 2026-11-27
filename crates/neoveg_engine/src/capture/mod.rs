@@ -750,26 +750,6 @@ pub fn discover_sources() -> DiscoveredSources {
     }
 }
 
-/// Lista apenas os nomes dos dispositivos de entrada de áudio disponíveis no SO
-/// (leve, sem varrer janelas nem câmeras), para uso nos seletores de entrada
-/// das trilhas de áudio e do Console de Mixagem.
-pub fn list_audio_input_names() -> Vec<String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    crate::playback::ensure_audio_com_keeper();
-    let host = cpal::default_host();
-    let mut out = Vec::new();
-    if let Ok(devs) = host.input_devices() {
-        for dev in devs {
-            if let Ok(name) = dev.name() {
-                if !name.trim().is_empty() && !out.contains(&name) {
-                    out.push(name);
-                }
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

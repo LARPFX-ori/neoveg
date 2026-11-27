@@ -134,6 +134,8 @@ pub enum FxTarget {
     Event(Id),
     Track(Id),
     AudioBus(Id),
+    /// Cadeia de efeitos de um barramento de entrada.
+    InputBus(Id),
     MasterAudio,
     MasterVideo,
 }
@@ -370,6 +372,8 @@ pub struct App {
     pub(crate) window_icon: Arc<egui::IconData>,
     pub(crate) last_frame: Instant,
     pub(crate) meters_hold: HashMap<Id, [f32; 2]>,
+    /// Nível VU (RMS com balística de ~300 ms) por trilha e barramento.
+    pub(crate) vu_levels: HashMap<Id, [f32; 2]>,
     pub(crate) master_hold: [f32; 2],
     pub loudness_target: LoudnessTarget,
     pub loudness_live: LoudnessSnapshot,
@@ -426,8 +430,6 @@ pub struct App {
     pub(crate) focused_pane: Option<crate::dock::DockPane>,
     /// Loja de scripts e extensões (aba Loja de scripts).
     pub(crate) store: crate::store_panel::StoreState,
-    /// Dispositivos de entrada de áudio listados sob demanda (cache para cabeçalhos e Mixer).
-    pub(crate) audio_input_devices: Option<Vec<String>>,
     /// Cache recente do espaço livre em disco (para *Record Time* na barra de status e Renderizar).
     pub(crate) status_disk_cache: Option<(Instant, PathBuf, Option<u64>)>,
 }
@@ -628,6 +630,7 @@ impl App {
             window_icon: Arc::new(crate::splash::window_icon_data()),
             last_frame: Instant::now(),
             meters_hold: HashMap::new(),
+            vu_levels: HashMap::new(),
             master_hold: [0.0; 2],
             loudness_target: LoudnessTarget::default(),
             loudness_live: LoudnessSnapshot::default(),
@@ -669,7 +672,6 @@ impl App {
             project_media: crate::project_media::ProjectMediaState::default(),
             focused_pane: None,
             store: crate::store_panel::StoreState::default(),
-            audio_input_devices: None,
             status_disk_cache: None,
         };
         app.sync_floating_docks();
@@ -2932,24 +2934,36 @@ impl App {
                         self.set_status("Gravação encerrada sem quadros capturados.");
                         return;
                     }
-                    match media::import_file(&clip.path) {
-                        Ok(imp) => {
-                            let id = imp.item.id;
-                            self.media.insert(id, imp.entry);
-                            let dur = Ticks::from_secs_f64(
-                                clip.frames_written as f64 / f64::from(clip.sample_rate.max(1)),
-                            )
-                            .unwrap_or_else(|| self.project.settings.frame_dur());
-                            self.session.commit_recorded_clip(
-                                imp.item,
-                                &clip.target_tracks,
-                                clip.start_cursor,
-                                dur,
-                            );
-                            self.sync_after_session();
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Erro ao importar gravação WAV: {e}"));
+                    let dur = Ticks::from_secs_f64(
+                        clip.frames_written as f64 / f64::from(clip.sample_rate.max(1)),
+                    )
+                    .unwrap_or_else(|| self.project.settings.frame_dur());
+                    // cada grupo de trilhas recebe o take do seu barramento de
+                    // entrada (a entrada do sistema, sem processamento, é `None`)
+                    let groups = take_groups_by_input(&self.project, &clip.target_tracks);
+                    for (bus_id, tracks) in groups {
+                        let bus = bus_id.and_then(|b| self.project.input_bus(b).cloned());
+                        let path = match bus.filter(|b| !b.is_transparent()) {
+                            None => Ok(clip.path.clone()),
+                            Some(b) => process_take_through_input_bus(&clip.path, &b),
+                        };
+                        let imported =
+                            path.and_then(|p| media::import_file(&p).map_err(|e| format!("{e}")));
+                        match imported {
+                            Ok(imp) => {
+                                let id = imp.item.id;
+                                self.media.insert(id, imp.entry);
+                                self.session.commit_recorded_clip(
+                                    imp.item,
+                                    &tracks,
+                                    clip.start_cursor,
+                                    dur,
+                                );
+                                self.sync_after_session();
+                            }
+                            Err(e) => {
+                                self.set_status(format!("Erro ao importar gravação WAV: {e}"));
+                            }
                         }
                     }
                 }
@@ -4192,6 +4206,8 @@ impl App {
                 self.cmd_menu_btn(ui, "insert.track_adjustment");
                 self.cmd_menu_btn(ui, "insert.track_folder");
                 self.cmd_menu_btn(ui, "insert.audio_bus");
+                self.cmd_menu_btn(ui, "insert.assignable_fx");
+                self.cmd_menu_btn(ui, "insert.input_bus");
                 ui.separator();
                 self.cmd_menu_btn(ui, "insert.nested_timeline");
                 ui.separator();
@@ -4477,6 +4493,8 @@ impl App {
             "insert.track_folder" => (Icon::TrackFolder, None, None),
             "insert.nested_timeline" => (Icon::NestedTimeline, None, None),
             "insert.audio_bus" => (Icon::BusTrack, None, None),
+            "insert.assignable_fx" => (Icon::BusTrack, None, None),
+            "insert.input_bus" => (Icon::BusTrack, None, None),
             "file.advanced_save" => (Icon::LiveSave, None, None),
             "file.archive_project" => (Icon::ArchiveProject, None, None),
             "file.snapshot" => (Icon::CameraSnap, None, None),
@@ -5215,16 +5233,6 @@ impl App {
         });
     }
 
-    /// Lista em cache os dispositivos de entrada de áudio do SO sem bloquear cada quadro.
-    pub(crate) fn cached_audio_inputs(&mut self) -> Vec<String> {
-        if let Some(cached) = &self.audio_input_devices {
-            return cached.clone();
-        }
-        let list = neoveg_engine::capture::list_audio_input_names();
-        self.audio_input_devices = Some(list.clone());
-        list
-    }
-
     /// Espaço livre em disco em cache (atualiza no máximo a cada 5 s ou ao trocar de pasta).
     pub(crate) fn cached_free_disk_bytes(&mut self, dir: &std::path::Path) -> Option<u64> {
         if let Some((at, cached_dir, val)) = &self.status_disk_cache {
@@ -5539,6 +5547,13 @@ impl App {
         }
         for k in 0..2 {
             self.master_hold[k] = (self.master_hold[k] * decay).max(m.master[k]);
+        }
+        let a = crate::panels::vu_smoothing(dt);
+        for (id, v) in m.track_rms.into_iter().chain(m.bus_rms) {
+            let e = self.vu_levels.entry(id).or_insert([0.0; 2]);
+            for k in 0..2 {
+                e[k] += (v[k] - e[k]) * a;
+            }
         }
         self.loudness_live = self.audio.loudness_snapshot();
     }
@@ -6807,5 +6822,98 @@ mod status_bar_tests {
         assert_eq!(format_record_time(192_000 * 3661, 48_000, 2), "1:01:01");
         assert_eq!(format_record_time(0, 0, 0), "0:00:00");
         assert_eq!(format_record_time(u64::MAX, 48_000, 2), "9999:59:59");
+    }
+}
+
+/// Agrupa as trilhas armadas pelo barramento de entrada de cada uma, na
+/// ordem em que aparecem (`None` = entrada do sistema sem processamento).
+pub(crate) fn take_groups_by_input(
+    project: &Project,
+    targets: &[Id],
+) -> Vec<(Option<Id>, Vec<Id>)> {
+    let mut groups: Vec<(Option<Id>, Vec<Id>)> = Vec::new();
+    for tid in targets {
+        let bus = project
+            .tracks
+            .iter()
+            .find(|t| t.id == *tid)
+            .and_then(|t| t.input_bus)
+            .filter(|b| project.input_bus(*b).is_some());
+        match groups.iter_mut().find(|(b, _)| *b == bus) {
+            Some((_, v)) => v.push(*tid),
+            None => groups.push((bus, vec![*tid])),
+        }
+    }
+    groups
+}
+
+/// Passa o take gravado em `raw` pelo barramento de entrada `bus` e grava o
+/// resultado ao lado (`<take>_<barramento>.wav`, 24 bits). Devolve o caminho.
+pub(crate) fn process_take_through_input_bus(
+    raw: &std::path::Path,
+    bus: &neoveg_engine::model::InputBus,
+) -> Result<std::path::PathBuf, String> {
+    let imp = media::import_file(raw).map_err(|e| format!("{e}"))?;
+    let audio = imp
+        .entry
+        .audio
+        .ok_or_else(|| "a gravação não tem áudio".to_string())?;
+    let out =
+        neoveg_engine::engine::audio::render_input_bus_take(bus, &audio.data, audio.sample_rate);
+    let safe: String = bus
+        .name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .take(40)
+        .collect();
+    let stem = raw
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "gravacao".into());
+    let path = raw.with_file_name(format!("{stem}_{safe}.wav"));
+    let mut w = neoveg_engine::render::WavWriter::create(
+        &path,
+        audio.sample_rate,
+        neoveg_engine::render::WavBits::Pcm24,
+    )
+    .map_err(|e| format!("{e}"))?;
+    w.write(&out).map_err(|e| format!("{e}"))?;
+    w.finish().map_err(|e| format!("{e}"))?;
+    Ok(path)
+}
+
+#[cfg(test)]
+mod input_take_tests {
+    use super::take_groups_by_input;
+    use crate::model::{InputBus, Project, TrackKind};
+
+    /// Trilhas armadas com barramentos de entrada diferentes recebem takes
+    /// diferentes; sem barramento (ou com um que não existe), a entrada do
+    /// sistema.
+    #[test]
+    fn agrupa_trilhas_pelo_barramento_de_entrada() {
+        let mut p = Project::new_default();
+        let a = InputBus::new("Entrada A");
+        let aid = a.id;
+        p.input_buses.push(a);
+        let ids: Vec<_> = p
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Audio)
+            .map(|t| t.id)
+            .collect();
+        assert!(!ids.is_empty());
+        let mut targets = ids.clone();
+        if let Some(t) = p
+            .tracks
+            .iter_mut()
+            .find(|t| Some(t.id) == ids.first().copied())
+        {
+            t.input_bus = Some(aid);
+        }
+        targets.push(987_654_321);
+        let g = take_groups_by_input(&p, &targets);
+        assert_eq!(g.first().map(|x| x.0), Some(Some(aid)));
+        assert!(g.iter().any(|x| x.0.is_none()));
     }
 }

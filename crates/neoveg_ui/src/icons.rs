@@ -157,16 +157,17 @@ pub enum Icon {
     LiveSave,
     HandPan,
     ScreenCapture,
-    TrackHeightMin,
-    TrackHeightMax,
+    /// Minimizar a altura da trilha: duas setas apontando para a linha do meio.
+    TrackMinimize,
+    /// Maximizar a altura da trilha: duas setas saindo da linha do meio.
+    TrackMaximize,
+    /// Modo de composição da trilha: duas camadas sobrepostas.
     CompositingMode,
-    MakeCompositingChild,
-    MakeCompositingParent,
 }
 
 #[cfg(test)]
 impl Icon {
-    pub const ALL: [Icon; 153] = [
+    pub const ALL: [Icon; 151] = [
         Icon::NewFile,
         Icon::OpenFolder,
         Icon::SaveDisk,
@@ -315,11 +316,9 @@ impl Icon {
         Icon::LiveSave,
         Icon::HandPan,
         Icon::ScreenCapture,
-        Icon::TrackHeightMin,
-        Icon::TrackHeightMax,
+        Icon::TrackMinimize,
+        Icon::TrackMaximize,
         Icon::CompositingMode,
-        Icon::MakeCompositingChild,
-        Icon::MakeCompositingParent,
     ];
 }
 
@@ -2224,51 +2223,28 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, theme: &ThemeColor
             c.line(0.32, 0.86, 0.68, 0.86, pal.ink, 0.08);
             c.p.circle_filled(c.pt(0.72, 0.34), c.u(0.11), pal.red);
         }
-        Icon::TrackHeightMin => {
-            // Duas setas verticais convergindo para uma faixa fina ao centro (minimizar altura).
-            c.line(0.14, 0.50, 0.86, 0.50, pal.ink, 0.09);
-            c.poly(&[(0.50, 0.42), (0.30, 0.16), (0.70, 0.16)], pal.ink, None);
-            c.poly(&[(0.50, 0.58), (0.30, 0.84), (0.70, 0.84)], pal.ink, None);
+        Icon::TrackMinimize => {
+            c.line(0.16, 0.50, 0.84, 0.50, pal.ink, 0.08);
+            c.poly(&[(0.30, 0.14), (0.70, 0.14), (0.50, 0.40)], pal.blue, None);
+            c.poly(&[(0.30, 0.86), (0.70, 0.86), (0.50, 0.60)], pal.blue, None);
         }
-        Icon::TrackHeightMax => {
-            // Duas setas verticais divergindo para as bordas (maximizar altura).
-            c.line(0.16, 0.14, 0.84, 0.14, pal.muted, 0.07);
-            c.line(0.16, 0.86, 0.84, 0.86, pal.muted, 0.07);
-            c.poly(&[(0.50, 0.22), (0.30, 0.44), (0.70, 0.44)], pal.ink, None);
-            c.poly(&[(0.50, 0.78), (0.30, 0.56), (0.70, 0.56)], pal.ink, None);
+        Icon::TrackMaximize => {
+            c.line(0.16, 0.50, 0.84, 0.50, pal.ink, 0.08);
+            c.poly(&[(0.30, 0.42), (0.70, 0.42), (0.50, 0.14)], pal.blue, None);
+            c.poly(&[(0.30, 0.58), (0.70, 0.58), (0.50, 0.86)], pal.blue, None);
         }
         Icon::CompositingMode => {
-            // Duas camadas sobrepostas com destaque de mistura alfa (modo de composição).
-            c.p.rect_filled(
-                c.rect(0.14, 0.16, 0.64, 0.64),
-                c.u(0.05),
-                pal.blue.gamma_multiply(0.55),
+            // camada de trás (cheia) e camada da frente (losango vazado)
+            c.poly(
+                &[(0.16, 0.40), (0.46, 0.22), (0.76, 0.40), (0.46, 0.58)],
+                pal.blue,
+                None,
             );
-            c.p.rect_stroke(
-                c.rect(0.14, 0.16, 0.64, 0.64),
-                c.u(0.05),
-                c.stroke(0.07, pal.blue),
-                StrokeKind::Inside,
+            c.poly(
+                &[(0.24, 0.60), (0.54, 0.42), (0.84, 0.60), (0.54, 0.78)],
+                pal.paper,
+                Some((0.07, pal.cyan)),
             );
-            c.p.rect_stroke(
-                c.rect(0.36, 0.36, 0.86, 0.84),
-                c.u(0.05),
-                c.stroke(0.08, pal.ink),
-                StrokeKind::Inside,
-            );
-            c.p.rect_filled(c.rect(0.38, 0.38, 0.62, 0.62), 0.0, pal.cyan);
-        }
-        Icon::MakeCompositingChild => {
-            // Recuo hierárquico para a direita (tornar trilha filha de composição).
-            c.line(0.20, 0.18, 0.20, 0.64, pal.ink, 0.08);
-            c.line(0.20, 0.64, 0.68, 0.64, pal.ink, 0.08);
-            c.poly(&[(0.84, 0.64), (0.58, 0.44), (0.58, 0.84)], pal.blue, None);
-        }
-        Icon::MakeCompositingParent => {
-            // Promoção hierárquica para a esquerda (promover trilha filha para pai/raiz).
-            c.line(0.80, 0.82, 0.80, 0.36, pal.ink, 0.08);
-            c.line(0.80, 0.36, 0.32, 0.36, pal.ink, 0.08);
-            c.poly(&[(0.16, 0.36), (0.42, 0.16), (0.42, 0.56)], pal.amber, None);
         }
     }
 }

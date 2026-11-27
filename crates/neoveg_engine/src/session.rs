@@ -1133,6 +1133,61 @@ impl EditorSession {
         idx
     }
 
+    /// Insere um barramento de entrada (com Desfazer).
+    pub fn add_input_bus(&mut self) -> Option<Id> {
+        if self.project.input_buses.len() >= crate::model::MAX_INPUT_BUSES {
+            return None;
+        }
+        self.checkpoint();
+        let id = self.project.add_input_bus()?;
+        self.changed();
+        Some(id)
+    }
+
+    /// Escolhe de qual barramento de entrada a trilha de áudio `ti` grava
+    /// (`None` = entrada do sistema). Devolve `true` se mudou.
+    pub fn set_track_input_bus(&mut self, ti: usize, bus: Option<Id>) -> bool {
+        let Some(t) = self.project.tracks.get(ti) else {
+            return false;
+        };
+        if t.kind != TrackKind::Audio || t.input_bus == bus {
+            return false;
+        }
+        if let Some(b) = bus {
+            if self.project.input_bus(b).is_none() {
+                return false;
+            }
+        }
+        self.checkpoint();
+        if let Some(t) = self.project.tracks.get_mut(ti) {
+            t.input_bus = bus;
+        }
+        self.changed();
+        true
+    }
+
+    /// Remove o barramento de entrada (com Desfazer).
+    pub fn remove_input_bus(&mut self, id: Id) -> bool {
+        if self.project.input_bus(id).is_none() {
+            return false;
+        }
+        self.checkpoint();
+        let ok = self.project.remove_input_bus(id);
+        self.changed();
+        ok
+    }
+
+    /// Insere um canal de FX atribuível (com Desfazer).
+    pub fn add_assignable_fx(&mut self) -> Option<Id> {
+        if self.project.audio_buses.len() >= MAX_AUDIO_BUSES {
+            return None;
+        }
+        self.checkpoint();
+        let id = self.project.add_assignable_fx()?;
+        self.changed();
+        Some(id)
+    }
+
     pub fn add_audio_bus(&mut self) -> Option<Id> {
         if self.project.audio_buses.len() >= MAX_AUDIO_BUSES {
             return None;
@@ -7103,6 +7158,125 @@ impl EditorSession {
         self.changed();
         self.post_ripple_applied = Some(self.edit_count);
         moved
+    }
+}
+
+#[cfg(test)]
+mod input_bus_tests {
+    use super::*;
+
+    fn audio_track(s: &EditorSession) -> usize {
+        s.project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio padrão")
+    }
+
+    /// Não havia barramento de entrada: a gravação ia direto da entrada do
+    /// sistema, sem efeitos.
+    #[test]
+    fn cria_e_atribui_barramento_de_entrada() {
+        let mut s = EditorSession::new(Project::new_default());
+        let a = s.add_input_bus().expect("Entrada A");
+        assert_eq!(
+            s.project.input_bus(a).map(|b| b.name.as_str()),
+            Some("Entrada A")
+        );
+        let ti = audio_track(&s);
+        assert!(s.set_track_input_bus(ti, Some(a)));
+        assert_eq!(s.project.tracks[ti].input_bus, Some(a));
+        // remover o barramento devolve a trilha à entrada do sistema
+        assert!(s.remove_input_bus(a));
+        assert_eq!(s.project.tracks[ti].input_bus, None);
+        s.undo();
+        assert_eq!(s.project.tracks[ti].input_bus, Some(a));
+    }
+
+    #[test]
+    fn nao_atribui_barramento_inexistente_nem_em_video() {
+        let mut s = EditorSession::new(Project::new_default());
+        let ti = audio_track(&s);
+        assert!(!s.set_track_input_bus(ti, Some(987_654)));
+        let a = s.add_input_bus().expect("Entrada A");
+        let vi = s
+            .project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .expect("trilha de vídeo padrão");
+        assert!(!s.set_track_input_bus(vi, Some(a)));
+        while s.project.input_buses.len() < crate::model::MAX_INPUT_BUSES {
+            let _ = s.add_input_bus();
+        }
+        assert!(s.add_input_bus().is_none());
+    }
+
+    /// Arquivo hostil: trilha apontando para entrada que não existe e
+    /// volume não finito são corrigidos ao abrir.
+    #[test]
+    fn sanitize_corrige_entradas_invalidas() {
+        let mut p = Project::new_default();
+        let mut b = InputBus::new("Entrada A");
+        b.volume_db = f32::NAN;
+        p.input_buses.push(b);
+        let ti = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("trilha de áudio padrão");
+        p.tracks[ti].input_bus = Some(123_456_789);
+        let fixes = p.sanitize();
+        assert_eq!(p.tracks[ti].input_bus, None);
+        assert_eq!(p.input_buses[0].volume_db, 0.0);
+        assert!(!fixes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod assignable_fx_tests {
+    use super::*;
+
+    /// Não havia canal de FX atribuível: os envios só iam para barramentos.
+    #[test]
+    fn insere_canais_de_fx_atribuivel_com_nomes_proprios() {
+        let mut s = EditorSession::new(Project::new_default());
+        let a = s.add_assignable_fx().expect("FX 1");
+        let b = s.add_assignable_fx().expect("FX 2");
+        let bus = s.add_audio_bus().expect("barramento comum");
+        let fx1 = s.project.audio_bus(a).expect("canal");
+        assert!(fx1.assignable_fx);
+        assert_eq!(fx1.name, "FX 1");
+        assert_eq!(
+            s.project.audio_bus(b).map(|x| x.name.as_str()),
+            Some("FX 2")
+        );
+        assert!(!s.project.audio_bus(bus).is_some_and(|x| x.assignable_fx));
+        // Desfazer remove o último inserido
+        s.undo();
+        assert!(s.project.audio_bus(bus).is_none());
+    }
+
+    #[test]
+    fn respeita_o_limite_de_barramentos() {
+        let mut s = EditorSession::new(Project::new_default());
+        while s.project.audio_buses.len() < MAX_AUDIO_BUSES {
+            let _ = s.add_audio_bus();
+        }
+        assert!(s.add_assignable_fx().is_none());
+    }
+
+    /// Projetos antigos não têm o campo: o barramento continua comum.
+    #[test]
+    fn projeto_antigo_carrega_barramento_comum() {
+        let bus = AudioBus::new("Bus A");
+        let mut v = serde_json::to_value(&bus).expect("json");
+        assert!(v.get("assignable_fx").is_none(), "falso não é gravado");
+        if let Some(o) = v.as_object_mut() {
+            o.remove("assignable_fx");
+        }
+        let back: AudioBus = serde_json::from_value(v).expect("lê");
+        assert!(!back.assignable_fx);
     }
 }
 

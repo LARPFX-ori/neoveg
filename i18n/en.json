@@ -3217,5 +3217,22 @@
   "★ Favoritos": "★ Favorites",
   "＋ Barramento": "+ Bus",
   "＋ Marcador no Cursor": "+ Marker at Cursor",
-  "＋ Áudio": "+ Audio"
+  "＋ Áudio": "+ Audio",
+  "FX atribuível": "Assignable FX",
+  "Inserir FX atribuível": "Insert Assignable FX",
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Insert an assignable FX channel: track sends go through its effects chain and out to the Master",
+  "Barramento de entrada": "Input Bus",
+  "Inserir barramento de entrada": "Insert Input Bus",
+  "Inserir barramento de entrada: a entrada de áudio passa pelos efeitos dele antes de ser gravada nas trilhas que o usam": "Insert an input bus: the audio input goes through its effects before being recorded on the tracks that use it",
+  "Entradas": "Inputs",
+  "Entrada do sistema": "System input",
+  "Entrada de gravação da trilha": "Track recording input",
+  "Efeitos do barramento de entrada": "Input bus effects",
+  "Efeitos do barramento de entrada — {name}": "Input bus effects — {name}",
+  "Remover barramento de entrada": "Remove input bus",
+  "limite de barramentos de entrada atingido": "input bus limit reached",
+  "Silenciar": "Mute",
+  "Inverter fase": "Invert phase",
+  "Modo de composição: {mode}": "Compositing mode: {mode}",
+  "Entrada": "Input"
 }

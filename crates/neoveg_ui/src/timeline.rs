@@ -3783,18 +3783,13 @@ impl App {
                 });
             }
 
-            let right_pad = if kind == TrackKind::Audio && !is_folder && h >= 56.0 {
-                32.0
-            } else {
-                14.0
-            };
             let inner = Rect::from_min_max(
                 pos2(
                     r.left() + indent + if use_gutter { 26.0 } else { 10.0 },
                     r.top() + 3.0,
                 ),
                 pos2(
-                    (r.right() - right_pad).max(r.left() + 60.0),
+                    r.right() - header_meter_reserve(kind == TrackKind::Audio, h),
                     r.bottom() - 3.0,
                 ),
             );
@@ -4094,33 +4089,26 @@ impl App {
                     more = Some(HeaderAction::ToggleCompositingChild);
                 }
                 if show_btns && btns.height && !is_folder {
-                    let min_tip = tr(lang, "Minimizar a altura da trilha");
-                    let min_btn = icons::small_icon_button(
-                        ui,
-                        Icon::TrackHeightMin,
-                        None,
-                        false,
-                        &self.theme,
-                    );
-                    min_btn.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, min_tip)
-                    });
-                    if min_btn.on_hover_text(min_tip).clicked() {
-                        more = Some(HeaderAction::Minimize);
-                    }
-                    let max_tip = tr(lang, "Maximizar a altura da trilha");
-                    let max_btn = icons::small_icon_button(
-                        ui,
-                        Icon::TrackHeightMax,
-                        None,
-                        false,
-                        &self.theme,
-                    );
-                    max_btn.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, max_tip)
-                    });
-                    if max_btn.on_hover_text(max_tip).clicked() {
-                        more = Some(HeaderAction::Maximize);
+                    // ícones próprios de altura da trilha, como no VEGAS Pro
+                    for (icon, label, action) in [
+                        (
+                            Icon::TrackMinimize,
+                            tr(lang, "Minimizar a altura da trilha"),
+                            HeaderAction::Minimize,
+                        ),
+                        (
+                            Icon::TrackMaximize,
+                            tr(lang, "Maximizar a altura da trilha"),
+                            HeaderAction::Maximize,
+                        ),
+                    ] {
+                        let b = icons::small_icon_button(ui, icon, None, false, &self.theme);
+                        b.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
+                        });
+                        if b.on_hover_text(label).clicked() {
+                            more = Some(action);
+                        }
                     }
                 }
                 if kf_has
@@ -4199,6 +4187,7 @@ impl App {
             }
             let mut auto_record: Option<(EnvKind, f32)> = None;
             let mut auto_released = false;
+            let theme_hdr = self.theme.clone();
             if h >= 50.0 && show_sliders {
                 child.horizontal(|ui| {
                     let t = &mut self.project.tracks[ti];
@@ -4258,134 +4247,40 @@ impl App {
                         if r.drag_stopped() {
                             auto_released = true;
                         }
-                    }
-                });
-            }
-            let mut make_child_req = false;
-            let mut make_parent_req = false;
-            if h >= 72.0 && show_sliders {
-                let audio_inputs = if kind == TrackKind::Audio {
-                    self.cached_audio_inputs()
-                } else {
-                    Vec::new()
-                };
-                child.horizontal(|ui| {
-                    if kind == TrackKind::Audio {
-                        let t = &mut self.project.tracks[ti];
-                        let am = t.automation_mode;
-                        ui.label(egui::RichText::new(tr(lang, "Pan")).small());
-                        let before_pan = t.pan;
-                        let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
-                        if slider_moved_by_other_button(ui, &r) {
-                            t.pan = before_pan;
-                        }
-                        if r.drag_started() {
-                            want_checkpoint = true;
-                        }
-                        if r.double_clicked() {
-                            t.pan = 0.0;
-                        }
-                        if playing_now && am.is_write() && (r.dragged() || r.changed()) {
-                            auto_record = Some((EnvKind::Pan, t.pan.clamp(-1.0, 1.0)));
-                        }
-                        if r.drag_stopped() {
-                            auto_released = true;
-                        }
-                        changed_track |= r.changed() || r.double_clicked();
-                        ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
-                        {
-                            let bus_list: Vec<(Id, String)> = self
-                                .project
-                                .audio_buses
-                                .iter()
-                                .map(|b| (b.id, b.name.clone()))
-                                .collect();
-                            let t = &mut self.project.tracks[ti];
-                            let in_lbl = t
-                                .input_device
-                                .as_deref()
-                                .unwrap_or_else(|| tr(lang, "Entrada: Padrão"));
-                            let before_in = t.input_device.clone();
-                            egui::ComboBox::from_id_salt(("hdr_in", tid))
-                                .width(66.0)
-                                .selected_text(in_lbl)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut t.input_device,
-                                        None,
-                                        tr(lang, "Entrada: Padrão"),
-                                    );
-                                    for dev in &audio_inputs {
-                                        ui.selectable_value(
-                                            &mut t.input_device,
-                                            Some(dev.clone()),
-                                            dev,
-                                        );
-                                    }
-                                });
-                            if t.input_device != before_in {
-                                want_checkpoint = true;
-                                changed_track = true;
-                            }
-                            let out_lbl = t
-                                .output_bus
-                                .and_then(|bid| {
-                                    bus_list
-                                        .iter()
-                                        .find(|(id, _)| *id == bid)
-                                        .map(|(_, nm)| nm.as_str())
-                                })
-                                .unwrap_or_else(|| tr(lang, "Master"));
-                            let before = t.output_bus;
-                            egui::ComboBox::from_id_salt(("hdr_out", tid))
-                                .width(58.0)
-                                .selected_text(out_lbl)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut t.output_bus,
-                                        None,
-                                        tr(lang, "Master"),
-                                    );
-                                    for (bid, bname) in &bus_list {
-                                        ui.selectable_value(&mut t.output_bus, Some(*bid), bname);
-                                    }
-                                });
-                            if t.output_bus != before {
-                                want_checkpoint = true;
-                                changed_track = true;
-                            }
-                        }
-                    } else {
-                        // 3 ícones de composição do VEGAS Pro: Modo de composição,
-                        // Tornar filho de composição e Promover para trilha pai.
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let cur_blend = self.project.tracks[ti].blend;
-                        let mode_tip = format!(
-                            "{}: {}",
-                            tr(lang, "Modo de composição"),
-                            cur_blend.name_in(lang)
-                        );
-                        let theme_snap = self.theme.clone();
-                        let mode_btn = icons::small_icon_button(
+                        // modo de composição: ícone à direita do Nível que abre a
+                        // lista de modos (como no VEGAS Pro)
+                        let cm = icons::small_icon_button(
                             ui,
                             Icon::CompositingMode,
                             None,
-                            cur_blend != BlendMode::SourceAlpha,
-                            &theme_snap,
-                        )
-                        .on_hover_text(&mode_tip);
+                            false,
+                            &theme_hdr,
+                        );
+                        let cm_label = tr_args(
+                            lang,
+                            "Modo de composição: {mode}",
+                            &[("mode", &t.blend.name_in(lang))],
+                        );
+                        cm.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                cm_label.clone(),
+                            )
+                        });
+                        let cm = cm.on_hover_text(cm_label.clone());
                         let pop_id = ui.make_persistent_id(("blend_pop", tid));
-                        if mode_btn.clicked() {
+                        if cm.clicked() {
                             ui.memory_mut(|m| m.toggle_popup(pop_id));
                         }
-                        egui::popup_below_widget(
+                        let before = t.blend;
+                        egui::popup::popup_below_widget(
                             ui,
                             pop_id,
-                            &mode_btn,
-                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            &cm,
+                            egui::PopupCloseBehavior::CloseOnClick,
                             |ui| {
                                 ui.set_min_width(150.0);
-                                let t = &mut self.project.tracks[ti];
                                 for b in BlendMode::ALL {
                                     if ui.selectable_label(t.blend == b, b.name_in(lang)).clicked()
                                     {
@@ -4396,69 +4291,107 @@ impl App {
                                 }
                             },
                         );
-                        if !adj {
-                            let child_tip = tr(lang, "Tornar filho de composição (Pai/Filho)");
-                            let child_btn = icons::small_icon_button(
-                                ui,
-                                Icon::MakeCompositingChild,
-                                None,
-                                has_parent,
-                                &theme_snap,
-                            );
-                            child_btn.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, child_tip)
-                            });
-                            if child_btn.on_hover_text(child_tip).clicked() {
-                                make_child_req = true;
-                            }
-                            let parent_tip = tr(lang, "Promover para trilha pai");
-                            let parent_btn = ui
-                                .add_enabled_ui(has_parent, |ui| {
-                                    icons::small_icon_button(
-                                        ui,
-                                        Icon::MakeCompositingParent,
-                                        None,
-                                        false,
-                                        &theme_snap,
-                                    )
-                                })
-                                .inner;
-                            parent_btn.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    has_parent,
-                                    parent_tip,
-                                )
-                            });
-                            if parent_btn.on_hover_text(parent_tip).clicked() {
-                                make_parent_req = true;
-                            }
-                        }
-                        if cur_blend != BlendMode::SourceAlpha {
-                            ui.label(
-                                egui::RichText::new(cur_blend.name_in(lang))
-                                    .small()
-                                    .color(self.theme.text_muted),
-                            );
+                        if t.blend != before {
+                            changed_track = true;
                         }
                     }
                 });
             }
-            if make_child_req {
-                if let Err(e) = self.session.make_compositing_child(ti) {
-                    self.set_status(format!("{e}"));
-                } else {
+            if h >= 72.0 && show_sliders && kind == TrackKind::Audio {
+                child.horizontal(|ui| {
+                    let t = &mut self.project.tracks[ti];
+                    let am = t.automation_mode;
+                    ui.label(egui::RichText::new(tr(lang, "Pan")).small());
+                    let before_pan = t.pan;
+                    let r = ui.add(egui::Slider::new(&mut t.pan, -1.0..=1.0).show_value(false));
+                    if slider_moved_by_other_button(ui, &r) {
+                        t.pan = before_pan;
+                    }
+                    if r.drag_started() {
+                        want_checkpoint = true;
+                    }
+                    if r.double_clicked() {
+                        t.pan = 0.0;
+                    }
+                    if playing_now && am.is_write() && (r.dragged() || r.changed()) {
+                        auto_record = Some((EnvKind::Pan, t.pan.clamp(-1.0, 1.0)));
+                    }
+                    if r.drag_stopped() {
+                        auto_released = true;
+                    }
+                    changed_track |= r.changed() || r.double_clicked();
+                    ui.label(egui::RichText::new(EnvKind::Pan.format(t.pan)).small());
+                    {
+                        let bus_list: Vec<(Id, String)> = self
+                            .project
+                            .audio_buses
+                            .iter()
+                            .map(|b| (b.id, b.name.clone()))
+                            .collect();
+                        let t = &mut self.project.tracks[ti];
+                        let out_lbl = t
+                            .output_bus
+                            .and_then(|bid| {
+                                bus_list
+                                    .iter()
+                                    .find(|(id, _)| *id == bid)
+                                    .map(|(_, nm)| nm.as_str())
+                            })
+                            .unwrap_or_else(|| tr(lang, "Master"));
+                        let before = t.output_bus;
+                        egui::ComboBox::from_id_salt(("hdr_out", tid))
+                            .width(64.0)
+                            .selected_text(out_lbl)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut t.output_bus, None, tr(lang, "Master"));
+                                for (bid, bname) in &bus_list {
+                                    ui.selectable_value(&mut t.output_bus, Some(*bid), bname);
+                                }
+                            });
+                        if t.output_bus != before {
+                            want_checkpoint = true;
+                            changed_track = true;
+                        }
+                    }
+                });
+            }
+            // entrada de gravação (como o dispositivo de entrada no cabeçalho
+            // do VEGAS Pro): a entrada do sistema ou um barramento de entrada
+            if kind == TrackKind::Audio && h >= 94.0 && show_sliders {
+                let choices: Vec<(Id, String)> = self
+                    .project
+                    .input_buses
+                    .iter()
+                    .map(|b| (b.id, b.name.clone()))
+                    .collect();
+                let cur = self.project.tracks[ti].input_bus;
+                let mut pick = cur;
+                child.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tr(lang, "Entrada")).small());
+                    let sel = pick
+                        .and_then(|b| choices.iter().find(|(id, _)| *id == b))
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_else(|| tr(lang, "Entrada do sistema").to_string());
+                    egui::ComboBox::from_id_salt(("hdr_in", tid))
+                        .width(118.0)
+                        .selected_text(sel)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut pick, None, tr(lang, "Entrada do sistema"));
+                            for (bid, name) in &choices {
+                                ui.selectable_value(&mut pick, Some(*bid), name);
+                            }
+                        })
+                        .response
+                        .on_hover_text(tr(lang, "Entrada de gravação da trilha"));
+                });
+                if pick != cur && self.session.set_track_input_bus(ti, pick) {
                     self.sync_after_session();
                 }
-            }
-            if make_parent_req {
-                self.session.unmake_compositing_child(ti);
-                self.sync_after_session();
             }
             // envio para barramento (como "FX 1 ... Post" no VEGAS Pro): o
             // primeiro envio da trilha, com nível e antes/depois do fader
             if kind == TrackKind::Audio
-                && h >= 94.0
+                && h >= 116.0
                 && show_sliders
                 && !self.project.tracks[ti].sends.is_empty()
             {
@@ -4554,23 +4487,25 @@ impl App {
                 };
                 let lv = rec_lv
                     .unwrap_or_else(|| self.meters_hold.get(&tid).cloned().unwrap_or([0.0; 2]));
-                if h >= 56.0 {
-                    let mr = Rect::from_min_max(
-                        pos2(r.right() - 29.0, r.top() + 4.0),
-                        pos2(r.right() - 19.0, r.bottom() - 4.0),
-                    );
-                    draw_meter(&painter, mr, lv);
-                    let sr = Rect::from_min_max(
-                        pos2(r.right() - 18.0, r.top() + 4.0),
-                        pos2(r.right() - 2.0, r.bottom() - 4.0),
-                    );
-                    crate::panels::draw_db_scale(&painter, sr, self.theme.text_muted);
-                } else {
-                    let mr = Rect::from_min_max(
-                        pos2(r.right() - 11.0, r.top() + 4.0),
-                        pos2(r.right() - 3.0, r.bottom() - 4.0),
-                    );
-                    draw_meter(&painter, mr, lv);
+                let mr = Rect::from_min_max(
+                    pos2(r.right() - 11.0, r.top() + 4.0),
+                    pos2(r.right() - 3.0, r.bottom() - 4.0),
+                );
+                draw_meter(&painter, mr, lv);
+                if header_meter_reserve(true, h) > 14.0 {
+                    // escala em dB ao lado do medidor, como no VEGAS Pro
+                    let font = FontId::monospace(7.5);
+                    for db in [-12.0_f32, -24.0, -36.0, -48.0] {
+                        let n = ((db + 60.0) / 66.0).clamp(0.0, 1.0);
+                        let y = mr.bottom() - n * mr.height();
+                        painter.text(
+                            pos2(mr.left() - 2.0, y),
+                            Align2::RIGHT_CENTER,
+                            format!("{}", -db as i32),
+                            font.clone(),
+                            self.theme.text_muted,
+                        );
+                    }
                 }
             }
             // alça de altura da trilha
@@ -10220,6 +10155,29 @@ mod folder_bar_tests {
         let mut v = Track::new(TrackKind::Video, "Vídeo");
         v.height = 90.0;
         assert_eq!(drawn_track_height(&v), 90.0);
+    }
+}
+
+/// Espaço reservado à direita do cabeçalho para o medidor: no áudio com
+/// altura para a escala em dB, o medidor e os números; senão só o medidor.
+fn header_meter_reserve(audio: bool, h: f32) -> f32 {
+    if audio && h >= 56.0 {
+        30.0
+    } else {
+        14.0
+    }
+}
+
+#[cfg(test)]
+mod header_meter_tests {
+    use super::header_meter_reserve;
+
+    #[test]
+    fn escala_do_medidor_so_no_audio_alto() {
+        assert_eq!(header_meter_reserve(true, 80.0), 30.0);
+        assert_eq!(header_meter_reserve(true, 40.0), 14.0);
+        assert_eq!(header_meter_reserve(false, 120.0), 14.0);
+        assert_eq!(header_meter_reserve(true, f32::NAN), 14.0);
     }
 }
 

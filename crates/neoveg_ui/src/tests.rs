@@ -2493,6 +2493,7 @@ fn mixer_fader_acompanha_a_altura_do_painel() {
         sends: true,
         automation: true,
         pan: true,
+        vu: true,
     };
     assert_eq!(mixer_fader_height(200.0, all), 102.0, "mínimo");
     assert!(mixer_fader_height(700.0, none) > 500.0);
