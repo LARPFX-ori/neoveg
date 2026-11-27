@@ -72,6 +72,15 @@ impl RelinkUiState {
             j.state.cancel();
         }
     }
+
+    /// Fecha a janela e cancela a busca. Chamado ao trocar de aba de projeto:
+    /// a lista é do projeto em que a busca começou, e *Aplicar e salvar*
+    /// agiria sobre o projeto da outra aba.
+    pub(crate) fn close(&mut self) {
+        self.cancel();
+        self.job = None;
+        self.open = false;
+    }
 }
 
 /// Verifica o projeto aberto e, se houver mídia ausente, abre a janela e já

@@ -198,6 +198,8 @@ impl App {
         let Some(mut incoming) = self.doc_tabs.get_mut(i).and_then(|t| t.stash.take()) else {
             return;
         };
+        // a busca de mídia ausente é do documento que está saindo
+        self.dlg.relink.close();
         self.leave_document();
         // opções da aplicação (barra de ferramentas) seguem de uma aba para outra
         let opts = self.session.opts.clone();

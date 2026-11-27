@@ -1159,6 +1159,55 @@ fn kittest_localizar_midia_caminho_longo_nao_esconde_os_botoes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Trocar de aba de projeto fecha a janela *Mídia não encontrada*. A lista
+/// é do projeto em que a busca começou; com a janela aberta em outra aba,
+/// *Aplicar e salvar* reapontava a mídia e salvava o projeto errado.
+#[test]
+fn kittest_trocar_de_aba_fecha_a_busca_de_midia_ausente() {
+    let dir = std::env::temp_dir().join(format!(
+        "neoveg_kittest_relink_troca_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("pasta de teste");
+    let outro = dir.join("outro.neoveg");
+    crate::model::Project::new_default()
+        .save_file(&outro)
+        .expect("salvar projeto de teste");
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.session.project.media.push(crate::model::MediaItem {
+            id: 9301,
+            name: "sumiu.wav".into(),
+            source: crate::model::MediaSource::File {
+                path: "Q:/Sumiu/sumiu.wav".into(),
+            },
+            duration: None,
+            has_video: false,
+            has_audio: true,
+            width: 0,
+            height: 0,
+            fps: None,
+            info: String::new(),
+            proxy_path: None,
+        });
+        app.session.dirty = true;
+        assert_eq!(crate::dlg_relink::open_if_missing(app), 1);
+        assert!(app.dlg.relink.open);
+        // o outro projeto não tem mídia ausente: abre numa aba nova
+        app.open_project_path(outro.clone());
+        assert_eq!(app.active_doc, 1, "o outro projeto abriu numa aba");
+        assert!(!app.dlg.relink.open, "a busca do projeto anterior fechou");
+    }
+    harness.run_steps(2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn lock_test_prefs() -> std::sync::MutexGuard<'static, ()> {
