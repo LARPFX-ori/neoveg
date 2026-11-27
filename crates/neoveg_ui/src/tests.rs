@@ -1307,13 +1307,14 @@ fn f11_area_de_janelas_lista_de_trilhas_e_timeline_maximizada() {
     );
 }
 
-/// Layout novo: à esquerda da Prévia só Mídia do Projeto, Transições, Efeitos
-/// de Vídeo, Geradores de Mídia e Plug-In Manager; o Trimmer no grupo da
+/// Layout novo: à esquerda da Prévia o Explorer (primeiro, como no VEGAS Pro),
+/// Mídia do Projeto, Transições, Efeitos de Vídeo, Geradores de Mídia e
+/// Plug-In Manager; o Trimmer no grupo da
 /// Prévia; os outros painéis fechados até o menu Exibir abrir. "Fechar
 /// painel" fecha de verdade e o layout salvo lembra. O zoom de teclado do
 /// egui fica desligado (Ctrl+= / Ctrl+- são teclas do VEGAS).
 #[test]
-fn dock_padrao_cinco_paineis_trimmer_na_previa_e_fechar_painel() {
+fn dock_padrao_seis_paineis_trimmer_na_previa_e_fechar_painel() {
     use crate::dock::{build_dock_tree, find_pane_tile, DockPane};
     use crate::layout::{builtin_presets, WindowLayout, DEFAULT_DOCK_TABS};
 
@@ -1323,12 +1324,8 @@ fn dock_padrao_cinco_paineis_trimmer_na_previa_e_fechar_painel() {
         assert!(!fechados.contains(&t), "{t:?} deve abrir no dock");
     }
     assert!(!fechados.contains(&DockTab::Trimmer));
-    for t in [
-        DockTab::Explorer,
-        DockTab::Mixer,
-        DockTab::Notes,
-        DockTab::Encoder,
-    ] {
+    assert_eq!(DEFAULT_DOCK_TABS[0], DockTab::Explorer);
+    for t in [DockTab::Mixer, DockTab::Notes, DockTab::Encoder] {
         assert!(fechados.contains(&t), "{t:?} deve começar fechado");
     }
     // preset que abre nos Escopos mostra os Escopos

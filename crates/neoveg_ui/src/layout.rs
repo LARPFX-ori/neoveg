@@ -137,10 +137,11 @@ fn floating_key_ok(k: &str) -> bool {
         || k.starts_with("float_")
 }
 
-/// Painéis do grupo à esquerda da Prévia num layout novo. O Trimmer fica no
-/// grupo da Prévia de Vídeo; os outros painéis começam fechados e abrem pelo
-/// menu Exibir.
-pub const DEFAULT_DOCK_TABS: [DockTab; 5] = [
+/// Painéis do grupo à esquerda da Prévia num layout novo, na ordem das abas
+/// do VEGAS Pro (o Explorer vem primeiro). O Trimmer fica no grupo da Prévia
+/// de Vídeo; os outros painéis começam fechados e abrem pelo menu Exibir.
+pub const DEFAULT_DOCK_TABS: [DockTab; 6] = [
+    DockTab::Explorer,
     DockTab::ProjectMedia,
     DockTab::Transitions,
     DockTab::VideoFx,
