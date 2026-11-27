@@ -3207,5 +3207,17 @@
   "＋ Áudio": "+ Audio",
   "FX atribuível": "FX asignable",
   "Inserir FX atribuível": "Insertar FX asignable",
-  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Insertar un canal de FX asignable: los envíos de las pistas pasan por su cadena de efectos y salen al Master"
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "Insertar un canal de FX asignable: los envíos de las pistas pasan por su cadena de efectos y salen al Master",
+  "Barramento de entrada": "Bus de entrada",
+  "Inserir barramento de entrada": "Insertar bus de entrada",
+  "Inserir barramento de entrada: a entrada de áudio passa pelos efeitos dele antes de ser gravada nas trilhas que o usam": "Insertar un bus de entrada: la entrada de audio pasa por sus efectos antes de grabarse en las pistas que lo usan",
+  "Entradas": "Entradas",
+  "Entrada do sistema": "Entrada del sistema",
+  "Entrada de gravação da trilha": "Entrada de grabación de la pista",
+  "Efeitos do barramento de entrada": "Efectos del bus de entrada",
+  "Efeitos do barramento de entrada — {name}": "Efectos del bus de entrada — {name}",
+  "Remover barramento de entrada": "Quitar bus de entrada",
+  "limite de barramentos de entrada atingido": "límite de buses de entrada alcanzado",
+  "Silenciar": "Silenciar",
+  "Inverter fase": "Invertir fase"
 }

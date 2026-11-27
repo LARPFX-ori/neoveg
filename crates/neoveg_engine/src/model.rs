@@ -646,6 +646,10 @@ pub struct Project {
     /// de forma acíclica para o Master Bus).
     #[serde(default)]
     pub audio_buses: Vec<AudioBus>,
+    /// Barramentos de entrada (*Input Bus*): a entrada de áudio passa por eles
+    /// antes de ser gravada nas trilhas que os usam como entrada.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_buses: Vec<InputBus>,
     #[serde(default)]
     pub notes: String,
     /// Notas estruturadas do projeto vinculadas a timecode (painel *Notas do Projeto* v21/2026).
@@ -1541,6 +1545,56 @@ impl Project {
         Some(id)
     }
 
+    /// Próximo nome livre de barramento de entrada: "Entrada A", "Entrada B"...
+    pub fn next_input_bus_name(&self) -> String {
+        for idx in 0..MAX_INPUT_BUSES {
+            let letter = (b'A' + idx as u8) as char;
+            let candidate = format!("Entrada {letter}");
+            if !self.input_buses.iter().any(|b| b.name == candidate) {
+                return candidate;
+            }
+        }
+        format!("Entrada {}", self.input_buses.len() + 1)
+    }
+
+    /// Cria um barramento de entrada (até `MAX_INPUT_BUSES`).
+    pub fn add_input_bus(&mut self) -> Option<Id> {
+        if self.input_buses.len() >= MAX_INPUT_BUSES {
+            return None;
+        }
+        let bus = InputBus::new(&self.next_input_bus_name());
+        let id = bus.id;
+        self.input_buses.push(bus);
+        Some(id)
+    }
+
+    pub fn input_bus(&self, id: Id) -> Option<&InputBus> {
+        self.input_buses.iter().find(|b| b.id == id)
+    }
+
+    pub fn input_bus_mut(&mut self, id: Id) -> Option<&mut InputBus> {
+        self.input_buses.iter_mut().find(|b| b.id == id)
+    }
+
+    /// Remove o barramento de entrada; as trilhas que gravavam dele voltam a
+    /// gravar da entrada do sistema.
+    pub fn remove_input_bus(&mut self, id: Id) -> bool {
+        let Some(pos) = self.input_buses.iter().position(|b| b.id == id) else {
+            return false;
+        };
+        self.input_buses.remove(pos);
+        for t in self
+            .tracks
+            .iter_mut()
+            .chain(self.sequences.iter_mut().flat_map(|s| s.tracks.iter_mut()))
+        {
+            if t.input_bus == Some(id) {
+                t.input_bus = None;
+            }
+        }
+        true
+    }
+
     pub fn add_audio_bus(&mut self, name: Option<&str>) -> Option<Id> {
         if self.audio_buses.len() >= MAX_AUDIO_BUSES {
             return None;
@@ -1793,6 +1847,12 @@ impl Project {
             m = m.max(f.id);
         }
         for b in &self.audio_buses {
+            m = m.max(b.id);
+            for f in &b.fx {
+                m = m.max(f.id);
+            }
+        }
+        for b in &self.input_buses {
             m = m.max(b.id);
             for f in &b.fx {
                 m = m.max(f.id);
@@ -2075,6 +2135,31 @@ impl Project {
         }
         sanitize_track_buses(&mut self.tracks, &bus_ids, &mut fixes);
 
+        if self.input_buses.len() > MAX_INPUT_BUSES {
+            self.input_buses.truncate(MAX_INPUT_BUSES);
+            fixes.push(format!(
+                "barramentos de entrada limitados ao máximo de {MAX_INPUT_BUSES}"
+            ));
+        }
+        let mut seen_inputs = std::collections::HashSet::new();
+        for b in &mut self.input_buses {
+            if !seen_inputs.insert(b.id) {
+                let old = b.id;
+                b.id = new_id();
+                fixes.push(format!(
+                    "id de barramento de entrada duplicado {old} renumerado"
+                ));
+                seen_inputs.insert(b.id);
+            }
+            b.volume_db = clampf(fin32(b.volume_db, 0.0), -120.0, 24.0);
+            for f in &mut b.fx {
+                sanitize_fx(f);
+            }
+        }
+        let input_ids: std::collections::HashSet<Id> =
+            self.input_buses.iter().map(|b| b.id).collect();
+        sanitize_track_inputs(&mut self.tracks, &input_ids, &mut fixes);
+
         // Sequências inativas e abas (item 13 do backlog / estilo Premiere Pro)
         if self.sequences.len() > MAX_SEQUENCES {
             self.sequences.truncate(MAX_SEQUENCES);
@@ -2123,6 +2208,7 @@ impl Project {
                 &mut fixes,
             );
             sanitize_track_buses(&mut seq.tracks, &bus_ids, &mut fixes);
+            sanitize_track_inputs(&mut seq.tracks, &input_ids, &mut fixes);
             sanitize_markers_and_regions(&mut seq.markers, &mut seq.regions, &mut seq.loop_region);
             seq.cursor = seq.cursor.clamp_safe(Ticks::ZERO, Ticks::MAX);
             seq.scroll_x = seq.scroll_x.clamp_safe(Ticks::ZERO, Ticks::MAX);
@@ -2410,6 +2496,27 @@ fn sanitize_tracks_slice(
                     ));
                 }
             }
+        }
+    }
+}
+
+/// Trilhas de vídeo não gravam áudio, e trilhas de áudio só apontam para
+/// barramentos de entrada que existem.
+fn sanitize_track_inputs(
+    tracks: &mut [Track],
+    input_ids: &std::collections::HashSet<Id>,
+    fixes: &mut Vec<String>,
+) {
+    for t in tracks.iter_mut() {
+        let Some(bid) = t.input_bus else {
+            continue;
+        };
+        if t.kind != TrackKind::Audio || !input_ids.contains(&bid) {
+            t.input_bus = None;
+            fixes.push(format!(
+                "barramento de entrada inexistente na trilha \"{}\" trocado pela entrada do sistema",
+                t.name
+            ));
         }
     }
 }
@@ -3919,6 +4026,10 @@ pub struct Track {
     /// Áudio: inverte a polaridade (fase 180°) do sinal da trilha (Console de Mixagem, p. 63).
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert_phase: bool,
+    /// Barramento de entrada de onde a trilha grava (`None` = a entrada do
+    /// sistema sem processamento).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_bus: Option<Id>,
 }
 
 fn default_glow_keyframes() -> Keyframes<ShadowGlowKey> {
@@ -3989,6 +4100,48 @@ pub struct AudioSend {
     pub pre_fader: bool,
     #[serde(default)]
     pub mute: bool,
+}
+
+/// Máximo de barramentos de entrada num projeto (entrada hostil, §0.4).
+pub const MAX_INPUT_BUSES: usize = 16;
+
+/// Barramento de entrada (*Input Bus*, VEGAS Pro): a entrada de áudio do
+/// sistema passa pela cadeia de efeitos, pelo volume e pela fase dele antes
+/// de ser gravada nas trilhas que o usam como entrada (`Track::input_bus`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InputBus {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub volume_db: f32,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub invert_phase: bool,
+    #[serde(default)]
+    pub fx: Vec<FxInstance>,
+}
+
+impl InputBus {
+    pub fn new(name: &str) -> Self {
+        InputBus {
+            id: new_id(),
+            name: name.into(),
+            volume_db: 0.0,
+            mute: false,
+            invert_phase: false,
+            fx: vec![],
+        }
+    }
+
+    /// O take gravado por este barramento sai igual ao que entrou (sem
+    /// efeitos, ganho, fase ou mudo): não precisa passar pelo mixer.
+    pub fn is_transparent(&self) -> bool {
+        !self.mute
+            && !self.invert_phase
+            && self.volume_db.abs() < 1e-6
+            && self.fx.iter().all(|f| !f.enabled)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4143,6 +4296,7 @@ impl Track {
             multicam: false,
             automation_mode: AutomationMode::Read,
             invert_phase: false,
+            input_bus: None,
         }
     }
 

@@ -3207,5 +3207,17 @@
   "＋ Áudio": "＋ オーディオ",
   "FX atribuível": "割り当て可能な FX",
   "Inserir FX atribuível": "割り当て可能な FX を挿入",
-  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "割り当て可能な FX チャンネルを挿入: トラックのセンドはエフェクトチェーンを通ってマスターへ出力されます"
+  "Inserir canal de FX atribuível: os envios das trilhas passam pela cadeia de efeitos dele e saem no Master": "割り当て可能な FX チャンネルを挿入: トラックのセンドはエフェクトチェーンを通ってマスターへ出力されます",
+  "Barramento de entrada": "入力バス",
+  "Inserir barramento de entrada": "入力バスを挿入",
+  "Inserir barramento de entrada: a entrada de áudio passa pelos efeitos dele antes de ser gravada nas trilhas que o usam": "入力バスを挿入: オーディオ入力はそのエフェクトを通ってから、それを使うトラックに録音されます",
+  "Entradas": "入力",
+  "Entrada do sistema": "システム入力",
+  "Entrada de gravação da trilha": "トラックの録音入力",
+  "Efeitos do barramento de entrada": "入力バスのエフェクト",
+  "Efeitos do barramento de entrada — {name}": "入力バスのエフェクト — {name}",
+  "Remover barramento de entrada": "入力バスを削除",
+  "limite de barramentos de entrada atingido": "入力バスの上限に達しました",
+  "Silenciar": "ミュート",
+  "Inverter fase": "位相を反転"
 }

@@ -26,15 +26,18 @@ pub enum MixerChannelFilter {
     AudioBuses,
     /// Canais de FX atribuível.
     AssignableFx,
+    /// Barramentos de entrada.
+    InputBuses,
     MasterOnly,
 }
 
 impl MixerChannelFilter {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::All,
         Self::AudioTracks,
         Self::AudioBuses,
         Self::AssignableFx,
+        Self::InputBuses,
         Self::MasterOnly,
     ];
 
@@ -44,7 +47,7 @@ impl MixerChannelFilter {
             Self::All => true,
             Self::AudioBuses => !assignable_fx,
             Self::AssignableFx => assignable_fx,
-            Self::AudioTracks | Self::MasterOnly => false,
+            Self::AudioTracks | Self::InputBuses | Self::MasterOnly => false,
         }
     }
 
@@ -54,6 +57,7 @@ impl MixerChannelFilter {
             Self::AudioTracks => "Trilhas",
             Self::AudioBuses => "Barramentos",
             Self::AssignableFx => "FX atribuível",
+            Self::InputBuses => "Entradas",
             Self::MasterOnly => "Master",
         };
         tr(lang, key)
@@ -3325,6 +3329,141 @@ impl App {
 
     /// Seção *Inserir FX* de um canal do Console de Mixagem: os efeitos da
     /// cadeia (clique abre a cadeia) e o botão para adicionar.
+    /// Canais dos barramentos de entrada no Console de Mixagem: nome, mudo,
+    /// fase, cadeia de efeitos, volume e o nível da entrada durante a
+    /// gravação (o maior entre as trilhas armadas que gravam dele).
+    fn mixer_input_bus_strips(
+        &mut self,
+        ui: &mut egui::Ui,
+        strip_w: f32,
+        fader_h: f32,
+        show_insert_fx: bool,
+        show_faders: bool,
+        show_meters: bool,
+    ) {
+        let lang = self.lang();
+        let ids: Vec<Id> = self.project.input_buses.iter().map(|b| b.id).collect();
+        for id in ids {
+            let Some(bus) = self.project.input_bus(id).cloned() else {
+                continue;
+            };
+            let level = self
+                .project
+                .tracks
+                .iter()
+                .filter(|t| t.input_bus == Some(id))
+                .filter_map(|t| self.recording_peaks.get(&t.id))
+                .fold([0f32; 2], |a, b| [a[0].max(b[0]), a[1].max(b[1])]);
+            let mut vol = bus.volume_db;
+            let mut toggle_mute = false;
+            let mut toggle_phase = false;
+            let mut open_fx = false;
+            let mut remove = false;
+            let mut vol_changed = false;
+            let mut vol_started = false;
+            let mut vol_reset = false;
+            ui.group(|ui| {
+                ui.set_width(strip_w);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("IN")
+                                .small()
+                                .strong()
+                                .color(self.theme.accent),
+                        )
+                        .on_hover_text(tr(lang, "Barramento de entrada"));
+                        ui.add(egui::Label::new(egui::RichText::new(&bus.name).small()).truncate());
+                    });
+                    ui.horizontal(|ui| {
+                        toggle_mute = ui
+                            .selectable_label(bus.mute, "M")
+                            .on_hover_text(tr(lang, "Silenciar"))
+                            .clicked();
+                        toggle_phase = ui
+                            .selectable_label(bus.invert_phase, "Ø")
+                            .on_hover_text(tr(lang, "Inverter fase"))
+                            .clicked();
+                        open_fx = ui
+                            .small_button("FX")
+                            .on_hover_text(tr(lang, "Efeitos do barramento de entrada"))
+                            .clicked();
+                        remove = ui
+                            .small_button("×")
+                            .on_hover_text(tr(lang, "Remover barramento de entrada"))
+                            .clicked();
+                    });
+                    if show_insert_fx {
+                        self.mixer_insert_fx(ui, FxTarget::InputBus(id), strip_w);
+                    }
+                    if show_faders || show_meters {
+                        ui.horizontal(|ui| {
+                            if show_faders {
+                                let r = ui
+                                    .scope(|ui| {
+                                        ui.spacing_mut().slider_width = (fader_h - 4.0).max(40.0);
+                                        ui.add_sized(
+                                            [22.0, fader_h],
+                                            egui::Slider::new(&mut vol, -60.0..=12.0)
+                                                .vertical()
+                                                .show_value(false),
+                                        )
+                                    })
+                                    .inner;
+                                vol_started = r.drag_started();
+                                if r.double_clicked() {
+                                    vol = 0.0;
+                                    vol_changed = true;
+                                    vol_reset = true;
+                                } else if r.changed() {
+                                    vol_changed = true;
+                                }
+                            }
+                            if show_meters {
+                                let (mr, _) =
+                                    ui.allocate_exact_size(vec2(14.0, fader_h), Sense::hover());
+                                draw_meter(ui.painter(), mr, level);
+                                let (sr, _) =
+                                    ui.allocate_exact_size(vec2(20.0, fader_h), Sense::hover());
+                                draw_db_scale(ui.painter(), sr, self.theme.text_muted);
+                            }
+                        });
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("{vol:+.1} dB"))
+                            .small()
+                            .monospace(),
+                    );
+                });
+            });
+            if open_fx {
+                self.open_fx_target(FxTarget::InputBus(id));
+            }
+            if remove {
+                self.session.remove_input_bus(id);
+                self.sync_after_session();
+                continue;
+            }
+            if toggle_mute || toggle_phase || vol_started || vol_reset {
+                self.checkpoint();
+            }
+            if toggle_mute || toggle_phase || vol_changed {
+                if let Some(b) = self.project.input_bus_mut(id) {
+                    if toggle_mute {
+                        b.mute = !b.mute;
+                    }
+                    if toggle_phase {
+                        b.invert_phase = !b.invert_phase;
+                    }
+                    if vol_changed {
+                        b.volume_db = vol;
+                    }
+                }
+                self.changed();
+            }
+        }
+    }
+
     fn mixer_insert_fx(&mut self, ui: &mut egui::Ui, target: FxTarget, strip_w: f32) {
         let lang = self.lang();
         let names: Vec<(String, bool)> = self
@@ -3500,6 +3639,22 @@ impl App {
                         self.open_fx_target(FxTarget::AudioBus(id));
                     }
                 }
+            }
+            let can_add_in =
+                self.project.input_buses.len() < crate::model::MAX_INPUT_BUSES;
+            if ui
+                .add_enabled(
+                    can_add_in,
+                    egui::Button::new(tr(lang, "Inserir barramento de entrada")),
+                )
+                .on_hover_text(tr(
+                    lang,
+                    "Inserir barramento de entrada: a entrada de áudio passa pelos efeitos dele antes de ser gravada nas trilhas que o usam",
+                ))
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                self.exec_cmd(Some(&ctx), "insert.input_bus");
             }
             let n_s = self.project.audio_buses.len().to_string();
             let max_s = crate::model::MAX_AUDIO_BUSES.to_string();
@@ -3744,6 +3899,13 @@ impl App {
                                 let mut pending_toggle_phase = false;
                                 let mut pending_toggle_rec = false;
                                 let mut pending_output = self.project.tracks[ti].output_bus;
+                                let mut pending_input = self.project.tracks[ti].input_bus;
+                                let input_choices: Vec<(Id, String)> = self
+                                    .project
+                                    .input_buses
+                                    .iter()
+                                    .map(|b| (b.id, b.name.clone()))
+                                    .collect();
                                 let mut pending_auto = self.project.tracks[ti].automation_mode;
                                 let mut vol_reset = false;
                                 let mut pan_reset = false;
@@ -3777,6 +3939,44 @@ impl App {
                                             egui::FontId::proportional(10.5),
                                             hdr_fg,
                                         );
+
+                                        if show_io && !input_choices.is_empty() {
+                                            let in_lbl = pending_input
+                                                .and_then(|bid| {
+                                                    input_choices
+                                                        .iter()
+                                                        .find(|(id, _)| *id == bid)
+                                                        .map(|(_, nm)| nm.as_str())
+                                                })
+                                                .unwrap_or_else(|| tr(lang, "Entrada do sistema"));
+                                            let before_in = pending_input;
+                                            egui::ComboBox::from_id_salt(("mix_trk_in", tid))
+                                                .width((strip_w - 10.0).max(64.0))
+                                                .selected_text(in_lbl)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut pending_input,
+                                                        None,
+                                                        tr(lang, "Entrada do sistema"),
+                                                    );
+                                                    for (bid, bname) in &input_choices {
+                                                        ui.selectable_value(
+                                                            &mut pending_input,
+                                                            Some(*bid),
+                                                            bname,
+                                                        );
+                                                    }
+                                                })
+                                                .response
+                                                .on_hover_text(tr(
+                                                    lang,
+                                                    "Entrada de gravação da trilha",
+                                                ));
+                                            if pending_input != before_in {
+                                                checkpoint_needed = true;
+                                                changed = true;
+                                            }
+                                        }
 
                                         if show_io && !bus_choices.is_empty() {
                                             let sel_lbl = pending_output
@@ -4080,6 +4280,10 @@ impl App {
                                     self.session.project.tracks[ti].output_bus = pending_output;
                                     changed = true;
                                 }
+                                if self.session.project.tracks[ti].input_bus != pending_input {
+                                    self.session.project.tracks[ti].input_bus = pending_input;
+                                    changed = true;
+                                }
                                 if self.session.project.tracks[ti].automation_mode != pending_auto {
                                     self.session.project.tracks[ti].automation_mode = pending_auto;
                                     changed = true;
@@ -4111,6 +4315,21 @@ impl App {
                                     self.changed();
                                 }
                             }
+                        }
+
+                        // Barramentos de entrada (Input Bus)
+                        if matches!(
+                            filter,
+                            MixerChannelFilter::All | MixerChannelFilter::InputBuses
+                        ) {
+                            self.mixer_input_bus_strips(
+                                ui,
+                                strip_w,
+                                fader_h,
+                                show_insert_fx,
+                                show_faders,
+                                show_meters,
+                            );
                         }
 
                         // Barramentos auxiliares (Bus A .. Bus Z)
@@ -5621,6 +5840,7 @@ mod mixer_filter_tests {
         assert!(F::AudioBuses.shows_bus(false) && !F::AudioBuses.shows_bus(true));
         assert!(F::AssignableFx.shows_bus(true) && !F::AssignableFx.shows_bus(false));
         assert!(!F::AudioTracks.shows_bus(false) && !F::MasterOnly.shows_bus(true));
+        assert!(!F::InputBuses.shows_bus(false) && !F::InputBuses.shows_bus(true));
     }
 }
 

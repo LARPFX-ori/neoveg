@@ -1743,11 +1743,122 @@ pub fn render_event_fx_stereo(
     Some(out)
 }
 
+/// Passa um take estéreo intercalado gravado na taxa `sr` pelo barramento de
+/// entrada `bus` (efeitos, volume, fase e mudo), fora de tempo real, com o
+/// mesmo mixer do render. Devolve o take processado com o mesmo número de
+/// quadros (no máximo 10 minutos são processados; o resto fica como estava).
+pub fn render_input_bus_take(bus: &crate::model::InputBus, stereo: &[f32], sr: u32) -> Vec<f32> {
+    let frames = stereo.len() / 2;
+    if frames == 0 {
+        return Vec::new();
+    }
+    if bus.mute {
+        return vec![0.0; frames * 2];
+    }
+    if bus.is_transparent() {
+        return stereo[..frames * 2].to_vec();
+    }
+    let sr = sr.clamp(8000, 192_000);
+    let max_frames = (sr as usize).saturating_mul(600);
+    let n_proc = frames.min(max_frames);
+    let mut iso = Project::default();
+    iso.settings.sample_rate = sr;
+    iso.settings.channel_layout = ChannelLayout::Stereo;
+    let dur = Ticks::from_samples(n_proc as i64, sr);
+    let media = MediaItem {
+        id: neoveg_common::curve::new_id(),
+        name: "take".into(),
+        source: crate::model::MediaSource::File {
+            path: String::new(),
+        },
+        duration: Some(dur),
+        has_video: false,
+        has_audio: true,
+        width: 0,
+        height: 0,
+        fps: None,
+        info: String::new(),
+        proxy_path: None,
+    };
+    let mut tr = Track::new(TrackKind::Audio, "Entrada");
+    tr.fx = bus.fx.clone();
+    tr.volume_db = bus.volume_db;
+    tr.invert_phase = bus.invert_phase;
+    tr.events.push(Event::new(&media, Ticks::ZERO, dur));
+    let mid = media.id;
+    iso.media.push(media);
+    iso.tracks.push(tr);
+    let mut audio_map: HashMap<Id, Arc<crate::media::AudioData>> = HashMap::new();
+    audio_map.insert(
+        mid,
+        Arc::new(crate::media::AudioData::from_stereo(
+            sr,
+            stereo[..n_proc * 2].to_vec(),
+        )),
+    );
+    let mut mixer = Mixer::new_offline(sr);
+    let pdc = mixer.total_latency(&iso) as i64;
+    let mut out = Vec::with_capacity(frames * 2);
+    let mut pos = 0usize;
+    let chunk = 2048usize;
+    while pos < n_proc {
+        let n = (n_proc - pos).min(chunk);
+        let mut blk = vec![0.0f32; n * 2];
+        mixer.process(&iso, &audio_map, pos as i64 + pdc, &mut blk);
+        out.extend_from_slice(&blk);
+        pos += n;
+    }
+    // além do limite: o take segue sem processamento
+    out.extend_from_slice(&stereo[n_proc * 2..frames * 2]);
+    out
+}
+
 fn master_gain(p: &Project) -> f32 {
     if p.master.mute {
         0.0
     } else {
         db_to_lin(p.master.volume_db)
+    }
+}
+
+#[cfg(test)]
+mod input_bus_render_tests {
+    use super::render_input_bus_take;
+    use crate::model::InputBus;
+
+    fn tone(frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let v = ((i as f32) * 0.05).sin() * 0.5;
+                [v, v]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn barramento_transparente_devolve_o_take() {
+        let take = tone(4800);
+        let out = render_input_bus_take(&InputBus::new("Entrada A"), &take, 48_000);
+        assert_eq!(out, take);
+        assert!(render_input_bus_take(&InputBus::new("A"), &[], 48_000).is_empty());
+    }
+
+    /// O take gravado não passava pelo barramento de entrada: o volume dele
+    /// tem de chegar ao take.
+    #[test]
+    fn volume_e_mudo_do_barramento_chegam_ao_take() {
+        let take = tone(4800);
+        let mut b = InputBus::new("Entrada A");
+        b.volume_db = -6.0;
+        let out = render_input_bus_take(&b, &take, 48_000);
+        assert_eq!(out.len(), take.len());
+        let peak_in = take.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let peak_out = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak_out < peak_in * 0.7, "{peak_out} vs {peak_in}");
+        assert!(peak_out > peak_in * 0.3, "{peak_out} vs {peak_in}");
+        b.mute = true;
+        let muted = render_input_bus_take(&b, &take, 48_000);
+        assert!(muted.iter().all(|v| *v == 0.0));
     }
 }
 
