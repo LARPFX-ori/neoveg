@@ -4940,7 +4940,7 @@ pub(crate) fn draw_db_scale(painter: &egui::Painter, r: Rect, color: Color32) {
     while db >= -60.0 {
         let y = y_of(db);
         let major = (db as i32) % 6 == 0;
-        let len = if major { 4.0 } else { 2.0 };
+        let len: f32 = if major { 4.0 } else { 2.0 };
         painter.line_segment(
             [pos2(r.left(), y), pos2(r.left() + len, y)],
             Stroke::new(1.0, color.gamma_multiply(0.7)),
