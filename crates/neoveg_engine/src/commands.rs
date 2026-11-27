@@ -498,6 +498,8 @@ pub enum UiAction {
     CaptureExportToProject,
     SnapshotDialog,
     OpenWorkFolders,
+    /// Arquivo → Localizar mídia ausente...
+    FindMissingMedia,
     OpenAdvancedSaveDialog,
     OpenArchiveProjectDialog,
     OpenSlideshowDialog,
@@ -1499,6 +1501,15 @@ pub static COMMANDS: &[CommandDef] = &[
         needs_ui: true,
         enabled: ui_enabled,
         run: |_s, h| ui_action(UiAction::OpenWorkFolders, h),
+    },
+    CommandDef {
+        id: "file.find_missing_media",
+        label: "Localizar mídia ausente...",
+        menu_path: "Arquivo/Localizar mídia ausente...",
+        default_shortcut: None,
+        needs_ui: true,
+        enabled: ui_enabled,
+        run: |_s, h| ui_action(UiAction::FindMissingMedia, h),
     },
     CommandDef {
         id: "file.advanced_save",

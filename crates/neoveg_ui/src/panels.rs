@@ -6,7 +6,7 @@ use crate::app::{LoadMsg, LoudnessJob};
 use crate::icons::{self, Icon};
 use crate::model::*;
 use eframe::egui;
-use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind};
+use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, StrokeKind, Vec2};
 use neoveg_common::{tr, tr_args, Language};
 use neoveg_engine::engine::loudness::{
     analyze_project_loudness, format_db, format_lufs, LoudnessSnapshot, LoudnessTarget,
@@ -4606,7 +4606,8 @@ impl App {
                                cfg: &mut neoveg_engine::scopes::ScopeConfig,
                                changed: &mut bool,
                                kind: ScopeViewLayout,
-                               tile_w: f32| {
+                               tile_w: f32,
+                               max_h: f32| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| match kind {
                     ScopeViewLayout::Vectorscope => {
@@ -4712,19 +4713,19 @@ impl App {
                 };
                 let s = t[tex_idx].size_vec2();
                 let is_vec = kind == ScopeViewLayout::Vectorscope;
-                let h = if is_vec {
-                    tile_w.min(300.0)
-                } else {
-                    (tile_w * s.y / s.x.max(1.0)).min(300.0)
-                };
-                let ww = if is_vec { h } else { tile_w };
-                ui.image((t[tex_idx].id(), vec2(ww, h)));
+                // cada quadro cabe na altura que sobrou (os 4 aparecem inteiros)
+                ui.image((t[tex_idx].id(), fit_scope_image(s, tile_w, max_h, is_vec)));
             });
         };
 
         let avail = ui.available_width();
+        // altura de cada quadro: o que sobra na aba, menos o título de cada
+        // linha, dividido por 2 na grade (VEGAS Pro 21, p. 61)
+        let title_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
+        let avail_h = ui.available_height();
         if self.scopes_layout == ScopeViewLayout::All {
-            let w = ((avail - 24.0) / 2.0).clamp(160.0, 420.0);
+            let w = ((avail - 24.0) / 2.0).max(80.0);
+            let max_h = ((avail_h - 2.0 * title_h - 8.0) / 2.0).max(48.0);
             egui::Grid::new("scopes").num_columns(2).show(ui, |ui| {
                 draw_scope_tile(
                     ui,
@@ -4732,6 +4733,7 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::Vectorscope,
                     w,
+                    max_h,
                 );
                 draw_scope_tile(
                     ui,
@@ -4739,6 +4741,7 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::Waveform,
                     w,
+                    max_h,
                 );
                 ui.end_row();
                 draw_scope_tile(
@@ -4747,6 +4750,7 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::Histogram,
                     w,
+                    max_h,
                 );
                 draw_scope_tile(
                     ui,
@@ -4754,13 +4758,15 @@ impl App {
                     &mut changed,
                     ScopeViewLayout::RgbParade,
                     w,
+                    max_h,
                 );
                 ui.end_row();
             });
         } else {
-            let w = (avail - 16.0).clamp(200.0, 720.0);
+            let w = (avail - 16.0).max(120.0);
+            let max_h = (avail_h - title_h - 4.0).max(48.0);
             let chosen = self.scopes_layout;
-            draw_scope_tile(ui, &mut self.scopes_config, &mut changed, chosen, w);
+            draw_scope_tile(ui, &mut self.scopes_config, &mut changed, chosen, w, max_h);
         }
 
         if changed {
@@ -4780,6 +4786,37 @@ pub(crate) fn preview_footer_scaled_flags(
     let prev_scaled = prev.0 != proj.0 || prev.1 != proj.1;
     let disp_scaled = disp.0 != prev.0 || disp.1 != prev.1;
     (prev_scaled, disp_scaled)
+}
+
+/// Tamanho de um quadro da aba Escopos: cabe em `tile_w` × `max_h`
+/// mantendo a proporção da textura; o vectorscope é quadrado.
+pub(crate) fn fit_scope_image(tex: Vec2, tile_w: f32, max_h: f32, square: bool) -> Vec2 {
+    let tile_w = if tile_w.is_finite() {
+        tile_w.max(1.0)
+    } else {
+        1.0
+    };
+    let max_h = if max_h.is_finite() {
+        max_h.max(1.0)
+    } else {
+        1.0
+    };
+    if square {
+        let side = tile_w.min(max_h);
+        return vec2(side, side);
+    }
+    let aspect = if tex.x > 0.0 && tex.y > 0.0 && tex.x.is_finite() && tex.y.is_finite() {
+        tex.x / tex.y
+    } else {
+        1.0
+    };
+    let mut w = tile_w;
+    let mut h = w / aspect;
+    if h > max_h {
+        h = max_h;
+        w = h * aspect;
+    }
+    vec2(w, h)
 }
 
 /// Maior retângulo de proporção `aspect` (largura/altura) centrado em `r`.

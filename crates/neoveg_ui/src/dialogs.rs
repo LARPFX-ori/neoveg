@@ -1014,6 +1014,8 @@ pub struct Dialogs {
     pub work_folders_draft: Option<neoveg_engine::model::WorkFolders>,
     pub notes_ui: crate::project_notes::ProjectNotesUiState,
     pub adv_save: crate::dlg_advanced_save::AdvancedSaveUiState,
+    /// Janela *Mídia não encontrada* (Localizar mídia ausente).
+    pub relink: crate::dlg_relink::RelinkUiState,
     pub slideshow: crate::dlg_slideshow::SlideshowUiState,
     pub audio_tools: crate::dlg_audio_tools::AudioToolsUiState,
 }
@@ -1429,6 +1431,7 @@ impl App {
         self.customize_toolbar_window(ctx);
         self.command_marker_window(ctx);
         crate::dlg_work_folders::show_work_folders_window(self, ctx);
+        crate::dlg_relink::show_relink_window(self, ctx);
         crate::dlg_advanced_save::show_advanced_save_windows(self, ctx);
         crate::dlg_slideshow::show_slideshow_window(self, ctx);
         crate::dlg_audio_tools::show_audio_tools_windows(self, ctx);

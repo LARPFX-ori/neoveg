@@ -2785,10 +2785,15 @@ fn kittest_arrastar_midia_do_projeto_para_o_trimmer() {
         })
         .map(|b| egui::pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32))
         .expect("cartão da mídia na Mídia do Projeto");
+    // a aba fica no rodapé do grupo da Prévia, dentro do dock (cuja altura
+    // segue o layout): procura acima do fim do tile da Prévia
+    let pv_bottom = find_pane_tile(&harness.state().dock_tree, DockPane::Preview)
+        .and_then(|id| harness.state().dock_tree.tiles.rect(id))
+        .map_or(380.0, |r| r.bottom());
     let to = harness
         .query_all_by_label("Trimmer")
         .filter_map(|n| n.raw_bounds())
-        .find(|b| (b.y0 as f32) < 380.0)
+        .find(|b| (b.y0 as f32) < pv_bottom)
         .map(|b| egui::pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32))
         .expect("aba Trimmer no dock");
 
@@ -3161,7 +3166,37 @@ fn kittest_paridade_color_grading_e_trimmer_historico() {
         .state_mut()
         .exec_cmd(Some(&ctx), "view.tab.color_grading");
     harness.run_steps(2);
-    harness.get_by_label("Ativar Color Grading").click();
+    // Como no VEGAS Pro, o painel abre completo, sem aviso de ativação, e o
+    // efeito só entra na cadeia na primeira edição (um passo de Desfazer).
+    let count_cc = |app: &App| {
+        let p = &app.session.project;
+        p.master
+            .video_fx
+            .iter()
+            .chain(p.tracks.iter().flat_map(|t| t.fx.iter()))
+            .chain(
+                p.tracks
+                    .iter()
+                    .flat_map(|t| t.events.iter().flat_map(|e| e.fx.iter())),
+            )
+            .filter(|f| f.kind == crate::model::FxKind::ColorCorrector)
+            .count()
+    };
+    assert!(harness.query_by_label("Ativar Color Grading").is_none());
+    assert_eq!(
+        count_cc(harness.state()),
+        0,
+        "abrir o painel não muda o projeto"
+    );
+    harness.get_by_label("Cinema Quente").click();
+    harness.run_steps(2);
+    assert_eq!(
+        count_cc(harness.state()),
+        1,
+        "a primeira edição insere o efeito"
+    );
+    assert!(harness.state_mut().session.undo());
+    assert_eq!(count_cc(harness.state()), 0, "um Desfazer tira o efeito");
     harness.run_steps(2);
 
     // Barra lateral de categorias e todas as seções visíveis em "Tudo"
@@ -3238,4 +3273,150 @@ fn kittest_paridade_color_grading_e_trimmer_historico() {
             .is_some(),
         "histórico do Trimmer deve exibir nome e diretório entre colchetes"
     );
+}
+
+/// A altura do dock segue `dock_height` mesmo depois do primeiro quadro: o
+/// egui grava a altura do painel e antes ignorava a do Neoveg (ficava presa
+/// num valor pequeno salvo uma vez e trocar de layout não mudava o dock).
+#[test]
+fn kittest_altura_do_dock_segue_o_layout() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(3);
+    let pv_h = |h: &Harness<'_, App>| {
+        find_pane_tile(&h.state().dock_tree, DockPane::Preview)
+            .and_then(|id| h.state().dock_tree.tiles.rect(id))
+            .map(|r| r.height())
+            .unwrap_or(0.0)
+    };
+    let h1 = pv_h(&harness);
+    // padrão perto de metade da tela, como no VEGAS Pro
+    assert!(h1 > 1000.0 * 0.35, "dock padrão baixo demais: {h1}");
+    harness.state_mut().dock_height = 220.0;
+    harness.run_steps(3);
+    let h2 = pv_h(&harness);
+    assert!(
+        h2 < h1 - 100.0,
+        "o dock não acompanhou dock_height: {h1} -> {h2}"
+    );
+}
+
+#[test]
+fn escopos_cabem_inteiros_na_altura_do_dock() {
+    use crate::panels::fit_scope_image;
+    // dock baixo: os quadros encolhem em vez de cortar
+    for (w, h) in [(400.0_f32, 60.0_f32), (300.0, 120.0), (500.0, 400.0)] {
+        for (tex, sq) in [
+            (egui::vec2(256.0, 256.0), true),
+            (egui::vec2(512.0, 256.0), false),
+        ] {
+            let s = fit_scope_image(tex, w, h, sq);
+            assert!(s.x <= w + 0.01 && s.y <= h + 0.01, "{s:?} em {w}x{h}");
+            if !sq {
+                assert!((s.x / s.y - 2.0).abs() < 0.01, "proporção mantida");
+            }
+        }
+    }
+    // entradas hostis
+    let s = fit_scope_image(egui::vec2(0.0, f32::NAN), f32::INFINITY, -5.0, false);
+    assert!(s.x.is_finite() && s.y.is_finite() && s.x > 0.0);
+}
+
+/// Mídia ausente: a janela procura todos os arquivos de uma vez, pede a
+/// escolha entre homônimos e reaponta as mídias num passo de Desfazer.
+#[test]
+fn kittest_localizar_midia_ausente_procura_tudo_e_escolhe_homonimo() {
+    use crate::model::{MediaItem, MediaSource};
+    let dir = std::env::temp_dir().join(format!("neoveg_kittest_relink_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for rel in [
+        "Novo/Audio/voz.wav",
+        "Backup/voz.wav",
+        "Novo/Video/cena.png",
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"x").unwrap();
+    }
+    let item = |id, path: &str| MediaItem {
+        id,
+        name: path.rsplit('/').next().unwrap_or_default().into(),
+        source: MediaSource::File { path: path.into() },
+        duration: None,
+        has_video: true,
+        has_audio: false,
+        width: 0,
+        height: 0,
+        fps: None,
+        info: String::new(),
+        proxy_path: None,
+    };
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 920.0))
+        .build_eframe(build_ready_app);
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut();
+        app.session
+            .project
+            .media
+            .push(item(9001, "Q:/Sumiu/Audio/voz.wav"));
+        app.session
+            .project
+            .media
+            .push(item(9002, "Q:/Sumiu/Video/cena.png"));
+        assert_eq!(crate::dlg_relink::open_if_missing(app), 2);
+        // a busca usa só a pasta de teste
+        app.dlg.relink.roots = vec![dir.clone()];
+        crate::dlg_relink::start_search(app);
+    }
+    for _ in 0..200 {
+        harness.run_steps(1);
+        if !harness.state().dlg.relink.searching() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!harness.state().dlg.relink.searching());
+    harness.get_by_label("Mídia não encontrada");
+    // cena.png tem um só candidato; voz.wav tem dois e espera a escolha
+    let st = &harness.state().dlg.relink;
+    assert_eq!(st.choices().len(), 1);
+    assert!(st.chosen(9001).is_none());
+    assert_eq!(
+        st.result
+            .as_ref()
+            .and_then(|r| r.candidates.get(&9001))
+            .map(Vec::len),
+        Some(2)
+    );
+
+    harness.state_mut().dlg.relink.choice.insert(9001, 0);
+    harness.state_mut().dlg.relink.dont_save = true;
+    crate::dlg_relink::apply(harness.state_mut());
+    harness.run_steps(2);
+    let app = harness.state();
+    assert!(relink_path(app, 9001).ends_with("voz.wav"));
+    assert!(
+        relink_path(app, 9001).contains("Novo"),
+        "o mais parecido com o original vem primeiro"
+    );
+    assert!(relink_path(app, 9002).ends_with("cena.png"));
+    assert!(!app.dlg.relink.open, "nada mais ausente: a janela fecha");
+    // um único Desfazer devolve os dois caminhos antigos
+    assert!(harness.state_mut().session.undo());
+    let app = harness.state();
+    assert_eq!(relink_path(app, 9001), "Q:/Sumiu/Audio/voz.wav");
+    assert_eq!(relink_path(app, 9002), "Q:/Sumiu/Video/cena.png");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+fn relink_path(app: &App, id: crate::model::Id) -> String {
+    match app.session.project.media(id).map(|m| &m.source) {
+        Some(crate::model::MediaSource::File { path }) => path.clone(),
+        _ => String::new(),
+    }
 }
