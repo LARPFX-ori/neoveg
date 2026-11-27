@@ -183,4 +183,4 @@ Uma inspeção da interface em outra máquina, conferida com as figuras da ajuda
 - **Grupo de trilhas** com solo do grupo, triângulo de recolher e linha vazia na pista do grupo.
 - ***Movimento da trilha*** com salvar e excluir predefinição ao lado do seletor, e **Tempo de gravação** na barra de status.
 
-Ainda não entraram: os recursos de IA e o Mocha, que aguardam decisão.
+Ainda não entraram: os recursos de IA e o Mocha, que ficam para depois.
