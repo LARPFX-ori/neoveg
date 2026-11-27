@@ -1751,8 +1751,8 @@ impl App {
             (false, false) => (usable_h, 0.0),
         };
 
-        self.trimmer_ruler(ui, &item, media_id, dur, frame_dur, ruler_h, lang);
-
+        // Ordem do Trimmer do VEGAS Pro: vídeo em cima, régua com marcadores e
+        // regiões logo acima da forma de onda (a régua ficava acima do vídeo).
         if show_video || (!show_wave && !item.has_video) {
             self.trimmer_video(
                 ui,
@@ -1770,6 +1770,8 @@ impl App {
         if show_video && show_wave {
             self.trimmer_splitter(ui, avail.x.max(160.0), splitter_h, usable_h);
         }
+
+        self.trimmer_ruler(ui, &item, media_id, dur, frame_dur, ruler_h, lang);
 
         if show_wave {
             self.trimmer_waveform(ui, &item, media_id, dur, frame_dur, wave_h, lang);
