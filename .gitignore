@@ -18,6 +18,7 @@ plan/arvore_funcionamento_neoveg.md
 filmcraft-main.zip
 /.claude
 /drive
+/fixtures
 
 # cache de bytecode Python (suíte tests/e2e)
 __pycache__/
